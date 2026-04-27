@@ -36,6 +36,7 @@ from bithumb_bot.fee_pending_repair import (
 from bithumb_bot.lifecycle import rebuild_lifecycle_projections_from_trades, summarize_position_lots
 from bithumb_bot.oms import set_status
 from bithumb_bot.position_authority_repair import (
+    _simulate_non_full_position_authority_repair,
     _replace_with_portfolio_anchored_projection,
     apply_position_authority_rebuild,
     build_position_authority_rebuild_preview,
@@ -2729,6 +2730,78 @@ def test_full_projection_rebuild_preview_refuses_when_final_post_publish_state_f
         str(item).startswith("post_rebuild_projection_converged=0")
         or str(item).startswith("post_rebuild_projected_total_qty_mismatch=")
         for item in (preview["full_projection_rebuild_post_state_preview"]["final_gate_failures"])
+    )
+
+
+def test_correction_preview_uses_simulated_final_post_state_before_recommending_apply(
+    recovery_db, monkeypatch
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _record_historical_sell_history(conn)
+        _apply_fee_pending_buy(conn)
+        _corrupt_latest_buy_lot_as_incident(conn)
+
+        target_trade = conn.execute(
+            "SELECT id, ts FROM trades WHERE client_order_id='incident_buy' AND side='BUY'"
+        ).fetchone()
+        assert target_trade is not None
+
+        original_simulator = _simulate_non_full_position_authority_repair
+
+        def _broken_simulator(_conn, *, preview, note=None):
+            result = original_simulator(_conn, preview=preview, note=note)
+            _conn.execute(
+                """
+                INSERT INTO open_position_lots(
+                    pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                    qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                    internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                    lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                    position_state, entry_fee_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settings.PAIR,
+                    int(target_trade["id"]),
+                    "incident_buy",
+                    "fill-23",
+                    int(target_trade["ts"]),
+                    PRICE,
+                    0.0004,
+                    1,
+                    0,
+                    1,
+                    LOT_SIZE,
+                    0.0002,
+                    0.0001,
+                    0.0,
+                    8,
+                    "ledger",
+                    "lot-native",
+                    "open_exposure",
+                    0.0,
+                ),
+            )
+            return result
+
+        monkeypatch.setattr(
+            "bithumb_bot.position_authority_repair._simulate_non_full_position_authority_repair",
+            _broken_simulator,
+        )
+
+        preview = build_position_authority_rebuild_preview(conn)
+    finally:
+        conn.close()
+
+    assert preview["repair_mode"] == "correction"
+    assert preview["safe_to_apply"] is False
+    assert preview["final_safe_to_apply"] is False
+    assert preview["recommended_command"] is None
+    assert preview["operator_next_action"] == "review_position_authority_evidence"
+    assert any(
+        str(item).startswith("post_repair_projected_total_qty_mismatch=")
+        for item in (preview["post_state_preview"]["final_gate_failures"] or [])
     )
 
 

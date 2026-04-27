@@ -11,6 +11,7 @@ from .db_core import (
     record_external_position_adjustment,
     record_position_authority_projection_publication,
     record_position_authority_repair,
+    summarize_fill_accounting_incident_projection,
 )
 from .lifecycle import (
     DUST_TRACKING_STATE,
@@ -199,6 +200,130 @@ def _source_modes_for_pair(conn: sqlite3.Connection, *, pair: str) -> list[str]:
     return [str(row["lot_rule_source_mode"] or "").strip() for row in rows if str(row["lot_rule_source_mode"] or "").strip()]
 
 
+def _query_runtime_gate_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    open_order_row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS open_order_count,
+            COALESCE(SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END), 0) AS recovery_required_count,
+            COALESCE(SUM(CASE WHEN status='PENDING_SUBMIT' THEN 1 ELSE 0 END), 0) AS pending_submit_count,
+            COALESCE(SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END), 0) AS submit_unknown_count
+        FROM orders
+        WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING',
+                         'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+        """
+    ).fetchone()
+    return {
+        "unresolved_open_order_count": int((open_order_row or {"open_order_count": 0})["open_order_count"] or 0),
+        "recovery_required_count": int((open_order_row or {"recovery_required_count": 0})["recovery_required_count"] or 0),
+        "pending_submit_count": int((open_order_row or {"pending_submit_count": 0})["pending_submit_count"] or 0),
+        "submit_unknown_count": int((open_order_row or {"submit_unknown_count": 0})["submit_unknown_count"] or 0),
+    }
+
+
+def _build_postcondition_gate_report(
+    conn: sqlite3.Connection,
+    *,
+    repair_mode: str,
+    require_broker_portfolio_convergence: bool,
+    broker_qty: float | None = None,
+    broker_qty_known: bool | None = None,
+    remote_open_order_count: int | None = None,
+) -> dict[str, Any]:
+    post_projection_convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    post_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+    portfolio_qty = float(post_projection_convergence.get("portfolio_qty") or 0.0)
+    projected_total_qty = float(post_projection_convergence.get("projected_total_qty") or 0.0)
+    gate_counts = _query_runtime_gate_counts(conn)
+    fee_pending_count = int(summarize_fill_accounting_incident_projection(conn).get("active_issue_count") or 0)
+    accounting_replay = compute_accounting_replay(conn)
+    replay_qty = float(accounting_replay.get("replay_qty") or 0.0)
+    accounting_projection_ok = bool(abs(normalize_asset_qty(replay_qty) - normalize_asset_qty(portfolio_qty)) <= _EPS)
+    final_gate_failures: list[str] = []
+
+    if require_broker_portfolio_convergence:
+        if not bool(broker_qty_known):
+            final_gate_failures.append("broker_position_qty_evidence_missing")
+        elif abs(normalize_asset_qty(float(broker_qty or 0.0)) - normalize_asset_qty(portfolio_qty)) > _EPS:
+            final_gate_failures.append(
+                "broker_portfolio_qty_mismatch="
+                f"broker_qty={float(broker_qty or 0.0):.12f},portfolio_qty={portfolio_qty:.12f}"
+            )
+
+    if not accounting_projection_ok:
+        final_gate_failures.append(
+            "accounting_projection_mismatch="
+            f"replay_qty={replay_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
+        )
+    if not bool(post_projection_convergence.get("converged")):
+        final_gate_failures.append(
+            "post_repair_projection_converged=0:"
+            f"{post_projection_convergence.get('reason') or 'projection_non_converged'}"
+        )
+    if abs(projected_total_qty - portfolio_qty) > _EPS:
+        final_gate_failures.append(
+            "post_repair_projected_total_qty_mismatch="
+            f"projected_total_qty={projected_total_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
+        )
+    if require_broker_portfolio_convergence and bool(broker_qty_known):
+        if abs(projected_total_qty - float(broker_qty or 0.0)) > _EPS:
+            final_gate_failures.append(
+                "post_repair_projected_total_qty_broker_mismatch="
+                f"projected_total_qty={projected_total_qty:.12f},broker_qty={float(broker_qty or 0.0):.12f}"
+            )
+
+    if fee_pending_count > 0:
+        final_gate_failures.append(f"fee_pending_count={fee_pending_count}")
+    if int(gate_counts["unresolved_open_order_count"]) > 0:
+        final_gate_failures.append(f"unresolved_open_order_count={gate_counts['unresolved_open_order_count']}")
+    if int(gate_counts["recovery_required_count"]) > 0:
+        final_gate_failures.append(f"recovery_required_count={gate_counts['recovery_required_count']}")
+    if int(remote_open_order_count or 0) > 0:
+        final_gate_failures.append(f"remote_open_order_count={int(remote_open_order_count or 0)}")
+    if int(gate_counts["pending_submit_count"]) > 0:
+        final_gate_failures.append(f"pending_submit_count={gate_counts['pending_submit_count']}")
+    if int(gate_counts["submit_unknown_count"]) > 0:
+        final_gate_failures.append(f"submit_unknown_count={gate_counts['submit_unknown_count']}")
+    if not bool(post_assessment.get("semantic_contract_check_passed")):
+        final_gate_failures.append(
+            "semantic_contract_not_satisfied="
+            f"{post_assessment.get('semantic_contract_check_state') or 'unknown'}"
+        )
+    if any(
+        bool(post_assessment.get(key))
+        for key in (
+            "needs_full_projection_rebuild",
+            "needs_correction",
+            "needs_portfolio_projection_repair",
+            "needs_residual_normalization",
+        )
+    ):
+        final_gate_failures.append(
+            "post_assessment_blockers="
+            f"{'|'.join(str(item) for item in (post_assessment.get('blockers') or [])) or 'none'}"
+        )
+
+    return {
+        "repair_mode": repair_mode,
+        "post_assessment": post_assessment,
+        "post_projection_convergence": post_projection_convergence,
+        "accounting_projection_ok": accounting_projection_ok,
+        "fee_pending_count": fee_pending_count,
+        "broker_qty": broker_qty,
+        "broker_qty_known": broker_qty_known,
+        "remote_open_order_count": int(remote_open_order_count or 0),
+        **gate_counts,
+        "final_gate_failures": final_gate_failures,
+        "why_safe": (
+            "final post-state is converged and semantically valid"
+            if not final_gate_failures
+            else None
+        ),
+        "why_unsafe": list(final_gate_failures),
+        "final_safe_to_apply": bool(not final_gate_failures),
+    }
+
+
 def _build_full_projection_rebuild_post_state_preview(
     conn: sqlite3.Connection,
     *,
@@ -340,6 +465,355 @@ def _build_full_projection_rebuild_post_state_preview(
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
 
+def _simulate_non_full_position_authority_repair(
+    conn: sqlite3.Connection,
+    *,
+    preview: dict[str, Any],
+    note: str | None = None,
+) -> dict[str, Any]:
+    repair_mode = str(preview.get("repair_mode") or "rebuild")
+    assessment = dict(preview.get("position_authority_assessment") or {})
+    target_trade_id = int(assessment.get("target_trade_id") or 0)
+    before = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+    event_ts = int(time.time() * 1000)
+
+    if repair_mode in {"correction", "residual_normalization", "portfolio_projection_repair"}:
+        row = conn.execute(
+            """
+            SELECT
+                t.id AS trade_id,
+                t.client_order_id,
+                t.ts AS fill_ts,
+                t.price,
+                t.qty,
+                t.fee,
+                t.strategy_name,
+                t.entry_decision_id,
+                t.exit_decision_id,
+                t.exit_reason,
+                t.exit_rule_name,
+                f.fill_id
+            FROM trades t
+            LEFT JOIN fills f
+              ON f.client_order_id=t.client_order_id
+             AND f.fill_ts=t.ts
+             AND ABS(f.price-t.price) < 1e-12
+             AND ABS(f.qty-t.qty) < 1e-12
+            WHERE t.id=? AND t.pair=? AND t.side='BUY'
+            """,
+            (target_trade_id, settings.PAIR),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("position authority correction target BUY evidence disappeared")
+
+        before_rows = [
+            dict(item)
+            for item in conn.execute(
+                """
+                SELECT id, pair, entry_trade_id, entry_client_order_id, entry_fill_id, qty_open,
+                       executable_lot_count, dust_tracking_lot_count, internal_lot_size,
+                       position_state, position_semantic_basis
+                FROM open_position_lots
+                WHERE pair=? AND entry_trade_id=?
+                ORDER BY id ASC
+                """,
+                (settings.PAIR, target_trade_id),
+            ).fetchall()
+        ]
+        sell_rows: list[dict[str, Any]] = []
+        sell_trade_ids = [int(value) for value in assessment.get("sell_trade_ids") or []]
+        if repair_mode == "residual_normalization":
+            if not sell_trade_ids:
+                raise RuntimeError("partial-close residual normalization target SELL evidence disappeared")
+            placeholders = ",".join("?" for _ in sell_trade_ids)
+            sell_rows = [
+                dict(item)
+                for item in conn.execute(
+                    f"""
+                    SELECT
+                        t.id AS trade_id,
+                        t.client_order_id,
+                        t.ts AS fill_ts,
+                        t.price,
+                        t.qty,
+                        t.fee,
+                        t.strategy_name,
+                        t.entry_decision_id,
+                        t.exit_decision_id,
+                        t.exit_reason,
+                        t.exit_rule_name,
+                        f.fill_id
+                    FROM trades t
+                    LEFT JOIN fills f
+                      ON f.client_order_id=t.client_order_id
+                     AND f.fill_ts=t.ts
+                     AND ABS(f.price-t.price) < 1e-12
+                     AND ABS(f.qty-t.qty) < 1e-12
+                    WHERE t.id IN ({placeholders}) AND t.pair=? AND t.side='SELL'
+                    ORDER BY t.ts ASC, t.id ASC
+                    """,
+                    (*sell_trade_ids, settings.PAIR),
+                ).fetchall()
+            ]
+            if [int(item["trade_id"]) for item in sell_rows] != sell_trade_ids:
+                raise RuntimeError("partial-close residual normalization target SELL evidence changed")
+
+        before_lifecycles = [
+            dict(item)
+            for item in conn.execute(
+                """
+                SELECT *
+                FROM trade_lifecycles
+                WHERE pair=?
+                  AND (
+                        entry_trade_id=?
+                        OR exit_trade_id IN (
+                            SELECT id FROM trades
+                            WHERE pair=? AND side='SELL' AND (ts > ? OR (ts=? AND id>?))
+                        )
+                      )
+                ORDER BY id ASC
+                """,
+                (settings.PAIR, target_trade_id, settings.PAIR, int(row["fill_ts"]), int(row["fill_ts"]), target_trade_id),
+            ).fetchall()
+        ]
+
+        if repair_mode == "portfolio_projection_repair":
+            repair_basis = {
+                "event_type": "portfolio_anchored_authority_projection_repair",
+                "preview": preview,
+                "target_trade_id": target_trade_id,
+                "target_client_order_id": assessment.get("target_client_order_id"),
+                "target_fill_id": assessment.get("target_fill_id"),
+                "target_fill_ts": assessment.get("target_fill_ts"),
+                "target_price": assessment.get("target_price"),
+                "target_qty": assessment.get("target_qty"),
+                "portfolio_qty": preview.get("portfolio_qty"),
+                "broker_qty": preview.get("broker_qty"),
+                "other_active_qty": assessment.get("other_active_qty"),
+                "projected_total_qty": assessment.get("projected_total_qty"),
+                "projected_qty_excess": assessment.get("projected_qty_excess"),
+                "target_remainder_qty": assessment.get("portfolio_target_remainder_qty"),
+                "canonical_internal_lot_size": assessment.get("canonical_internal_lot_size"),
+                "canonical_executable_lot_count": assessment.get("canonical_executable_lot_count"),
+                "canonical_executable_qty": assessment.get("canonical_executable_qty"),
+                "old_lot_rows": before_rows,
+                "old_trade_lifecycle_rows": before_lifecycles,
+                "lot_snapshot_before": before,
+            }
+            apply_portfolio_anchored_projection_repair_basis(
+                conn,
+                pair=settings.PAIR,
+                repair_basis=repair_basis,
+            )
+            after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+            repair_basis["lot_snapshot_after"] = after
+            portfolio_row = conn.execute(
+                """
+                SELECT cash_available, cash_locked, asset_available, asset_locked
+                FROM portfolio
+                WHERE id=1
+                """
+            ).fetchone()
+            replay = compute_accounting_replay(conn)
+            portfolio_cash = 0.0
+            portfolio_qty = 0.0
+            if portfolio_row is not None:
+                portfolio_cash = float(portfolio_row["cash_available"] or 0.0) + float(portfolio_row["cash_locked"] or 0.0)
+                portfolio_qty = float(portfolio_row["asset_available"] or 0.0) + float(portfolio_row["asset_locked"] or 0.0)
+            accounting_preview = {
+                "replay_cash": float(replay.get("replay_cash") or 0.0),
+                "replay_qty": float(replay.get("replay_qty") or 0.0),
+                "portfolio_cash": float(portfolio_cash),
+                "portfolio_qty": float(portfolio_qty),
+                "cash_delta": float(portfolio_cash) - float(replay.get("replay_cash") or 0.0),
+                "asset_qty_delta": float(portfolio_qty) - float(replay.get("replay_qty") or 0.0),
+                "safe_to_apply": True,
+                "needs_repair": bool(
+                    abs(float(portfolio_cash) - float(replay.get("replay_cash") or 0.0)) > 1e-8
+                    or abs(float(portfolio_qty) - float(replay.get("replay_qty") or 0.0)) > 1e-12
+                ),
+            }
+            repair_basis["external_position_accounting_preview"] = accounting_preview
+            adjustment = None
+            if bool(accounting_preview.get("needs_repair")):
+                adjustment_basis = {
+                    "event_type": "external_position_adjustment",
+                    "source_event_type": "portfolio_anchored_authority_projection_repair",
+                    "target_trade_id": target_trade_id,
+                    "target_client_order_id": assessment.get("target_client_order_id"),
+                    "target_fill_id": assessment.get("target_fill_id"),
+                    "position_authority_preview": preview,
+                    "accounting_preview": accounting_preview,
+                }
+                adjustment = record_external_position_adjustment(
+                    conn,
+                    event_ts=event_ts,
+                    asset_qty_delta=float(accounting_preview.get("asset_qty_delta") or 0.0),
+                    cash_delta=float(accounting_preview.get("cash_delta") or 0.0),
+                    source="manual_portfolio_anchored_authority_projection_repair",
+                    reason="portfolio_projection_external_position_adjustment",
+                    adjustment_basis=adjustment_basis,
+                    note=note,
+                )
+            repair_basis["external_position_adjustment"] = adjustment
+            publication = record_position_authority_projection_publication(
+                conn,
+                event_ts=event_ts,
+                pair=settings.PAIR,
+                target_trade_id=target_trade_id,
+                source="manual_portfolio_anchored_authority_projection_publish",
+                publish_basis=repair_basis,
+                note=note,
+            )
+            repair_basis["projection_publication"] = publication
+            repair = record_position_authority_repair(
+                conn,
+                event_ts=event_ts,
+                source="manual_portfolio_anchored_authority_projection_repair",
+                reason=PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON,
+                repair_basis=repair_basis,
+                note=note,
+            )
+            return {
+                "repair_mode": repair_mode,
+                "repair_basis": repair_basis,
+                "repair": repair,
+                "projection_publication": publication,
+                "external_position_adjustment": adjustment,
+                "lot_snapshot_before": before,
+                "lot_snapshot_after": after,
+            }
+
+        conn.execute(
+            "DELETE FROM open_position_lots WHERE pair=? AND entry_trade_id=?",
+            (settings.PAIR, target_trade_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM trade_lifecycles
+            WHERE pair=?
+              AND (
+                    entry_trade_id=?
+                    OR exit_trade_id IN (
+                        SELECT id FROM trades
+                        WHERE pair=? AND side='SELL' AND (ts > ? OR (ts=? AND id>?))
+                    )
+                  )
+            """,
+            (settings.PAIR, target_trade_id, settings.PAIR, int(row["fill_ts"]), int(row["fill_ts"]), target_trade_id),
+        )
+        apply_fill_lifecycle(
+            conn,
+            side="BUY",
+            pair=settings.PAIR,
+            trade_id=int(row["trade_id"]),
+            client_order_id=str(row["client_order_id"]),
+            fill_id=(str(row["fill_id"]) if row["fill_id"] is not None else None),
+            fill_ts=int(row["fill_ts"]),
+            price=float(row["price"]),
+            qty=float(row["qty"]),
+            fee=float(row["fee"] or 0.0),
+            strategy_name=(str(row["strategy_name"]) if row["strategy_name"] is not None else None),
+            entry_decision_id=(int(row["entry_decision_id"]) if row["entry_decision_id"] is not None else None),
+            allow_entry_decision_fallback=False,
+        )
+        for sell in sell_rows:
+            apply_fill_lifecycle(
+                conn,
+                side="SELL",
+                pair=settings.PAIR,
+                trade_id=int(sell["trade_id"]),
+                client_order_id=str(sell["client_order_id"]),
+                fill_id=(str(sell["fill_id"]) if sell["fill_id"] is not None else None),
+                fill_ts=int(sell["fill_ts"]),
+                price=float(sell["price"]),
+                qty=float(sell["qty"]),
+                fee=float(sell["fee"] or 0.0),
+                strategy_name=(str(sell["strategy_name"]) if sell["strategy_name"] is not None else None),
+                entry_decision_id=(int(sell["entry_decision_id"]) if sell["entry_decision_id"] is not None else None),
+                exit_decision_id=(int(sell["exit_decision_id"]) if sell["exit_decision_id"] is not None else None),
+                exit_reason=(str(sell["exit_reason"]) if sell["exit_reason"] is not None else None),
+                exit_rule_name=(str(sell["exit_rule_name"]) if sell["exit_rule_name"] is not None else None),
+                allow_entry_decision_fallback=False,
+            )
+        after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+        repair_basis = {
+            "event_type": (
+                "partial_close_residual_authority_normalization"
+                if repair_mode == "residual_normalization"
+                else "position_authority_correction"
+            ),
+            "preview": preview,
+            "target_trade_id": target_trade_id,
+            "target_client_order_id": assessment.get("target_client_order_id"),
+            "sell_trade_ids": sell_trade_ids,
+            "expected_residual_qty": assessment.get("expected_residual_qty"),
+            "sell_after_target_buy_qty": assessment.get("sell_after_target_buy_qty"),
+            "target_lifecycle_matched_qty": assessment.get("target_lifecycle_matched_qty"),
+            "effective_closed_qty": assessment.get("effective_closed_qty"),
+            "lifecycle_matched_qty_acceptance_reason": assessment.get("lifecycle_matched_qty_acceptance_reason"),
+            "canonical_executable_qty": assessment.get("canonical_executable_qty"),
+            "old_lot_rows": before_rows,
+            "old_trade_lifecycle_rows": before_lifecycles,
+            "lot_snapshot_before": before,
+            "lot_snapshot_after": after,
+        }
+        repair = record_position_authority_repair(
+            conn,
+            event_ts=event_ts,
+            source=(
+                "manual_partial_close_residual_authority_normalization"
+                if repair_mode == "residual_normalization"
+                else "manual_position_authority_correction"
+            ),
+            reason=(
+                PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON
+                if repair_mode == "residual_normalization"
+                else "accounted_buy_fill_authority_correction"
+            ),
+            repair_basis=repair_basis,
+            note=note,
+        )
+        return {
+            "repair_mode": repair_mode,
+            "repair_basis": repair_basis,
+            "repair": repair,
+            "lot_snapshot_before": before,
+            "lot_snapshot_after": after,
+        }
+
+    projection_replay = rebuild_lifecycle_projections_from_trades(
+        conn,
+        pair=settings.PAIR,
+        allow_entry_decision_fallback=False,
+    )
+    after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+    repair_basis = {
+        "event_type": "position_authority_rebuild",
+        "preview": preview,
+        "lot_snapshot_before": before,
+        "lot_snapshot_after": after,
+        "projection_replay": projection_replay.as_dict(),
+    }
+    repair = record_position_authority_repair(
+        conn,
+        event_ts=event_ts,
+        source="manual_position_authority_rebuild",
+        reason="accounted_buy_fill_authority_rebuild",
+        repair_basis=repair_basis,
+        note=note,
+    )
+    return {
+        "repair_mode": repair_mode,
+        "repair_basis": repair_basis,
+        "repair": repair,
+        "lot_snapshot_before": before,
+        "lot_snapshot_after": after,
+        "projection_replay": projection_replay.as_dict(),
+    }
+
+
 def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: bool = False) -> dict[str, Any]:
     snapshot = compute_runtime_readiness_snapshot(conn)
     authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
@@ -388,6 +862,7 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
     authority_action_state = str(authority_assessment.get("repair_action_state") or "not_applicable")
     full_projection_gate_report: dict[str, Any] | None = None
     full_projection_post_state_preview: dict[str, Any] | None = None
+    post_state_preview: dict[str, Any] | None = None
     projection_convergence = dict(authority_assessment.get("projection_convergence") or {})
 
     if full_projection_rebuild or bool(authority_assessment.get("needs_full_projection_rebuild")):
@@ -431,6 +906,38 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
             )
             if not bool(full_projection_post_state_preview.get("final_safe_to_apply")):
                 reasons = list(full_projection_post_state_preview.get("final_gate_failures") or [])
+    elif repair_mode in {"correction", "residual_normalization", "portfolio_projection_repair", "rebuild"} and not reasons:
+        savepoint = "position_authority_preview_postcheck"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            simulated = _simulate_non_full_position_authority_repair(
+                conn,
+                preview={
+                    "repair_mode": repair_mode,
+                    "position_authority_assessment": authority_assessment,
+                    "portfolio_qty": portfolio_qty,
+                    "broker_qty": broker_qty,
+                    "broker_qty_known": broker_qty_known,
+                },
+            )
+            post_state_preview = {
+                **simulated,
+                **_build_postcondition_gate_report(
+                    conn,
+                    repair_mode=repair_mode,
+                    require_broker_portfolio_convergence=False,
+                    broker_qty=broker_qty,
+                    broker_qty_known=broker_qty_known,
+                    remote_open_order_count=remote_open_order_count,
+                ),
+                "source_mode_of_new_rows": _source_modes_for_pair(conn, pair=settings.PAIR),
+                "rollback_path": "preview savepoint rollback; no DB changes committed",
+            }
+        finally:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        if not bool(post_state_preview.get("final_safe_to_apply")):
+            reasons = list(post_state_preview.get("final_gate_failures") or [])
     if repair_mode == "portfolio_projection_repair":
         portfolio_remainder_qty = normalize_asset_qty(
             float(authority_assessment.get("portfolio_target_remainder_qty") or 0.0)
@@ -491,16 +998,24 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
     final_safe_to_apply = (
         bool(full_projection_post_state_preview.get("final_safe_to_apply"))
         if full_projection_post_state_preview is not None
-        else safe_to_apply
+        else (
+            bool(not reasons and post_state_preview.get("final_safe_to_apply"))
+            if post_state_preview is not None
+            else safe_to_apply
+        )
     )
-    if repair_mode == "full_projection_rebuild":
+    if repair_mode in {"full_projection_rebuild", "correction", "residual_normalization", "portfolio_projection_repair", "rebuild"}:
         safe_to_apply = final_safe_to_apply
     next_required_action = (
         "review_rebuild_replay"
         if repair_mode == "full_projection_rebuild"
         and full_projection_post_state_preview is not None
         and not final_safe_to_apply
-        else ("apply_rebuild_position_authority" if safe_to_apply else snapshot.operator_next_action)
+        else (
+            "review_position_authority_evidence"
+            if post_state_preview is not None and not final_safe_to_apply
+            else ("apply_rebuild_position_authority" if safe_to_apply else snapshot.operator_next_action)
+        )
     )
     preview_command = (
         "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
@@ -555,6 +1070,10 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "operator_next_action": next_required_action,
         "preview_command": preview_command,
         "recommended_command": recommended_command,
+        "post_assessment_blockers": (
+            list((full_projection_post_state_preview or {}).get("post_publish_assessment", {}).get("blockers") or [])
+            or list((post_state_preview or {}).get("post_assessment", {}).get("blockers") or [])
+        ),
         "position_authority_assessment": authority_assessment,
         "portfolio_qty": portfolio_qty,
         "accounted_buy_qty": buy_qty,
@@ -584,6 +1103,7 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
                     .get("post_publish_assessment", {})
                     .get("target_lot_provenance_kind")
                 )
+                or (post_state_preview or {}).get("post_assessment", {}).get("target_lot_provenance_kind")
                 or authority_assessment.get("target_lot_provenance_kind")
                 or "unknown"
             )
@@ -595,6 +1115,7 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
                     .get("post_publish_assessment", {})
                     .get("target_lot_source_modes")
                 )
+                or (post_state_preview or {}).get("post_assessment", {}).get("target_lot_source_modes")
                 or authority_assessment.get("target_lot_source_modes")
                 or []
             )
@@ -606,7 +1127,11 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
                 .get("target_lot_fill_qty_invariant_applies")
             )
             if full_projection_post_state_preview is not None
-            else authority_assessment.get("target_lot_fill_qty_invariant_applies")
+            else (
+                (post_state_preview or {}).get("post_assessment", {}).get("target_lot_fill_qty_invariant_applies")
+                if post_state_preview is not None
+                else authority_assessment.get("target_lot_fill_qty_invariant_applies")
+            )
         ),
         "semantic_contract_check_applicable": bool(
             (
@@ -615,14 +1140,22 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
                 .get("semantic_contract_check_applicable")
             )
             if full_projection_post_state_preview is not None
-            else authority_assessment.get("semantic_contract_check_applicable")
+            else (
+                (post_state_preview or {}).get("post_assessment", {}).get("semantic_contract_check_applicable")
+                if post_state_preview is not None
+                else authority_assessment.get("semantic_contract_check_applicable")
+            )
         ),
         "semantic_contract_check_skipped_reason": (
             (full_projection_post_state_preview or {})
             .get("post_publish_assessment", {})
             .get("semantic_contract_check_skipped_reason")
             if full_projection_post_state_preview is not None
-            else authority_assessment.get("semantic_contract_check_skipped_reason")
+            else (
+                (post_state_preview or {}).get("post_assessment", {}).get("semantic_contract_check_skipped_reason")
+                if post_state_preview is not None
+                else authority_assessment.get("semantic_contract_check_skipped_reason")
+            )
         ),
         "semantic_contract_check_passed": bool(
             (
@@ -631,7 +1164,11 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
                 .get("semantic_contract_check_passed")
             )
             if full_projection_post_state_preview is not None
-            else authority_assessment.get("semantic_contract_check_passed")
+            else (
+                (post_state_preview or {}).get("post_assessment", {}).get("semantic_contract_check_passed")
+                if post_state_preview is not None
+                else authority_assessment.get("semantic_contract_check_passed")
+            )
         ),
         "portfolio_anchor_missing_evidence": list(authority_assessment.get("portfolio_anchor_missing_evidence") or []),
         "manual_projection_missing_evidence": list(authority_assessment.get("manual_projection_missing_evidence") or []),
@@ -671,22 +1208,34 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "cash_locked": broker_evidence.get("cash_locked"),
         "remote_open_order_count": remote_open_order_count,
         "broker_portfolio_converged": (
-            None if full_projection_gate_report is None else bool(full_projection_gate_report["broker_portfolio_converged"])
+            bool(full_projection_gate_report["broker_portfolio_converged"])
+            if full_projection_gate_report is not None
+            else (post_state_preview.get("broker_qty_known") if post_state_preview is not None else None)
         ),
         "accounting_projection_ok": (
-            None if full_projection_gate_report is None else bool(full_projection_gate_report["accounting_projection_ok"])
+            bool(full_projection_gate_report["accounting_projection_ok"])
+            if full_projection_gate_report is not None
+            else ((post_state_preview or {}).get("accounting_projection_ok") if post_state_preview is not None else None)
         ),
         "unresolved_open_order_count": (
-            None if full_projection_gate_report is None else int(full_projection_gate_report["unresolved_open_order_count"])
+            int(full_projection_gate_report["unresolved_open_order_count"])
+            if full_projection_gate_report is not None
+            else ((post_state_preview or {}).get("unresolved_open_order_count") if post_state_preview is not None else None)
         ),
         "pending_submit_count": (
-            None if full_projection_gate_report is None else int(full_projection_gate_report["pending_submit_count"])
+            int(full_projection_gate_report["pending_submit_count"])
+            if full_projection_gate_report is not None
+            else ((post_state_preview or {}).get("pending_submit_count") if post_state_preview is not None else None)
         ),
         "submit_unknown_count": (
-            None if full_projection_gate_report is None else int(full_projection_gate_report["submit_unknown_count"])
+            int(full_projection_gate_report["submit_unknown_count"])
+            if full_projection_gate_report is not None
+            else ((post_state_preview or {}).get("submit_unknown_count") if post_state_preview is not None else None)
         ),
         "unresolved_fee_pending": (
-            None if full_projection_gate_report is None else bool(full_projection_gate_report["unresolved_fee_pending"])
+            bool(full_projection_gate_report["unresolved_fee_pending"])
+            if full_projection_gate_report is not None
+            else (int((post_state_preview or {}).get("fee_pending_count") or 0) > 0 if post_state_preview is not None else None)
         ),
         "full_projection_rebuild_gate_report": full_projection_gate_report,
         "repair_kind": (
@@ -701,14 +1250,16 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
             else float(authority_assessment.get("projected_total_qty") or 0.0)
         ),
         "replay_projected_total_qty": (
-            None
-            if full_projection_post_state_preview is None
-            else float(full_projection_post_state_preview.get("replay_projected_total_qty") or 0.0)
+            float(full_projection_post_state_preview.get("replay_projected_total_qty") or 0.0)
+            if full_projection_post_state_preview is not None
+            else None
         ),
         "post_publish_projected_total_qty": (
-            None
-            if full_projection_post_state_preview is None
-            else float(full_projection_post_state_preview.get("post_publish_projected_total_qty") or 0.0)
+            float(full_projection_post_state_preview.get("post_publish_projected_total_qty") or 0.0)
+            if full_projection_post_state_preview is not None
+            else float((post_state_preview or {}).get("post_projection_convergence", {}).get("projected_total_qty") or 0.0)
+            if post_state_preview is not None
+            else None
         ),
         "projection_converged_before": (
             bool(full_projection_post_state_preview.get("projection_converged_before"))
@@ -721,9 +1272,11 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
             else bool(full_projection_post_state_preview.get("projection_converged_after_replay"))
         ),
         "projection_converged_after_publish": (
-            None
-            if full_projection_post_state_preview is None
-            else bool(full_projection_post_state_preview.get("projection_converged_after_publish"))
+            bool(full_projection_post_state_preview.get("projection_converged_after_publish"))
+            if full_projection_post_state_preview is not None
+            else bool((post_state_preview or {}).get("post_projection_convergence", {}).get("converged"))
+            if post_state_preview is not None
+            else None
         ),
         "replay_projection_converged": (
             None
@@ -731,31 +1284,34 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
             else bool(full_projection_post_state_preview.get("replay_projection_converged"))
         ),
         "post_publish_projection_converged": (
-            None
-            if full_projection_post_state_preview is None
-            else bool(full_projection_post_state_preview.get("post_publish_projection_converged"))
+            bool(full_projection_post_state_preview.get("post_publish_projection_converged"))
+            if full_projection_post_state_preview is not None
+            else bool((post_state_preview or {}).get("post_projection_convergence", {}).get("converged"))
+            if post_state_preview is not None
+            else None
         ),
         "source_mode_of_new_rows": (
-            []
-            if full_projection_post_state_preview is None
-            else list(full_projection_post_state_preview.get("source_mode_of_new_rows") or [])
+            list(full_projection_post_state_preview.get("source_mode_of_new_rows") or [])
+            if full_projection_post_state_preview is not None
+            else list((post_state_preview or {}).get("source_mode_of_new_rows") or [])
         ),
         "rollback_path": (
-            None
-            if full_projection_post_state_preview is None
-            else str(full_projection_post_state_preview.get("rollback_path") or "")
+            str(
+                (full_projection_post_state_preview or {}).get("rollback_path")
+                or (post_state_preview or {}).get("rollback_path")
+                or ""
+            ) or None
         ),
         "why_safe": (
-            None
-            if full_projection_post_state_preview is None
-            else full_projection_post_state_preview.get("why_safe")
+            (full_projection_post_state_preview or {}).get("why_safe")
+            or (post_state_preview or {}).get("why_safe")
         ),
         "why_unsafe": (
-            []
-            if full_projection_post_state_preview is None
-            else list(full_projection_post_state_preview.get("why_unsafe") or [])
+            list((full_projection_post_state_preview or {}).get("why_unsafe") or [])
+            or list((post_state_preview or {}).get("why_unsafe") or [])
         ),
         "full_projection_rebuild_post_state_preview": full_projection_post_state_preview,
+        "post_state_preview": post_state_preview,
     }
 
 
@@ -1064,6 +1620,40 @@ def apply_position_authority_rebuild(
         raise RuntimeError(f"position authority rebuild is not safe to apply: {preview['eligibility_reason']}")
 
     before = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+    if str(preview.get("repair_mode") or "rebuild") in {
+        "correction",
+        "residual_normalization",
+        "portfolio_projection_repair",
+        "rebuild",
+    }:
+        simulated = _simulate_non_full_position_authority_repair(conn, preview=preview, note=note)
+        gate_report = _build_postcondition_gate_report(
+            conn,
+            repair_mode=str(preview.get("repair_mode") or "rebuild"),
+            require_broker_portfolio_convergence=False,
+            broker_qty=float(preview.get("broker_qty") or 0.0),
+            broker_qty_known=bool(preview.get("broker_qty_known")),
+            remote_open_order_count=int(preview.get("remote_open_order_count") or 0),
+        )
+        repair_basis = dict(simulated.get("repair_basis") or {})
+        repair_basis["post_repair_projection_convergence"] = gate_report["post_projection_convergence"]
+        repair_basis["position_authority_assessment_after"] = gate_report["post_assessment"]
+        repair_basis["final_gate_failures"] = list(gate_report["final_gate_failures"])
+        if list(gate_report["final_gate_failures"]):
+            raise RuntimeError(
+                "position authority repair postcondition failed: "
+                f"repair_mode={preview.get('repair_mode') or 'rebuild'}; "
+                f"blockers={'|'.join(str(item) for item in gate_report['final_gate_failures']) or 'none'}"
+            )
+        return {
+            "preview": preview,
+            **simulated,
+            "lot_snapshot_before": before,
+            "post_repair_projection_convergence": gate_report["post_projection_convergence"],
+            "post_repair_assessment": gate_report["post_assessment"],
+            "final_gate_failures": gate_report["final_gate_failures"],
+        }
+
     if str(preview.get("repair_mode") or "rebuild") in {
         "correction",
         "residual_normalization",
