@@ -1,558 +1,619 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is to investigate and implement a structural fix for a live-readiness incident observed on EC2. Do not treat the current diagnosis as proven fact. Use it as the starting hypothesis, verify or falsify it from the repository code and tests, then implement the smallest coherent design change that moves the repo toward a more robust, reproducible, operable automated trading experiment system.
+Your task is to continue from the latest residual-only holdings patch and finish the remaining structural cleanup. Do not treat the current diagnosis as unquestionable fact; verify each hypothesis against the current repository and tests. The goal is not to weaken safety gates, not to force live resume, not to flatten, not to manually patch the DB, and not to suppress warnings. The goal is to make the operator-facing model unambiguous and to prevent this entire class of incidents from being misread or mishandled.
 
-Do not solve this by flattening the position, mutating the DB manually, weakening startup gates, or adding a narrow one-off suppression. The goal is to model the state correctly and prevent this entire class of incidents from being misclassified or mis-recommended in the future.
-
-Incident facts from EC2 to encode as a reproducible fixture or test scenario:
+The central issue is now narrower than the original incident:
 
 ```text
-broker-diagnose:
-  overall=PASS
-  cash_available≈341,778 KRW
-  asset_available=0.00049980 BTC
-  open orders=0
+The latest patch correctly classifies broker-matched residual-only holdings as TRADEABILITY_POLICY / NON_EXECUTABLE_RESIDUAL_HOLDINGS and routes operators toward residual-closeout-plan instead of rebuild-position-authority or flatten.
 
-open_position_lots:
-  lot 353:
-    entry_trade_id=32
-    qty_open=0.00039982
-    position_state=dust_tracking
-    executable_lot_count=0
-    dust_tracking_lot_count=1
-    internal_lot_size=0.00040000
-    lot_min_qty=0.0002
-    lot_qty_step=0.0001
-    lot_min_notional_krw=5000
-    lot_rule_source_mode=full_projection_rebuild_portfolio_anchor
-    entry_decision_linkage=degraded_recovery_unattributed
-
-  lot 355:
-    entry_trade_id=34
-    qty_open=0.00009998
-    position_state=dust_tracking
-    executable_lot_count=0
-    dust_tracking_lot_count=1
-    internal_lot_size=0.00040000
-    lot_min_qty=0.0002
-    lot_qty_step=0.0001
-    lot_min_notional_krw=5000
-    lot_rule_source_mode=ledger
-    entry_decision_linkage=direct
-
-sum(open_position_lots.qty_open)=0.00049980 BTC
-broker_qty=0.00049980 BTC
-portfolio_qty=0.00049980 BTC
-
-recent lifecycle:
-  trade 32 BUY residual consumed by trade 33 SELL 0.00040000
-  trade 34 BUY consumed by trade 35 SELL 0.00040000
-  remaining residuals total 0.00049980 BTC
-
-fills.trade_id linkage:
-  29 null trade_id rows are 1:1 matchable to trades by client_order_id + qty + price + fee
-  1 null trade_id row is unmatched and must remain operator-review, not auto-mutated
+However, some operator-facing surfaces still mix meanings:
+- startup/recovery gate vs run-loop/tradeability gate
+- halt recovery resume vs run loop resume
+- projection convergence reason vs tradeability block reason
+- repair candidate command vs top-level recommended command
+- legacy audit trade-snapshot invariants vs ledger/replay truth
 ```
 
-Primary working hypothesis:
+Do not dilute this into general cleanup. This is about making the repo safer and more operable for real live automated trading experiments.
+
+Current verified EC2 state after the latest patch:
 
 ```text
-The incident is not primarily a broker/API failure, not a broker/portfolio quantity mismatch, and not necessarily a position-authority projection divergence.
-
-The likely direct issue is:
-  broker_qty == portfolio_qty == sum(open_position_lots.qty_open)
-  executable_lot_count == 0
-  dust_tracking_qty > 0
-  no unresolved orders
-
-but the repo does not classify this as a first-class tradeability state. It is currently liable to be represented as POSITION_AUTHORITY_CORRECTION_REQUIRED / LOT_AUTHORITY_CONFLICT / repair-oriented recovery, which pushes operators toward rebuild-position-authority, flatten, or manual repair even though the better response is residual policy review.
-
-The intended state name is:
-  NON_EXECUTABLE_RESIDUAL_HOLDINGS
-or:
-  BROKER_MATCHED_RESIDUAL_ONLY_POSITION
+broker_qty=0.00049980
+portfolio_qty=0.00049980
+projected_total_qty=0.00049980
+projection_converged=1
+local_residual_qty=0.00049980
+executable_qty=0
+strategy_closeout_allowed=0
+operator_closeout_possible=1
+run_loop_allowed=0
+new_entry_allowed=0
+reason_code=NON_EXECUTABLE_RESIDUAL_HOLDINGS
 ```
 
-Keep these as hypotheses until verified. For each hypothesis below, either verify it with tests/code evidence or clearly falsify it in your final report.
-
-Hypotheses to verify or falsify:
-
-1. Direct classification hypothesis
+Current `residual-closeout-plan` behavior is good and must be preserved:
 
 ```text
-When:
-  broker_qty == portfolio_qty == sum(open_position_lots.qty_open)
-  projection_converged == true
-  executable_lot_count == 0
-  dust_tracking_qty > 0
-  open_order_count == 0
-  recovery_required_count == 0
-
-Then:
-  runtime readiness should fail closed with reason NON_EXECUTABLE_RESIDUAL_HOLDINGS
-  not POSITION_AUTHORITY_CORRECTION_REQUIRED
-  not LOT_PROJECTION_DIVERGENCE
-  not a rebuild-position-authority recommendation
-  not flatten-position
+preview_mode=read_only_non_mutating
+broker_qty=0.000499800000
+portfolio_qty=0.000499800000
+projected_total_qty=0.000499800000
+projection_converged=1
+local_residual_qty=0.000499800000
+estimated_notional_krw≈58,068.809
+residual_lot_count=2
+residual_classes=DEGRADED_RECOVERY_RESIDUAL|LEDGER_SPLIT_RESIDUAL|NEAR_LOT_RESIDUAL|PORTFOLIO_ANCHOR_RESIDUAL|TRUE_DUST
+strategy_closeout_allowed=0
+operator_closeout_possible=1
+exchange_sellable=1
+run_loop_allowed=0
+new_entry_allowed=0
+reason_code=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+operator_next_action=residual_policy_review
+recommended_command=uv run bithumb-bot residual-closeout-plan
 ```
 
-Verification:
-Add or update tests around `compute_runtime_readiness_snapshot()`, recovery-report, and repair-plan output using a fixture equivalent to the EC2 state above.
-
-Falsification:
-If the code proves there is actual projection divergence, broker/portfolio mismatch, unresolved order state, or true correction needed, document it and adjust the classification accordingly.
-
-2. Residual modeling hypothesis
-
-```text
-dust_tracking is too coarse. It currently conflates:
-  true dust
-  ledger split residual
-  near-lot residual
-  portfolio-anchor projection residual
-  degraded recovery residual
-```
-
-Verification:
-Inspect `dust.py`, `lifecycle.py`, `position_authority_state.py`, and `runtime_readiness.py`. Add a residual inventory/classification layer if the current model cannot distinguish these cases.
-
-Expected classification for the EC2 fixture:
+Row-level residual classification must also be preserved:
 
 ```text
 lot 353:
-  NEAR_LOT_RESIDUAL
-  PORTFOLIO_ANCHOR_RESIDUAL
-  DEGRADED_RECOVERY_RESIDUAL
+  qty_open=0.00039982
+  source_mode=full_projection_rebuild_portfolio_anchor
+  entry_decision_linkage=degraded_recovery_unattributed
+  classes=NEAR_LOT_RESIDUAL|PORTFOLIO_ANCHOR_RESIDUAL|DEGRADED_RECOVERY_RESIDUAL
 
 lot 355:
-  LEDGER_SPLIT_RESIDUAL
-  possibly TRUE_DUST depending on exchange min qty/notional policy
+  qty_open=0.00009998
+  source_mode=ledger
+  entry_decision_linkage=direct
+  classes=LEDGER_SPLIT_RESIDUAL|TRUE_DUST
 ```
 
-Falsification:
-If an existing model already exposes these distinctions, wire that model into runtime readiness, repair-plan, and operator output instead of creating a duplicate abstraction.
-
-3. Repair recommendation hypothesis
+The latest patch already added or modified relevant code around:
 
 ```text
-repair_plan currently does not adequately distinguish quantity/projection repair from tradeability policy block.
-```
-
-Verification:
-For the EC2 fixture, `repair-plan` should produce:
-
-```text
-primary_incident_class=TRADEABILITY_POLICY
-recommended_mode=residual_policy_review
-recommended_command=residual-closeout-plan or recovery-report
-candidate_repair.rebuild-position-authority.needed=false
-flatten_primary_recommendation=false
-```
-
-It must not recommend:
-
-```text
-rebuild-position-authority --apply --yes
-rebuild-position-authority --full-projection-rebuild --apply --yes
-flatten-position
-resume
-run
-```
-
-Falsification:
-If actual projection divergence exists in the fixture after correct setup, repair recommendation may remain valid, but then the report must explain exactly which invariant fails.
-
-4. Fill-trade linkage hypothesis
-
-```text
-fills.trade_id null rows are not the direct cause of this incident, but they weaken deterministic replay and forensic quality.
-```
-
-Verification:
-Implement or improve a read-only diagnostic:
-
-```bash
-MODE=live uv run bithumb-bot diagnose-fill-trade-linkage
-```
-
-It should count:
-
-```text
-fills_total
-fills_missing_trade_id
-missing_but_safely_matchable
-ambiguous
-unmatchable
-```
-
-Optional repair command only if it is safe and idempotent:
-
-```bash
-MODE=live uv run bithumb-bot repair-fill-trade-linkage --dry-run
-MODE=live uv run bithumb-bot repair-fill-trade-linkage --apply --yes
-```
-
-Auto-apply only when:
-
-```text
-trade_id is null
-matched_trade_count == 1
-client_order_id matches
-qty matches
-price matches within existing tolerance
-fee matches within existing tolerance
-timestamp is equal or very close
-```
-
-The unmatched row must remain operator-review and must not be guessed.
-
-5. Higher-level authority hierarchy hypothesis
-
-```text
-The repo has pieces of the right model, but the operator decision surface does not cleanly separate:
-  ledger truth
-  portfolio/accounting projection
-  materialized lot projection
-  executable authority
-  residual tradeability policy
-  repair recommendations
-```
-
-Verification:
-Inspect existing abstractions before adding new ones. Prefer evolving existing structures in:
-
-```text
-src/bithumb_bot/dust.py
-src/bithumb_bot/lifecycle.py
-src/bithumb_bot/position_authority_state.py
 src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/lifecycle.py
 src/bithumb_bot/repair_plan.py
 src/bithumb_bot/app.py
-tests/test_dust.py
-tests/test_position_authority_recovery_state.py
-tests/test_operator_commands.py
-```
-
-Implement a clearer separation if needed:
-
-```text
-PositionTruth:
-  broker_qty
-  portfolio_qty
-  accounting_replay_qty
-  open_position_lots_total_qty
-  projection_converged
-
-ExecutableAuthority:
-  open_lot_count
-  executable_qty
-  sellable_executable_qty
-  authority_gap_reason
-
-ResidualInventory:
-  residual_qty
-  residual_notional
-  residual_classes[]
-  exchange_sellable
-  strategy_sellable
-
-TradeabilityState:
-  run_loop_allowed
-  new_entry_allowed
-  closeout_allowed
-  reason_code
-  operator_next_action
-```
-
-Do not overbuild. Add only the parts needed to make this incident class explicit, testable, and visible.
-
-Implementation priorities:
-
-P0 — classification and gating
-
-Add a first-class reason code, preferably:
-
-```text
-NON_EXECUTABLE_RESIDUAL_HOLDINGS
-```
-
-Use it when:
-
-```text
-broker/local/accounting/lot quantities match or are explicitly converged
-projection_converged == true
-executable_qty == 0
-tracked residual qty > 0
-no open/unresolved/recovery-required orders
-no fee/accounting blocker that should take precedence
-```
-
-Expected behavior:
-
-```text
-resume_ready=false
-run_loop_allowed=false unless policy explicitly allows residual-only resume
-new_entry_allowed=false by default for material residuals
-closeout_allowed=false for strategy closeout if no executable lot
-operator_action_required=true
-operator_next_action=residual_policy_review or residual-closeout-plan
-recommended_command must not be rebuild-position-authority or flatten-position
-```
-
-P0 — repair-plan safety
-
-Update `repair_plan.py` so broker-matched residual-only holdings are treated as a tradeability policy state, not an accounting root cause or position-authority rebuild need.
-
-For this state:
-
-```text
-primary_incident_class=TRADEABILITY_POLICY
-recommended_mode=residual_policy_review
-accounting_root_cause_unresolved=false
-flatten_primary_recommendation=false
-candidate_repair.rebuild-position-authority.needed=false
-recommended_command=uv run python bot.py residual-closeout-plan
-```
-
-If `residual-closeout-plan` is not implemented in the same patch, use `recovery-report` as the command but include a TODO/test for the future command. Prefer implementing the read-only plan now.
-
-P0 — residual inventory / residual classification
-
-Expose residual details in runtime readiness and reports:
-
-```text
-residual_qty
-residual_notional_krw
-residual_lot_count
-residual_classes
-exchange_sellable
-strategy_sellable
-residual_rows[]
-```
-
-Each row should include:
-
-```text
-lot_id
-entry_trade_id
-qty_open
-position_state
-source_mode
-entry_decision_linkage
-internal_lot_size
-near_lot_delta
-below_exchange_min_qty
-below_exchange_min_notional
-classes[]
-```
-
-Do not make dust-tracking sellable for strategy submission. Preserve the lot-native contract that SELL authority comes from executable lot counts, not aggregate quantity.
-
-P0 — tests
-
-Add regression tests that reproduce the EC2 incident without requiring live broker calls.
-
-At minimum add tests equivalent to:
-
-```text
-test_broker_matched_residual_only_holdings_block_resume_without_rebuild_or_flatten
-```
-
-Assert:
-
-```text
-broker_qty == portfolio_qty == sum(open_position_lots.qty_open)
-projection_converged == true
-executable_qty == 0
-tracked_residual_qty == 0.00049980
-resume_ready == false
-reason/blocker == NON_EXECUTABLE_RESIDUAL_HOLDINGS
-recommended_command does not contain rebuild-position-authority
-recommended_command does not contain flatten-position
-primary_incident_class == TRADEABILITY_POLICY
-```
-
-Also test row classification:
-
-```text
-0.00039982 full_projection_rebuild_portfolio_anchor degraded_recovery_unattributed -> NEAR_LOT_RESIDUAL + PORTFOLIO_ANCHOR_RESIDUAL + DEGRADED_RECOVERY_RESIDUAL
-0.00009998 ledger direct -> LEDGER_SPLIT_RESIDUAL and/or TRUE_DUST depending on thresholds
-```
-
-Add tests ensuring this state is not confused with:
-
-```text
-actual broker/portfolio mismatch
-actual lot projection divergence
-actual executable exposure
-legacy qty-only authority missing
-unresolved order recovery
-fee accounting blocker
-```
-
-P1 — read-only residual closeout plan
-
-Implement:
-
-```bash
-MODE=live uv run bithumb-bot residual-closeout-plan
-```
-
-This command must not submit orders and must not mutate the DB.
-
-It should output:
-
-```text
-broker_qty
-portfolio_qty
-local_residual_qty
-residual_classes
-exchange_min_qty
-exchange_min_notional_krw
-estimated_notional_krw
-strategy_closeout_allowed
-operator_closeout_possible
-risk_of_holding_residual
-risk_of_ignoring_residual
-recommended_policy_options
-```
-
-Expected distinction:
-
-```text
-strategy_closeout_allowed=false when executable_lot_count == 0
-operator_closeout_possible=true if broker residual satisfies exchange min qty/notional
-```
-
-This is not flatten. It is a planning/diagnostic command.
-
-P1 — fill-trade linkage diagnostic
-
-Implement or improve:
-
-```bash
-MODE=live uv run bithumb-bot diagnose-fill-trade-linkage
-```
-
-Prefer JSON support:
-
-```bash
-MODE=live uv run bithumb-bot diagnose-fill-trade-linkage --json
-```
-
-Optional repair:
-
-```bash
-MODE=live uv run bithumb-bot repair-fill-trade-linkage --dry-run
-MODE=live uv run bithumb-bot repair-fill-trade-linkage --apply --yes
-```
-
-Do not auto-link ambiguous or unmatched rows.
-
-P1 — observability and JSON consistency
-
-Where feasible, add `--json` support to operator-facing commands involved in this incident class:
-
-```text
-health --json
-ops-report --json
-restart-checklist --json
-broker-diagnose --json
-residual-closeout-plan --json
-diagnose-fill-trade-linkage --json
-```
-
-If implementing all is too large, document what was added and what remains.
-
-Reports should separate:
-
-```text
-Ledger quality:
-  fills linked/missing/matchable/unmatched
-  accounting replay status
-  broker snapshot status
-
-Position truth:
-  broker qty
-  portfolio qty
-  accounting replay qty
-  open lots total qty
-  projection convergence
-
-Tradeability:
-  executable qty
-  residual qty
-  new_entry_allowed
-  closeout_allowed
-  reason code
-
-Repair:
-  repair recommended or not
-  rebuild-position-authority recommended or explicitly not recommended
-```
-
-Design constraints:
-
-1. Do not weaken safety gates.
-2. Do not make `dust_tracking` sellable by strategy order submission.
-3. Do not infer executable authority from aggregate quantity.
-4. Do not recommend flatten as a primary path for this incident class.
-5. Do not mutate live DB state in diagnostic commands.
-6. Do not treat historical repair events as current-state proof unless there is an explicit current-state attestation and convergence proof.
-7. Preserve fail-closed behavior when evidence is missing, stale, ambiguous, or contradictory.
-8. Prefer append-only repair events over direct row mutation if any repair is added.
-9. All repair commands must have dry-run/preview and idempotent apply semantics.
-10. Keep the patch focused: classify and expose the state first, repair tooling second.
-
-Suggested files to inspect and likely modify:
-
-```text
-src/bithumb_bot/dust.py
-src/bithumb_bot/lifecycle.py
-src/bithumb_bot/position_authority_state.py
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/repair_plan.py
-src/bithumb_bot/app.py
+src/bithumb_bot/recovery_policy.py
 src/bithumb_bot/reason_codes.py
-tests/test_dust.py
+tests/test_position_authority_recovery_state.py
+```
+
+Inspect these first. Do not assume the patch is correct; verify.
+
+## Working hypotheses to verify or falsify
+
+### H1 — The core residual-only classification is now correct and should be preserved
+
+Hypothesis:
+
+```text
+For broker-matched residual-only holdings:
+  broker_qty == portfolio_qty == projected_total_qty
+  projection_converged == true
+  executable_qty == 0
+  material residual_qty > 0
+  no unresolved orders
+  no active fee/accounting blocker
+
+the correct classification is:
+  primary_incident_class=TRADEABILITY_POLICY
+  recommended_mode=residual_policy_review
+  reason_code=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+  run_loop_allowed=0
+  new_entry_allowed=0
+  closeout_allowed=0
+  repair is not recommended
+  flatten is not primary
+```
+
+Verification:
+Run or add tests equivalent to the EC2 fixture in `tests/test_position_authority_recovery_state.py`.
+
+Expected:
+
+```text
+repair-plan top-level recommended_command == uv run bithumb-bot residual-closeout-plan
+candidate rebuild-position-authority needed == false
+candidate rebuild-position-authority recommended_command is empty/null/none
+flatten_primary_recommendation == false
+```
+
+Falsification:
+If the current fixture actually contains a broker mismatch, projection divergence, unresolved order, active accounting blocker, or executable exposure, document it and adjust the classification. Do not silently force this state into residual policy.
+
+### H2 — The remaining problem is operator-surface ambiguity, not the core residual inventory model
+
+Hypothesis:
+
+```text
+residual-closeout-plan is mostly correct, but health/restart/repair surfaces still expose ambiguous fields such as:
+  can_resume=true
+  resume_safety=safe
+  gate_blocked=0
+  reason=converged
+while also saying:
+  run_loop_allowed=0
+  new_entry_allowed=0
+  closeout_allowed=0
+  Do not resume the run loop
+  NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+Verification:
+Inspect `health`, `restart-checklist`, `repair-plan --json`, and runtime readiness outputs. Add tests asserting that residual-only holdings never produce operator-facing text that implies run-loop resume is safe.
+
+Falsification:
+If `can_resume` or `resume_safety` are already semantically scoped to a narrower halt-recovery concept, preserve them but rename or expose explicit scoped fields so operators cannot misread them.
+
+### H3 — Startup/recovery gate and tradeability/run-loop gate need explicit separation
+
+Hypothesis:
+
+```text
+startup gate_blocked=0 can be true while tradeability gate is blocked.
+This is not wrong by itself, but it is dangerous if printed as the only gate.
+```
+
+Verification:
+Find the gate evaluation/output path in `engine.py`, `runtime_readiness.py`, and `app.py`. Confirm whether `gate_blocked=0` refers only to startup recovery blockers and not strategy tradeability.
+
+Expected new output fields:
+
+```text
+startup_recovery_gate_blocked=0
+tradeability_gate_blocked=1
+tradeability_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+run_loop_allowed=0
+```
+
+Falsification:
+If startup gate is intended to cover tradeability too, then residual-only holdings must set `gate_blocked=1`. Do not allow a single unqualified `gate_blocked=0` to coexist with `run_loop_allowed=0` without explanation.
+
+### H4 — `can_resume` and `resume_safety` are overloaded and need scope clarification
+
+Hypothesis:
+
+```text
+can_resume=true / resume_safety=safe currently risks being read as "it is safe to start the live run loop",
+even when the actual tradeability state says run_loop_allowed=0.
+```
+
+Verification:
+Search for `can_resume`, `resume_safety`, `evaluate_resume_eligibility`, `evaluate_restart_readiness`, and their display surfaces.
+
+Expected behavior for `NON_EXECUTABLE_RESIDUAL_HOLDINGS`:
+Either:
+
+```text
+can_resume=false
+resume_safety=policy_blocked
+blockers=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+or split into scoped fields:
+
+```text
+halt_recovery_can_resume=true
+run_loop_can_resume=false
+tradeability_resume_safety=policy_blocked
+tradeability_block_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+Prefer the split if existing semantics require preserving halt recovery behavior.
+
+Falsification:
+If there is no operator-facing ambiguity after current code inspection and tests, document why and add a regression test to lock it down.
+
+### H5 — repair-plan candidate commands remain too loose
+
+Hypothesis:
+
+```text
+Top-level repair-plan output is correct, but individual candidate_repairs may still contain recommended_command values even when needed=false and safe_to_apply=false.
+Example from EC2:
+  fee-gap-accounting-repair:
+    needed=false
+    safe_to_apply=false
+    recommended_command="uv run python bot.py resume"
+```
+
+This is dangerous for JSON consumers and operators.
+
+Verification:
+Inspect `src/bithumb_bot/repair_plan.py`.
+
+Expected rule:
+
+```text
+if candidate.needed == false:
+  candidate.recommended_command = ""
+  candidate.command_applicable = false
+  candidate.not_recommended_reason = <clear reason>
+```
+
+For residual-only holdings, repair candidates should explain:
+
+```text
+not_recommended_reason=current broker/portfolio/projection are converged; residual-only tradeability policy applies
+```
+
+Falsification:
+If candidates are explicitly documented as static command templates rather than recommendations, rename the field to `command_template` and add a separate `recommended_command` that is empty when not applicable. Do not leave ambiguous command fields.
+
+### H6 — `reason=converged` is too weak for top-level repair-plan
+
+Hypothesis:
+
+```text
+repair-plan top-level reason currently shows projection reason only, e.g. reason=converged,
+while the actual operator-relevant reason is NON_EXECUTABLE_RESIDUAL_HOLDINGS.
+```
+
+Verification:
+Inspect repair-plan payload construction.
+
+Expected:
+
+```text
+projection_reason=converged
+tradeability_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+or equivalent unambiguous fields.
+
+Falsification:
+If `reason` is intentionally projection-specific, rename it to `projection_reason` and add `primary_reason` / `tradeability_reason`.
+
+### H7 — legacy `audit` SELL snapshot invariant conflicts with the newer residual/ledger model
+
+Hypothesis:
+
+```text
+audit still fails on:
+  trade id=35 SELL snapshot impossible: asset_after=0.0004998, qty=0.0004
+
+But this is not impossible if the account had other residual holdings after the SELL.
+audit-ledger passes, and broker/portfolio/projection are converged.
+```
+
+Verification:
+Inspect `cmd_audit()` or the audit code path in `app.py` and any audit tests.
+
+Expected correction:
+Do not flag `SELL asset_after > sell qty` as impossible by itself.
+
+Replace or narrow the invariant to:
+
+```text
+asset_after >= 0
+cash_after >= 0
+accounting replay == portfolio
+broker == portfolio when broker evidence is available
+lifecycle consumed qty is explainable
+```
+
+Clarify roles:
+
+```text
+audit = schema/order/fill/lifecycle consistency
+audit-ledger = authoritative accounting replay consistency
+```
+
+Falsification:
+If `asset_after > qty` really means something else in this schema, document the intended invariant and adjust the EC2 evidence interpretation. Do not leave `audit` failing while `audit-ledger` says OK without a clear operator distinction.
+
+## Required design changes
+
+### P0.1 Make gate surfaces scoped and non-contradictory
+
+Implement explicit gate scopes in health/restart/startup outputs.
+
+Expected operator-facing shape for residual-only holdings:
+
+```text
+startup_recovery_gate_blocked=0
+tradeability_gate_blocked=1
+tradeability_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+run_loop_allowed=0
+new_entry_allowed=0
+closeout_allowed=0
+operator_next_action=residual_policy_review
+recommended_command=uv run bithumb-bot residual-closeout-plan
+```
+
+If `gate_blocked` remains, qualify it:
+
+```text
+startup_gate_blocked=0
+tradeability_gate_blocked=1
+```
+
+Do not leave a bare `gate_blocked=0` as the only visible gate in a state where `run_loop_allowed=0`.
+
+### P0.2 Clarify resume semantics
+
+Either make residual-only holdings return:
+
+```text
+can_resume=false
+resume_safety=policy_blocked
+```
+
+or split:
+
+```text
+halt_recovery_can_resume=true
+run_loop_can_resume=false
+tradeability_resume_safety=policy_blocked
+```
+
+Any output that says `can_resume=true` must make clear it is not permission to start the strategy run loop.
+
+Add tests that fail if residual-only holdings produce:
+
+```text
+can_resume=true
+resume_safety=safe
+```
+
+without a clearly scoped `run_loop_can_resume=false`.
+
+### P0.3 Make repair-plan candidate recommendations safe for humans and JSON consumers
+
+In `repair_plan.py`, ensure:
+
+```text
+candidate.needed=false => candidate.recommended_command is empty/null/none
+candidate.command_applicable=false
+candidate.not_recommended_reason present
+```
+
+For residual-only holdings, all repair candidates that are not needed must include context that the primary issue is tradeability policy, not repair.
+
+Do not allow inactive candidates to carry `resume`, `run`, `flatten`, or `rebuild-position-authority --apply` as `recommended_command`.
+
+### P0.4 Split projection reason from tradeability reason
+
+Top-level repair/recovery payloads should distinguish:
+
+```text
+projection_reason=converged
+tradeability_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+primary_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+If existing API compatibility requires keeping `reason`, set it to the primary operator-relevant reason and add `projection_reason` separately.
+
+### P0.5 Fix or re-scope legacy audit invariants
+
+Find the `SELL snapshot impossible` logic and update it so that a SELL trade is not invalid merely because `asset_after > sell_qty`.
+
+Add tests covering:
+
+```text
+pre-existing residual holdings remain after SELL
+asset_after > sell_qty
+audit should not fail solely for that
+audit-ledger remains authoritative for replay/portfolio convergence
+```
+
+If full audit refactor is too large, at least:
+
+* downgrade this specific condition to a warning when audit-ledger/accounting projection is OK, or
+* replace it with a more correct lifecycle/replay check.
+
+Do not hide real negative-balance or impossible principal accounting errors.
+
+## Required tests
+
+Add or update tests in the relevant files, likely:
+
+```text
 tests/test_position_authority_recovery_state.py
 tests/test_operator_commands.py
 tests/test_accounting_projection.py
+tests/test_dust.py
 ```
 
-Before editing, inspect the current code paths and existing tests. Reuse existing abstractions where possible. Do not duplicate state models if the repo already has a suitable one.
+Minimum test cases:
 
-Acceptance criteria:
+1. Residual-only fixture keeps core classification
 
-1. A reproducible test fixture for broker-matched residual-only holdings exists.
-2. The EC2-like fixture is classified as `NON_EXECUTABLE_RESIDUAL_HOLDINGS` or an equivalent explicit first-class reason.
-3. The fixture does not recommend `rebuild-position-authority`, `flatten-position`, `resume`, or `run`.
-4. The fixture keeps startup/live readiness fail-closed.
-5. The fixture distinguishes:
+```text
+broker_qty == portfolio_qty == projected_total_qty
+projection_converged == true
+executable_qty == 0
+residual_qty > 0
+primary_incident_class == TRADEABILITY_POLICY
+reason_code == NON_EXECUTABLE_RESIDUAL_HOLDINGS
+recommended_command == residual-closeout-plan
+run_loop_allowed == false
+new_entry_allowed == false
+closeout_allowed == false
+```
 
-   * position truth is converged
-   * executable authority is absent
-   * residual inventory exists
-   * repair is not the primary action
-6. Residual rows expose enough detail to tell `near_lot_residual`, `ledger_split_residual`, `portfolio_anchor_residual`, and degraded recovery residual apart.
-7. Existing dust and lot-native tests still pass or are updated to preserve their safety intent.
-8. New tests cover negative cases where actual projection divergence or broker mismatch still recommends review/repair rather than residual policy.
-9. If fill-trade linkage tooling is implemented, it must be dry-run first and must not guess unmatched rows.
-10. Final CLI/report output is operator-useful and does not imply “just rebuild or flatten” for this class.
+2. Residual-only fixture does not recommend repair or flatten
 
-Run tests:
+```text
+candidate rebuild-position-authority needed == false
+candidate rebuild-position-authority recommended_command empty/null/none
+flatten_primary_recommendation == false
+no inactive candidate has recommended_command=resume/run/flatten/rebuild --apply
+```
+
+3. Gate output is scoped
+
+```text
+startup_recovery_gate_blocked == false
+tradeability_gate_blocked == true
+tradeability_reason == NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+4. Resume output is scoped
+
+```text
+run_loop_can_resume == false
+tradeability_resume_safety == policy_blocked
+```
+
+If legacy `can_resume=true` remains, test must assert it is explicitly scoped and cannot be mistaken for run-loop permission.
+
+5. Projection reason and tradeability reason are separate
+
+```text
+projection_reason == converged
+primary_reason == NON_EXECUTABLE_RESIDUAL_HOLDINGS
+tradeability_reason == NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+6. Audit no longer rejects valid residual-after-SELL state
+
+Create or reuse a fixture where:
+
+```text
+SELL qty=0.0004
+asset_after=0.0004998
+residual holdings explain remaining asset
+cash_after >= 0
+asset_after >= 0
+accounting replay converges
+```
+
+Expected:
+
+```text
+audit does not fail solely because asset_after > sell_qty
+audit-ledger remains OK
+```
+
+7. Negative controls
+
+Ensure the new relaxed audit rule still catches:
+
+```text
+negative asset_after
+negative cash_after
+portfolio/replay mismatch
+unexplainable lifecycle consumption
+real broker/portfolio mismatch
+actual lot projection divergence
+actual unresolved order recovery
+```
+
+## Observability requirements
+
+Operator outputs should make the final state unmistakable:
+
+```text
+PositionTruth:
+  broker=0.00049980
+  portfolio=0.00049980
+  projected_total=0.00049980
+  projection_converged=1
+
+ExecutableAuthority:
+  executable_qty=0
+  sellable_executable_qty=0
+  open_lot_count=0
+
+ResidualInventory:
+  residual_qty=0.00049980
+  residual_classes=...
+  operator_closeout_possible=1
+  strategy_closeout_allowed=0
+
+Tradeability:
+  run_loop_allowed=0
+  new_entry_allowed=0
+  closeout_allowed=0
+  reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS
+
+RepairRecommendation:
+  repair_not_recommended
+  residual-closeout-plan recommended
+  flatten_not_primary
+```
+
+Ensure `residual-closeout-plan` remains read-only and non-mutating.
+
+If feasible, add `--json` support or verify existing `--json` support for:
+
+```text
+residual-closeout-plan --json
+restart-checklist --json
+health --json
+```
+
+If not feasible in this patch, document it as follow-up.
+
+## Safety constraints
+
+Do not:
+
+```text
+- allow run loop resume for residual-only holdings
+- allow new entries for material residual-only holdings
+- make dust_tracking sellable by strategy order submission
+- infer executable authority from aggregate qty
+- recommend flatten as the primary action
+- recommend rebuild-position-authority for broker/portfolio/projection-converged residual-only holdings
+- mutate DB in diagnostic commands
+- silently ignore audit failures without replacing them with correct invariants
+```
+
+Preserve:
+
+```text
+- fail-closed behavior
+- lot-count based SELL authority
+- residual-closeout-plan as read-only
+- broker/portfolio/projection convergence checks
+- historical repair events not being treated as current-state proof unless attested
+```
+
+## Suggested implementation order
+
+1. Inspect current `runtime_readiness.py`, `repair_plan.py`, `app.py`, `engine.py`, and audit logic.
+2. Add failing tests for the remaining ambiguities.
+3. Fix repair-plan candidate command applicability.
+4. Split projection/tradeability reason fields.
+5. Scope startup/recovery gate vs tradeability gate output.
+6. Scope resume semantics.
+7. Fix or re-scope audit SELL snapshot invariant.
+8. Run targeted tests.
+9. Run full test suite if practical.
+
+## Commands to run
+
+At minimum:
+
+```bash
+uv run pytest tests/test_position_authority_recovery_state.py
+uv run pytest tests/test_operator_commands.py
+uv run pytest tests/test_accounting_projection.py
+```
+
+If practical:
 
 ```bash
 uv run pytest
 ```
 
-If the full suite is too slow, at least run the targeted tests you modified or added, then document exactly what was run.
+Do not claim full validation unless the full suite was actually run.
 
-Final report format:
+## Final report format
+
+Return a final report with exactly these sections:
 
 ```text
 Summary
-- What changed and why.
+- What changed.
 
 Hypotheses
 - H1: verified/falsified/inconclusive, with evidence.
@@ -560,35 +621,52 @@ Hypotheses
 - H3: verified/falsified/inconclusive, with evidence.
 - H4: verified/falsified/inconclusive, with evidence.
 - H5: verified/falsified/inconclusive, with evidence.
+- H6: verified/falsified/inconclusive, with evidence.
+- H7: verified/falsified/inconclusive, with evidence.
 
 Design changes
-- New or changed state model fields.
-- New reason codes.
-- New CLI/report behavior.
-- Why this is not flatten/manual repair/symptom suppression.
+- Gate scoping.
+- Resume scoping.
+- Repair-plan candidate command safety.
+- Reason field separation.
+- Audit invariant update.
 
 Safety
 - How fail-closed behavior is preserved.
 - Why strategy SELL authority is still lot-count based.
-- Why repair recommendations are constrained.
+- Why residual-closeout-plan remains read-only.
+- Why flatten/rebuild/resume are not recommended.
 
 Tests
-- List new/changed tests.
+- New/changed tests.
 - Commands run.
 - Results.
 
 Operational impact
-- What an operator will now see for the EC2-like incident.
-- What commands are safe to run.
-- What commands are intentionally not recommended.
+- What EC2-like residual-only holdings now show.
+- Which command is recommended.
+- Which commands are intentionally not recommended.
 
 Follow-ups
-- Any intentionally deferred JSON support, forensic export, linkage repair, or broader architecture cleanup.
+- Any deferred JSON support.
+- Any deferred fill-trade linkage diagnostic/repair.
+- Any deferred forensic bundle or broader architecture cleanup.
 ```
 
-The central goal is:
+The intended final state is:
 
 ```text
-Classify broker-matched residual-only holdings as a first-class tradeability state, without forcing flatten or position-authority rebuild.
+PositionTruth: OK
+Accounting: OK
+LotProjection: OK
+ExecutableAuthority: none
+ResidualInventory: material residual exists
+Tradeability: blocked
+Repair: not recommended
+Operator command: residual-closeout-plan
+Run/resume: not recommended
+Flatten: not primary
 ```
+
+This patch should finish the operator-surface correctness work started by the residual-only holdings patch.
 

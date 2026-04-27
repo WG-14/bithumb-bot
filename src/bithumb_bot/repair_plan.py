@@ -259,6 +259,20 @@ def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any
             ),
         },
     ]
+    inactive_reason = (
+        "current broker/portfolio/projection are converged; residual-only tradeability policy applies"
+        if str(policy.get("recommended_mode") or "") == "residual_policy_review"
+        else "current report does not indicate this repair is needed"
+    )
+    for candidate in candidates:
+        needed = bool(candidate.get("needed"))
+        if not needed:
+            candidate["recommended_command"] = None
+            candidate["command_applicable"] = False
+            candidate["not_recommended_reason"] = inactive_reason
+            continue
+        candidate["command_applicable"] = bool(candidate.get("recommended_command"))
+        candidate["not_recommended_reason"] = None
     return candidates
 
 
@@ -270,6 +284,19 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
             ((report.get("runtime_readiness") or {}).get("projection_convergence") or {}).get("reason")
             or "projection_non_converged"
         )
+    )
+    runtime_readiness = dict(report.get("runtime_readiness") or {})
+    tradeability_reason = str(
+        report.get("tradeability_reason")
+        or runtime_readiness.get("tradeability_reason")
+        or runtime_readiness.get("residual_class")
+        or "none"
+    )
+    primary_reason = str(
+        report.get("primary_reason")
+        or runtime_readiness.get("primary_reason")
+        or tradeability_reason
+        or projection_reason
     )
     payload = {
         "mode": str(report.get("mode") or "paper"),
@@ -316,7 +343,10 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "safe_to_rebuild": bool((report.get("position_authority_rebuild_preview") or {}).get("safe_to_apply")),
         "pre_gate_passed": bool((report.get("position_authority_rebuild_preview") or {}).get("pre_gate_passed")),
         "final_safe_to_rebuild": bool((report.get("position_authority_rebuild_preview") or {}).get("final_safe_to_apply")),
-        "reason": projection_reason,
+        "reason": primary_reason,
+        "primary_reason": primary_reason,
+        "projection_reason": projection_reason,
+        "tradeability_reason": tradeability_reason,
         "non_mutating_preview": True,
         "repair_kind": position_preview.get("repair_kind"),
         "truth_source": position_preview.get("truth_source"),

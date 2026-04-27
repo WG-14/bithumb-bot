@@ -77,6 +77,15 @@ class RuntimeReadinessSnapshot:
     inspect_only_mode: bool
 
     def as_dict(self) -> dict[str, object]:
+        primary_reason = str(self.resume_blockers[0]) if self.resume_blockers else (
+            str(self.residual_class or "NONE") if not self.run_loop_allowed else "none"
+        )
+        projection_reason = (
+            "converged"
+            if bool(self.projection_convergence.get("converged"))
+            else str(self.projection_convergence.get("reason") or "projection_non_converged")
+        )
+        tradeability_reason = str(self.residual_class or "NONE") if not self.run_loop_allowed else "none"
         return {
             "recovery_stage": self.recovery_stage,
             "resume_ready": bool(self.resume_ready),
@@ -112,12 +121,23 @@ class RuntimeReadinessSnapshot:
             "projection_convergence": dict(self.projection_convergence),
             "projection_converged": bool(self.projection_convergence.get("converged")),
             "projection_non_convergence_reason": str(self.projection_convergence.get("reason") or "none"),
+            "projection_reason": projection_reason,
+            "primary_reason": primary_reason,
+            "tradeability_reason": tradeability_reason,
             "authority_truth_model": dict(self.authority_truth_model),
             "broker_position_evidence": dict(self.broker_position_evidence),
             "structured_blockers": [dict(item) for item in self.structured_blockers],
             "inspect_only_mode": bool(self.inspect_only_mode),
             "canonical_state": self.canonical_state,
             "residual_class": self.residual_class,
+            "halt_recovery_can_resume": bool(self.resume_ready),
+            "run_loop_can_resume": bool(self.run_loop_allowed),
+            "tradeability_gate_blocked": bool(not self.run_loop_allowed),
+            "tradeability_resume_safety": (
+                "safe"
+                if self.run_loop_allowed
+                else f"policy_blocked ({tradeability_reason})"
+            ),
             "run_loop_allowed": bool(self.run_loop_allowed),
             "position_management_allowed": bool(self.position_management_allowed),
             "new_entry_allowed": bool(self.new_entry_allowed),

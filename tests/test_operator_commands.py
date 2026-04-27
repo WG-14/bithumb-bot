@@ -4683,6 +4683,9 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "cash_locked",
         "portfolio_qty",
         "lot_projection_converged",
+        "projection_reason",
+        "tradeability_reason",
+        "primary_reason",
         "live_ready",
         "blocking_incident_class",
         "recovery_stage",
@@ -4693,6 +4696,11 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "blockers",
         "force_resume_allowed",
         "can_resume",
+        "halt_recovery_can_resume",
+        "run_loop_can_resume",
+        "startup_recovery_gate_blocked",
+        "tradeability_gate_blocked",
+        "tradeability_resume_safety",
         "resume_blockers",
         "last_reconcile_summary",
         "oldest_orders",
@@ -4768,6 +4776,14 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert "status=" in payload["last_reconcile_summary"]
     assert payload["resume_allowed"] is False
     assert payload["can_resume"] is False
+    assert isinstance(payload["halt_recovery_can_resume"], bool)
+    assert isinstance(payload["run_loop_can_resume"], bool)
+    assert isinstance(payload["startup_recovery_gate_blocked"], bool)
+    assert isinstance(payload["tradeability_gate_blocked"], bool)
+    assert payload["projection_reason"]
+    assert payload["tradeability_reason"]
+    assert payload["primary_reason"]
+    assert payload["tradeability_resume_safety"]
     assert "STARTUP_SAFETY_GATE_BLOCKED" in payload["resume_blockers"]
     assert payload["force_resume_allowed"] is False
     assert isinstance(payload["blockers"], list)

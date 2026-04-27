@@ -208,6 +208,134 @@ def test_external_adjustment_idempotency_keeps_projection_deterministic(projecti
     assert after["external_cash_adjustment_total"] == pytest.approx(77.0)
 
 
+def test_audit_allows_sell_snapshot_with_residual_holdings_when_projection_converges(
+    projection_db,
+    capsys,
+):
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="residual_audit_buy",
+            side="BUY",
+            qty_req=0.0008998,
+            price=100_000_000.0,
+            ts_ms=1_700_000_100_000,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="residual_audit_buy",
+            side="BUY",
+            fill_id="residual_audit_buy_fill",
+            fill_ts=1_700_000_100_100,
+            price=100_000_000.0,
+            qty=0.0008998,
+            fee=50.0,
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="residual_audit_sell",
+            side="SELL",
+            qty_req=0.0004,
+            price=110_000_000.0,
+            ts_ms=1_700_000_100_200,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="residual_audit_sell",
+            side="SELL",
+            fill_id="residual_audit_sell_fill",
+            fill_ts=1_700_000_100_300,
+            price=110_000_000.0,
+            qty=0.0004,
+            fee=60.0,
+        )
+        latest_sell = conn.execute(
+            """
+            SELECT qty, cash_after, asset_after
+            FROM trades
+            WHERE client_order_id='residual_audit_sell'
+            """
+        ).fetchone()
+        replay = compute_accounting_replay(conn)
+    finally:
+        conn.close()
+
+    assert latest_sell is not None
+    assert float(latest_sell["asset_after"]) > float(latest_sell["qty"])
+    assert float(replay["replay_qty"]) == pytest.approx(float(latest_sell["asset_after"]))
+
+    app_main(["audit"])
+    out = capsys.readouterr().out
+
+    assert "[AUDIT] FAILED" not in out
+    assert "[AUDIT] OK" in out
+
+
+def test_audit_still_fails_negative_sell_snapshot_after_relaxing_residual_rule(
+    projection_db,
+    capsys,
+):
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="negative_sell_buy",
+            side="BUY",
+            qty_req=0.001,
+            price=100_000_000.0,
+            ts_ms=1_700_000_200_000,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="negative_sell_buy",
+            side="BUY",
+            fill_id="negative_sell_buy_fill",
+            fill_ts=1_700_000_200_100,
+            price=100_000_000.0,
+            qty=0.001,
+            fee=50.0,
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="negative_sell_sell",
+            side="SELL",
+            qty_req=0.001,
+            price=110_000_000.0,
+            ts_ms=1_700_000_200_200,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="negative_sell_sell",
+            side="SELL",
+            fill_id="negative_sell_sell_fill",
+            fill_ts=1_700_000_200_300,
+            price=110_000_000.0,
+            qty=0.001,
+            fee=60.0,
+        )
+        conn.execute(
+            "UPDATE trades SET asset_after=? WHERE client_order_id='negative_sell_sell'",
+            (-0.0001,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(SystemExit):
+        app_main(["audit"])
+    out = capsys.readouterr().out
+
+    assert "[AUDIT] FAILED" in out
+    assert "SELL snapshot impossible" in out
+
+
 def test_fee_observation_lifecycle_is_visible_without_becoming_projection_authority(
     projection_db,
 ):

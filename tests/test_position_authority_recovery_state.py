@@ -2635,7 +2635,7 @@ def test_repair_plan_and_residual_closeout_plan_classify_residual_only_holdings_
 
     capsys.readouterr()
     app_main(["repair-plan", "--json"])
-    plan = json.loads(capsys.readouterr().out)
+    plan = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert plan["primary_incident_class"] == "TRADEABILITY_POLICY"
     assert plan["recommended_mode"] == "residual_policy_review"
     assert plan["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
@@ -2652,6 +2652,90 @@ def test_repair_plan_and_residual_closeout_plan_classify_residual_only_holdings_
     assert closeout_plan["strategy_closeout_allowed"] is False
     assert closeout_plan["operator_closeout_possible"] is True
     assert closeout_plan["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
+
+
+def test_residual_only_holdings_scope_resume_gates_and_reasons_across_operator_surfaces(
+    recovery_db,
+    capsys,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_broker_matched_residual_only_fixture(conn)
+    finally:
+        conn.close()
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is True
+    assert report["halt_recovery_can_resume"] is True
+    assert report["run_loop_can_resume"] is False
+    assert report["startup_recovery_gate_blocked"] is False
+    assert report["tradeability_gate_blocked"] is True
+    assert report["projection_reason"] == "converged"
+    assert report["tradeability_reason"] == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert report["primary_reason"] == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert report["operator_next_action"] == "residual_policy_review"
+    assert report["resume_blocked_reason"] == "run loop blocked by non-executable residual holdings policy"
+    assert report["tradeability_resume_safety"] == "policy_blocked (NON_EXECUTABLE_RESIDUAL_HOLDINGS)"
+    assert report["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
+
+    capsys.readouterr()
+    app_main(["health"])
+    health_out = capsys.readouterr().out
+    assert "can_resume=true" in health_out
+    assert "halt_recovery_can_resume=true" in health_out
+    assert "run_loop_can_resume=false" in health_out
+    assert "startup_recovery_gate_blocked=0 tradeability_gate_blocked=1" in health_out
+    assert "tradeability_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS" in health_out
+    assert "projection_reason=converged" in health_out
+    assert "resume_safety=scoped_safe_halt_recovery_only (NON_EXECUTABLE_RESIDUAL_HOLDINGS)" in health_out
+    assert "tradeability_resume_safety=policy_blocked (NON_EXECUTABLE_RESIDUAL_HOLDINGS)" in health_out
+    assert "next_commands=uv run bithumb-bot residual-closeout-plan" in health_out
+
+    app_main(["restart-checklist"])
+    checklist_out = capsys.readouterr().out
+    assert "resume_scope=process_loop_only" in checklist_out
+    assert "startup_recovery_gate_blocked=0 tradeability_gate_blocked=1" in checklist_out
+    assert "halt_recovery_can_resume=1 run_loop_can_resume=0" in checklist_out
+    assert "run_loop_allowed=0" in checklist_out
+    assert "tradeability_reason=NON_EXECUTABLE_RESIDUAL_HOLDINGS" in checklist_out
+    assert "tradeability_resume_safety=policy_blocked (NON_EXECUTABLE_RESIDUAL_HOLDINGS)" in checklist_out
+
+
+def test_residual_only_repair_plan_inactive_candidates_do_not_carry_recommended_commands(
+    recovery_db,
+    capsys,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_broker_matched_residual_only_fixture(conn)
+    finally:
+        conn.close()
+
+    capsys.readouterr()
+    app_main(["repair-plan", "--json"])
+    plan = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert plan["reason"] == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert plan["primary_reason"] == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert plan["projection_reason"] == "converged"
+    assert plan["tradeability_reason"] == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+
+    for candidate in plan["candidate_repairs"]:
+        if candidate["needed"]:
+            continue
+        assert candidate["recommended_command"] is None
+        assert candidate["command_applicable"] is False
+        assert candidate["not_recommended_reason"] == (
+            "current broker/portfolio/projection are converged; residual-only tradeability policy applies"
+        )
+
+    rebuild_candidate = next(
+        candidate for candidate in plan["candidate_repairs"] if candidate["name"] == "rebuild-position-authority"
+    )
+    assert rebuild_candidate["needed"] is False
+    assert rebuild_candidate["recommended_command"] is None
+    assert rebuild_candidate["command_applicable"] is False
 
 
 def test_diagnose_fill_trade_linkage_reports_matchable_and_unmatchable_rows(

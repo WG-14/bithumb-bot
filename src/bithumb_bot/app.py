@@ -46,6 +46,7 @@ from .engine import (
     compute_signal,
     evaluate_restart_readiness,
     evaluate_resume_eligibility,
+    evaluate_startup_safety_gate,
     get_health_status,
     get_stale_risk_state_mismatch_halt_diagnostics,
     maybe_clear_stale_initial_reconcile_halt,
@@ -565,7 +566,7 @@ def cmd_audit():
         """
         SELECT id, side, qty, cash_after, asset_after
         FROM trades
-        WHERE side='SELL' AND (cash_after < 0 OR asset_after > qty)
+        WHERE side='SELL' AND (cash_after < 0 OR asset_after < 0)
         """
     ).fetchall()
     for row in bad_sell_snapshots:
@@ -874,6 +875,11 @@ def cmd_health() -> None:
             f"reason={health['last_disable_reason'] or '-'}"
         )
     can_resume_label = "true" if bool(resume_allowed) else "false"
+    run_loop_can_resume = bool(resume_allowed and readiness_snapshot.run_loop_allowed)
+    readiness_payload = readiness_snapshot.as_dict()
+    tradeability_reason = str(
+        readiness_payload.get("tradeability_reason") or readiness_snapshot.residual_class or "none"
+    )
     blockers_label = ", ".join(resume_blocker_codes) if resume_blocker_codes else "none"
     blocker_reason_codes_label = ", ".join(resume_blocker_reason_codes) if resume_blocker_reason_codes else "none"
     unsafe_reasons: list[str] = []
@@ -884,8 +890,13 @@ def cmd_health() -> None:
             unsafe_reasons.append("RESUME_BLOCKED")
     if unsafe_reasons:
         resume_safety = f"unsafe ({', '.join(unsafe_reasons)})"
+    elif not run_loop_can_resume:
+        resume_safety = f"scoped_safe_halt_recovery_only ({tradeability_reason})"
     else:
         resume_safety = "safe"
+    tradeability_resume_safety = (
+        "safe" if run_loop_can_resume else f"policy_blocked ({tradeability_reason})"
+    )
 
     recovery_policy = build_recovery_policy_from_report(_load_recovery_report())
     recommended_commands = "uv run python bot.py recovery-report"
@@ -912,6 +923,8 @@ def cmd_health() -> None:
 
     if bool(recovery_policy.get("accounting_root_cause_unresolved")):
         recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
+    elif str(recovery_policy.get("recommended_mode") or "") == "residual_policy_review":
+        recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
     elif str(recovery_policy.get("recommended_mode") or "") == "position_management":
         recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
     elif bool(recovery_policy.get("flatten_primary_recommendation")):
@@ -922,6 +935,7 @@ def cmd_health() -> None:
         or health["halt_new_orders_blocked"]
         or bool(health.get("emergency_flatten_blocked"))
         or health["recovery_required_count"] > 0
+        or not readiness_snapshot.run_loop_allowed
         or (dust.present and not dust_view.resume_allowed)
     )
 
@@ -1010,6 +1024,8 @@ def cmd_health() -> None:
         f"state_message={position_state.state_interpretation.operator_message}"
     )
     print(f"    can_resume={can_resume_label}")
+    print(f"    halt_recovery_can_resume={'true' if bool(resume_allowed) else 'false'}")
+    print(f"    run_loop_can_resume={'true' if run_loop_can_resume else 'false'}")
     print(f"    blockers={blockers_label}")
     print(f"    blocker_reason_codes={blocker_reason_codes_label}")
     print(f"    recovery_stage={readiness_snapshot.recovery_stage}")
@@ -1018,6 +1034,14 @@ def cmd_health() -> None:
         f"{', '.join(readiness_snapshot.blocker_categories) if readiness_snapshot.blocker_categories else 'none'}"
     )
     print(f"    canonical_next_action={readiness_snapshot.operator_next_action}")
+    print(
+        "    "
+        f"startup_recovery_gate_blocked={1 if bool(health.get('startup_gate_reason')) else 0} "
+        f"tradeability_gate_blocked={1 if not readiness_snapshot.run_loop_allowed else 0} "
+        f"tradeability_reason={tradeability_reason} "
+        f"primary_reason={str(readiness_payload.get('primary_reason') or tradeability_reason)} "
+        f"projection_reason={str(readiness_payload.get('projection_reason') or 'none')}"
+    )
     print(
         "    "
         f"canonical_state={readiness_snapshot.canonical_state} "
@@ -1053,6 +1077,7 @@ def cmd_health() -> None:
         f"{', '.join(str(item) for item in stale_halt_clear_diagnostics.get('stale_halt_clear_blockers') or []) or 'none'}"
     )
     print(f"    resume_safety={resume_safety}")
+    print(f"    tradeability_resume_safety={tradeability_resume_safety}")
     print(
         "    "
         f"dust_state={dust_view.state} "
@@ -3070,11 +3095,33 @@ def _load_recovery_report(
         if residual_only_holdings
         else str((runtime_readiness_snapshot.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
     )
+    runtime_primary_reason = str(
+        runtime_readiness_snapshot.get("primary_reason")
+        or (runtime_readiness_snapshot.get("resume_blockers") or ["none"])[0]
+    )
+    runtime_projection_reason = str(
+        runtime_readiness_snapshot.get("projection_reason")
+        or ((runtime_readiness_snapshot.get("projection_convergence") or {}).get("reason") or "none")
+    )
+    runtime_tradeability_reason = str(
+        runtime_readiness_snapshot.get("tradeability_reason")
+        or runtime_readiness_snapshot.get("residual_class")
+        or "none"
+    )
     report_recommended_command = recommended_command
     if position_management_resume_ready or (
         bool(resume_allowed) and readiness_has_deferred_debt
     ) or blocking_incident_class in {"HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT", "TRADEABILITY_POLICY"}:
         report_recommended_command = str(runtime_readiness_snapshot.get("recommended_command") or recommended_command)
+    if blocking_incident_class == "TRADEABILITY_POLICY":
+        report_operator_next_action = str(
+            runtime_readiness_snapshot.get("operator_next_action") or "residual_policy_review"
+        )
+        report_recommended_next_action = (
+            "Do not resume the run loop. Holdings are converged, but only non-executable residual inventory remains; "
+            "review residual-closeout policy."
+        )
+        resume_blocked_reason = "run loop blocked by non-executable residual holdings policy"
 
     report = {
         "mode": settings.MODE,
@@ -3166,6 +3213,9 @@ def _load_recovery_report(
         "cash_locked": broker_position_evidence.get("cash_locked"),
         "portfolio_qty": portfolio_qty,
         "lot_projection_converged": lot_projection_converged,
+        "projection_reason": runtime_projection_reason,
+        "tradeability_reason": runtime_tradeability_reason,
+        "primary_reason": runtime_primary_reason,
         "live_ready": bool(runtime_readiness_snapshot.get("resume_ready")),
         "blocking_incident_class": blocking_incident_class,
         "recovery_stage": runtime_readiness_snapshot.get("recovery_stage"),
@@ -3186,6 +3236,15 @@ def _load_recovery_report(
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
         "resume_allowed": bool(resume_allowed),
         "can_resume": can_resume,
+        "halt_recovery_can_resume": bool(resume_allowed),
+        "run_loop_can_resume": bool(resume_allowed and runtime_readiness_snapshot.get("run_loop_allowed")),
+        "startup_recovery_gate_blocked": bool(evaluate_startup_safety_gate()),
+        "tradeability_gate_blocked": bool(not runtime_readiness_snapshot.get("run_loop_allowed")),
+        "tradeability_resume_safety": (
+            "safe"
+            if bool(resume_allowed and runtime_readiness_snapshot.get("run_loop_allowed"))
+            else f"policy_blocked ({runtime_tradeability_reason})"
+        ),
         "resume_blockers": blocker_codes,
         "resume_blocker_reason_codes": blocker_reason_codes,
         "force_resume_allowed": all(bool(b.overridable) for b in blockers),
@@ -3291,6 +3350,17 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    canonical_next_action={runtime_readiness.get('operator_next_action') or 'review_recovery_report'}")
     print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
     print(f"    can_resume={'true' if bool(report['can_resume']) else 'false'}")
+    print(f"    halt_recovery_can_resume={1 if bool(report.get('halt_recovery_can_resume')) else 0}")
+    print(f"    run_loop_can_resume={1 if bool(report.get('run_loop_can_resume')) else 0}")
+    print(
+        "    "
+        f"startup_recovery_gate_blocked={1 if bool(report.get('startup_recovery_gate_blocked')) else 0} "
+        f"tradeability_gate_blocked={1 if bool(report.get('tradeability_gate_blocked')) else 0} "
+        f"tradeability_reason={report.get('tradeability_reason') or 'none'} "
+        f"primary_reason={report.get('primary_reason') or 'none'} "
+        f"projection_reason={report.get('projection_reason') or 'none'}"
+    )
+    print(f"    tradeability_resume_safety={report.get('tradeability_resume_safety') or 'none'}")
     resume_blockers = report.get("resume_blockers") or []
     print(f"    blockers={', '.join(str(b) for b in resume_blockers) if resume_blockers else 'none'}")
     resume_blocker_reason_codes = report.get("resume_blocker_reason_codes") or []
@@ -3783,7 +3853,10 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         f"rebuildable={1 if bool(plan.get('rebuildable')) else 0} "
         f"safe_to_rebuild={1 if bool(plan.get('safe_to_rebuild')) else 0} "
         f"final_safe_to_rebuild={1 if bool(plan.get('final_safe_to_rebuild')) else 0} "
-        f"reason={plan.get('reason') or 'none'}"
+        f"reason={plan.get('reason') or 'none'} "
+        f"primary_reason={plan.get('primary_reason') or 'none'} "
+        f"projection_reason={plan.get('projection_reason') or 'none'} "
+        f"tradeability_reason={plan.get('tradeability_reason') or 'none'}"
     )
     if plan.get("repair_kind"):
         print(
@@ -3833,6 +3906,8 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         print(f"      idempotency_key={candidate.get('idempotency_key') or 'none'}")
         print(f"      rollback_or_backup={candidate.get('rollback_or_backup') or 'none'}")
         print(f"      why_safe={candidate.get('why_safe') or 'none'}")
+        print(f"      command_applicable={1 if bool(candidate.get('command_applicable')) else 0}")
+        print(f"      not_recommended_reason={candidate.get('not_recommended_reason') or 'none'}")
         print(f"      recommended_command={candidate.get('recommended_command') or 'none'}")
 
 
@@ -4792,6 +4867,10 @@ def cmd_restart_checklist() -> None:
     print(
         "  "
         "resume_scope=process_loop_only "
+        f"startup_recovery_gate_blocked={1 if bool(report.get('startup_recovery_gate_blocked')) else 0} "
+        f"tradeability_gate_blocked={1 if bool(report.get('tradeability_gate_blocked')) else 0} "
+        f"halt_recovery_can_resume={1 if bool(report.get('halt_recovery_can_resume')) else 0} "
+        f"run_loop_can_resume={1 if bool(report.get('run_loop_can_resume')) else 0} "
         f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
         f"trading_allowed={1 if tradeability_fields['trading_allowed'] else 0} "
         f"position_management_allowed={1 if readiness_snapshot.position_management_allowed else 0} "
@@ -4804,8 +4883,12 @@ def cmd_restart_checklist() -> None:
         f"canonical_state={readiness_snapshot.canonical_state} "
         f"residual_class={readiness_snapshot.residual_class} "
         f"strategy_tradeability_state={readiness_snapshot.tradeability_operator_fields['strategy_tradeability_state']} "
-        f"trading_block_reason={tradeability_fields['trading_block_reason']}"
+        f"trading_block_reason={tradeability_fields['trading_block_reason']} "
+        f"tradeability_reason={report.get('tradeability_reason') or 'none'} "
+        f"primary_reason={report.get('primary_reason') or 'none'} "
+        f"projection_reason={report.get('projection_reason') or 'none'}"
     )
+    print(f"  tradeability_resume_safety={report.get('tradeability_resume_safety') or 'none'}")
     print(
         "  "
         f"tradeability_operator_message={tradeability_fields['tradeability_operator_message']}"
