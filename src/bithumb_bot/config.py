@@ -482,6 +482,7 @@ class Settings:
     # paper portfolio
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
+    RESIDUAL_INVENTORY_MODE: str = os.getenv("RESIDUAL_INVENTORY_MODE", "block").strip().lower() or "block"
     # 怨듯넻 湲곕낯 ?섏닔猷뚯쑉. ?댁쁺?먯꽌??LIVE/PAPER ?섏닔猷뚯쑉??媛곴컖 紐낆떆?쒕떎.
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))
     # live pretrade ?붽퀬/?꾧툑 寃利??꾩슜 蹂댁닔??異붿젙 ?섏닔猷뚯쑉.

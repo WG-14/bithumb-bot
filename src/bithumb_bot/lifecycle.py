@@ -181,6 +181,24 @@ class ResidualInventorySnapshot:
     material_residual: bool
     rows: tuple[ResidualLotRowSnapshot, ...]
 
+    @property
+    def explainable(self) -> bool:
+        if not self.rows:
+            return False
+        unresolved_classes = {"UNCLASSIFIED_RESIDUAL"}
+        allowed_linkages = {"direct", "degraded_recovery_unattributed"}
+        allowed_sources = {
+            "ledger",
+            "full_projection_rebuild_portfolio_anchor",
+            "portfolio_anchored_repair",
+        }
+        return all(
+            all(value not in unresolved_classes for value in row.classes)
+            and str(row.entry_decision_linkage or "") in allowed_linkages
+            and str(row.source_mode or "") in allowed_sources
+            for row in self.rows
+        )
+
     def as_dict(self) -> dict[str, object]:
         return {
             "residual_qty": float(self.residual_qty),
@@ -192,6 +210,7 @@ class ResidualInventorySnapshot:
             "exchange_sellable": bool(self.exchange_sellable),
             "strategy_sellable": bool(self.strategy_sellable),
             "material_residual": bool(self.material_residual),
+            "explainable": bool(self.explainable),
             "rows": [row.as_dict() for row in self.rows],
         }
 

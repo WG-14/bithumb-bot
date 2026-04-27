@@ -152,6 +152,45 @@ def test_buy_execution_sizing_returns_direct_reason_for_non_positive_budget(
     assert plan.decision_reason_code == BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET
 
 
+def test_buy_execution_sizing_reduces_budget_by_tracked_residual_exposure(
+    sizing_rule_overrides,
+) -> None:
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=20_000.0,
+        market_price=10_000_000.0,
+        residual_inventory_qty=0.0003,
+        residual_inventory_notional_krw=3_000.0,
+    )
+
+    assert plan.allowed is True
+    assert plan.gross_budget_krw == pytest.approx(10_000.0)
+    assert plan.budget_krw == pytest.approx(7_000.0)
+    assert plan.exposure_offset_krw == pytest.approx(3_000.0)
+    assert plan.residual_inventory_qty == pytest.approx(0.0003)
+    assert plan.residual_inventory_notional_krw == pytest.approx(3_000.0)
+    assert plan.total_effective_exposure_qty == pytest.approx(0.0003)
+    assert plan.total_effective_exposure_notional_krw == pytest.approx(3_000.0)
+    assert plan.buy_sizing_residual_adjusted is True
+
+
+def test_buy_execution_sizing_blocks_when_tracked_residual_consumes_budget(
+    sizing_rule_overrides,
+) -> None:
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=20_000.0,
+        market_price=10_000_000.0,
+        residual_inventory_qty=0.001,
+        residual_inventory_notional_krw=10_000.0,
+    )
+
+    assert plan.allowed is False
+    assert plan.block_reason == BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET
+    assert plan.budget_krw == pytest.approx(0.0)
+    assert plan.buy_sizing_residual_adjusted is True
+
+
 def test_buy_execution_sizing_returns_direct_reason_for_min_notional_miss(
     sizing_rule_overrides,
 ) -> None:

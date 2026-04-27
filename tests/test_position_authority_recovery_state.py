@@ -2614,6 +2614,99 @@ def test_broker_matched_residual_only_holdings_block_resume_without_rebuild_or_f
     ]
 
 
+def test_broker_matched_residual_only_holdings_track_mode_resume_as_tracked_inventory(
+    recovery_db,
+):
+    original_mode = settings.RESIDUAL_INVENTORY_MODE
+    object.__setattr__(settings, "RESIDUAL_INVENTORY_MODE", "track")
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_broker_matched_residual_only_fixture(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+        object.__setattr__(settings, "RESIDUAL_INVENTORY_MODE", original_mode)
+
+    payload = readiness.as_dict()
+
+    assert readiness.resume_ready is True
+    assert readiness.recovery_stage == "RESIDUAL_INVENTORY_TRACKED"
+    assert readiness.run_loop_allowed is True
+    assert readiness.new_entry_allowed is True
+    assert readiness.closeout_allowed is True
+    assert readiness.residual_class == "RESIDUAL_INVENTORY_TRACKED"
+    assert readiness.recommended_command == "uv run python bot.py resume"
+    assert payload["residual_inventory_mode"] == "track"
+    assert payload["residual_inventory_state"] == "RESIDUAL_INVENTORY_TRACKED"
+    assert payload["tradeability_reason"] == "RESIDUAL_INVENTORY_TRACKED"
+    assert payload["tradeability_gate_blocked"] is False
+    assert payload["residual_inventory_policy_allows_run"] is True
+    assert payload["residual_inventory_policy_allows_buy"] is True
+    assert payload["residual_inventory_policy_allows_sell"] is True
+    assert payload["residual_sell_candidate_allowed"] is True
+    assert payload["residual_sell_candidate"]["source"] == "residual_inventory"
+    assert payload["total_effective_exposure_qty"] == pytest.approx(RESIDUAL_INCIDENT_PORTFOLIO_QTY)
+
+
+def test_broker_matched_residual_only_holdings_track_mode_still_fails_closed_when_broker_evidence_stale(
+    recovery_db,
+):
+    original_mode = settings.RESIDUAL_INVENTORY_MODE
+    object.__setattr__(settings, "RESIDUAL_INVENTORY_MODE", "track")
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_broker_matched_residual_only_fixture(conn)
+        metadata = json.loads(str(runtime_state.snapshot().last_reconcile_metadata or "{}"))
+        metadata["balance_source_stale"] = True
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata=metadata,
+            now_epoch_sec=2.0,
+        )
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+        object.__setattr__(settings, "RESIDUAL_INVENTORY_MODE", original_mode)
+
+    assert readiness.run_loop_allowed is False
+    assert readiness.residual_class == "RESIDUAL_INVENTORY_UNRESOLVED"
+
+
+def test_tracked_residual_inventory_changes_operator_policy_surfaces(
+    recovery_db,
+    capsys,
+):
+    original_mode = settings.RESIDUAL_INVENTORY_MODE
+    object.__setattr__(settings, "RESIDUAL_INVENTORY_MODE", "track")
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_broker_matched_residual_only_fixture(conn)
+    finally:
+        conn.close()
+
+    try:
+        report = _load_recovery_report()
+
+        assert report["tradeability_reason"] == "RESIDUAL_INVENTORY_TRACKED"
+        assert report["recommended_command"] == "uv run python bot.py resume"
+        assert report["recovery_policy"]["recommended_mode"] == "residual_inventory_tracked"
+
+        capsys.readouterr()
+        app_main(["health"])
+        health_out = capsys.readouterr().out
+        assert "run_loop_can_resume=true" in health_out
+        assert "tradeability_reason=RESIDUAL_INVENTORY_TRACKED" in health_out
+        assert "tradeability_gate_blocked=0" in health_out
+
+        app_main(["restart-checklist"])
+        checklist_out = capsys.readouterr().out
+        assert "run_loop_allowed=1" in checklist_out
+        assert "recommended_mode=residual_inventory_tracked" in checklist_out
+    finally:
+        object.__setattr__(settings, "RESIDUAL_INVENTORY_MODE", original_mode)
+
+
 def test_repair_plan_and_residual_closeout_plan_classify_residual_only_holdings_as_tradeability_policy(
     recovery_db,
     capsys,

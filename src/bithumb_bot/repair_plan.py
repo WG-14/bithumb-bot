@@ -44,6 +44,7 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         _truthy(fee_gap_preview.get("needs_repair"))
         and _truthy(fee_gap_preview.get("resume_blocking"))
     )
+    residual_inventory_tracked = str(runtime_readiness.get("residual_class") or "") == "RESIDUAL_INVENTORY_TRACKED"
     residual_only_holdings = bool(
         "NON_EXECUTABLE_RESIDUAL_HOLDINGS" in (runtime_readiness.get("resume_blockers") or [])
         or str(runtime_readiness.get("residual_class") or "") == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
@@ -81,7 +82,13 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
     recommended_action = str(report.get("operator_next_action") or "investigate_blockers")
     recommended_command = str(report.get("recommended_command") or "uv run python bot.py recovery-report")
 
-    if accounting_root_cause_unresolved:
+    if residual_inventory_tracked:
+        recommended_mode = "residual_inventory_tracked"
+        primary_incident_class = "RESIDUAL_INVENTORY"
+        additional_orders_allowed = bool(new_entry_allowed)
+        recommended_action = "run_with_residual_inventory_tracking"
+        recommended_command = str(runtime_readiness.get("recommended_command") or "uv run python bot.py resume")
+    elif accounting_root_cause_unresolved:
         recommended_mode = "forensic_accounting"
         primary_incident_class = "ACCOUNTING_ROOT_CAUSE"
         recommended_action = "collect_broker_fill_evidence_and_build_repair_plan"
@@ -113,6 +120,8 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         incident_reasons.append("open_position_lots_projection_drift")
     if residual_only_holdings:
         incident_reasons.append("non_executable_residual_holdings")
+    if residual_inventory_tracked:
+        incident_reasons.append("residual_inventory_tracked")
     if _int(fee_rate_drift.get("recent_expected_fee_rate_mismatch_count")) > 0:
         incident_reasons.append("fee_rate_drift_visible")
 

@@ -24,6 +24,23 @@ class SignalExecutionRequest:
     decision_context: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class ResidualSellCandidate:
+    qty: float
+    notional: float | None
+    source: str
+    classes: tuple[str, ...]
+    exchange_sellable: bool
+    allowed_by_policy: bool
+    requires_final_pre_submit_proof: bool
+
+
+@dataclass(frozen=True)
+class ResidualSellPreSubmitProof:
+    passed: bool
+    reasons: tuple[str, ...]
+
+
 class SignalExecutionService(Protocol):
     def execute(self, request: SignalExecutionRequest) -> dict | None: ...
 
@@ -82,8 +99,82 @@ def record_harmless_dust_exit_suppression(**kwargs) -> bool:
     return _record_harmless_dust_exit_suppression(**kwargs)
 
 
+def _dict_value(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def build_residual_sell_candidate(decision_context: dict[str, object] | None) -> ResidualSellCandidate | None:
+    if not isinstance(decision_context, dict):
+        return None
+    residual_mode = str(decision_context.get("residual_inventory_mode") or "block")
+    residual_state = str(decision_context.get("residual_inventory_state") or "")
+    residual_inventory = _dict_value(decision_context.get("residual_inventory"))
+    residual_candidate = _dict_value(decision_context.get("residual_sell_candidate"))
+    if residual_mode != "track" or residual_state != "RESIDUAL_INVENTORY_TRACKED":
+        return None
+    if residual_candidate:
+        return ResidualSellCandidate(
+            qty=float(residual_candidate.get("qty") or 0.0),
+            notional=(
+                None if residual_candidate.get("notional") is None else float(residual_candidate.get("notional") or 0.0)
+            ),
+            source=str(residual_candidate.get("source") or "residual_inventory"),
+            classes=tuple(str(item) for item in (residual_candidate.get("classes") or [])),
+            exchange_sellable=bool(residual_candidate.get("exchange_sellable")),
+            allowed_by_policy=bool(residual_candidate.get("allowed_by_policy")),
+            requires_final_pre_submit_proof=bool(residual_candidate.get("requires_final_pre_submit_proof")),
+        )
+    if not bool(residual_inventory.get("exchange_sellable")):
+        return None
+    qty = float(residual_inventory.get("residual_qty") or 0.0)
+    if qty <= 1e-12:
+        return None
+    return ResidualSellCandidate(
+        qty=qty,
+        notional=(
+            None
+            if residual_inventory.get("residual_notional_krw") is None
+            else float(residual_inventory.get("residual_notional_krw") or 0.0)
+        ),
+        source="residual_inventory",
+        classes=tuple(str(item) for item in (residual_inventory.get("residual_classes") or [])),
+        exchange_sellable=True,
+        allowed_by_policy=True,
+        requires_final_pre_submit_proof=True,
+    )
+
+
+def build_residual_sell_presubmit_proof(decision_context: dict[str, object] | None) -> ResidualSellPreSubmitProof:
+    reasons: list[str] = []
+    if not isinstance(decision_context, dict):
+        return ResidualSellPreSubmitProof(passed=False, reasons=("missing_decision_context",))
+    candidate = build_residual_sell_candidate(decision_context)
+    if candidate is None:
+        reasons.append("missing_residual_sell_candidate")
+    if not bool(decision_context.get("residual_inventory_policy_allows_sell")):
+        reasons.append("residual_sell_policy_blocked")
+    if not bool(decision_context.get("projection_converged")):
+        reasons.append("projection_not_converged")
+    if not bool(decision_context.get("accounting_projection_ok")):
+        reasons.append("accounting_projection_not_ok")
+    if int(decision_context.get("open_order_count") or 0) > 0:
+        reasons.append("open_order_count_nonzero")
+    if int(decision_context.get("recovery_required_count") or 0) > 0:
+        reasons.append("recovery_required_count_nonzero")
+    broker_evidence = _dict_value(decision_context.get("broker_position_evidence"))
+    if not bool(broker_evidence.get("broker_qty_known")):
+        reasons.append("broker_qty_unknown")
+    if bool(broker_evidence.get("balance_source_stale")):
+        reasons.append("broker_evidence_stale")
+    if candidate is not None and float(broker_evidence.get("broker_qty") or 0.0) + 1e-12 < float(candidate.qty):
+        reasons.append("broker_qty_below_candidate_qty")
+    return ResidualSellPreSubmitProof(passed=not reasons, reasons=tuple(reasons))
+
+
 def _canonical_harmless_dust_sell_preview(decision_context: dict[str, object] | None) -> dict[str, float | str] | None:
     if not isinstance(decision_context, dict):
+        return None
+    if build_residual_sell_candidate(decision_context) is not None:
         return None
 
     canonical_exposure = resolve_canonical_position_exposure_snapshot(decision_context)

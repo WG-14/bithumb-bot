@@ -29,6 +29,7 @@ from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
 from ..public_api_orderbook import BestQuote
+from ..runtime_readiness import compute_runtime_readiness_snapshot
 from .base import BrokerRejectError
 from ..reason_codes import (
     AMBIGUOUS_SUBMIT,
@@ -188,6 +189,7 @@ class _LiveExecutionPositionState:
     effective_rules: object
     normalized_exposure: object
     decision_observability: dict[str, object]
+    readiness_snapshot: object
     canonical_sell: _CanonicalSellExecutionView | None
     diagnostic_sell_qty: _SellDiagnosticQtyView | None
     has_lot_native_sell_state: bool
@@ -2133,6 +2135,45 @@ def _determine_live_execution_position_state(
             "effective_flat_truth_source": "position_state.normalized_exposure.effective_flat",
         }
     )
+    readiness_snapshot = compute_runtime_readiness_snapshot(conn)
+    readiness_payload = readiness_snapshot.as_dict()
+    decision_observability.update(
+        {
+            "residual_inventory_mode": str(readiness_payload.get("residual_inventory_mode") or "block"),
+            "residual_inventory_state": str(
+                readiness_payload.get("residual_inventory_state") or "RESIDUAL_INVENTORY_UNRESOLVED"
+            ),
+            "residual_inventory_qty": float(readiness_payload.get("residual_inventory_qty") or 0.0),
+            "residual_inventory_notional_krw": float(
+                readiness_payload.get("residual_inventory_notional_krw") or 0.0
+            ),
+            "residual_inventory_policy_allows_run": bool(
+                readiness_payload.get("residual_inventory_policy_allows_run")
+            ),
+            "residual_inventory_policy_allows_buy": bool(
+                readiness_payload.get("residual_inventory_policy_allows_buy")
+            ),
+            "residual_inventory_policy_allows_sell": bool(
+                readiness_payload.get("residual_inventory_policy_allows_sell")
+            ),
+            "total_effective_exposure_qty": float(
+                readiness_payload.get("total_effective_exposure_qty") or 0.0
+            ),
+            "total_effective_exposure_notional_krw": float(
+                readiness_payload.get("total_effective_exposure_notional_krw") or 0.0
+            ),
+            "buy_sizing_residual_adjusted": bool(
+                readiness_payload.get("residual_inventory_policy_allows_buy")
+            ),
+            "residual_sell_candidate": readiness_payload.get("residual_sell_candidate"),
+            "accounting_projection_ok": bool(readiness_payload.get("projection_converged")),
+            "projection_converged": bool(readiness_payload.get("projection_converged")),
+            "open_order_count": int(readiness_payload.get("open_order_count") or 0),
+            "recovery_required_count": int(readiness_payload.get("recovery_required_count") or 0),
+            "broker_position_evidence": dict(readiness_payload.get("broker_position_evidence") or {}),
+            "residual_inventory": dict(readiness_payload.get("residual_inventory") or {}),
+        }
+    )
 
     canonical_sell: _CanonicalSellExecutionView | None = None
     diagnostic_sell_qty: _SellDiagnosticQtyView | None = None
@@ -2168,6 +2209,7 @@ def _determine_live_execution_position_state(
         effective_rules=effective_rules,
         normalized_exposure=normalized_exposure,
         decision_observability=decision_observability,
+        readiness_snapshot=readiness_snapshot,
         canonical_sell=canonical_sell,
         diagnostic_sell_qty=diagnostic_sell_qty,
         has_lot_native_sell_state=has_lot_native_sell_state,
@@ -2292,6 +2334,17 @@ def _determine_live_execution_intent(
                 entry_allowed_truth_source=str(
                     decision_observability.get("entry_allowed_truth_source") or "-"
                 ),
+            ),
+            existing_exposure_qty=float(normalized_exposure.open_exposure_qty),
+            residual_inventory_qty=(
+                float(decision_observability.get("residual_inventory_qty") or 0.0)
+                if bool(decision_observability.get("residual_inventory_policy_allows_buy"))
+                else 0.0
+            ),
+            residual_inventory_notional_krw=(
+                float(decision_observability.get("residual_inventory_notional_krw") or 0.0)
+                if bool(decision_observability.get("residual_inventory_policy_allows_buy"))
+                else 0.0
             ),
         )
         if not entry_sizing.allowed:

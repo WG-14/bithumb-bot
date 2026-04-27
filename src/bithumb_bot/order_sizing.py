@@ -55,7 +55,9 @@ class ExecutionSizingPlan:
     allowed: bool
     block_reason: str
     decision_reason_code: str
+    gross_budget_krw: float
     budget_krw: float
+    exposure_offset_krw: float
     requested_qty: float
     exchange_constrained_qty: float
     lifecycle_executable_qty: float
@@ -78,6 +80,11 @@ class ExecutionSizingPlan:
     fee_authority_source: str = "unresolved"
     fee_authority_degraded: bool = False
     fee_rate_used: float = 0.0
+    residual_inventory_qty: float = 0.0
+    residual_inventory_notional_krw: float = 0.0
+    total_effective_exposure_qty: float = 0.0
+    total_effective_exposure_notional_krw: float = 0.0
+    buy_sizing_residual_adjusted: bool = False
 
 
 @dataclass(frozen=True)
@@ -254,19 +261,37 @@ def build_buy_execution_sizing(
     fee_rate: float | None = None,
     entry_intent: EntryExecutionIntent | dict[str, Any] | None = None,
     authority: BuyExecutionAuthority | None = None,
+    existing_exposure_qty: float = 0.0,
+    residual_inventory_qty: float = 0.0,
+    residual_inventory_notional_krw: float | None = None,
 ) -> ExecutionSizingPlan:
     resolved_intent = _parse_entry_execution_intent(pair=pair, entry_intent=entry_intent)
     resolved_authority = _parse_buy_execution_authority(authority=authority)
     gross_budget = max(0.0, float(cash_krw)) * float(resolved_intent.budget_fraction_of_cash)
     if float(resolved_intent.max_budget_krw) > 0:
         gross_budget = min(gross_budget, float(resolved_intent.max_budget_krw))
-    if gross_budget <= 0.0:
+    residual_qty = max(0.0, float(residual_inventory_qty))
+    executable_exposure_qty = max(0.0, float(existing_exposure_qty))
+    residual_notional = (
+        max(0.0, float(residual_inventory_notional_krw))
+        if residual_inventory_notional_krw is not None
+        else residual_qty * max(0.0, float(market_price))
+    )
+    executable_exposure_notional = executable_exposure_qty * max(0.0, float(market_price))
+    total_effective_exposure_qty = executable_exposure_qty + residual_qty
+    total_effective_exposure_notional = executable_exposure_notional + residual_notional
+    exposure_offset_krw = total_effective_exposure_notional
+    adjusted_budget = max(0.0, float(gross_budget) - float(exposure_offset_krw))
+    residual_adjusted = bool(residual_qty > DUST_POSITION_EPS or residual_notional > 0.0)
+    if adjusted_budget <= 0.0:
         return ExecutionSizingPlan(
             side="BUY",
             allowed=False,
             block_reason=BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
             decision_reason_code=BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
-            budget_krw=float(gross_budget),
+            gross_budget_krw=float(gross_budget),
+            budget_krw=float(adjusted_budget),
+            exposure_offset_krw=float(exposure_offset_krw),
             requested_qty=0.0,
             exchange_constrained_qty=0.0,
             lifecycle_executable_qty=0.0,
@@ -283,6 +308,11 @@ def build_buy_execution_sizing(
             min_notional_krw=0.0,
             non_executable_reason=BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
             buy_authority=resolved_authority,
+            residual_inventory_qty=float(residual_qty),
+            residual_inventory_notional_krw=float(residual_notional),
+            total_effective_exposure_qty=float(total_effective_exposure_qty),
+            total_effective_exposure_notional_krw=float(total_effective_exposure_notional),
+            buy_sizing_residual_adjusted=residual_adjusted,
         )
     if not math.isfinite(float(market_price)) or float(market_price) <= 0.0:
         return ExecutionSizingPlan(
@@ -290,7 +320,9 @@ def build_buy_execution_sizing(
             allowed=False,
             block_reason="invalid_market_price",
             decision_reason_code="invalid_market_price",
-            budget_krw=float(gross_budget),
+            gross_budget_krw=float(gross_budget),
+            budget_krw=float(adjusted_budget),
+            exposure_offset_krw=float(exposure_offset_krw),
             requested_qty=0.0,
             exchange_constrained_qty=0.0,
             lifecycle_executable_qty=0.0,
@@ -307,6 +339,11 @@ def build_buy_execution_sizing(
             min_notional_krw=0.0,
             non_executable_reason="invalid_market_price",
             buy_authority=resolved_authority,
+            residual_inventory_qty=float(residual_qty),
+            residual_inventory_notional_krw=float(residual_notional),
+            total_effective_exposure_qty=float(total_effective_exposure_qty),
+            total_effective_exposure_notional_krw=float(total_effective_exposure_notional),
+            buy_sizing_residual_adjusted=residual_adjusted,
         )
     resolution = get_effective_order_rules(pair)
     rules = resolution.rules
@@ -318,7 +355,9 @@ def build_buy_execution_sizing(
                 allowed=False,
                 block_reason=FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
                 decision_reason_code=FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
-                budget_krw=float(gross_budget),
+                gross_budget_krw=float(gross_budget),
+                budget_krw=float(adjusted_budget),
+                exposure_offset_krw=float(exposure_offset_krw),
                 requested_qty=0.0,
                 exchange_constrained_qty=0.0,
                 lifecycle_executable_qty=0.0,
@@ -339,6 +378,11 @@ def build_buy_execution_sizing(
                 fee_authority_source=fee_authority.fee_source,
                 fee_authority_degraded=True,
                 fee_rate_used=float(fee_authority.taker_bid_fee_rate),
+                residual_inventory_qty=float(residual_qty),
+                residual_inventory_notional_krw=float(residual_notional),
+                total_effective_exposure_qty=float(total_effective_exposure_qty),
+                total_effective_exposure_notional_krw=float(total_effective_exposure_notional),
+                buy_sizing_residual_adjusted=residual_adjusted,
             )
     lot_rules = build_market_lot_rules(
         market_id=pair,
@@ -348,7 +392,7 @@ def build_buy_execution_sizing(
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
-    requested_qty = float(_decimal_from_number(gross_budget) / _decimal_from_number(market_price))
+    requested_qty = float(_decimal_from_number(adjusted_budget) / _decimal_from_number(market_price))
     effective_qty_step = _exchange_qty_step(
         qty_step=float(rules.qty_step),
         min_qty=float(rules.min_qty),
@@ -402,7 +446,9 @@ def build_buy_execution_sizing(
         allowed=allowed,
         block_reason="none" if allowed else entry_reason,
         decision_reason_code="none" if allowed else entry_reason,
-        budget_krw=float(gross_budget),
+        gross_budget_krw=float(gross_budget),
+        budget_krw=float(adjusted_budget),
+        exposure_offset_krw=float(exposure_offset_krw),
         requested_qty=float(requested_qty),
         exchange_constrained_qty=float(executable_qty),
         lifecycle_executable_qty=float(lifecycle_executable_qty),
@@ -425,6 +471,11 @@ def build_buy_execution_sizing(
         fee_authority_source=fee_authority.fee_source,
         fee_authority_degraded=fee_authority.degraded,
         fee_rate_used=float(fee_authority.taker_bid_fee_rate),
+        residual_inventory_qty=float(residual_qty),
+        residual_inventory_notional_krw=float(residual_notional),
+        total_effective_exposure_qty=float(total_effective_exposure_qty),
+        total_effective_exposure_notional_krw=float(total_effective_exposure_notional),
+        buy_sizing_residual_adjusted=residual_adjusted,
     )
 
 
@@ -475,7 +526,9 @@ def build_sell_execution_sizing(
         allowed=allowed,
         block_reason=block_reason,
         decision_reason_code="none" if allowed else _sell_decision_reason_code(exit_block_reason=block_reason),
+        gross_budget_krw=0.0,
         budget_krw=0.0,
+        exposure_offset_krw=0.0,
         requested_qty=float(requested_qty),
         exchange_constrained_qty=float(requested_qty),
         lifecycle_executable_qty=float(executable_qty if allowed else 0.0),

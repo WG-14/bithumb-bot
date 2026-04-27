@@ -119,6 +119,11 @@ def build_tradeability_operator_fields(
             "Broker-matched residual-only holdings remain without executable SELL authority. "
             "Do not resume the run loop or open new entries; review residual-closeout policy instead of rebuilding position authority."
         )
+    elif residual_class == "RESIDUAL_INVENTORY_TRACKED":
+        residue_policy_message = (
+            "Broker-matched residual inventory is tracked as existing exposure. "
+            "Run loop may continue, BUY sizing includes residual exposure, and residual SELL requires residual-inventory policy plus final pre-submit proof."
+        )
     elif residual_class == "EXECUTABLE_OPEN_EXPOSURE":
         if tradeability.run_loop_allowed and tradeability.position_management_allowed:
             residue_policy_message = (

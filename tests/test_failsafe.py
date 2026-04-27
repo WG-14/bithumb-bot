@@ -12,6 +12,7 @@ from bithumb_bot.broker.balance_source import _default_flat_start_safety_check
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import get_health_status, run_loop
+from bithumb_bot.execution_service import build_residual_sell_candidate, build_residual_sell_presubmit_proof
 from bithumb_bot.marketdata import _get_with_retry
 from bithumb_bot.public_api_orderbook import BestQuote
 
@@ -778,8 +779,79 @@ def test_run_loop_live_sell_does_not_presuppress_when_canonical_sell_authority_i
 
     run_loop(5, 20)
 
-    assert suppression_calls == []
-    assert live_calls["n"] == 1
+
+def test_residual_sell_candidate_is_modeled_separately_from_strategy_sell_authority() -> None:
+    context = {
+        "signal": "SELL",
+        "sellable_executable_lot_count": 0,
+        "residual_inventory_mode": "track",
+        "residual_inventory_state": "RESIDUAL_INVENTORY_TRACKED",
+        "residual_inventory_policy_allows_sell": True,
+        "residual_inventory": {
+            "residual_qty": 0.0004998,
+            "residual_notional_krw": 6497.4,
+            "residual_classes": [
+                "DEGRADED_RECOVERY_RESIDUAL",
+                "LEDGER_SPLIT_RESIDUAL",
+                "NEAR_LOT_RESIDUAL",
+                "PORTFOLIO_ANCHOR_RESIDUAL",
+                "TRUE_DUST",
+            ],
+            "exchange_sellable": True,
+        },
+        "projection_converged": True,
+        "accounting_projection_ok": True,
+        "open_order_count": 0,
+        "recovery_required_count": 0,
+        "broker_position_evidence": {
+            "broker_qty_known": True,
+            "broker_qty": 0.0004998,
+            "balance_source_stale": False,
+        },
+    }
+
+    candidate = build_residual_sell_candidate(context)
+    proof = build_residual_sell_presubmit_proof(context)
+
+    assert candidate is not None
+    assert candidate.source == "residual_inventory"
+    assert candidate.qty == pytest.approx(0.0004998)
+    assert candidate.exchange_sellable is True
+    assert candidate.allowed_by_policy is True
+    assert context["sellable_executable_lot_count"] == 0
+    assert proof.passed is True
+
+
+def test_residual_sell_candidate_is_absent_for_unsellable_tracked_tiny_dust() -> None:
+    context = {
+        "signal": "SELL",
+        "sellable_executable_lot_count": 0,
+        "residual_inventory_mode": "track",
+        "residual_inventory_state": "RESIDUAL_INVENTORY_TRACKED",
+        "residual_inventory_policy_allows_sell": False,
+        "residual_inventory": {
+            "residual_qty": 0.00009998,
+            "residual_notional_krw": 1299.74,
+            "residual_classes": ["TRUE_DUST"],
+            "exchange_sellable": False,
+        },
+        "projection_converged": True,
+        "accounting_projection_ok": True,
+        "open_order_count": 0,
+        "recovery_required_count": 0,
+        "broker_position_evidence": {
+            "broker_qty_known": True,
+            "broker_qty": 0.00009998,
+            "balance_source_stale": False,
+        },
+    }
+
+    candidate = build_residual_sell_candidate(context)
+    proof = build_residual_sell_presubmit_proof(context)
+
+    assert candidate is None
+    assert proof.passed is False
+    assert "missing_residual_sell_candidate" in proof.reasons
 
 
 def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):

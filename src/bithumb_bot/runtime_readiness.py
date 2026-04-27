@@ -71,6 +71,14 @@ class RuntimeReadinessSnapshot:
     tradeability: Any
     tradeability_operator_fields: dict[str, object]
     residual_inventory: ResidualInventorySnapshot
+    residual_inventory_mode: str
+    residual_inventory_state: str
+    residual_inventory_policy_allows_run: bool
+    residual_inventory_policy_allows_buy: bool
+    residual_inventory_policy_allows_sell: bool
+    total_effective_exposure_qty: float
+    total_effective_exposure_notional_krw: float | None
+    residual_sell_candidate: dict[str, object] | None
     structured_blockers: tuple[dict[str, object], ...]
     authority_truth_model: dict[str, object]
     broker_position_evidence: dict[str, object]
@@ -85,7 +93,11 @@ class RuntimeReadinessSnapshot:
             if bool(self.projection_convergence.get("converged"))
             else str(self.projection_convergence.get("reason") or "projection_non_converged")
         )
-        tradeability_reason = str(self.residual_class or "NONE") if not self.run_loop_allowed else "none"
+        tradeability_reason = (
+            str(self.residual_class or "NONE")
+            if (not self.run_loop_allowed or str(self.residual_class or "") == "RESIDUAL_INVENTORY_TRACKED")
+            else "none"
+        )
         return {
             "recovery_stage": self.recovery_stage,
             "resume_ready": bool(self.resume_ready),
@@ -149,6 +161,31 @@ class RuntimeReadinessSnapshot:
             "accounting_flat": bool(self.accounting_flat),
             "tradeability": self.tradeability.as_dict(),
             "residual_inventory": self.residual_inventory.as_dict(),
+            "residual_inventory_mode": self.residual_inventory_mode,
+            "residual_inventory_state": self.residual_inventory_state,
+            "residual_inventory_qty": float(self.residual_inventory.residual_qty),
+            "residual_inventory_notional_krw": (
+                None
+                if self.residual_inventory.residual_notional_krw is None
+                else float(self.residual_inventory.residual_notional_krw)
+            ),
+            "residual_inventory_exchange_sellable": bool(self.residual_inventory.exchange_sellable),
+            "residual_inventory_explainable": bool(self.residual_inventory.explainable),
+            "residual_inventory_policy_allows_run": bool(self.residual_inventory_policy_allows_run),
+            "residual_inventory_policy_allows_buy": bool(self.residual_inventory_policy_allows_buy),
+            "residual_inventory_policy_allows_sell": bool(self.residual_inventory_policy_allows_sell),
+            "total_effective_exposure_qty": float(self.total_effective_exposure_qty),
+            "total_effective_exposure_notional_krw": (
+                None
+                if self.total_effective_exposure_notional_krw is None
+                else float(self.total_effective_exposure_notional_krw)
+            ),
+            "residual_sell_candidate": (
+                None if self.residual_sell_candidate is None else dict(self.residual_sell_candidate)
+            ),
+            "residual_sell_candidate_allowed": bool(
+                self.residual_sell_candidate and self.residual_inventory_policy_allows_sell
+            ),
             **self.tradeability_operator_fields,
         }
 
@@ -286,6 +323,90 @@ def _metadata_dict(raw: object | None) -> dict[str, object]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _residual_inventory_mode() -> str:
+    mode = str(getattr(settings, "RESIDUAL_INVENTORY_MODE", "block") or "block").strip().lower()
+    if mode not in {"block", "track", "ignore_tiny"}:
+        return "block"
+    return mode
+
+
+def _ignore_tiny_policy_eligible(*, residual_inventory: ResidualInventorySnapshot) -> bool:
+    return bool(
+        residual_inventory.material_residual
+        and not residual_inventory.exchange_sellable
+        and "TRUE_DUST" in residual_inventory.residual_classes
+    )
+
+
+def _is_residual_inventory_trackable(
+    *,
+    residual_inventory: ResidualInventorySnapshot,
+    projection_convergence: dict[str, object],
+    authority_assessment: dict[str, object],
+    broker_position_evidence: dict[str, object],
+    open_order_count: int,
+    recovery_required_count: int,
+    fee_validation_blocked_count: int,
+    unapplied_principal_pending_count: int,
+    fee_gap_resume_blocking: bool,
+) -> bool:
+    if open_order_count > 0 or recovery_required_count > 0:
+        return False
+    if unapplied_principal_pending_count > 0 or fee_validation_blocked_count > 0 or fee_gap_resume_blocking:
+        return False
+    if not bool(projection_convergence.get("converged")):
+        return False
+    if not bool(residual_inventory.material_residual):
+        return False
+    if not bool(residual_inventory.explainable):
+        return False
+    if any(
+        bool(authority_assessment.get(key))
+        for key in (
+            "needs_correction",
+            "needs_residual_normalization",
+            "needs_portfolio_projection_repair",
+            "needs_full_projection_rebuild",
+        )
+    ):
+        return False
+    if bool(broker_position_evidence.get("balance_source_stale")):
+        return False
+    return _broker_portfolio_projection_match(
+        broker_qty_known=bool(broker_position_evidence.get("broker_qty_known")),
+        broker_qty=float(broker_position_evidence.get("broker_qty") or 0.0),
+        portfolio_qty=float(projection_convergence.get("portfolio_qty") or 0.0),
+        projected_total_qty=float(projection_convergence.get("projected_total_qty") or 0.0),
+    )
+
+
+def _build_residual_sell_candidate_summary(
+    *,
+    residual_inventory: ResidualInventorySnapshot,
+    residual_inventory_mode: str,
+    residual_inventory_state: str,
+) -> dict[str, object] | None:
+    if residual_inventory_mode != "track":
+        return None
+    if residual_inventory_state != "RESIDUAL_INVENTORY_TRACKED":
+        return None
+    if not residual_inventory.exchange_sellable:
+        return None
+    return {
+        "qty": float(residual_inventory.residual_qty),
+        "notional": (
+            None
+            if residual_inventory.residual_notional_krw is None
+            else float(residual_inventory.residual_notional_krw)
+        ),
+        "source": "residual_inventory",
+        "classes": list(residual_inventory.residual_classes),
+        "exchange_sellable": True,
+        "allowed_by_policy": True,
+        "requires_final_pre_submit_proof": True,
+    }
 
 
 def _metadata_int(metadata: dict[str, object], key: str) -> int:
@@ -611,6 +732,8 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         )
         fee_gap_policy = fee_gap_incident.policy
         replay_mismatch_preview = build_external_position_accounting_repair_preview(conn)
+        residual_inventory_mode = _residual_inventory_mode()
+        residual_inventory_state = "NONE"
 
         blockers: list[str] = []
         categories: list[str] = []
@@ -841,6 +964,28 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             categories.append("runtime_resume_gate")
             operator_next_action = "review_halt_state"
             recommended_command = "uv run python bot.py recovery-report"
+        elif residual_inventory_mode == "track" and _is_residual_inventory_trackable(
+            residual_inventory=residual_inventory,
+            projection_convergence=projection_convergence,
+            authority_assessment=authority_assessment,
+            broker_position_evidence=broker_position_evidence,
+            open_order_count=open_order_count,
+            recovery_required_count=recovery_required_count,
+            fee_validation_blocked_count=fee_validation_blocked_count,
+            unapplied_principal_pending_count=unapplied_principal_pending_count,
+            fee_gap_resume_blocking=fee_gap_policy.resume_blocking,
+        ):
+            stage = "RESIDUAL_INVENTORY_TRACKED"
+            operator_next_action = "run_with_residual_inventory_tracking"
+            recommended_command = "uv run python bot.py resume"
+            residual_inventory_state = "RESIDUAL_INVENTORY_TRACKED"
+        elif residual_inventory_mode == "track" and residual_inventory.material_residual:
+            stage = "RESIDUAL_INVENTORY_UNRESOLVED"
+            blockers.append("RESIDUAL_INVENTORY_UNRESOLVED")
+            categories.append("tradeability_policy")
+            operator_next_action = "review_residual_inventory_evidence"
+            recommended_command = "uv run python bot.py recovery-report"
+            residual_inventory_state = "RESIDUAL_INVENTORY_UNRESOLVED"
         elif _is_non_executable_residual_holdings_state(
             residual_inventory=residual_inventory,
             position_state=position_state,
@@ -858,6 +1003,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             categories.append("tradeability_policy")
             operator_next_action = "residual_policy_review"
             recommended_command = "uv run bithumb-bot residual-closeout-plan"
+            residual_inventory_state = "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
             structured_blockers.append(
                 _make_structured_blocker(
                     code="NON_EXECUTABLE_RESIDUAL_HOLDINGS",
@@ -876,6 +1022,12 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                     authority_assessment=authority_assessment,
                 )
             )
+        elif residual_inventory_mode == "ignore_tiny" and _ignore_tiny_policy_eligible(
+            residual_inventory=residual_inventory
+        ):
+            residual_inventory_state = "RESIDUAL_INVENTORY_TRACKED"
+        elif residual_inventory.material_residual:
+            residual_inventory_state = "RESIDUAL_INVENTORY_UNRESOLVED"
 
         resume_ready = not blockers
         run_loop_policy_allowed = bool(
@@ -933,6 +1085,48 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 why_not=";".join(item for item in reasons if item and item != "none"),
                 operator_next_action="residual_policy_review",
             )
+        elif stage == "RESIDUAL_INVENTORY_UNRESOLVED":
+            reasons = [str(tradeability.why_not or "none"), "residual_inventory_unresolved"]
+            tradeability = replace(
+                tradeability,
+                residual_class="RESIDUAL_INVENTORY_UNRESOLVED",
+                run_loop_allowed=False,
+                position_management_allowed=False,
+                new_entry_allowed=False,
+                closeout_allowed=False,
+                operator_action_required=True,
+                why_not=";".join(item for item in reasons if item and item != "none"),
+                operator_next_action="review_residual_inventory_evidence",
+            )
+        elif stage == "RESIDUAL_INVENTORY_TRACKED":
+            tradeability = replace(
+                tradeability,
+                residual_class="RESIDUAL_INVENTORY_TRACKED",
+                run_loop_allowed=True,
+                position_management_allowed=True,
+                new_entry_allowed=bool(position_state.normalized_exposure.entry_allowed),
+                closeout_allowed=bool(residual_inventory.exchange_sellable),
+                operator_action_required=False,
+                why_not="none",
+                operator_next_action="run_with_residual_inventory_tracking",
+            )
+        residual_inventory_policy_allows_run = bool(stage == "RESIDUAL_INVENTORY_TRACKED")
+        residual_inventory_policy_allows_buy = bool(
+            residual_inventory_policy_allows_run and tradeability.new_entry_allowed
+        )
+        residual_inventory_policy_allows_sell = bool(
+            residual_inventory_policy_allows_run and residual_inventory.exchange_sellable
+        )
+        residual_sell_candidate = _build_residual_sell_candidate_summary(
+            residual_inventory=residual_inventory,
+            residual_inventory_mode=residual_inventory_mode,
+            residual_inventory_state=residual_inventory_state,
+        )
+        total_effective_exposure_qty = float(position_state.normalized_exposure.open_exposure_qty)
+        total_effective_exposure_notional_krw: float | None = None
+        if residual_inventory_state == "RESIDUAL_INVENTORY_TRACKED":
+            total_effective_exposure_qty += float(residual_inventory.residual_qty)
+            total_effective_exposure_notional_krw = residual_inventory.residual_notional_krw
         tradeability_operator_fields = build_tradeability_operator_fields(
             tradeability=tradeability,
             dust_fields=dust_context.fields,
@@ -989,6 +1183,14 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             tradeability=tradeability,
             tradeability_operator_fields=tradeability_operator_fields,
             residual_inventory=residual_inventory,
+            residual_inventory_mode=residual_inventory_mode,
+            residual_inventory_state=residual_inventory_state,
+            residual_inventory_policy_allows_run=residual_inventory_policy_allows_run,
+            residual_inventory_policy_allows_buy=residual_inventory_policy_allows_buy,
+            residual_inventory_policy_allows_sell=residual_inventory_policy_allows_sell,
+            total_effective_exposure_qty=total_effective_exposure_qty,
+            total_effective_exposure_notional_krw=total_effective_exposure_notional_krw,
+            residual_sell_candidate=residual_sell_candidate,
             structured_blockers=tuple(structured_blockers),
             authority_truth_model=authority_truth_model,
             broker_position_evidence=broker_position_evidence,
