@@ -3061,13 +3061,19 @@ def _load_recovery_report(
             "derived_blockers": [],
             "root_chain": [fill_root_cause],
         }
+    residual_only_holdings = bool(
+        "NON_EXECUTABLE_RESIDUAL_HOLDINGS" in (runtime_readiness_snapshot.get("resume_blockers") or [])
+        or str(runtime_readiness_snapshot.get("residual_class") or "") == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    )
     blocking_incident_class = (
-        str((runtime_readiness_snapshot.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
+        "TRADEABILITY_POLICY"
+        if residual_only_holdings
+        else str((runtime_readiness_snapshot.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
     )
     report_recommended_command = recommended_command
     if position_management_resume_ready or (
         bool(resume_allowed) and readiness_has_deferred_debt
-    ) or blocking_incident_class == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT":
+    ) or blocking_incident_class in {"HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT", "TRADEABILITY_POLICY"}:
         report_recommended_command = str(runtime_readiness_snapshot.get("recommended_command") or recommended_command)
 
     report = {
@@ -3828,6 +3834,251 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         print(f"      rollback_or_backup={candidate.get('rollback_or_backup') or 'none'}")
         print(f"      why_safe={candidate.get('why_safe') or 'none'}")
         print(f"      recommended_command={candidate.get('recommended_command') or 'none'}")
+
+
+def _build_residual_closeout_plan() -> dict[str, object]:
+    conn = ensure_db()
+    try:
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    residual_inventory = readiness.residual_inventory.as_dict()
+    broker_evidence = dict(readiness.broker_position_evidence or {})
+    projection = dict(readiness.projection_convergence or {})
+    residual_rows = list(residual_inventory.get("rows") or [])
+    residual_qty = float(residual_inventory.get("residual_qty") or 0.0)
+    residual_notional_krw = residual_inventory.get("residual_notional_krw")
+    exchange_min_qty = max([float(row.get("lot_min_qty") or 0.0) for row in residual_rows] + [0.0])
+    exchange_min_notional_krw = max(
+        [float(row.get("lot_min_notional_krw") or 0.0) for row in residual_rows] + [0.0]
+    )
+    risk_of_holding_residual = (
+        "market_and_operational_residual_risk"
+        if residual_qty > 1e-12
+        else "none"
+    )
+    risk_of_ignoring_residual = (
+        "state_is_converged_but_non_executable_residual_can_be_misclassified_on_future_restart"
+        if residual_qty > 1e-12
+        else "none"
+    )
+    return {
+        "mode": settings.MODE,
+        "broker_qty": float(broker_evidence.get("broker_qty") or 0.0),
+        "broker_qty_known": bool(broker_evidence.get("broker_qty_known")),
+        "portfolio_qty": float(projection.get("portfolio_qty") or 0.0),
+        "projected_total_qty": float(projection.get("projected_total_qty") or 0.0),
+        "projection_converged": bool(projection.get("converged")),
+        "local_residual_qty": residual_qty,
+        "residual_qty": residual_qty,
+        "residual_notional_krw": residual_notional_krw,
+        "residual_classes": list(residual_inventory.get("residual_classes") or []),
+        "residual_lot_count": int(residual_inventory.get("residual_lot_count") or 0),
+        "residual_rows": residual_rows,
+        "exchange_min_qty": exchange_min_qty,
+        "exchange_min_notional_krw": exchange_min_notional_krw,
+        "estimated_notional_krw": residual_notional_krw,
+        "strategy_closeout_allowed": bool(readiness.closeout_allowed),
+        "operator_closeout_possible": bool(residual_inventory.get("exchange_sellable")),
+        "exchange_sellable": bool(residual_inventory.get("exchange_sellable")),
+        "run_loop_allowed": bool(readiness.run_loop_allowed),
+        "new_entry_allowed": bool(readiness.new_entry_allowed),
+        "reason_code": (
+            "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+            if "NON_EXECUTABLE_RESIDUAL_HOLDINGS" in readiness.resume_blockers
+            else (readiness.resume_blockers[0] if readiness.resume_blockers else "none")
+        ),
+        "operator_next_action": str(readiness.operator_next_action or "residual_policy_review"),
+        "recommended_command": str(readiness.recommended_command or "uv run bithumb-bot residual-closeout-plan"),
+        "risk_of_holding_residual": risk_of_holding_residual,
+        "risk_of_ignoring_residual": risk_of_ignoring_residual,
+        "recommended_policy_options": [
+            "review_residual_position_truth_and provenance",
+            "decide whether operator closeout is allowed by exchange minimums",
+            "keep strategy SELL authority disabled until executable lots exist again",
+        ],
+    }
+
+
+def cmd_residual_closeout_plan(*, as_json: bool = False) -> None:
+    plan = _build_residual_closeout_plan()
+    write_json_atomic(PATH_MANAGER.report_path("residual_closeout_plan"), plan)
+    if as_json:
+        print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
+        return
+
+    print("[RESIDUAL-CLOSEOUT-PLAN]")
+    print("  preview_mode=read_only_non_mutating")
+    print(
+        "  "
+        f"broker_qty={float(plan.get('broker_qty') or 0.0):.12f} "
+        f"portfolio_qty={float(plan.get('portfolio_qty') or 0.0):.12f} "
+        f"projected_total_qty={float(plan.get('projected_total_qty') or 0.0):.12f} "
+        f"projection_converged={1 if bool(plan.get('projection_converged')) else 0}"
+    )
+    print(
+        "  "
+        f"local_residual_qty={float(plan.get('local_residual_qty') or 0.0):.12f} "
+        f"estimated_notional_krw={float(plan.get('estimated_notional_krw') or 0.0):,.3f} "
+        f"residual_lot_count={int(plan.get('residual_lot_count') or 0)} "
+        f"residual_classes={'|'.join(str(item) for item in (plan.get('residual_classes') or [])) or 'none'}"
+    )
+    print(
+        "  "
+        f"strategy_closeout_allowed={1 if bool(plan.get('strategy_closeout_allowed')) else 0} "
+        f"operator_closeout_possible={1 if bool(plan.get('operator_closeout_possible')) else 0} "
+        f"exchange_sellable={1 if bool(plan.get('exchange_sellable')) else 0} "
+        f"run_loop_allowed={1 if bool(plan.get('run_loop_allowed')) else 0} "
+        f"new_entry_allowed={1 if bool(plan.get('new_entry_allowed')) else 0}"
+    )
+    print(
+        "  "
+        f"reason_code={plan.get('reason_code') or 'none'} "
+        f"operator_next_action={plan.get('operator_next_action') or 'residual_policy_review'} "
+        f"recommended_command={plan.get('recommended_command') or 'uv run bithumb-bot residual-closeout-plan'}"
+    )
+    print(
+        "  "
+        f"risk_of_holding_residual={plan.get('risk_of_holding_residual') or 'none'} "
+        f"risk_of_ignoring_residual={plan.get('risk_of_ignoring_residual') or 'none'}"
+    )
+    print("  residual_rows:")
+    for row in plan.get("residual_rows") or []:
+        print(
+            "    - "
+            f"lot_id={int(row.get('lot_id') or 0)} "
+            f"entry_trade_id={int(row.get('entry_trade_id') or 0)} "
+            f"qty_open={float(row.get('qty_open') or 0.0):.12f} "
+            f"position_state={row.get('position_state') or '-'} "
+            f"source_mode={row.get('source_mode') or '-'} "
+            f"entry_decision_linkage={row.get('entry_decision_linkage') or '-'} "
+            f"near_lot_delta={float(row.get('near_lot_delta') or 0.0):.12f} "
+            f"below_exchange_min_qty={1 if bool(row.get('below_exchange_min_qty')) else 0} "
+            f"below_exchange_min_notional={1 if bool(row.get('below_exchange_min_notional')) else 0} "
+            f"classes={'|'.join(str(item) for item in (row.get('classes') or [])) or 'none'}"
+        )
+
+
+def _build_fill_trade_linkage_diagnostic() -> dict[str, object]:
+    conn = ensure_db()
+    try:
+        fills_total = int(conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0])
+        missing_rows = conn.execute(
+            """
+            SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
+            FROM fills
+            WHERE trade_id IS NULL
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    safe_matchable = 0
+    ambiguous = 0
+    unmatchable = 0
+    samples: list[dict[str, object]] = []
+
+    conn = ensure_db()
+    try:
+        for row in missing_rows:
+            client_order_id = str(row["client_order_id"] or "")
+            qty = float(row["qty"] or 0.0)
+            price = float(row["price"] or 0.0)
+            fee = row["fee"]
+            fill_ts = int(row["fill_ts"] or 0)
+            trade_rows = conn.execute(
+                """
+                SELECT id, client_order_id, ts, price, qty, fee
+                FROM trades
+                WHERE client_order_id=?
+                ORDER BY ABS(ts-?) ASC, id ASC
+                """,
+                (client_order_id, fill_ts),
+            ).fetchall()
+            candidates = []
+            for trade in trade_rows:
+                trade_fee = trade["fee"]
+                fee_matches = False
+                if fee is None and trade_fee is None:
+                    fee_matches = True
+                else:
+                    try:
+                        fee_matches = abs(float(fee or 0.0) - float(trade_fee or 0.0)) <= 1e-8
+                    except (TypeError, ValueError):
+                        fee_matches = False
+                if (
+                    abs(float(trade["qty"] or 0.0) - qty) <= 1e-12
+                    and abs(float(trade["price"] or 0.0) - price) <= 1e-8
+                    and fee_matches
+                    and abs(int(trade["ts"] or 0) - fill_ts) <= 2_000
+                ):
+                    candidates.append(
+                        {
+                            "trade_id": int(trade["id"]),
+                            "trade_ts": int(trade["ts"]),
+                            "client_order_id": str(trade["client_order_id"] or ""),
+                        }
+                    )
+            if len(candidates) == 1:
+                safe_matchable += 1
+                status = "safely_matchable"
+            elif len(candidates) > 1:
+                ambiguous += 1
+                status = "ambiguous"
+            else:
+                unmatchable += 1
+                status = "unmatchable"
+            if len(samples) < 10:
+                samples.append(
+                    {
+                        "fill_row_id": int(row["id"]),
+                        "client_order_id": client_order_id,
+                        "fill_id": str(row["fill_id"] or ""),
+                        "status": status,
+                        "matched_trade_count": len(candidates),
+                        "candidate_trade_ids": [int(item["trade_id"]) for item in candidates],
+                    }
+                )
+    finally:
+        conn.close()
+
+    return {
+        "fills_total": fills_total,
+        "fills_missing_trade_id": len(missing_rows),
+        "missing_but_safely_matchable": safe_matchable,
+        "ambiguous": ambiguous,
+        "unmatchable": unmatchable,
+        "samples": samples,
+    }
+
+
+def cmd_diagnose_fill_trade_linkage(*, as_json: bool = False) -> None:
+    payload = _build_fill_trade_linkage_diagnostic()
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+
+    print("[DIAGNOSE-FILL-TRADE-LINKAGE]")
+    print(
+        "  "
+        f"fills_total={int(payload.get('fills_total') or 0)} "
+        f"fills_missing_trade_id={int(payload.get('fills_missing_trade_id') or 0)} "
+        f"missing_but_safely_matchable={int(payload.get('missing_but_safely_matchable') or 0)} "
+        f"ambiguous={int(payload.get('ambiguous') or 0)} "
+        f"unmatchable={int(payload.get('unmatchable') or 0)}"
+    )
+    for sample in payload.get("samples") or []:
+        print(
+            "  "
+            f"fill_row_id={int(sample.get('fill_row_id') or 0)} "
+            f"client_order_id={sample.get('client_order_id') or '-'} "
+            f"fill_id={sample.get('fill_id') or '-'} "
+            f"status={sample.get('status') or 'unknown'} "
+            f"matched_trade_count={int(sample.get('matched_trade_count') or 0)} "
+            f"candidate_trade_ids={'|'.join(str(item) for item in (sample.get('candidate_trade_ids') or [])) or 'none'}"
+        )
 
 
 def _load_json_object_arg(value: str | None, *, field_name: str, allow_none: bool = False) -> dict[str, object] | None:
@@ -5367,6 +5618,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     repair_plan.add_argument("--json", action="store_true")
+    residual_closeout_plan = sub.add_parser(
+        "residual-closeout-plan",
+        help="show read-only residual-only closeout and policy review plan",
+        description=(
+            "Summarize converged non-executable residual holdings without mutating the DB or "
+            "recommending position-authority rebuild."
+        ),
+    )
+    residual_closeout_plan.add_argument("--json", action="store_true")
+    fill_trade_linkage = sub.add_parser(
+        "diagnose-fill-trade-linkage",
+        help="summarize fills that are missing trade_id linkage",
+        description="Read-only diagnostic for fills.trade_id gaps and safely matchable rows.",
+    )
+    fill_trade_linkage.add_argument("--json", action="store_true")
     sub.add_parser(
         "restart-checklist",
         help="print restart safety checklist before resume",
@@ -5726,6 +5992,10 @@ def main(argv: list[str] | None = None) -> int:
         cmd_recovery_report(as_json=bool(args.json))
     elif args.cmd == "repair-plan":
         cmd_repair_plan(as_json=bool(args.json))
+    elif args.cmd == "residual-closeout-plan":
+        cmd_residual_closeout_plan(as_json=bool(args.json))
+    elif args.cmd == "diagnose-fill-trade-linkage":
+        cmd_diagnose_fill_trade_linkage(as_json=bool(args.json))
     elif args.cmd == "restart-checklist":
         cmd_restart_checklist()
     elif args.cmd == "recover-order":

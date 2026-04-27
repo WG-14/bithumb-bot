@@ -15,7 +15,12 @@ from .db_core import (
 from .dust import build_dust_display_context, build_position_state_model
 from .external_position_repair import build_external_position_accounting_repair_preview
 from .fee_gap_policy import classify_fee_gap_incident_verdict, matching_fee_gap_repair_present
-from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
+from .lifecycle import (
+    ResidualInventorySnapshot,
+    summarize_non_executable_residuals,
+    summarize_position_lots,
+    summarize_reserved_exit_qty,
+)
 from .markets import normalize_market_id
 from .position_authority_state import build_lot_projection_convergence, build_position_authority_assessment
 from .recovery_policy import (
@@ -65,6 +70,7 @@ class RuntimeReadinessSnapshot:
     accounting_flat: bool
     tradeability: Any
     tradeability_operator_fields: dict[str, object]
+    residual_inventory: ResidualInventorySnapshot
     structured_blockers: tuple[dict[str, object], ...]
     authority_truth_model: dict[str, object]
     broker_position_evidence: dict[str, object]
@@ -122,6 +128,7 @@ class RuntimeReadinessSnapshot:
             "execution_flat": bool(self.execution_flat),
             "accounting_flat": bool(self.accounting_flat),
             "tradeability": self.tradeability.as_dict(),
+            "residual_inventory": self.residual_inventory.as_dict(),
             **self.tradeability_operator_fields,
         }
 
@@ -186,6 +193,67 @@ def _build_authority_truth_model(
     }
     truth_model.update(dict(authority_assessment.get("truth_model") or {}))
     return truth_model
+
+
+def _broker_portfolio_projection_match(
+    *,
+    broker_qty_known: bool,
+    broker_qty: float,
+    portfolio_qty: float,
+    projected_total_qty: float,
+) -> bool:
+    if not broker_qty_known:
+        return False
+    return bool(
+        abs(float(broker_qty) - float(portfolio_qty)) <= 1e-12
+        and abs(float(projected_total_qty) - float(portfolio_qty)) <= 1e-12
+    )
+
+
+def _is_non_executable_residual_holdings_state(
+    *,
+    residual_inventory: ResidualInventorySnapshot,
+    position_state: Any,
+    projection_convergence: dict[str, object],
+    authority_assessment: dict[str, object],
+    broker_position_evidence: dict[str, object],
+    open_order_count: int,
+    recovery_required_count: int,
+    fee_validation_blocked_count: int,
+    unapplied_principal_pending_count: int,
+    fee_gap_resume_blocking: bool,
+) -> bool:
+    normalized = position_state.normalized_exposure
+    if open_order_count > 0 or recovery_required_count > 0:
+        return False
+    if unapplied_principal_pending_count > 0 or fee_validation_blocked_count > 0 or fee_gap_resume_blocking:
+        return False
+    if not bool(projection_convergence.get("converged")):
+        return False
+    if any(
+        bool(authority_assessment.get(key))
+        for key in (
+            "needs_correction",
+            "needs_residual_normalization",
+            "needs_portfolio_projection_repair",
+            "needs_full_projection_rebuild",
+        )
+    ):
+        return False
+    if not residual_inventory.material_residual:
+        return False
+    if not bool(getattr(normalized, "has_dust_only_remainder", False)):
+        return False
+    if bool(getattr(normalized, "has_executable_exposure", False)):
+        return False
+    if int(getattr(normalized, "sellable_executable_lot_count", 0) or 0) > 0:
+        return False
+    return _broker_portfolio_projection_match(
+        broker_qty_known=bool(broker_position_evidence.get("broker_qty_known")),
+        broker_qty=float(broker_position_evidence.get("broker_qty") or 0.0),
+        portfolio_qty=float(projection_convergence.get("portfolio_qty") or 0.0),
+        projected_total_qty=float(projection_convergence.get("projected_total_qty") or 0.0),
+    )
 
 
 def _metadata_dict(raw: object | None) -> dict[str, object]:
@@ -392,6 +460,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
 
         dust_context = build_dust_display_context(metadata)
         lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        residual_inventory = summarize_non_executable_residuals(conn, pair=settings.PAIR)
         lot_definition = getattr(lot_snapshot, "lot_definition", None)
         reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
         position_state = build_position_state_model(
@@ -752,6 +821,41 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             categories.append("runtime_resume_gate")
             operator_next_action = "review_halt_state"
             recommended_command = "uv run python bot.py recovery-report"
+        elif _is_non_executable_residual_holdings_state(
+            residual_inventory=residual_inventory,
+            position_state=position_state,
+            projection_convergence=projection_convergence,
+            authority_assessment=authority_assessment,
+            broker_position_evidence=broker_position_evidence,
+            open_order_count=open_order_count,
+            recovery_required_count=recovery_required_count,
+            fee_validation_blocked_count=fee_validation_blocked_count,
+            unapplied_principal_pending_count=unapplied_principal_pending_count,
+            fee_gap_resume_blocking=fee_gap_policy.resume_blocking,
+        ):
+            stage = "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+            blockers.append("NON_EXECUTABLE_RESIDUAL_HOLDINGS")
+            categories.append("tradeability_policy")
+            operator_next_action = "residual_policy_review"
+            recommended_command = "uv run bithumb-bot residual-closeout-plan"
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="NON_EXECUTABLE_RESIDUAL_HOLDINGS",
+                    category="tradeability_policy",
+                    stage=stage,
+                    detail=(
+                        "broker/portfolio/projection converge, but only tracked non-executable residual holdings remain; "
+                        f"residual_qty={float(residual_inventory.residual_qty):.12f} "
+                        f"exchange_sellable={1 if residual_inventory.exchange_sellable else 0} "
+                        f"residual_classes={'|'.join(residual_inventory.residual_classes) or 'none'}"
+                    ),
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
 
         resume_ready = not blockers
         run_loop_policy_allowed = bool(
@@ -795,6 +899,19 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 closeout_allowed=False,
                 why_not=";".join(item for item in reasons if item and item != "none"),
                 operator_next_action="review_fee_evidence",
+            )
+        elif stage == "NON_EXECUTABLE_RESIDUAL_HOLDINGS":
+            reasons = [str(tradeability.why_not or "none"), "non_executable_residual_holdings"]
+            tradeability = replace(
+                tradeability,
+                residual_class="NON_EXECUTABLE_RESIDUAL_HOLDINGS",
+                run_loop_allowed=False,
+                position_management_allowed=False,
+                new_entry_allowed=False,
+                closeout_allowed=False,
+                operator_action_required=True,
+                why_not=";".join(item for item in reasons if item and item != "none"),
+                operator_next_action="residual_policy_review",
             )
         tradeability_operator_fields = build_tradeability_operator_fields(
             tradeability=tradeability,
@@ -851,6 +968,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             accounting_flat=canonical_recovery.accounting_flat,
             tradeability=tradeability,
             tradeability_operator_fields=tradeability_operator_fields,
+            residual_inventory=residual_inventory,
             structured_blockers=tuple(structured_blockers),
             authority_truth_model=authority_truth_model,
             broker_position_evidence=broker_position_evidence,

@@ -114,6 +114,11 @@ def build_tradeability_operator_fields(
         residue_policy_message = (
             "Non-executable residue exists without normal SELL authority; operator recovery review is required."
         )
+    elif residual_class == "NON_EXECUTABLE_RESIDUAL_HOLDINGS":
+        residue_policy_message = (
+            "Broker-matched residual-only holdings remain without executable SELL authority. "
+            "Do not resume the run loop or open new entries; review residual-closeout policy instead of rebuilding position authority."
+        )
     elif residual_class == "EXECUTABLE_OPEN_EXPOSURE":
         if tradeability.run_loop_allowed and tradeability.position_management_allowed:
             residue_policy_message = (
@@ -132,6 +137,7 @@ def build_tradeability_operator_fields(
         and residual_class in {
             "TRACKED_DUST_BLOCK_NEW_ENTRY",
             "NON_EXECUTABLE_RESIDUE_REQUIRES_OPERATOR_ACTION",
+            "NON_EXECUTABLE_RESIDUAL_HOLDINGS",
         }
     )
     if dust_tradeability_consistent:

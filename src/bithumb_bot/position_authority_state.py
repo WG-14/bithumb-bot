@@ -807,6 +807,38 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         and abs(other_active_qty) <= _EPS
         and portfolio_matches_target
     )
+    broker_matched_multi_lot_residual_only_projection = bool(
+        conflicting_dust_authority
+        and sell_after_count > 0
+        and canonical_executable_qty > _EPS
+        and _qty_within_tolerance(
+            effective_closed_qty,
+            canonical_executable_qty,
+            tolerance=residual_qty_tolerance,
+        )
+        and expected_residual_qty > _EPS
+        and _qty_within_tolerance(
+            target_total_qty,
+            expected_residual_qty,
+            tolerance=residual_qty_tolerance,
+        )
+        and _qty_within_tolerance(
+            target_dust_qty,
+            expected_residual_qty,
+            tolerance=residual_qty_tolerance,
+        )
+        and abs(target_open_qty) <= _EPS
+        and target_dust_lot_count > 0
+        and other_active_lot_count > 0
+        and other_active_qty > _EPS
+        and bool(projection_convergence.get("converged"))
+        and abs(projected_total_qty - portfolio_qty) <= _EPS
+        and abs(_row_float(projection_convergence, "open_exposure_qty")) <= _EPS
+        and abs(_row_float(projection_convergence, "dust_tracking_qty") - projected_total_qty) <= _EPS
+        and unresolved_open_order_count <= 0
+        and recovery_required_count <= 0
+        and not unresolved_fee_pending
+    )
     portfolio_projection_divergence_candidate = bool(
         lot_row_count > 0
         and target_open_qty > _EPS
@@ -999,6 +1031,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         or (
             conflicting_dust_authority
             and not partial_close_residual_candidate
+            and not broker_matched_multi_lot_residual_only_projection
             and not portfolio_projection_state_converged
         )
     )
@@ -1313,6 +1346,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "portfolio_target_remainder_qty": portfolio_target_remainder_qty,
         "partial_close_residual_candidate": partial_close_residual_candidate,
         "portfolio_projection_divergence_candidate": portfolio_projection_divergence_candidate,
+        "broker_matched_multi_lot_residual_only_projection": broker_matched_multi_lot_residual_only_projection,
         "projection_excess_with_materialized_fragmentation": projection_excess_with_materialized_fragmentation,
         "portfolio_projection_repair_recorded": portfolio_projection_repair_recorded,
         "portfolio_projection_publication_present": portfolio_projection_publication_present,

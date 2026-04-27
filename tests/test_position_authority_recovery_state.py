@@ -60,6 +60,11 @@ EC2_REPRO_PRIOR_BUY_QTY = 0.00059986
 EC2_REPRO_LATEST_BUY_QTY = 0.00059999
 EC2_REPRO_SELL_QTY = 0.0004
 EC2_REPRO_PORTFOLIO_QTY = 0.00039985
+RESIDUAL_INCIDENT_PRICE = 13_000_000.0
+RESIDUAL_INCIDENT_PRIOR_BUY_QTY = 0.00079982
+RESIDUAL_INCIDENT_LATEST_BUY_QTY = 0.00049998
+RESIDUAL_INCIDENT_SELL_QTY = 0.0004
+RESIDUAL_INCIDENT_PORTFOLIO_QTY = 0.00049980
 
 
 @pytest.fixture
@@ -653,19 +658,21 @@ def _apply_filled_order(
     ts_ms: int,
     fill_id: str,
     fee: float = 1.0,
+    price: float = PRICE,
+    min_notional_krw: float = 0.0,
 ) -> None:
     record_order_if_missing(
         conn,
         client_order_id=client_order_id,
         side=side,
         qty_req=qty,
-        price=PRICE,
+        price=price,
         ts_ms=ts_ms,
         status="NEW",
         internal_lot_size=LOT_SIZE,
         effective_min_trade_qty=0.0002,
         qty_step=0.0001,
-        min_notional_krw=0.0,
+        min_notional_krw=min_notional_krw,
         intended_lot_count=1,
         executable_lot_count=1,
     )
@@ -675,7 +682,7 @@ def _apply_filled_order(
         side=side,
         fill_id=fill_id,
         fill_ts=ts_ms + 50,
-        price=PRICE,
+        price=price,
         qty=qty,
         fee=fee,
         allow_entry_decision_fallback=False,
@@ -752,6 +759,154 @@ def _materialize_full_rebuild_portfolio_anchor_fixture(
     conn.commit()
     _record_portfolio_projection_broker_evidence(broker_qty=EC2_REPRO_PORTFOLIO_QTY)
     return anchor
+
+
+def _materialize_broker_matched_residual_only_fixture(conn) -> dict[str, object]:
+    _apply_filled_order(
+        conn,
+        client_order_id="residual_prior_buy",
+        side="BUY",
+        qty=RESIDUAL_INCIDENT_PRIOR_BUY_QTY,
+        ts_ms=1_777_142_400_000,
+        fill_id="residual-prior-buy-fill",
+        price=RESIDUAL_INCIDENT_PRICE,
+        min_notional_krw=5_000.0,
+    )
+    _apply_filled_order(
+        conn,
+        client_order_id="residual_prior_sell",
+        side="SELL",
+        qty=RESIDUAL_INCIDENT_SELL_QTY,
+        ts_ms=1_777_142_410_000,
+        fill_id="residual-prior-sell-fill",
+        price=RESIDUAL_INCIDENT_PRICE,
+        min_notional_krw=5_000.0,
+    )
+    _apply_filled_order(
+        conn,
+        client_order_id="residual_latest_buy",
+        side="BUY",
+        qty=RESIDUAL_INCIDENT_LATEST_BUY_QTY,
+        ts_ms=1_777_142_500_000,
+        fill_id="residual-latest-buy-fill",
+        price=RESIDUAL_INCIDENT_PRICE,
+        min_notional_krw=5_000.0,
+    )
+    _apply_filled_order(
+        conn,
+        client_order_id="residual_latest_sell",
+        side="SELL",
+        qty=RESIDUAL_INCIDENT_SELL_QTY,
+        ts_ms=1_777_142_510_000,
+        fill_id="residual-latest-sell-fill",
+        price=RESIDUAL_INCIDENT_PRICE,
+        min_notional_krw=5_000.0,
+    )
+    set_portfolio_breakdown(
+        conn,
+        cash_available=341_778.0,
+        cash_locked=0.0,
+        asset_available=RESIDUAL_INCIDENT_PORTFOLIO_QTY,
+        asset_locked=0.0,
+    )
+    _align_accounting_projection_to_portfolio(conn, portfolio_qty=RESIDUAL_INCIDENT_PORTFOLIO_QTY)
+    rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR, allow_entry_decision_fallback=False)
+
+    prior_buy_trade = conn.execute(
+        "SELECT id FROM trades WHERE client_order_id='residual_prior_buy' AND side='BUY'"
+    ).fetchone()
+    latest_buy_trade = conn.execute(
+        "SELECT id FROM trades WHERE client_order_id='residual_latest_buy' AND side='BUY'"
+    ).fetchone()
+    assert prior_buy_trade is not None
+    assert latest_buy_trade is not None
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET
+            position_state='dust_tracking',
+            executable_lot_count=0,
+            dust_tracking_lot_count=1,
+            internal_lot_size=?,
+            lot_min_qty=?,
+            lot_qty_step=?,
+            lot_min_notional_krw=?,
+            lot_max_qty_decimals=?,
+            lot_rule_source_mode='full_projection_rebuild_portfolio_anchor',
+            entry_decision_linkage='degraded_recovery_unattributed'
+        WHERE entry_trade_id=?
+        """,
+        (LOT_SIZE, 0.0002, 0.0001, 5_000.0, 8, int(prior_buy_trade["id"])),
+    )
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET
+            position_state='dust_tracking',
+            executable_lot_count=0,
+            dust_tracking_lot_count=1,
+            internal_lot_size=?,
+            lot_min_qty=?,
+            lot_qty_step=?,
+            lot_min_notional_krw=?,
+            lot_max_qty_decimals=?,
+            lot_rule_source_mode='ledger',
+            entry_decision_linkage='direct'
+        WHERE entry_trade_id=?
+        """,
+        (LOT_SIZE, 0.0002, 0.0001, 5_000.0, 8, int(latest_buy_trade["id"])),
+    )
+    record_position_authority_projection_publication(
+        conn,
+        event_ts=1_777_142_520_000,
+        pair=settings.PAIR,
+        target_trade_id=int(prior_buy_trade["id"]),
+        source="test_residual_only_publication",
+        publish_basis={
+            "event_type": "full_projection_materialized_rebuild",
+            "target_trade_id": int(prior_buy_trade["id"]),
+            "portfolio_qty": RESIDUAL_INCIDENT_PORTFOLIO_QTY,
+        },
+        note="residual-only current-state attestation fixture",
+    )
+    conn.commit()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_observed_ts_ms": 1_777_142_530_000,
+            "balance_asset_ts_ms": 1_777_142_530_000,
+            "balance_source": "accounts_v1_rest_snapshot",
+            "balance_source_stale": False,
+            "balance_source_quote_currency": "KRW",
+            "balance_source_base_currency": "BTC",
+            "broker_asset_qty": RESIDUAL_INCIDENT_PORTFOLIO_QTY,
+            "broker_asset_available": RESIDUAL_INCIDENT_PORTFOLIO_QTY,
+            "broker_asset_locked": 0.0,
+            "broker_cash_available": 341_778.0,
+            "broker_cash_locked": 0.0,
+            "remote_open_order_found": 0,
+            "unresolved_open_order_count": 0,
+            "submit_unknown_count": 0,
+            "recovery_required_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_state": "harmless_dust",
+            "dust_broker_qty": RESIDUAL_INCIDENT_PORTFOLIO_QTY,
+            "dust_local_qty": RESIDUAL_INCIDENT_PORTFOLIO_QTY,
+            "dust_delta_qty": 0.0,
+            "dust_qty_gap_tolerance": 0.000001,
+            "dust_qty_gap_small": 1,
+            "dust_min_qty": 0.0002,
+            "dust_min_notional_krw": 5_000.0,
+        },
+        now_epoch_sec=1.0,
+    )
+    return {
+        "prior_buy_trade_id": int(prior_buy_trade["id"]),
+        "latest_buy_trade_id": int(latest_buy_trade["id"]),
+    }
 
 
 def test_fee_pending_repaired_buy_materializes_consistent_lot_authority(recovery_db):
@@ -1847,10 +2002,11 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
     assert rows[0]["executable_lot_count"] == 0
     assert rows[0]["dust_tracking_lot_count"] == 1
     assert rows[0]["internal_lot_size"] == pytest.approx(LOT_SIZE)
-    assert after.recovery_stage == "RESUME_READY"
-    assert after.resume_ready is True
+    assert after.recovery_stage == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert after.resume_ready is False
     assert after.canonical_state == "DUST_ONLY_TRACKED"
     assert after.position_state.normalized_exposure.sellable_executable_lot_count == 0
+    assert after.recommended_command == "uv run bithumb-bot residual-closeout-plan"
     assert preview_after["needs_repair"] is False
     assert replay.replayed_buy_count == 1
     assert len(replay_rows) == 1
@@ -2400,13 +2556,155 @@ def test_full_projection_rebuild_portfolio_anchor_does_not_require_fill_qty_matc
     assert assessment["portfolio_projection_publication_present"] is True
     assert assessment["needs_correction"] is False
     assert not any("target_lot_qty_fill_mismatch=" in blocker for blocker in assessment["blockers"])
-    assert readiness.recovery_stage == "RESUME_READY"
-    assert readiness.resume_ready is True
-    assert readiness.resume_blockers == ()
+    assert readiness.recovery_stage == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert readiness.resume_ready is False
+    assert readiness.resume_blockers == ("NON_EXECUTABLE_RESIDUAL_HOLDINGS",)
+    assert readiness.recommended_command == "uv run bithumb-bot residual-closeout-plan"
+    assert readiness.run_loop_allowed is False
+    assert readiness.new_entry_allowed is False
+    assert readiness.closeout_allowed is False
+    assert readiness.residual_class == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
     assert (
         readiness.as_dict()["position_authority_assessment"]["target_lot_provenance_kind"]
         == "portfolio_anchor_projection_lot"
     )
+    assert readiness.as_dict()["residual_inventory"]["exchange_sellable"] is True
+
+
+def test_broker_matched_residual_only_holdings_block_resume_without_rebuild_or_flatten(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        fixture = _materialize_broker_matched_residual_only_fixture(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    payload = readiness.as_dict()
+    residual_inventory = payload["residual_inventory"]
+    row_map = {int(row["entry_trade_id"]): row for row in residual_inventory["rows"]}
+
+    assert payload["projection_converged"] is True
+    assert payload["broker_position_evidence"]["broker_qty"] == pytest.approx(RESIDUAL_INCIDENT_PORTFOLIO_QTY)
+    assert payload["projection_convergence"]["portfolio_qty"] == pytest.approx(RESIDUAL_INCIDENT_PORTFOLIO_QTY)
+    assert payload["projection_convergence"]["projected_total_qty"] == pytest.approx(RESIDUAL_INCIDENT_PORTFOLIO_QTY)
+    assert payload["normalized_exposure"]["sellable_executable_lot_count"] == 0
+    assert residual_inventory["residual_qty"] == pytest.approx(RESIDUAL_INCIDENT_PORTFOLIO_QTY)
+    assert readiness.resume_ready is False
+    assert readiness.recovery_stage == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert readiness.resume_blockers == ("NON_EXECUTABLE_RESIDUAL_HOLDINGS",)
+    assert readiness.run_loop_allowed is False
+    assert readiness.new_entry_allowed is False
+    assert readiness.closeout_allowed is False
+    assert readiness.residual_class == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert readiness.recommended_command == "uv run bithumb-bot residual-closeout-plan"
+    assert "rebuild-position-authority" not in readiness.recommended_command
+    assert "flatten-position" not in readiness.recommended_command
+    assert residual_inventory["exchange_sellable"] is True
+    assert residual_inventory["strategy_sellable"] is False
+    assert row_map[fixture["prior_buy_trade_id"]]["classes"] == [
+        "NEAR_LOT_RESIDUAL",
+        "PORTFOLIO_ANCHOR_RESIDUAL",
+        "DEGRADED_RECOVERY_RESIDUAL",
+    ]
+    assert row_map[fixture["latest_buy_trade_id"]]["classes"] == [
+        "LEDGER_SPLIT_RESIDUAL",
+        "TRUE_DUST",
+    ]
+
+
+def test_repair_plan_and_residual_closeout_plan_classify_residual_only_holdings_as_tradeability_policy(
+    recovery_db,
+    capsys,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_broker_matched_residual_only_fixture(conn)
+    finally:
+        conn.close()
+
+    report = _load_recovery_report()
+
+    assert report["blocking_incident_class"] == "TRADEABILITY_POLICY"
+    assert report["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
+    assert report["runtime_readiness"]["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
+    assert report["recovery_policy"]["primary_incident_class"] == "TRADEABILITY_POLICY"
+    assert report["recovery_policy"]["recommended_mode"] == "residual_policy_review"
+    assert report["recovery_policy"]["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
+
+    capsys.readouterr()
+    app_main(["repair-plan", "--json"])
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["primary_incident_class"] == "TRADEABILITY_POLICY"
+    assert plan["recommended_mode"] == "residual_policy_review"
+    assert plan["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
+    assert plan["flatten_primary_recommendation"] is False
+    assert plan["accounting_root_cause_unresolved"] is False
+    rebuild_candidate = next(
+        candidate for candidate in plan["candidate_repairs"] if candidate["name"] == "rebuild-position-authority"
+    )
+    assert rebuild_candidate["needed"] is False
+
+    app_main(["residual-closeout-plan", "--json"])
+    closeout_plan = json.loads(capsys.readouterr().out)
+    assert closeout_plan["reason_code"] == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert closeout_plan["strategy_closeout_allowed"] is False
+    assert closeout_plan["operator_closeout_possible"] is True
+    assert closeout_plan["recommended_command"] == "uv run bithumb-bot residual-closeout-plan"
+
+
+def test_diagnose_fill_trade_linkage_reports_matchable_and_unmatchable_rows(
+    recovery_db,
+    capsys,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_filled_order(
+            conn,
+            client_order_id="linkable_buy",
+            side="BUY",
+            qty=0.0004,
+            ts_ms=1_777_242_400_000,
+            fill_id="linkable-fill",
+            price=RESIDUAL_INCIDENT_PRICE,
+        )
+        conn.execute("UPDATE fills SET trade_id=NULL WHERE client_order_id='linkable_buy'")
+        record_order_if_missing(
+            conn,
+            client_order_id="unmatched_fill",
+            side="BUY",
+            qty_req=0.00012345,
+            price=RESIDUAL_INCIDENT_PRICE,
+            ts_ms=1_777_242_500_000,
+            status="FILLED",
+        )
+        conn.execute(
+            """
+            INSERT INTO fills(client_order_id, fill_id, fill_ts, price, qty, fee, trade_id)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                "unmatched_fill",
+                "unmatched-fill-id",
+                1_777_242_500_000,
+                RESIDUAL_INCIDENT_PRICE,
+                0.00012345,
+                0.11,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    capsys.readouterr()
+    app_main(["diagnose-fill-trade-linkage", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["fills_missing_trade_id"] == 2
+    assert payload["missing_but_safely_matchable"] == 1
+    assert payload["ambiguous"] == 0
+    assert payload["unmatchable"] == 1
 
 
 def test_portfolio_anchor_projection_still_blocks_without_current_publication_attestation(recovery_db):
@@ -3247,8 +3545,9 @@ def test_external_position_accounting_repair_blocks_resume_until_recorded_for_hi
     assert preview["safe_to_apply"] is True
     assert preview["asset_qty_delta"] == pytest.approx(-0.00020004)
     assert result["adjustment"]["reason"] == "external_position_accounting_repair"
-    assert after.recovery_stage == "RESUME_READY"
-    assert after.resume_ready is True
+    assert after.recovery_stage == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    assert after.resume_ready is False
+    assert after.recommended_command == "uv run bithumb-bot residual-closeout-plan"
 
 
 def test_fee_gap_deadlock_reports_authority_correction_as_next_stage(recovery_db):

@@ -1,936 +1,594 @@
-You are working in the GitHub repository:
+You are working in the GitHub repository `WG-14/bithumb-bot`.
+
+Your task is to investigate and implement a structural fix for a live-readiness incident observed on EC2. Do not treat the current diagnosis as proven fact. Use it as the starting hypothesis, verify or falsify it from the repository code and tests, then implement the smallest coherent design change that moves the repo toward a more robust, reproducible, operable automated trading experiment system.
+
+Do not solve this by flattening the position, mutating the DB manually, weakening startup gates, or adding a narrow one-off suppression. The goal is to model the state correctly and prevent this entire class of incidents from being misclassified or mis-recommended in the future.
+
+Incident facts from EC2 to encode as a reproducible fixture or test scenario:
 
 ```text
-WG-14/bithumb-bot
+broker-diagnose:
+  overall=PASS
+  cash_available≈341,778 KRW
+  asset_available=0.00049980 BTC
+  open orders=0
+
+open_position_lots:
+  lot 353:
+    entry_trade_id=32
+    qty_open=0.00039982
+    position_state=dust_tracking
+    executable_lot_count=0
+    dust_tracking_lot_count=1
+    internal_lot_size=0.00040000
+    lot_min_qty=0.0002
+    lot_qty_step=0.0001
+    lot_min_notional_krw=5000
+    lot_rule_source_mode=full_projection_rebuild_portfolio_anchor
+    entry_decision_linkage=degraded_recovery_unattributed
+
+  lot 355:
+    entry_trade_id=34
+    qty_open=0.00009998
+    position_state=dust_tracking
+    executable_lot_count=0
+    dust_tracking_lot_count=1
+    internal_lot_size=0.00040000
+    lot_min_qty=0.0002
+    lot_qty_step=0.0001
+    lot_min_notional_krw=5000
+    lot_rule_source_mode=ledger
+    entry_decision_linkage=direct
+
+sum(open_position_lots.qty_open)=0.00049980 BTC
+broker_qty=0.00049980 BTC
+portfolio_qty=0.00049980 BTC
+
+recent lifecycle:
+  trade 32 BUY residual consumed by trade 33 SELL 0.00040000
+  trade 34 BUY consumed by trade 35 SELL 0.00040000
+  remaining residuals total 0.00049980 BTC
+
+fills.trade_id linkage:
+  29 null trade_id rows are 1:1 matchable to trades by client_order_id + qty + price + fee
+  1 null trade_id row is unmatched and must remain operator-review, not auto-mutated
 ```
 
-Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in the repository and with tests before changing code. The current EC2 failure is no longer primarily about fee accounting, broker balance visibility, stale halt clearing, or open-position resume policy. The remaining failure is a deeper **position authority / projection semantics bug**: the repair/rebuild layer has introduced a model that distinguishes broker/portfolio-anchor projections from fill-native lots, but that provenance does not appear to be preserved consistently through final post-assessment, `final_safe_to_apply`, and `recommended_command` generation. The attached incident notes show `projected_total_qty=0.00258797`, `portfolio_qty=0.00079985`, `projection_converged=false`, `HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT`, while an apply recommendation is still surfaced; after rebuild, quantity convergence can become true, but `target_lot_qty_fill_mismatch=target_qty=0.000799850000,fill_qty=0.000599990000` remains. 
-
-## Mission
-
-Do **not** solve this by flattening the position, forcing resume, manually editing the DB, weakening safety gates, suppressing blockers, or repeatedly applying repair commands.
-
-The goal is to make the `position_authority` repair/rebuild path strict about the correct invariant:
+Primary working hypothesis:
 
 ```text
-final_safe_to_apply =
-  broker/portfolio quantity convergence
-  + provenance-aware semantic contract
-  + no active fee/order/submit blockers
-  + final post-assessment consistency
+The incident is not primarily a broker/API failure, not a broker/portfolio quantity mismatch, and not necessarily a position-authority projection divergence.
+
+The likely direct issue is:
+  broker_qty == portfolio_qty == sum(open_position_lots.qty_open)
+  executable_lot_count == 0
+  dust_tracking_qty > 0
+  no unresolved orders
+
+but the repo does not classify this as a first-class tradeability state. It is currently liable to be represented as POSITION_AUTHORITY_CORRECTION_REQUIRED / LOT_AUTHORITY_CONFLICT / repair-oriented recovery, which pushes operators toward rebuild-position-authority, flatten, or manual repair even though the better response is residual policy review.
+
+The intended state name is:
+  NON_EXECUTABLE_RESIDUAL_HOLDINGS
+or:
+  BROKER_MATCHED_RESIDUAL_ONLY_POSITION
 ```
 
-The goal is **not** to make the bot less strict. The goal is to make it strict about the right thing.
+Keep these as hypotheses until verified. For each hypothesis below, either verify it with tests/code evidence or clearly falsify it in your final report.
 
-## Core design principle
+Hypotheses to verify or falsify:
 
-`open_position_lots` must be treated as a rebuildable, provenance-aware materialized projection, not as untyped canonical truth.
-
-Canonical truth should be:
+1. Direct classification hypothesis
 
 ```text
-fills
-trades
-finalized fee events
-broker fill evidence
-external cash/position adjustments
-manual repair events
-current broker account snapshot as evidence
+When:
+  broker_qty == portfolio_qty == sum(open_position_lots.qty_open)
+  projection_converged == true
+  executable_lot_count == 0
+  dust_tracking_qty > 0
+  open_order_count == 0
+  recovery_required_count == 0
+
+Then:
+  runtime readiness should fail closed with reason NON_EXECUTABLE_RESIDUAL_HOLDINGS
+  not POSITION_AUTHORITY_CORRECTION_REQUIRED
+  not LOT_PROJECTION_DIVERGENCE
+  not a rebuild-position-authority recommendation
+  not flatten-position
 ```
 
-Derived projections should be:
+Verification:
+Add or update tests around `compute_runtime_readiness_snapshot()`, recovery-report, and repair-plan output using a fixture equivalent to the EC2 state above.
+
+Falsification:
+If the code proves there is actual projection divergence, broker/portfolio mismatch, unresolved order state, or true correction needed, document it and adjust the classification accordingly.
+
+2. Residual modeling hypothesis
 
 ```text
-open_position_lots
-trade_lifecycles
-normalized exposure
-dust tracking
-operator recovery state
+dust_tracking is too coarse. It currently conflates:
+  true dust
+  ledger split residual
+  near-lot residual
+  portfolio-anchor projection residual
+  degraded recovery residual
 ```
 
-The repair/rebuild system must keep these meanings separate:
+Verification:
+Inspect `dust.py`, `lifecycle.py`, `position_authority_state.py`, and `runtime_readiness.py`. Add a residual inventory/classification layer if the current model cannot distinguish these cases.
+
+Expected classification for the EC2 fixture:
 
 ```text
-FillNativeLot:
-  source=ledger or accounted buy/fill evidence
-  invariant=original fill qty + lifecycle residual
+lot 353:
+  NEAR_LOT_RESIDUAL
+  PORTFOLIO_ANCHOR_RESIDUAL
+  DEGRADED_RECOVERY_RESIDUAL
 
-PortfolioAnchorProjectionLot:
-  source=full_projection_rebuild_portfolio_anchor
-  invariant=current broker/portfolio projection convergence
-  may differ from original BUY fill qty
-
-ManualRepairProjectionLot:
-  source=portfolio_anchored_repair or equivalent
-  invariant=repair event + broker/portfolio convergence
+lot 355:
+  LEDGER_SPLIT_RESIDUAL
+  possibly TRUE_DUST depending on exchange min qty/notional policy
 ```
 
-`target_lot_qty_fill_mismatch` may only be emitted for `FillNativeLot`.
+Falsification:
+If an existing model already exposes these distinctions, wire that model into runtime readiness, repair-plan, and operator output instead of creating a duplicate abstraction.
 
-## Current incident facts to preserve as regression fixtures
-
-Use these quantities and states as incident-shaped fixtures.
-
-### Pre-rebuild divergence case
-
-The logs show a projection divergence:
+3. Repair recommendation hypothesis
 
 ```text
-projected_total_qty=0.00258797
-portfolio_qty=0.00079985
-broker_qty=0.00079985
-projected_qty_excess=0.00178812
-projection_converged=false
-dust_tracking_lot_count=16
-dust_tracking_qty=0.00218797
-open_exposure_qty=0.0004
-executable_lot_count=1
-incident_class=HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-diagnostic_flags include:
-  projection_diverged
-  historical_fragmentation
-  materialized_projection_fragmentation
-  unsafe_auto_repair
+repair_plan currently does not adequately distinguish quantity/projection repair from tradeability policy block.
 ```
 
-Despite this, a recommendation like this is surfaced:
+Verification:
+For the EC2 fixture, `repair-plan` should produce:
 
 ```text
-recommended_command=uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes
-safe_to_apply=true
+primary_incident_class=TRADEABILITY_POLICY
+recommended_mode=residual_policy_review
+recommended_command=residual-closeout-plan or recovery-report
+candidate_repair.rebuild-position-authority.needed=false
+flatten_primary_recommendation=false
 ```
 
-That is unsafe unless final post-state is proven safe.
-
-### Post-rebuild quantity-converged but semantically inconsistent case
-
-After a broker/portfolio-anchored rebuild, the logs show quantity convergence:
+It must not recommend:
 
 ```text
-post_repair_projection_convergence:
-  converged=true
-  projected_total_qty=0.00079985
-  portfolio_qty=0.00079985
-  open_exposure_qty=0.0004
-  dust_tracking_qty=0.00039985
+rebuild-position-authority --apply --yes
+rebuild-position-authority --full-projection-rebuild --apply --yes
+flatten-position
+resume
+run
 ```
 
-But the post-assessment still emits:
+Falsification:
+If actual projection divergence exists in the fixture after correct setup, repair recommendation may remain valid, but then the report must explain exactly which invariant fails.
+
+4. Fill-trade linkage hypothesis
 
 ```text
-target_lot_qty_fill_mismatch=
-  target_qty=0.000799850000,
-  fill_qty=0.000599990000
+fills.trade_id null rows are not the direct cause of this incident, but they weaken deterministic replay and forensic quality.
 ```
 
-This suggests a portfolio-anchor projection row is still being checked with a fill-native invariant.
+Verification:
+Implement or improve a read-only diagnostic:
 
-### Prior correction apply failure case
-
-A previous correction path also exposed the same class of bug:
-
-```text
-preview:
-  safe_to_apply=true
-  final_safe_to_apply=true
-  recommended_command=... rebuild-position-authority --apply --yes
-
-actual apply failed postcondition:
-  repair_mode=correction
-  projected_total_qty=0.00089980
-  portfolio_qty=0.00049980
+```bash
+MODE=live uv run bithumb-bot diagnose-fill-trade-linkage
 ```
 
-That proves preview/apply semantics are not consistently using the exact same final post-state validation.
-
-## Files and code paths to inspect first
-
-Inspect these files first:
+It should count:
 
 ```text
+fills_total
+fills_missing_trade_id
+missing_but_safely_matchable
+ambiguous
+unmatchable
+```
+
+Optional repair command only if it is safe and idempotent:
+
+```bash
+MODE=live uv run bithumb-bot repair-fill-trade-linkage --dry-run
+MODE=live uv run bithumb-bot repair-fill-trade-linkage --apply --yes
+```
+
+Auto-apply only when:
+
+```text
+trade_id is null
+matched_trade_count == 1
+client_order_id matches
+qty matches
+price matches within existing tolerance
+fee matches within existing tolerance
+timestamp is equal or very close
+```
+
+The unmatched row must remain operator-review and must not be guessed.
+
+5. Higher-level authority hierarchy hypothesis
+
+```text
+The repo has pieces of the right model, but the operator decision surface does not cleanly separate:
+  ledger truth
+  portfolio/accounting projection
+  materialized lot projection
+  executable authority
+  residual tradeability policy
+  repair recommendations
+```
+
+Verification:
+Inspect existing abstractions before adding new ones. Prefer evolving existing structures in:
+
+```text
+src/bithumb_bot/dust.py
+src/bithumb_bot/lifecycle.py
 src/bithumb_bot/position_authority_state.py
-src/bithumb_bot/position_authority_repair.py
-src/bithumb_bot/position_authority_incidents.py
-src/bithumb_bot/recovery_policy.py
 src/bithumb_bot/runtime_readiness.py
 src/bithumb_bot/repair_plan.py
 src/bithumb_bot/app.py
-src/bithumb_bot/db_core.py
-src/bithumb_bot/lot_model.py
-src/bithumb_bot/lifecycle.py
-src/bithumb_bot/execution_service.py
+tests/test_dust.py
+tests/test_position_authority_recovery_state.py
+tests/test_operator_commands.py
 ```
 
-Inspect and extend tests around:
+Implement a clearer separation if needed:
 
 ```text
+PositionTruth:
+  broker_qty
+  portfolio_qty
+  accounting_replay_qty
+  open_position_lots_total_qty
+  projection_converged
+
+ExecutableAuthority:
+  open_lot_count
+  executable_qty
+  sellable_executable_qty
+  authority_gap_reason
+
+ResidualInventory:
+  residual_qty
+  residual_notional
+  residual_classes[]
+  exchange_sellable
+  strategy_sellable
+
+TradeabilityState:
+  run_loop_allowed
+  new_entry_allowed
+  closeout_allowed
+  reason_code
+  operator_next_action
+```
+
+Do not overbuild. Add only the parts needed to make this incident class explicit, testable, and visible.
+
+Implementation priorities:
+
+P0 — classification and gating
+
+Add a first-class reason code, preferably:
+
+```text
+NON_EXECUTABLE_RESIDUAL_HOLDINGS
+```
+
+Use it when:
+
+```text
+broker/local/accounting/lot quantities match or are explicitly converged
+projection_converged == true
+executable_qty == 0
+tracked residual qty > 0
+no open/unresolved/recovery-required orders
+no fee/accounting blocker that should take precedence
+```
+
+Expected behavior:
+
+```text
+resume_ready=false
+run_loop_allowed=false unless policy explicitly allows residual-only resume
+new_entry_allowed=false by default for material residuals
+closeout_allowed=false for strategy closeout if no executable lot
+operator_action_required=true
+operator_next_action=residual_policy_review or residual-closeout-plan
+recommended_command must not be rebuild-position-authority or flatten-position
+```
+
+P0 — repair-plan safety
+
+Update `repair_plan.py` so broker-matched residual-only holdings are treated as a tradeability policy state, not an accounting root cause or position-authority rebuild need.
+
+For this state:
+
+```text
+primary_incident_class=TRADEABILITY_POLICY
+recommended_mode=residual_policy_review
+accounting_root_cause_unresolved=false
+flatten_primary_recommendation=false
+candidate_repair.rebuild-position-authority.needed=false
+recommended_command=uv run python bot.py residual-closeout-plan
+```
+
+If `residual-closeout-plan` is not implemented in the same patch, use `recovery-report` as the command but include a TODO/test for the future command. Prefer implementing the read-only plan now.
+
+P0 — residual inventory / residual classification
+
+Expose residual details in runtime readiness and reports:
+
+```text
+residual_qty
+residual_notional_krw
+residual_lot_count
+residual_classes
+exchange_sellable
+strategy_sellable
+residual_rows[]
+```
+
+Each row should include:
+
+```text
+lot_id
+entry_trade_id
+qty_open
+position_state
+source_mode
+entry_decision_linkage
+internal_lot_size
+near_lot_delta
+below_exchange_min_qty
+below_exchange_min_notional
+classes[]
+```
+
+Do not make dust-tracking sellable for strategy submission. Preserve the lot-native contract that SELL authority comes from executable lot counts, not aggregate quantity.
+
+P0 — tests
+
+Add regression tests that reproduce the EC2 incident without requiring live broker calls.
+
+At minimum add tests equivalent to:
+
+```text
+test_broker_matched_residual_only_holdings_block_resume_without_rebuild_or_flatten
+```
+
+Assert:
+
+```text
+broker_qty == portfolio_qty == sum(open_position_lots.qty_open)
+projection_converged == true
+executable_qty == 0
+tracked_residual_qty == 0.00049980
+resume_ready == false
+reason/blocker == NON_EXECUTABLE_RESIDUAL_HOLDINGS
+recommended_command does not contain rebuild-position-authority
+recommended_command does not contain flatten-position
+primary_incident_class == TRADEABILITY_POLICY
+```
+
+Also test row classification:
+
+```text
+0.00039982 full_projection_rebuild_portfolio_anchor degraded_recovery_unattributed -> NEAR_LOT_RESIDUAL + PORTFOLIO_ANCHOR_RESIDUAL + DEGRADED_RECOVERY_RESIDUAL
+0.00009998 ledger direct -> LEDGER_SPLIT_RESIDUAL and/or TRUE_DUST depending on thresholds
+```
+
+Add tests ensuring this state is not confused with:
+
+```text
+actual broker/portfolio mismatch
+actual lot projection divergence
+actual executable exposure
+legacy qty-only authority missing
+unresolved order recovery
+fee accounting blocker
+```
+
+P1 — read-only residual closeout plan
+
+Implement:
+
+```bash
+MODE=live uv run bithumb-bot residual-closeout-plan
+```
+
+This command must not submit orders and must not mutate the DB.
+
+It should output:
+
+```text
+broker_qty
+portfolio_qty
+local_residual_qty
+residual_classes
+exchange_min_qty
+exchange_min_notional_krw
+estimated_notional_krw
+strategy_closeout_allowed
+operator_closeout_possible
+risk_of_holding_residual
+risk_of_ignoring_residual
+recommended_policy_options
+```
+
+Expected distinction:
+
+```text
+strategy_closeout_allowed=false when executable_lot_count == 0
+operator_closeout_possible=true if broker residual satisfies exchange min qty/notional
+```
+
+This is not flatten. It is a planning/diagnostic command.
+
+P1 — fill-trade linkage diagnostic
+
+Implement or improve:
+
+```bash
+MODE=live uv run bithumb-bot diagnose-fill-trade-linkage
+```
+
+Prefer JSON support:
+
+```bash
+MODE=live uv run bithumb-bot diagnose-fill-trade-linkage --json
+```
+
+Optional repair:
+
+```bash
+MODE=live uv run bithumb-bot repair-fill-trade-linkage --dry-run
+MODE=live uv run bithumb-bot repair-fill-trade-linkage --apply --yes
+```
+
+Do not auto-link ambiguous or unmatched rows.
+
+P1 — observability and JSON consistency
+
+Where feasible, add `--json` support to operator-facing commands involved in this incident class:
+
+```text
+health --json
+ops-report --json
+restart-checklist --json
+broker-diagnose --json
+residual-closeout-plan --json
+diagnose-fill-trade-linkage --json
+```
+
+If implementing all is too large, document what was added and what remains.
+
+Reports should separate:
+
+```text
+Ledger quality:
+  fills linked/missing/matchable/unmatched
+  accounting replay status
+  broker snapshot status
+
+Position truth:
+  broker qty
+  portfolio qty
+  accounting replay qty
+  open lots total qty
+  projection convergence
+
+Tradeability:
+  executable qty
+  residual qty
+  new_entry_allowed
+  closeout_allowed
+  reason code
+
+Repair:
+  repair recommended or not
+  rebuild-position-authority recommended or explicitly not recommended
+```
+
+Design constraints:
+
+1. Do not weaken safety gates.
+2. Do not make `dust_tracking` sellable by strategy order submission.
+3. Do not infer executable authority from aggregate quantity.
+4. Do not recommend flatten as a primary path for this incident class.
+5. Do not mutate live DB state in diagnostic commands.
+6. Do not treat historical repair events as current-state proof unless there is an explicit current-state attestation and convergence proof.
+7. Preserve fail-closed behavior when evidence is missing, stale, ambiguous, or contradictory.
+8. Prefer append-only repair events over direct row mutation if any repair is added.
+9. All repair commands must have dry-run/preview and idempotent apply semantics.
+10. Keep the patch focused: classify and expose the state first, repair tooling second.
+
+Suggested files to inspect and likely modify:
+
+```text
+src/bithumb_bot/dust.py
+src/bithumb_bot/lifecycle.py
+src/bithumb_bot/position_authority_state.py
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/repair_plan.py
+src/bithumb_bot/app.py
+src/bithumb_bot/reason_codes.py
+tests/test_dust.py
 tests/test_position_authority_recovery_state.py
 tests/test_operator_commands.py
 tests/test_accounting_projection.py
-tests/test_recovery_report.py
-tests/test_runtime_readiness.py
 ```
 
-Search for:
-
-```text
-FULL_PROJECTION_REBUILD_PORTFOLIO_ANCHOR_SOURCE_MODE
-PORTFOLIO_ANCHORED_REPAIR_SOURCE_MODE
-TargetLotProvenance
-_classify_target_lot_provenance
-fill_qty_invariant_applies
-_semantic_contract_skip_reason
-semantic_contract_check_applicable
-semantic_contract_check_skipped_reason
-semantic_contract_check_passed
-target_lot_qty_fill_mismatch
-build_lot_projection_convergence
-build_position_authority_assessment
-build_position_authority_rebuild_preview
-_build_full_projection_rebuild_post_state_preview
-final_gate_failures
-safe_to_apply
-final_safe_to_apply
-recommended_command
-HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-MATERIALIZED_PROJECTION_FRAGMENTATION
-POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
-portfolio_projection_qty_mismatch
-```
-
-## Repository facts to verify
-
-`position_authority_state.py` already appears to define a provenance model:
-
-```text
-FULL_PROJECTION_REBUILD_PORTFOLIO_ANCHOR_SOURCE_MODE
-PORTFOLIO_ANCHORED_REPAIR_SOURCE_MODE
-TargetLotProvenance
-fill_qty_invariant_applies
-_semantic_contract_skip_reason()
-```
-
-Verify this directly.
-
-The intended classification appears to be:
-
-```text
-ledger / missing source mode
-→ fill_native_lot
-→ fill_qty_invariant_applies=True
-
-full_projection_rebuild_portfolio_anchor
-→ portfolio_anchor_projection_lot
-→ fill_qty_invariant_applies=False
-
-portfolio_anchored_repair
-→ manual_external_position_adjustment_lot
-→ fill_qty_invariant_applies=False
-```
-
-The bug is probably not just “missing provenance types.” The bug is likely that provenance is not preserved all the way through:
-
-```text
-post-rebuild DB row source modes
-post-publish assessment
-semantic contract evaluation
-final_safe_to_apply
-recommended_command generation
-repair-plan output
-recovery-report / health / restart-checklist consistency
-```
-
-Verify this before making changes.
-
-## Working hypotheses
-
-Keep these as hypotheses until verified or falsified in code and tests.
-
-### Hypothesis A — portfolio-anchor projection rows are still checked with fill-native invariants
-
-Hypothesis:
-
-```text
-Rows sourced from full_projection_rebuild_portfolio_anchor are created to represent current broker/portfolio anchored projection state, but post-assessment still applies fill-native checks such as target_qty == original BUY fill qty.
-```
-
-Evidence:
-
-```text
-post_repair_projection_convergence:
-  projected_total_qty=0.00079985
-  portfolio_qty=0.00079985
-  converged=true
-
-but:
-  target_lot_qty_fill_mismatch=
-    target_qty=0.000799850000,
-    fill_qty=0.000599990000
-```
-
-Verification:
-
-```text
-1. After full projection rebuild preview/apply, inspect open_position_lots rows for the target trade.
-2. Confirm their lot_rule_source_mode.
-3. Confirm _classify_target_lot_provenance() returns portfolio_anchor_projection_lot.
-4. Confirm fill_qty_invariant_applies=false.
-5. Confirm build_position_authority_assessment() does not emit target_lot_qty_fill_mismatch when fill_qty_invariant_applies=false.
-6. Confirm semantic_contract_check_applicable=false and semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot.
-```
-
-Falsification condition:
-
-```text
-If the target row is actually source_mode=ledger and no portfolio-anchor projection row exists for the target, then fill-native invariant may be valid. In that case, investigate why the portfolio-anchor replacement did not create or classify the row as full_projection_rebuild_portfolio_anchor.
-```
-
-### Hypothesis B — `recommended_command` does not fully reflect final post-assessment semantic mismatch
-
-Hypothesis:
-
-```text
-repair preview calculates safe_to_apply or recommended_command from quantity convergence, pre-gates, or partial final gates, but does not consistently remove recommended_command when post-assessment contains semantic mismatch blockers.
-```
-
-Evidence:
-
-```text
-recommended_command=... --apply --yes
-```
-
-appears alongside either:
-
-```text
-projection_converged=false
-```
-
-or:
-
-```text
-target_lot_qty_fill_mismatch
-```
-
-Verification:
-
-```text
-1. Trace build_position_authority_rebuild_preview().
-2. Trace _build_full_projection_rebuild_post_state_preview().
-3. Inspect final_gate_failures.
-4. Confirm semantic mismatch from post_publish_assessment.blockers is included in final_gate_failures.
-5. Confirm final_safe_to_apply=false if semantic contract is neither passed nor intentionally skipped by provenance.
-6. Confirm recommended_command is absent whenever final_safe_to_apply=false.
-```
-
-Falsification condition:
-
-```text
-If recommended_command is intentionally a pre-gate recommendation, the operator schema is still wrong. Rename or split fields so the operator cannot mistake pre_gate_passed for final apply safety.
-```
-
-### Hypothesis C — post-rebuild assessment uses stale pre-rebuild target semantics
-
-Hypothesis:
-
-```text
-After rebuild/publish, post-assessment reuses pre-rebuild target trade/fill-native context instead of reloading the newly written open_position_lots rows and source modes.
-```
-
-Verification:
-
-```text
-1. In full projection rebuild preview, confirm the savepoint path writes the same rows the real apply path would write.
-2. Confirm post-publish assessment runs after those rows exist.
-3. Confirm post-publish assessment reloads source modes from DB.
-4. Confirm target_lot_source_modes, target_lot_provenance_kind, and fill_qty_invariant_applies in output reflect post-publish rows, not pre-rebuild rows.
-```
-
-Falsification condition:
-
-```text
-If post-assessment reloads current DB rows correctly but still sees source_mode=ledger, then the portfolio-anchor replacement itself is writing wrong source_mode rows.
-```
-
-### Hypothesis D — `final_safe_to_apply` is quantity-heavy and not semantic-contract complete
-
-Hypothesis:
-
-```text
-final_safe_to_apply currently treats projected_total_qty == portfolio_qty as sufficient or near-sufficient, but does not enforce semantic contract passed-or-skipped as a hard final gate.
-```
-
-Verification:
-
-```text
-Build a fixture:
-  projected_total_qty == portfolio_qty == broker_qty
-  source_mode=full_projection_rebuild_portfolio_anchor
-  target_qty != original fill_qty
-
-Expected:
-  semantic_contract_check_applicable=false
-  semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
-  semantic_contract_check_passed=true
-  final_safe_to_apply=true
-
-Wrong:
-  target_lot_qty_fill_mismatch emitted
-  semantic_contract_check_passed=false
-  recommended_command still present
-```
-
-## Required P0 design changes
-
-### P0.1 Restrict `target_lot_qty_fill_mismatch` to FillNativeLot only
-
-Implement or strengthen this hard rule:
-
-```text
-if target_lot_provenance.fill_qty_invariant_applies is false:
-    do not emit target_lot_qty_fill_mismatch
-```
-
-For:
-
-```text
-target_lot_provenance.kind == portfolio_anchor_projection_lot
-source_mode == full_projection_rebuild_portfolio_anchor
-```
-
-the expected assessment is:
-
-```text
-semantic_contract_check_applicable=false
-semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
-semantic_contract_check_passed=true
-target_lot_qty_fill_mismatch absent
-```
-
-Do not hide mismatches blindly. Only skip fill-native invariant when provenance explicitly proves the row is a projection attestation.
-
-### P0.2 Redefine `final_safe_to_apply`
-
-`final_safe_to_apply=true` must require all of:
-
-```text
-broker_portfolio_converged=true
-accounting_projection_ok=true
-post_publish_projection_converged=true
-projected_total_qty == portfolio_qty == broker_qty
-active fee issue=0
-unresolved local order=0
-remote open order=0
-submit_unknown=0
-semantic contract passed
-  OR semantic contract intentionally skipped due to recognized projection provenance
-post-assessment has no remaining repair-required blockers
-```
-
-If any of these fail:
-
-```text
-safe_to_apply=false
-final_safe_to_apply=false
-recommended_command absent
-operator_next_action=review_position_authority_evidence or review_rebuild_replay
-why_unsafe includes exact final gate failures
-```
-
-### P0.3 Make preview and apply use the exact same postcondition assessment
-
-Preview and apply must not diverge.
-
-Required structure:
-
-```text
-preview:
-  SAVEPOINT
-  run the exact mutation apply would run
-  run the exact postcondition assessment
-  compute final_safe_to_apply
-  ROLLBACK TO SAVEPOINT
-  RELEASE SAVEPOINT
-
-apply:
-  run the exact same mutation
-  run the exact same postcondition assessment
-  commit only if final gates pass
-```
-
-This must apply to both:
-
-```text
-full_projection_rebuild
-correction
-```
-
-The earlier correction incident already proved that preview could say safe while real apply failed with:
-
-```text
-projected_total_qty=0.00089980
-portfolio_qty=0.00049980
-```
-
-Do not leave correction mode with weaker preview semantics than full rebuild.
-
-### P0.4 `recommended_command` must only appear after final gates pass
-
-This combination must be impossible:
-
-```text
-recommended_command=... --apply --yes
-
-and any of:
-  projection_converged=false
-  post_publish_projection_converged=false
-  target_lot_qty_fill_mismatch
-  semantic_contract_mismatch
-  semantic_contract_check_passed=false
-  final_safe_to_apply=false
-```
-
-If post-assessment contains blockers, the output should be:
-
-```text
-recommended_command=null
-final_safe_to_apply=false
-operator_next_action=review_position_authority_evidence
-why_unsafe=[...]
-```
-
-### P0.5 Make output stage-aware and non-contradictory
-
-Operator-facing output must distinguish:
-
-```text
-pre_gate_passed
-replay_projection_converged
-post_publish_projection_converged
-semantic_contract_check_applicable
-semantic_contract_check_skipped_reason
-semantic_contract_check_passed
-post_assessment_blockers
-final_safe_to_apply
-recommended_command
-why_safe
-why_unsafe
-```
-
-Do not show a bare `safe_to_apply=true` next to semantic blockers.
-
-## Required tests
-
-Add incident-shaped regression tests with exact quantities.
-
-### Test 1 — portfolio-anchor projection skips fill-native invariant
-
-Fixture:
-
-```text
-source_mode=full_projection_rebuild_portfolio_anchor
-broker_qty=0.00079985
-portfolio_qty=0.00079985
-projected_total_qty=0.00079985
-original BUY fill_qty=0.00059999
-target_qty=0.00079985
-```
-
-Expected:
-
-```text
-target_lot_provenance_kind=portfolio_anchor_projection_lot
-target_lot_fill_qty_invariant_applies=false
-semantic_contract_check_applicable=false
-semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
-semantic_contract_check_passed=true
-target_lot_qty_fill_mismatch absent
-final_safe_to_apply=true if all other gates pass
-```
-
-### Test 2 — fill-native lot still enforces fill invariant
-
-Fixture:
-
-```text
-source_mode=ledger
-target_qty != expected fill/lifecycle residual
-no portfolio-anchor projection evidence
-```
-
-Expected:
-
-```text
-target_lot_provenance_kind=fill_native_lot
-target_lot_fill_qty_invariant_applies=true
-target_lot_qty_fill_mismatch emitted
-semantic_contract_check_passed=false
-safe_to_correct=false
-final_safe_to_apply=false
-```
-
-### Test 3 — quantity convergence alone is not enough
-
-Fixture:
-
-```text
-projected_total_qty=0.00079985
-portfolio_qty=0.00079985
-broker_qty=0.00079985
-post_assessment_blockers includes target_lot_qty_fill_mismatch
-semantic_contract_check_passed=false
-```
-
-Expected:
-
-```text
-final_safe_to_apply=false
-recommended_command absent
-operator_next_action=review_position_authority_evidence
-```
-
-### Test 4 — diverged projection must not recommend apply
-
-Fixture:
-
-```text
-projected_total_qty=0.00258797
-portfolio_qty=0.00079985
-broker_qty=0.00079985
-projection_converged=false
-incident_class=HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-```
-
-Expected:
-
-```text
-recommended_command absent unless savepoint preview proves final post-publish state:
-  projected_total_qty=portfolio_qty=broker_qty=0.00079985
-  semantic contract passed or skipped by recognized provenance
-  final_safe_to_apply=true
-```
-
-### Test 5 — correction preview simulates real apply
-
-Fixture from prior incident:
-
-```text
-row A: qty_open=0.00039982, position_state=dust_tracking, source=full_projection_rebuild_portfolio_anchor
-row B: qty_open=0.00009998, position_state=dust_tracking, source=ledger
-portfolio_qty=0.00049980
-broker_qty=0.00049980
-```
-
-If the real correction would produce:
-
-```text
-projected_total_qty=0.00089980
-portfolio_qty=0.00049980
-```
-
-Expected preview:
-
-```text
-final_safe_to_apply=false
-recommended_command absent
-why_unsafe includes projected_total_qty mismatch
-```
-
-### Test 6 — preview/apply postcondition parity
-
-For every repair mode:
-
-```text
-full_projection_rebuild
-correction
-portfolio_projection_repair
-residual_normalization if applicable
-```
-
-Expected:
-
-```text
-preview savepoint post-state and real apply post-state use same mutation and same final gate logic
-```
-
-### Test 7 — cross-surface consistency
-
-For a failed semantic contract state:
-
-```text
-projection_converged=true
-semantic_contract_check_passed=false
-```
-
-Expected all surfaces agree:
-
-```text
-health
-recovery-report
-repair-plan
-restart-checklist
-audit-ledger
-rebuild-position-authority preview
-```
-
-Expected:
-
-```text
-can_resume=false
-run_loop_allowed=false
-recommended_command absent
-operator_next_action=review_position_authority_evidence
-```
-
-For a valid portfolio-anchor projection state:
-
-```text
-projection_converged=true
-target_lot_provenance_kind=portfolio_anchor_projection_lot
-semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
-semantic_contract_check_passed=true
-```
-
-Expected:
-
-```text
-no target_lot_qty_fill_mismatch
-no LOT_AUTHORITY_CONFLICT
-no HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-position-management readiness determined by actual exposure/risk policy
-```
-
-## Verification commands
-
-Run targeted tests first:
+Before editing, inspect the current code paths and existing tests. Reuse existing abstractions where possible. Do not duplicate state models if the repo already has a suitable one.
+
+Acceptance criteria:
+
+1. A reproducible test fixture for broker-matched residual-only holdings exists.
+2. The EC2-like fixture is classified as `NON_EXECUTABLE_RESIDUAL_HOLDINGS` or an equivalent explicit first-class reason.
+3. The fixture does not recommend `rebuild-position-authority`, `flatten-position`, `resume`, or `run`.
+4. The fixture keeps startup/live readiness fail-closed.
+5. The fixture distinguishes:
+
+   * position truth is converged
+   * executable authority is absent
+   * residual inventory exists
+   * repair is not the primary action
+6. Residual rows expose enough detail to tell `near_lot_residual`, `ledger_split_residual`, `portfolio_anchor_residual`, and degraded recovery residual apart.
+7. Existing dust and lot-native tests still pass or are updated to preserve their safety intent.
+8. New tests cover negative cases where actual projection divergence or broker mismatch still recommends review/repair rather than residual policy.
+9. If fill-trade linkage tooling is implemented, it must be dry-run first and must not guess unmatched rows.
+10. Final CLI/report output is operator-useful and does not imply “just rebuild or flatten” for this class.
+
+Run tests:
 
 ```bash
-uv run pytest tests/test_position_authority_recovery_state.py -k "provenance or semantic or portfolio_anchor or fill_native or final_safe or target_lot"
-uv run pytest tests/test_operator_commands.py -k "rebuild_position_authority or repair_plan or recovery_report or recommended_command"
-uv run pytest tests/test_accounting_projection.py -k "projection or lot or authority"
-uv run pytest tests/test_runtime_readiness.py -k "authority or projection or semantic or dust"
+uv run pytest
 ```
 
-Then run broader relevant suites:
+If the full suite is too slow, at least run the targeted tests you modified or added, then document exactly what was run.
 
-```bash
-uv run pytest tests/test_position_authority_recovery_state.py
-uv run pytest tests/test_operator_commands.py
-uv run pytest tests/test_accounting_projection.py
-uv run pytest tests/test_runtime_readiness.py
-```
-
-If module or test names differ, search the test suite and run the closest relevant tests. Report exact commands and pass/fail results.
-
-## EC2 validation after patch
-
-Do **not** start the bot, resume, flatten, or apply repair blindly.
-
-First run preview/diagnostics only:
-
-```bash
-MODE=live uv run bithumb-bot rebuild-position-authority
-MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
-MODE=live uv run bithumb-bot repair-plan --json
-MODE=live uv run bithumb-bot recovery-report --json
-MODE=live uv run bithumb-bot audit-ledger
-MODE=live uv run bithumb-bot health
-```
-
-Expected safe preview must clearly show either a safe case:
+Final report format:
 
 ```text
-projected_total_qty == portfolio_qty == broker_qty
-post_publish_projection_converged=true
-semantic_contract_check_passed=true
-semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot if portfolio-anchor row differs from fill qty
-final_safe_to_apply=true
-recommended_command present only if final_safe_to_apply=true
+Summary
+- What changed and why.
+
+Hypotheses
+- H1: verified/falsified/inconclusive, with evidence.
+- H2: verified/falsified/inconclusive, with evidence.
+- H3: verified/falsified/inconclusive, with evidence.
+- H4: verified/falsified/inconclusive, with evidence.
+- H5: verified/falsified/inconclusive, with evidence.
+
+Design changes
+- New or changed state model fields.
+- New reason codes.
+- New CLI/report behavior.
+- Why this is not flatten/manual repair/symptom suppression.
+
+Safety
+- How fail-closed behavior is preserved.
+- Why strategy SELL authority is still lot-count based.
+- Why repair recommendations are constrained.
+
+Tests
+- List new/changed tests.
+- Commands run.
+- Results.
+
+Operational impact
+- What an operator will now see for the EC2-like incident.
+- What commands are safe to run.
+- What commands are intentionally not recommended.
+
+Follow-ups
+- Any intentionally deferred JSON support, forensic export, linkage repair, or broader architecture cleanup.
 ```
 
-or an unsafe case:
+The central goal is:
 
 ```text
-final_safe_to_apply=false
-recommended_command absent
-why_unsafe includes exact blocker
-operator_next_action=review_position_authority_evidence or review_rebuild_replay
-```
-
-If any output shows:
-
-```text
-recommended_command=... --apply --yes
-```
-
-while also showing:
-
-```text
-projection_converged=false
-target_lot_qty_fill_mismatch
-semantic_contract_check_passed=false
-final_safe_to_apply=false
-```
-
-then the patch is not correct.
-
-Only if the safe case appears should the operator consider apply.
-
-After any apply, immediately run:
-
-```bash
-MODE=live uv run bithumb-bot rebuild-position-authority
-MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
-MODE=live uv run bithumb-bot repair-plan --json
-MODE=live uv run bithumb-bot recovery-report --json
-MODE=live uv run bithumb-bot audit-ledger
-MODE=live uv run bithumb-bot health
-```
-
-Expected post-apply:
-
-```text
-projected_total_qty == portfolio_qty == broker_qty
-projection_converged=true
-semantic_contract_check_passed=true
-no target_lot_qty_fill_mismatch unless target lot is FillNativeLot and truly mismatched
-no LOT_AUTHORITY_CONFLICT
-no HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-no repeated recommendation of the same failed repair
-```
-
-Only after that should `resume` or `systemctl start` be considered.
-
-## Scope boundaries
-
-Do:
-
-```text
-- Verify provenance classification end-to-end.
-- Restrict target_lot_qty_fill_mismatch to FillNativeLot only.
-- Make portfolio-anchor projection rows skip fill-native invariant with explicit reason.
-- Redefine final_safe_to_apply as quantity convergence + provenance-aware semantic contract.
-- Make correction and full rebuild preview use the same mutation and postcondition as apply.
-- Remove recommended_command whenever final gates fail.
-- Add stage-aware operator output.
-- Add incident-shaped regression tests using 0.00258797 / 0.00079985 and 0.00089980 / 0.00049980 cases.
-```
-
-Do not:
-
-```text
-- Treat open_position_lots as canonical truth.
-- Let historical dust rows override current broker/portfolio truth.
-- Hide target_lot_qty_fill_mismatch without provenance proof.
-- Apply fill-native invariant to portfolio-anchor projection rows.
-- Recommend --apply when final post-assessment still has semantic blockers.
-- Ignore active fee issues, unresolved orders, remote open orders, submit_unknown, stale broker snapshots, or broker/portfolio mismatch.
-- Require flattening the current BTC position.
-- Use resume --force.
-- Directly edit the DB.
-```
-
-## Long-term design recommendations to include in final report
-
-Discuss, even if not fully implemented now:
-
-```text
-1. Event-sourced accounting core:
-   canonical events = fills/trades/fees/adjustments/broker evidence
-   projections = open_position_lots/trade_lifecycles/exposure/dust
-
-2. Typed projection rows:
-   FillNativeLot
-   PortfolioAnchorProjectionLot
-   ManualRepairProjectionLot
-
-3. Deterministic projection rebuild:
-   rebuild must be reproducible from canonical events + broker anchor + projection policy
-
-4. Explicit projection states:
-   PROJECTION_DIVERGED
-   PROJECTION_CONVERGED_SEMANTIC_PENDING
-   PROJECTION_CONVERGED_PROVENANCE_VALID
-   PROJECTION_CONVERGED_PROVENANCE_INVALID
-   REPAIR_PREVIEW_SAFE
-   REPAIR_APPLY_SAFE
-   REPAIR_POSTCHECK_FAILED
-   POSITION_MANAGEMENT_READY
-
-5. Operator repair workflow:
-   doctor --live --explain
-   repair-plan --live
-   repair-apply --plan-id
-
-6. Repair plan schema:
-   preconditions
-   truth source
-   tables touched
-   before/after portfolio
-   before/after projection
-   row provenance changes
-   semantic contract result
-   idempotency key
-   rollback path
-   final gates
-   why safe
-   why unsafe
-```
-
-## Final report format
-
-When finished, produce a report with exactly these sections:
-
-```text
-1. Summary
-   - What changed.
-   - Why this addresses projection authority semantics instead of masking the blocker.
-   - Why this avoids repeated manual repair / flatten loops.
-
-2. Hypothesis results
-   - Hypothesis A: portfolio-anchor projection rows are still checked with fill-native invariants — confirmed / falsified / partially confirmed.
-   - Hypothesis B: recommended_command does not fully reflect final post-assessment semantic mismatch — confirmed / falsified / partially confirmed.
-   - Hypothesis C: post-rebuild assessment uses stale pre-rebuild target semantics — confirmed / falsified / partially confirmed.
-   - Hypothesis D: final_safe_to_apply is quantity-heavy and not semantic-contract complete — confirmed / falsified / partially confirmed.
-
-3. Design assessment
-   - Canonical truth vs derived projection.
-   - Broker/portfolio terminal anchor model.
-   - Lot provenance model.
-   - Semantic contract model.
-   - Final apply safety model.
-   - What still fails closed.
-
-4. Code changes
-   - Files changed.
-   - New functions/classes.
-   - Key behavior changes.
-   - Compatibility notes.
-
-5. Tests
-   - Tests added/updated.
-   - Portfolio-anchor invariant tests.
-   - Fill-native invariant tests.
-   - Final-safe-to-apply tests.
-   - Preview/apply parity tests.
-   - Projection divergence tests.
-   - Cross-surface consistency tests.
-
-6. Verification
-   - Commands run.
-   - Pass/fail results.
-   - Any unrelated failures.
-
-7. EC2 operational follow-up
-   - Commands to run on EC2.
-   - Expected preview output.
-   - When apply is safe.
-   - Expected post-apply output.
-   - When resume/systemctl start is safe.
-```
-
-The patch is successful only if the repository can prove this invariant:
-
-```text
-A repair command may recommend --apply --yes only when the simulated final post-state is broker/portfolio-converged and the semantic contract is either passed or explicitly skipped for a recognized non-fill-native provenance type.
+Classify broker-matched residual-only holdings as a first-class tradeability state, without forcing flatten or position-authority rebuild.
 ```
 

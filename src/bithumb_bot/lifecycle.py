@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, replace
+from typing import Any
 
 from .config import settings
 from .db_core import normalize_asset_qty
@@ -127,6 +128,72 @@ class PositionLotSnapshot:
             payload["lot_semantic_version"] = self.lot_definition.semantic_version
             payload["internal_lot_size"] = self.lot_definition.internal_lot_size
         return payload
+
+
+@dataclass(frozen=True)
+class ResidualLotRowSnapshot:
+    lot_id: int
+    entry_trade_id: int
+    qty_open: float
+    position_state: str
+    source_mode: str
+    entry_decision_linkage: str
+    internal_lot_size: float
+    lot_min_qty: float
+    lot_min_notional_krw: float
+    near_lot_delta: float | None
+    below_exchange_min_qty: bool
+    below_exchange_min_notional: bool
+    estimated_notional_krw: float | None
+    classes: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "lot_id": int(self.lot_id),
+            "entry_trade_id": int(self.entry_trade_id),
+            "qty_open": float(self.qty_open),
+            "position_state": str(self.position_state or ""),
+            "source_mode": str(self.source_mode or ""),
+            "entry_decision_linkage": str(self.entry_decision_linkage or ""),
+            "internal_lot_size": float(self.internal_lot_size),
+            "lot_min_qty": float(self.lot_min_qty),
+            "lot_min_notional_krw": float(self.lot_min_notional_krw),
+            "near_lot_delta": (
+                None if self.near_lot_delta is None else float(self.near_lot_delta)
+            ),
+            "below_exchange_min_qty": bool(self.below_exchange_min_qty),
+            "below_exchange_min_notional": bool(self.below_exchange_min_notional),
+            "estimated_notional_krw": (
+                None if self.estimated_notional_krw is None else float(self.estimated_notional_krw)
+            ),
+            "classes": list(self.classes),
+        }
+
+
+@dataclass(frozen=True)
+class ResidualInventorySnapshot:
+    residual_qty: float
+    residual_notional_krw: float | None
+    residual_lot_count: int
+    residual_classes: tuple[str, ...]
+    exchange_sellable: bool
+    strategy_sellable: bool
+    material_residual: bool
+    rows: tuple[ResidualLotRowSnapshot, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "residual_qty": float(self.residual_qty),
+            "residual_notional_krw": (
+                None if self.residual_notional_krw is None else float(self.residual_notional_krw)
+            ),
+            "residual_lot_count": int(self.residual_lot_count),
+            "residual_classes": list(self.residual_classes),
+            "exchange_sellable": bool(self.exchange_sellable),
+            "strategy_sellable": bool(self.strategy_sellable),
+            "material_residual": bool(self.material_residual),
+            "rows": [row.as_dict() for row in self.rows],
+        }
 
 
 @dataclass(frozen=True)
@@ -287,6 +354,27 @@ def _row_value(row: object, key: str, index: int) -> object | None:
         return row[index]  # type: ignore[index]
     except (IndexError, KeyError, TypeError):
         return None
+
+
+def _row_float_local(row: Any, key: str, default: float = 0.0) -> float:
+    value = _row_value(row, key, -1)
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _row_int_local(row: Any, key: str, default: int = 0) -> int:
+    value = _row_value(row, key, -1)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _row_text_local(row: Any, key: str, default: str = "") -> str:
+    value = _row_value(row, key, -1)
+    return str(value or default)
 
 
 def _read_authoritative_lot_definition_snapshot(
@@ -1593,6 +1681,177 @@ def summarize_position_lots(
         exit_non_executable_reason=exit_non_executable_reason,
         position_semantic_basis="lot-native",
         lot_definition=lot_definition,
+    )
+
+
+def _residual_classification_tolerance(
+    *,
+    internal_lot_size: float,
+    qty_step: float,
+    max_qty_decimals: int | None,
+) -> float:
+    decimal_unit = 0.0
+    if max_qty_decimals is not None and int(max_qty_decimals) > 0:
+        decimal_unit = 10 ** (-int(max_qty_decimals))
+    return max(
+        1e-12,
+        decimal_unit * 20.0,
+        abs(float(qty_step or 0.0)) * 0.002,
+        abs(float(internal_lot_size or 0.0)) * 0.001,
+        2e-7,
+    )
+
+
+def summarize_non_executable_residuals(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+) -> ResidualInventorySnapshot:
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                entry_trade_id,
+                qty_open,
+                position_state,
+                COALESCE(lot_rule_source_mode, '') AS lot_rule_source_mode,
+                COALESCE(entry_decision_linkage, '') AS entry_decision_linkage,
+                COALESCE(internal_lot_size, 0.0) AS internal_lot_size,
+                COALESCE(lot_min_qty, 0.0) AS lot_min_qty,
+                COALESCE(lot_qty_step, 0.0) AS lot_qty_step,
+                COALESCE(lot_min_notional_krw, 0.0) AS lot_min_notional_krw,
+                COALESCE(lot_max_qty_decimals, 0) AS lot_max_qty_decimals,
+                entry_price
+            FROM open_position_lots
+            WHERE pair=?
+              AND qty_open > 1e-12
+              AND COALESCE(executable_lot_count, 0) = 0
+              AND COALESCE(dust_tracking_lot_count, 0) > 0
+            ORDER BY entry_ts ASC, id ASC
+            """,
+            (str(pair),),
+        ).fetchall()
+    except (sqlite3.OperationalError, AssertionError):
+        rows = []
+
+    residual_rows: list[ResidualLotRowSnapshot] = []
+    residual_classes: set[str] = set()
+    total_qty = 0.0
+    total_notional = 0.0
+    notional_known = False
+    aggregate_min_qty = 0.0
+    aggregate_min_notional = 0.0
+
+    for row in rows:
+        qty_open = max(0.0, _row_float_local(row, "qty_open"))
+        internal_lot_size = max(0.0, _row_float_local(row, "internal_lot_size"))
+        min_qty = max(0.0, _row_float_local(row, "lot_min_qty"))
+        qty_step = max(0.0, _row_float_local(row, "lot_qty_step"))
+        min_notional_krw = max(0.0, _row_float_local(row, "lot_min_notional_krw"))
+        max_qty_decimals = _row_int_local(row, "lot_max_qty_decimals")
+        entry_price = _row_float_local(row, "entry_price")
+        source_mode = _row_text_local(row, "lot_rule_source_mode")
+        entry_decision_linkage = _row_text_local(row, "entry_decision_linkage")
+        tolerance = _residual_classification_tolerance(
+            internal_lot_size=internal_lot_size,
+            qty_step=qty_step,
+            max_qty_decimals=max_qty_decimals,
+        )
+        near_lot_delta = (
+            None
+            if internal_lot_size <= 1e-12
+            else normalize_asset_qty(abs(qty_open - internal_lot_size))
+        )
+        below_exchange_min_qty = bool(min_qty > 0.0 and qty_open + 1e-12 < min_qty)
+        estimated_notional_krw = (
+            qty_open * entry_price if entry_price > 0.0 else None
+        )
+        below_exchange_min_notional = bool(
+            estimated_notional_krw is not None
+            and min_notional_krw > 0.0
+            and estimated_notional_krw + 1e-9 < min_notional_krw
+        )
+        classes: list[str] = []
+        if near_lot_delta is not None and near_lot_delta <= tolerance:
+            classes.append("NEAR_LOT_RESIDUAL")
+        if source_mode == "ledger":
+            classes.append("LEDGER_SPLIT_RESIDUAL")
+        if source_mode in {
+            "full_projection_rebuild_portfolio_anchor",
+            "portfolio_anchored_repair",
+        }:
+            classes.append("PORTFOLIO_ANCHOR_RESIDUAL")
+        if entry_decision_linkage.startswith("degraded_recovery_"):
+            classes.append("DEGRADED_RECOVERY_RESIDUAL")
+        if below_exchange_min_qty or below_exchange_min_notional:
+            classes.append("TRUE_DUST")
+        if not classes:
+            classes.append("UNCLASSIFIED_RESIDUAL")
+
+        residual_rows.append(
+            ResidualLotRowSnapshot(
+                lot_id=_row_int_local(row, "id"),
+                entry_trade_id=_row_int_local(row, "entry_trade_id"),
+                qty_open=qty_open,
+                position_state=_row_text_local(row, "position_state"),
+                source_mode=source_mode,
+                entry_decision_linkage=entry_decision_linkage,
+                internal_lot_size=internal_lot_size,
+                lot_min_qty=min_qty,
+                lot_min_notional_krw=min_notional_krw,
+                near_lot_delta=near_lot_delta,
+                below_exchange_min_qty=below_exchange_min_qty,
+                below_exchange_min_notional=below_exchange_min_notional,
+                estimated_notional_krw=estimated_notional_krw,
+                classes=tuple(classes),
+            )
+        )
+        residual_classes.update(classes)
+        total_qty = normalize_asset_qty(total_qty + qty_open)
+        if estimated_notional_krw is not None:
+            total_notional += estimated_notional_krw
+            notional_known = True
+        aggregate_min_qty = max(aggregate_min_qty, min_qty)
+        aggregate_min_notional = max(aggregate_min_notional, min_notional_krw)
+
+    residual_notional_krw = total_notional if notional_known else None
+    exchange_sellable = bool(
+        total_qty > 1e-12
+        and aggregate_min_qty > 0.0
+        and total_qty + 1e-12 >= aggregate_min_qty
+        and (
+            aggregate_min_notional <= 0.0
+            or (
+                residual_notional_krw is not None
+                and residual_notional_krw + 1e-9 >= aggregate_min_notional
+            )
+        )
+    )
+    material_residual = bool(
+        total_qty > 1e-12
+        and (
+            exchange_sellable
+            or any(
+                value in residual_classes
+                for value in (
+                    "NEAR_LOT_RESIDUAL",
+                    "PORTFOLIO_ANCHOR_RESIDUAL",
+                    "DEGRADED_RECOVERY_RESIDUAL",
+                    "UNCLASSIFIED_RESIDUAL",
+                )
+            )
+        )
+    )
+    return ResidualInventorySnapshot(
+        residual_qty=total_qty,
+        residual_notional_krw=residual_notional_krw,
+        residual_lot_count=len(residual_rows),
+        residual_classes=tuple(sorted(residual_classes)),
+        exchange_sellable=exchange_sellable,
+        strategy_sellable=False,
+        material_residual=material_residual,
+        rows=tuple(residual_rows),
     )
 
 

@@ -26,6 +26,7 @@ def _int(value: object, default: int = 0) -> int:
 def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
     runtime_readiness = dict(report.get("runtime_readiness") or {})
     normalized_exposure = dict(runtime_readiness.get("normalized_exposure") or {})
+    residual_inventory = dict(runtime_readiness.get("residual_inventory") or {})
     fill_projection = dict(report.get("fill_accounting_incident_projection") or {})
     fill_root = dict(report.get("fill_accounting_root_cause") or {})
     fee_gap_preview = dict(report.get("fee_gap_accounting_repair_preview") or {})
@@ -43,12 +44,22 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         _truthy(fee_gap_preview.get("needs_repair"))
         and _truthy(fee_gap_preview.get("resume_blocking"))
     )
+    residual_only_holdings = bool(
+        "NON_EXECUTABLE_RESIDUAL_HOLDINGS" in (runtime_readiness.get("resume_blockers") or [])
+        or str(runtime_readiness.get("residual_class") or "") == "NON_EXECUTABLE_RESIDUAL_HOLDINGS"
+    )
+    manual_flat_active_issue = bool(
+        _truthy(manual_flat_preview.get("needs_repair")) and not residual_only_holdings
+    )
+    external_position_active_issue = bool(
+        _truthy(external_position_preview.get("needs_repair")) and not residual_only_holdings
+    )
     accounting_root_cause_unresolved = any(
         (
             active_fill_issue_count > 0,
             fee_gap_active_issue,
-            _truthy(manual_flat_preview.get("needs_repair")),
-            _truthy(external_position_preview.get("needs_repair")),
+            manual_flat_active_issue,
+            external_position_active_issue,
             projection_drift,
         )
     )
@@ -63,7 +74,6 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
     position_management_allowed = bool(runtime_readiness.get("position_management_allowed"))
     new_entry_allowed = bool(runtime_readiness.get("new_entry_allowed"))
     closeout_allowed = bool(runtime_readiness.get("closeout_allowed"))
-
     recommended_mode = "recovery"
     primary_incident_class = "RECOVERY_READINESS"
     additional_orders_allowed = False
@@ -76,6 +86,13 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         primary_incident_class = "ACCOUNTING_ROOT_CAUSE"
         recommended_action = "collect_broker_fill_evidence_and_build_repair_plan"
         recommended_command = "uv run python bot.py repair-plan"
+    elif residual_only_holdings:
+        recommended_mode = "residual_policy_review"
+        primary_incident_class = "TRADEABILITY_POLICY"
+        recommended_action = "residual_policy_review"
+        recommended_command = str(
+            runtime_readiness.get("recommended_command") or "uv run bithumb-bot residual-closeout-plan"
+        )
     elif actual_executable_exposure and accounting_evidence_reliable and run_loop_allowed and position_management_allowed:
         recommended_mode = "position_management"
         primary_incident_class = "CANONICAL_OPEN_POSITION"
@@ -88,12 +105,14 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         incident_reasons.append("fill_accounting_incident_active")
     if fee_gap_active_issue:
         incident_reasons.append("fee_gap_recovery_active")
-    if _truthy(manual_flat_preview.get("needs_repair")):
+    if manual_flat_active_issue:
         incident_reasons.append("manual_flat_accounting_repair_required")
-    if _truthy(external_position_preview.get("needs_repair")):
+    if external_position_active_issue:
         incident_reasons.append("external_position_accounting_repair_required")
     if projection_drift:
         incident_reasons.append("open_position_lots_projection_drift")
+    if residual_only_holdings:
+        incident_reasons.append("non_executable_residual_holdings")
     if _int(fee_rate_drift.get("recent_expected_fee_rate_mismatch_count")) > 0:
         incident_reasons.append("fee_rate_drift_visible")
 
@@ -109,6 +128,8 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         "flatten_not_primary": bool(not flatten_primary_recommendation),
         "recommended_action": recommended_action,
         "recommended_command": recommended_command,
+        "residual_qty": _float(residual_inventory.get("residual_qty")),
+        "residual_classes": list(residual_inventory.get("residual_classes") or []),
         "fill_root_cause": str(fill_root.get("root") or "none"),
         "incident_reasons": incident_reasons,
     }
