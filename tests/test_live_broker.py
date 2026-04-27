@@ -1140,6 +1140,11 @@ def _reset_pretrade_guards():
         "LIVE_FILL_FEE_STRICT_MODE": settings.LIVE_FILL_FEE_STRICT_MODE,
         "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW": settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW,
         "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW": settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW,
+        "MAX_ORDER_KRW": settings.MAX_ORDER_KRW,
+        "STRATEGY_ENTRY_SLIPPAGE_BPS": settings.STRATEGY_ENTRY_SLIPPAGE_BPS,
+        "ENTRY_EDGE_BUFFER_RATIO": settings.ENTRY_EDGE_BUFFER_RATIO,
+        "RESIDUAL_LIVE_SELL_MODE": settings.RESIDUAL_LIVE_SELL_MODE,
+        "RESIDUAL_BUY_SIZING_MODE": settings.RESIDUAL_BUY_SIZING_MODE,
         "PAIR": settings.PAIR,
     }
 
@@ -1565,6 +1570,155 @@ def test_live_sell_duplicate_intent_after_cancel_keeps_lot_native_authority(monk
     assert submit_evidence["observed_submit_payload_qty"] == pytest.approx(0.0004)
     assert submit_evidence["order_qty"] == pytest.approx(0.0004)
     assert submit_evidence["order_qty"] != pytest.approx(0.00049193)
+
+
+def _residual_execution_submit_plan() -> dict[str, object]:
+    return {
+        "side": "SELL",
+        "source": "residual_inventory",
+        "authority": "residual_inventory_policy",
+        "final_action": "CLOSE_RESIDUAL_CANDIDATE",
+        "qty": 0.0004998,
+        "notional_krw": 57_816.0,
+        "submit_expected": True,
+        "pre_submit_proof_status": "passed",
+        "block_reason": "none",
+        "intent_type": "residual_close",
+        "strategy_context": "residual_inventory_policy",
+        "idempotency_key": "residual-close-test-key",
+    }
+
+
+def test_live_execute_signal_consumes_residual_plan_as_standard_submit_intent(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "residual_standard_submit_intent.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    _stub_live_effective_order_rules(monkeypatch)
+
+    conn = ensure_db(db_path)
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0004998,
+            asset_locked=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    captured: dict[str, object] = {}
+
+    def _capture_standard_pipeline(*, submission_ready, **_kwargs):
+        captured["submission_ready"] = submission_ready
+        return {"status": "captured"}
+
+    monkeypatch.setattr(live_module, "execute_live_submission_and_application", _capture_standard_pipeline)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        115_679_000.0,
+        execution_submit_plan=_residual_execution_submit_plan(),
+    )
+
+    assert trade == {"status": "captured"}
+    assert broker.place_order_calls == 0
+    submission_ready = captured["submission_ready"]
+    intent = submission_ready.intent
+    feasibility = submission_ready.feasibility
+    assert intent.side == "SELL"
+    assert intent.intent_type == "residual_close"
+    assert intent.strategy_context == "residual_inventory_policy"
+    assert intent.use_qty_intent_key is True
+    assert intent.submit_qty_source == "residual_inventory_policy"
+    assert intent.exit_sizing.qty_source == "residual_inventory_policy"
+    assert feasibility.side == "SELL"
+    assert feasibility.order_qty == pytest.approx(0.0004998)
+    assert feasibility.normalized_qty == pytest.approx(0.0004998)
+    assert feasibility.submit_qty_source == "residual_inventory_policy"
+
+
+def test_live_residual_sell_duplicate_intent_is_deduped(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "residual_sell_dedup.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    _stub_live_effective_order_rules(monkeypatch)
+
+    conn = ensure_db(db_path)
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0004998,
+            asset_locked=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    attempt_ids = iter(["attempt_residual_a", "attempt_residual_b"])
+    monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: next(attempt_ids))
+    notifications: list[str] = []
+    monkeypatch.setattr(live_module, "notify", lambda msg: notifications.append(msg))
+    broker = _CanceledBroker()
+    plan = _residual_execution_submit_plan()
+
+    first = live_execute_signal(broker, "SELL", 1000, 115_679_000.0, execution_submit_plan=plan)
+    second = live_execute_signal(broker, "SELL", 1000, 115_679_000.0, execution_submit_plan=plan)
+
+    assert first is None
+    assert second is None
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.0004998)
+
+    conn = ensure_db(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT client_order_id, submit_attempt_id, status, side, qty_req
+            FROM orders
+            WHERE client_order_id LIKE 'live_1000_sell_%'
+            ORDER BY id
+            """
+        ).fetchall()
+        dedup_row = conn.execute(
+            """
+            SELECT client_order_id, order_status, strategy_context, intent_type, qty,
+                   intended_lot_count, executable_lot_count
+            FROM order_intent_dedup
+            WHERE symbol=? AND side='SELL' AND intent_ts=1000
+            """,
+            (settings.PAIR,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["status"] == "CANCELED"
+    assert rows[0]["submit_attempt_id"] == "attempt_residual_a"
+    assert rows[0]["qty_req"] == pytest.approx(0.0004998)
+    assert dedup_row is not None
+    assert dedup_row["client_order_id"] == rows[0]["client_order_id"]
+    assert dedup_row["order_status"] == "CANCELED"
+    assert dedup_row["strategy_context"] == "residual_inventory_policy"
+    assert dedup_row["intent_type"] == "residual_close"
+    assert dedup_row["qty"] == pytest.approx(0.0004998)
+    assert dedup_row["intended_lot_count"] is None
+    assert dedup_row["executable_lot_count"] is None
+    assert any("event=order_intent_dedup_skip" in msg for msg in notifications)
 
 
 def test_live_sell_failed_before_send_retry_keeps_lot_native_authority(monkeypatch, tmp_path):
@@ -6378,6 +6532,141 @@ def test_live_execute_signal_buy_passes_typed_buy_authority_to_sizing(tmp_path, 
         entry_allowed=True,
         entry_allowed_truth_source="position_state.normalized_exposure.entry_allowed",
     )
+
+
+@pytest.mark.fast_regression
+def test_live_buy_residual_sizing_mode_delta_changes_actual_entry_sizing(tmp_path, monkeypatch):
+    object.__setattr__(settings, "START_CASH_KRW", 200_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100_000.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0)
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "ENTRY_EDGE_BUFFER_RATIO", 0.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    _stub_live_effective_order_rules(monkeypatch)
+
+    readiness_payload = {
+        "residual_inventory_mode": "track",
+        "residual_inventory_state": "RESIDUAL_INVENTORY_TRACKED",
+        "residual_inventory_qty": 0.0004998,
+        "residual_inventory_notional_krw": 57_816.0,
+        "residual_inventory_policy_allows_run": True,
+        "residual_inventory_policy_allows_buy": True,
+        "residual_inventory_policy_allows_sell": True,
+        "total_effective_exposure_qty": 0.0004998,
+        "total_effective_exposure_notional_krw": 57_816.0,
+        "accounting_projection_ok": True,
+        "projection_converged": True,
+        "open_order_count": 0,
+        "unresolved_open_order_count": 0,
+        "recovery_required_count": 0,
+        "submit_unknown_count": 0,
+        "broker_position_evidence": {},
+        "residual_inventory": {
+            "residual_qty": 0.0004998,
+            "residual_notional_krw": 57_816.0,
+            "exchange_sellable": True,
+        },
+    }
+    monkeypatch.setattr(
+        live_module,
+        "compute_runtime_readiness_snapshot",
+        lambda _conn: SimpleNamespace(as_dict=lambda: dict(readiness_payload)),
+    )
+
+    captured: list[object] = []
+
+    def _capture_standard_pipeline(*, submission_ready, **_kwargs):
+        captured.append(submission_ready)
+        return {"status": "captured"}
+
+    monkeypatch.setattr(live_module, "execute_live_submission_and_application", _capture_standard_pipeline)
+
+    def _seed_buy_db(db_path: str) -> int:
+        conn = ensure_db(db_path)
+        try:
+            init_portfolio(conn)
+            set_portfolio_breakdown(
+                conn,
+                cash_available=200_000.0,
+                cash_locked=0.0,
+                asset_available=0.0,
+                asset_locked=0.0,
+            )
+            decision_id = record_strategy_decision(
+                conn,
+                decision_ts=1000,
+                strategy_name="sma_with_filter",
+                signal="BUY",
+                reason="sma golden cross",
+                candle_ts=1000,
+                market_price=100_000_000.0,
+                context={
+                    "base_signal": "BUY",
+                    "base_reason": "sma golden cross",
+                    "entry_reason": "sma golden cross",
+                    "entry_allowed": True,
+                    "entry_allowed_truth_source": "position_state.normalized_exposure.entry_allowed",
+                    "effective_flat": True,
+                    "normalized_exposure_active": False,
+                    "normalized_exposure_qty": 0.0,
+                    "raw_qty_open": 0.0,
+                    "raw_total_asset_qty": 0.0,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "has_executable_exposure": False,
+                    "has_any_position_residue": False,
+                    "has_non_executable_residue": False,
+                    "has_dust_only_remainder": False,
+                },
+            )
+            conn.commit()
+            return int(decision_id)
+        finally:
+            conn.close()
+
+    object.__setattr__(settings, "RESIDUAL_BUY_SIZING_MODE", "telemetry")
+    telemetry_db = str(tmp_path / "buy_residual_telemetry.sqlite")
+    object.__setattr__(settings, "DB_PATH", telemetry_db)
+    telemetry_decision_id = _seed_buy_db(telemetry_db)
+    telemetry_trade = live_execute_signal(
+        _FakeBroker(),
+        "BUY",
+        1000,
+        100_000_000.0,
+        decision_id=telemetry_decision_id,
+        decision_reason="sma golden cross",
+    )
+
+    object.__setattr__(settings, "RESIDUAL_BUY_SIZING_MODE", "delta")
+    delta_db = str(tmp_path / "buy_residual_delta.sqlite")
+    object.__setattr__(settings, "DB_PATH", delta_db)
+    delta_decision_id = _seed_buy_db(delta_db)
+    delta_trade = live_execute_signal(
+        _FakeBroker(),
+        "BUY",
+        1000,
+        100_000_000.0,
+        decision_id=delta_decision_id,
+        decision_reason="sma golden cross",
+    )
+
+    assert telemetry_trade == {"status": "captured"}
+    assert delta_trade == {"status": "captured"}
+    telemetry_sizing = captured[0].intent.entry_sizing
+    delta_sizing = captured[1].intent.entry_sizing
+    assert telemetry_sizing.budget_krw == pytest.approx(100_000.0)
+    assert telemetry_sizing.qty_source == "entry.intent_budget_exchange_constraints"
+    assert telemetry_sizing.buy_sizing_residual_adjusted is False
+    assert delta_sizing.budget_krw == pytest.approx(42_184.0)
+    assert delta_sizing.qty_source == "residual_inventory_delta"
+    assert delta_sizing.buy_sizing_residual_adjusted is True
 
 
 @pytest.mark.fast_regression

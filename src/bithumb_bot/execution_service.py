@@ -159,6 +159,7 @@ def live_execute_signal(
     decision_id: int | None = None,
     decision_reason: str | None = None,
     exit_rule_name: str | None = None,
+    execution_submit_plan: dict[str, object] | None = None,
 ) -> dict | None:
     from .broker.live import live_execute_signal as _live_execute_signal
 
@@ -171,6 +172,7 @@ def live_execute_signal(
         decision_id=decision_id,
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
+        execution_submit_plan=execution_submit_plan,
     )
 
 
@@ -712,16 +714,13 @@ class LiveSignalExecutionService:
             except TypeError as exc:
                 if "unexpected keyword argument" not in str(exc):
                     raise
-                return self.executor(
-                    self.broker,
-                    request.signal,
-                    request.ts,
-                    request.market_price,
-                    strategy_name=request.strategy_name,
-                    decision_id=request.decision_id,
-                    decision_reason=request.decision_reason,
-                    exit_rule_name=request.exit_rule_name,
-                )
+                return {
+                    "status": "blocked",
+                    "reason": "executor_missing_execution_submit_plan_support",
+                    "side": "SELL",
+                    "source": "residual_inventory",
+                    "authority": "residual_inventory_policy",
+                }
         harmless_dust_preview = None
         if request.signal == "SELL":
             harmless_dust_preview = _canonical_harmless_dust_sell_preview(request.decision_context)

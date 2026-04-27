@@ -2788,10 +2788,18 @@ def _evaluate_live_execution_feasibility(
     )
     normalized_qty = 0.0
     order_qty = float(intent.order_qty)
+    residual_policy_sell_intent = (
+        intent.side == "SELL"
+        and str(intent.submit_qty_source or "") == "residual_inventory_policy"
+        and str(intent.intent_type or "") == "residual_close"
+        and str(intent.strategy_context or "") == _residual_order_intent_strategy_context()
+    )
     try:
         if pretrade_needs_live_reference:
             reference_quote = _load_live_reference_quote(pair=settings.PAIR)
         if intent.side == "BUY":
+            normalized_qty = float(order_qty)
+        elif residual_policy_sell_intent:
             normalized_qty = float(order_qty)
         else:
             normalized_qty = adjust_sell_order_qty_for_dust_safety(qty=order_qty, market_price=market_price)

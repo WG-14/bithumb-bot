@@ -15,6 +15,7 @@ from bithumb_bot.engine import get_health_status, run_loop
 from bithumb_bot.execution_service import (
     LiveSignalExecutionService,
     SignalExecutionRequest,
+    build_signal_execution_service,
     build_execution_decision_summary,
     build_residual_sell_candidate,
     build_residual_sell_presubmit_proof,
@@ -1131,6 +1132,92 @@ def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_
     assert executor_calls[0]["execution_submit_plan"]["authority"] == "residual_inventory_policy"
     assert executor_calls[0]["execution_submit_plan"]["qty"] == pytest.approx(0.0004998)
     assert trade["source"] == "residual_inventory"
+
+
+def test_default_live_service_wrapper_preserves_residual_execution_submit_plan(monkeypatch) -> None:
+    from bithumb_bot.broker import live as live_module
+
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "enabled")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    decision = build_execution_decision_summary(
+        decision_context=_ec2_residual_context(),
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    assert decision.residual_submit_plan is not None
+    captured: dict[str, object] = {}
+
+    def _capture_live_execute_signal(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"status": "captured"}
+
+    monkeypatch.setattr(live_module, "live_execute_signal", _capture_live_execute_signal)
+
+    broker = _ResidualFakeBroker()
+    service = build_signal_execution_service(mode="live", broker=broker)
+    assert service is not None
+    result = service.execute(
+        SignalExecutionRequest(
+            signal="SELL",
+            ts=123,
+            market_price=115_679_000.0,
+            decision_context={"execution_decision": decision.as_dict()},
+        )
+    )
+
+    assert result == {"status": "captured"}
+    execution_submit_plan = captured["execution_submit_plan"]
+    assert isinstance(execution_submit_plan, dict)
+    assert execution_submit_plan["source"] == "residual_inventory"
+    assert execution_submit_plan["authority"] == "residual_inventory_policy"
+    assert execution_submit_plan["side"] == "SELL"
+    assert execution_submit_plan["qty"] == pytest.approx(0.0004998)
+
+
+def test_residual_enabled_executor_typeerror_fails_closed_without_retry() -> None:
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "enabled")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    decision = build_execution_decision_summary(
+        decision_context=_ec2_residual_context(),
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    assert decision.residual_submit_plan is not None
+    calls: list[dict[str, object]] = []
+
+    def _legacy_executor(*_args, **kwargs):
+        calls.append(dict(kwargs))
+        if "execution_submit_plan" in kwargs:
+            raise TypeError("unexpected keyword argument 'execution_submit_plan'")
+        raise AssertionError("residual submit plan was silently dropped")
+
+    broker = _ResidualFakeBroker()
+    service = LiveSignalExecutionService(
+        broker=broker,
+        executor=_legacy_executor,
+        harmless_dust_recorder=lambda **_k: False,
+    )
+    result = service.execute(
+        SignalExecutionRequest(
+            signal="SELL",
+            ts=123,
+            market_price=115_679_000.0,
+            decision_context={"execution_decision": decision.as_dict()},
+        )
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["execution_submit_plan"]["source"] == "residual_inventory"
+    assert result is not None
+    assert result["status"] == "blocked"
+    assert result["reason"] == "executor_missing_execution_submit_plan_support"
+    assert broker.orders == []
 
 
 def test_residual_sell_proof_missing_accounting_projection_fails_closed() -> None:
