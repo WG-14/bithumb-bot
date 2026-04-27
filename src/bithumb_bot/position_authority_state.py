@@ -197,6 +197,24 @@ def _classify_target_lot_provenance(
     )
 
 
+def _semantic_contract_skip_reason(
+    *,
+    target_lot_provenance: TargetLotProvenance,
+    projection_converged: bool,
+    portfolio_anchor_projection_state_converged: bool,
+    manual_projection_state_converged: bool,
+) -> str | None:
+    if target_lot_provenance.fill_qty_invariant_applies:
+        return None
+    if target_lot_provenance.kind == "portfolio_anchor_projection_lot":
+        return "portfolio_anchor_projection_lot" if portfolio_anchor_projection_state_converged else None
+    if target_lot_provenance.kind == "manual_external_position_adjustment_lot":
+        return "manual_external_position_adjustment_lot" if (
+            manual_projection_state_converged and projection_converged
+        ) else None
+    return None
+
+
 def build_lot_projection_convergence(conn, *, pair: str | None = None) -> dict[str, Any]:
     """Summarize whether the persisted lot projection matches portfolio holdings.
 
@@ -735,7 +753,6 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         and canonical_lot_size > _EPS
     )
     target_qty_matches_fill = bool(abs(target_total_qty - fill_qty) <= 1e-12)
-    portfolio_matches_target = bool(portfolio_qty <= _EPS or abs(portfolio_qty - target_total_qty) <= 1e-12)
     expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - effective_closed_qty))
     residual_qty_step = max(target_max_qty_step, target_min_qty_step, canonical_qty_step, 0.0)
     residual_max_qty_decimals = max(
@@ -755,6 +772,15 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     portfolio_target_remainder_qty = normalize_asset_qty(max(0.0, portfolio_qty - other_active_qty))
     projection_repair_removable_qty = normalize_asset_qty(max(0.0, target_total_qty - portfolio_target_remainder_qty))
     projection_repair_covers_excess = bool(projected_qty_excess <= projection_repair_removable_qty + _EPS)
+    other_active_qty_supported = bool(
+        other_active_qty <= _EPS or abs(projected_total_qty - portfolio_qty) <= _EPS
+    )
+    portfolio_matches_target_direct = bool(portfolio_qty <= _EPS or abs(portfolio_qty - target_total_qty) <= _EPS)
+    portfolio_matches_target_remainder = bool(
+        other_active_qty_supported
+        and abs(portfolio_target_remainder_qty - target_total_qty) <= _EPS
+    )
+    portfolio_matches_target = bool(portfolio_matches_target_direct or portfolio_matches_target_remainder)
     partial_close_residual_candidate = bool(
         conflicting_dust_authority
         and sell_after_count > 0
@@ -948,6 +974,15 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         recorded=portfolio_projection_repair_recorded,
         state_converged=portfolio_projection_state_converged,
     )
+    semantic_contract_check_skipped_reason = _semantic_contract_skip_reason(
+        target_lot_provenance=target_lot_provenance,
+        projection_converged=bool(projection_convergence.get("converged")),
+        portfolio_anchor_projection_state_converged=portfolio_anchor_projection_state_converged,
+        manual_projection_state_converged=portfolio_projection_state_converged,
+    )
+    semantic_contract_check_applicable = bool(
+        target_lot_provenance.fill_qty_invariant_applies and semantic_contract_check_skipped_reason is None
+    )
     needs_correction = bool(
         (
             target_lot_provenance.kind == "portfolio_anchor_projection_lot"
@@ -1067,7 +1102,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     ):
         blockers.append(f"sell_after_target_buy={sell_after_count}")
     if (
-        target_lot_provenance.fill_qty_invariant_applies
+        semantic_contract_check_applicable
         and not target_qty_matches_fill
         and not partial_close_residual_candidate
         and not residual_state_converged
@@ -1085,9 +1120,24 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
             "unknown_target_row_provenance="
             f"source_modes={'|'.join(target_lot_provenance.source_modes) or 'none'}"
         )
-    if not portfolio_matches_target and not needs_portfolio_projection_repair:
+    if (
+        other_active_qty > _EPS
+        and not other_active_qty_supported
+        and not needs_portfolio_projection_repair
+    ):
         blockers.append(
-            f"portfolio_target_qty_mismatch=portfolio_qty={portfolio_qty:.12f},target_qty={target_total_qty:.12f}"
+            "other_active_qty_evidence_required="
+            f"other_active_qty={other_active_qty:.12f},"
+            f"projected_total_qty={projected_total_qty:.12f},"
+            f"portfolio_qty={portfolio_qty:.12f}"
+        )
+    elif not portfolio_matches_target and not needs_portfolio_projection_repair:
+        blockers.append(
+            "portfolio_target_qty_mismatch="
+            f"portfolio_qty={portfolio_qty:.12f},"
+            f"target_qty={target_total_qty:.12f},"
+            f"other_active_qty={other_active_qty:.12f},"
+            f"portfolio_target_remainder_qty={portfolio_target_remainder_qty:.12f}"
         )
     if order_status not in {"FILLED", "PARTIAL", "NEW", "unknown"}:
         blockers.append(f"order_status={order_status}")
@@ -1157,6 +1207,22 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "portfolio_projection_repair_event_status": portfolio_projection_repair_event_status,
         "portfolio_projection_publication_status": projection_publication_status,
     }
+    semantic_contract_blocked = bool(
+        semantic_contract_check_applicable
+        and any(str(item).startswith("target_lot_qty_fill_mismatch=") for item in blockers)
+    )
+    semantic_contract_check_passed = bool(
+        (semantic_contract_check_applicable and not semantic_contract_blocked)
+        or (
+            not semantic_contract_check_applicable
+            and semantic_contract_check_skipped_reason is not None
+        )
+    )
+    semantic_contract_check_state = (
+        "applied"
+        if semantic_contract_check_applicable
+        else ("skipped" if semantic_contract_check_skipped_reason is not None else "blocked_pending_evidence")
+    )
     return {
         "incident_class": (
             HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
@@ -1263,12 +1329,17 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "residual_state_converged": residual_state_converged,
         "portfolio_projection_repair_event_status": portfolio_projection_repair_event_status,
         "portfolio_projection_publication_status": projection_publication_status,
+        "semantic_contract_check_applicable": semantic_contract_check_applicable,
+        "semantic_contract_check_skipped_reason": semantic_contract_check_skipped_reason,
+        "semantic_contract_check_passed": semantic_contract_check_passed,
+        "semantic_contract_check_state": semantic_contract_check_state,
         "target_lot_provenance": target_lot_provenance.as_dict(),
         "target_lot_provenance_kind": target_lot_provenance.kind,
         "target_lot_source_modes": list(target_lot_provenance.source_modes),
         "target_lot_fill_qty_invariant_applies": target_lot_provenance.fill_qty_invariant_applies,
         "other_active_lot_count": other_active_lot_count,
         "other_active_qty": other_active_qty,
+        "other_active_qty_supported": other_active_qty_supported,
         "portfolio_qty": portfolio_qty,
         "unresolved_open_order_count": unresolved_open_order_count,
         "recovery_required_count": recovery_required_count,

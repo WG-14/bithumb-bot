@@ -294,6 +294,10 @@ def _record_portfolio_projection_broker_evidence(*, broker_qty: float) -> None:
 def _insert_live_incident_stale_dust_projection(conn) -> None:
     dust_quantities = [0.000128] * 13 + [0.000124]
     assert sum(dust_quantities) == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    _insert_stale_dust_projection_rows(conn, dust_quantities=dust_quantities)
+
+
+def _insert_stale_dust_projection_rows(conn, *, dust_quantities: list[float]) -> None:
     for idx, qty_open in enumerate(dust_quantities):
         conn.execute(
             """
@@ -2372,6 +2376,9 @@ def test_full_projection_rebuild_portfolio_anchor_does_not_require_fill_qty_matc
     assert assessment["existing_total_qty"] == pytest.approx(EC2_REPRO_PORTFOLIO_QTY)
     assert assessment["target_lot_provenance_kind"] == "portfolio_anchor_projection_lot"
     assert assessment["target_lot_fill_qty_invariant_applies"] is False
+    assert assessment["semantic_contract_check_applicable"] is False
+    assert assessment["semantic_contract_check_skipped_reason"] == "portfolio_anchor_projection_lot"
+    assert assessment["semantic_contract_check_passed"] is True
     assert assessment["portfolio_anchor_projection_state_converged"] is True
     assert assessment["portfolio_projection_publication_present"] is True
     assert assessment["needs_correction"] is False
@@ -2490,8 +2497,216 @@ def test_fill_native_lot_qty_mismatch_still_blocks(recovery_db):
 
     assert assessment["target_lot_provenance_kind"] == "fill_native_lot"
     assert assessment["target_lot_fill_qty_invariant_applies"] is True
+    assert assessment["semantic_contract_check_applicable"] is True
+    assert assessment["semantic_contract_check_skipped_reason"] is None
+    assert assessment["semantic_contract_check_passed"] is False
     assert assessment["needs_correction"] is True
     assert any("target_lot_qty_fill_mismatch=" in blocker for blocker in assessment["blockers"])
+
+
+def test_full_projection_rebuild_preview_reports_final_post_publish_state(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_filled_order(
+            conn,
+            client_order_id="ec2_latest_buy",
+            side="BUY",
+            qty=EC2_REPRO_LATEST_BUY_QTY,
+            ts_ms=1_777_042_500_000,
+            fill_id="ec2-latest-buy-fill",
+        )
+        conn.execute("DELETE FROM open_position_lots")
+        stale_quantities = [0.000136748125] * 16
+        assert sum(stale_quantities) == pytest.approx(0.00218797)
+        _insert_stale_dust_projection_rows(conn, dust_quantities=stale_quantities)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=EC2_REPRO_PORTFOLIO_QTY,
+            asset_locked=0.0,
+        )
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=EC2_REPRO_PORTFOLIO_QTY)
+        record_position_authority_repair(
+            conn,
+            event_ts=1_777_042_600_000,
+            source="test_ec2_projection_fragmentation_preview",
+            reason="portfolio_anchored_authority_projection_repair",
+            repair_basis={
+                "event_type": "portfolio_anchored_authority_projection_repair",
+                "target_trade_id": int(
+                    conn.execute(
+                        "SELECT id FROM trades WHERE client_order_id='ec2_latest_buy' AND side='BUY'"
+                    ).fetchone()["id"]
+                ),
+                "target_client_order_id": "ec2_latest_buy",
+                "target_remainder_qty": 0.0,
+                "portfolio_qty": EC2_REPRO_PORTFOLIO_QTY,
+                "projected_total_qty": 0.00218797,
+                "projected_qty_excess": 0.00178812,
+            },
+            note="ec2 fragmented projection fixture",
+        )
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=EC2_REPRO_PORTFOLIO_QTY)
+
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is True
+    assert preview["final_safe_to_apply"] is True
+    assert preview["truth_source"] == "broker_portfolio_anchor"
+    assert preview["pre_projected_total_qty"] == pytest.approx(0.00218797)
+    assert preview["post_publish_projected_total_qty"] == pytest.approx(EC2_REPRO_PORTFOLIO_QTY)
+    assert preview["projection_converged_before"] is False
+    assert preview["projection_converged_after_publish"] is True
+    assert preview["source_mode_of_new_rows"] == ["full_projection_rebuild_portfolio_anchor"]
+    assert preview["target_lot_provenance_kind"] == "portfolio_anchor_projection_lot"
+    assert preview["target_lot_fill_qty_invariant_applies"] is False
+    assert preview["semantic_contract_check_applicable"] is False
+    assert preview["semantic_contract_check_skipped_reason"] == "portfolio_anchor_projection_lot"
+    assert preview["full_projection_rebuild_post_state_preview"]["final_gate_failures"] == []
+
+
+def test_multi_lot_target_remainder_uses_other_active_qty_when_projection_is_supported(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_filled_order(
+            conn,
+            client_order_id="other_active_buy",
+            side="BUY",
+            qty=0.00039982,
+            ts_ms=1_777_042_300_000,
+            fill_id="other-active-fill",
+        )
+        _apply_filled_order(
+            conn,
+            client_order_id="target_buy",
+            side="BUY",
+            qty=0.00009998,
+            ts_ms=1_777_042_400_000,
+            fill_id="target-fill",
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.00049980,
+            asset_locked=0.0,
+        )
+        conn.commit()
+
+        assessment = build_position_authority_assessment(conn)
+    finally:
+        conn.close()
+
+    assert assessment["other_active_qty"] == pytest.approx(0.00039982)
+    assert assessment["other_active_qty_supported"] is True
+    assert assessment["portfolio_target_remainder_qty"] == pytest.approx(0.00009998)
+    assert not any("portfolio_target_qty_mismatch=" in blocker for blocker in assessment["blockers"])
+
+
+def test_multi_lot_target_remainder_fails_closed_when_other_active_qty_is_unsupported(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_filled_order(
+            conn,
+            client_order_id="other_active_buy",
+            side="BUY",
+            qty=0.00039982,
+            ts_ms=1_777_042_300_000,
+            fill_id="other-active-fill",
+        )
+        _apply_filled_order(
+            conn,
+            client_order_id="target_buy",
+            side="BUY",
+            qty=0.00009998,
+            ts_ms=1_777_042_400_000,
+            fill_id="target-fill",
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.00009998,
+            asset_locked=0.0,
+        )
+        conn.commit()
+
+        assessment = build_position_authority_assessment(conn)
+    finally:
+        conn.close()
+
+    assert assessment["other_active_qty"] == pytest.approx(0.00039982)
+    assert assessment["other_active_qty_supported"] is False
+    assert assessment["safe_to_correct"] is False
+    assert any("other_active_qty_evidence_required=" in blocker for blocker in assessment["blockers"])
+
+
+def test_full_projection_rebuild_preview_refuses_when_final_post_publish_state_fails(recovery_db, monkeypatch):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+
+        def _broken_anchor(_conn, *, portfolio_qty: float, broker_qty: float) -> dict[str, object]:
+            anchor = _replace_with_portfolio_anchored_projection(
+                _conn,
+                portfolio_qty=portfolio_qty,
+                broker_qty=broker_qty,
+            )
+            _conn.execute(
+                """
+                INSERT INTO open_position_lots(
+                    pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                    qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                    internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                    lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                    position_state, entry_fee_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settings.PAIR,
+                    int(anchor["anchor_trade_id"]),
+                    str(anchor["anchor_client_order_id"]),
+                    anchor["anchor_fill_id"],
+                    int(anchor["anchor_fill_ts"]),
+                    PRICE,
+                    0.0008,
+                    2,
+                    0,
+                    1,
+                    LOT_SIZE,
+                    0.0002,
+                    0.0001,
+                    0.0,
+                    8,
+                    "full_projection_rebuild_portfolio_anchor",
+                    "lot-native",
+                    "open_exposure",
+                    0.0,
+                ),
+            )
+            return anchor
+
+        monkeypatch.setattr(
+            "bithumb_bot.position_authority_repair._replace_with_portfolio_anchored_projection",
+            _broken_anchor,
+        )
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert preview["final_safe_to_apply"] is False
+    assert preview["recommended_command"] == "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
+    assert preview["next_required_action"] == "review_rebuild_replay"
+    assert any(
+        str(item).startswith("post_rebuild_projection_converged=0")
+        or str(item).startswith("post_rebuild_projected_total_qty_mismatch=")
+        for item in (preview["full_projection_rebuild_post_state_preview"]["final_gate_failures"])
+    )
 
 
 @pytest.mark.parametrize(

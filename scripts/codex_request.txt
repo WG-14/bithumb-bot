@@ -1,6 +1,6 @@
-Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. The latest EC2 diagnosis is now narrower than before: fee/accounting/broker-evidence/lot-projection convergence appears to be successful, but runtime permission still fails because stale halt clearance and open-exposure tradeability policy do not convert current clean evidence into `run_loop_allowed=1`. 
+Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. The current EC2 failure is no longer primarily about fee accounting, stale halt clearing, broker balance visibility, or position-management resume. The remaining failure is in the **position authority projection/rebuild semantics**: `open_position_lots` is being treated sometimes as fill-native canonical authority and sometimes as broker/portfolio-anchored materialized projection, and those two meanings are not kept separate end-to-end. 
 
-You are working in the GitHub repository:
+You are working in:
 
 ```text
 WG-14/bithumb-bot
@@ -8,680 +8,727 @@ WG-14/bithumb-bot
 
 ## Mission
 
-Do **not** solve this by flattening the current BTC position, using `resume --force`, deleting lots, hiding blockers, loosening all halt gates, or adding another manual DB repair path.
+Do **not** solve this by flattening the position, forcing resume, manually editing the DB, repeatedly applying repair commands, or hiding blockers.
 
-The goal is to make the bot stricter about the right thing: **current active danger**, not the mere existence of a correctly accounted open position.
-
-Core principle:
+The goal is to make `position_authority` a provenance-aware projection system:
 
 ```text
-Current evidence converged
-→ stale halt should be revalidated
-→ clean open exposure should become position-management-ready
+canonical truth =
+  fills
+  trades
+  finalized fee events
+  external cash/position adjustments
+  manual repair events
+  current broker account snapshot as evidence
+
+derived materialized projections =
+  open_position_lots
+  trade_lifecycles
+  normalized exposure
+  dust tracking
 ```
 
-The current problem is not fee repair, not broker balance visibility, and not lot projection drift. The remaining issue is that runtime policy does not turn verified convergence into safe runtime permission.
+`open_position_lots` must not act as untyped canonical truth. It must be a rebuildable projection whose invariants depend on provenance.
 
-## Current EC2 state to preserve as an incident fixture
-
-The latest EC2 state shows the important accounting and evidence surfaces are now mostly converged:
+The key principle:
 
 ```text
-accounting_projection_ok=1
-broker_portfolio_converged=1
-lot_projection_converged=1
-unresolved_fee_state=0
-fill_accounting_active_issue_count=0
-blocking_incident_class=NONE
+fill-native lot evidence
+≠ broker/portfolio-anchored projection evidence
+≠ manual portfolio repair evidence
 ```
 
-Broker evidence is also materially complete:
+## Current EC2 incident facts to preserve as fixtures
+
+The latest incident indicates that previously solved categories are not the active cause:
 
 ```text
-broker_asset_qty=0.00079982
-broker_asset_available=0.00079982
-broker_asset_locked=0.0
-broker_cash_available=306916.10493
-balance_source_base_currency=BTC
-balance_source_quote_currency=KRW
-balance_source_stale=false
+fee pending: not active
+broker balance read: OK
+broker_portfolio_converged: true
+accounting_projection_ok: true
+stale RISK_STATE_MISMATCH halt: previously fixed
+OPEN_EXECUTABLE position-management resume: previously fixed
 ```
 
-But runtime still blocks:
+The current issue is in `open_position_lots` / `position_authority` projection semantics.
+
+Observed failure pattern 1 — historical dust rows are over-materialized:
 
 ```text
-can_resume=false
-blockers=HALT_STATE_UNRESOLVED, HALT_RISK_OPEN_POSITION
-halt_reason_code=RISK_STATE_MISMATCH
-strategy_tradeability_state=run_loop_blocked
-run_loop_allowed=0
-position_management_allowed=0
-new_entry_allowed=0
-closeout_allowed=0
+portfolio_qty=0.00039985
+broker_qty=0.00039985
+projected_total_qty=0.00218797
+projected_qty_excess=0.00178812
+dust_tracking_lot_count=16
+dust_tracking_qty=0.00218797
+projection_converged=false
 ```
 
-The likely current runtime state is:
+This means the materialized projection can become much larger than broker/portfolio truth.
+
+Observed failure pattern 2 — after broker/portfolio anchoring, semantic contract still fails:
 
 ```text
-canonical_state=OPEN_EXECUTABLE
-has_executable=1
-exit_allowed=1
-current BTC position=0.00079982
-executable exposure roughly=0.00040000
-tracked remainder/dust roughly=0.00039982
+portfolio_qty=0.00039985
+broker_qty=0.00039985
+projected_total_qty=0.00039985
+projection_converged=true
+
+but:
+target_lot_qty_fill_mismatch=
+  target_qty=0.000399850000,
+  fill_qty=0.000599990000
+
+alignment_state=semantic_contract_mismatch
+safe_to_correct=false
 ```
 
-This should not require manual flattening if broker/portfolio/replay/projection evidence is current and coherent.
+This suggests that a broker/portfolio-anchored projection row is still being checked against a fill-native invariant.
+
+Observed failure pattern 3 — multi-lot partial close can compare target residual to whole portfolio incorrectly:
+
+```text
+portfolio_qty=0.00049980
+other_active_qty=0.00039982
+target_residual_qty=0.00009998
+```
+
+Correct comparison:
+
+```text
+portfolio_qty == other_active_qty + target_residual_qty
+```
+
+Incorrect comparison seen in prior output:
+
+```text
+portfolio_qty == target_residual_qty
+```
+
+which produced:
+
+```text
+portfolio_target_qty_mismatch=
+  portfolio_qty=0.00049980,
+  target_qty=0.00009998
+```
 
 ## Files and code paths to inspect first
 
-Inspect these files and related tests:
+Inspect these files and nearby tests:
 
 ```text
-src/bithumb_bot/engine.py
+src/bithumb_bot/position_authority_state.py
+src/bithumb_bot/position_authority_incidents.py
 src/bithumb_bot/recovery_policy.py
 src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/recovery.py
 src/bithumb_bot/repair_plan.py
-src/bithumb_bot/runtime_state.py
-src/bithumb_bot/position_state_snapshot.py
 src/bithumb_bot/app.py
-src/bithumb_bot/flatten.py
+src/bithumb_bot/db_core.py
+src/bithumb_bot/lot_model.py
+src/bithumb_bot/execution_service.py
 
 tests/test_operator_commands.py
-tests/test_runtime_readiness.py
-tests/test_recovery_report.py
 tests/test_position_authority_recovery_state.py
 tests/test_accounting_projection.py
-tests/test_live_broker.py
+tests/test_recovery_report.py
+tests/test_runtime_readiness.py
 ```
 
-Search directly for:
+Search for:
 
 ```text
-STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES
-maybe_clear_stale_risk_state_mismatch_halt
-_can_clear_stale_risk_state_mismatch_halt
-RISK_STATE_MISMATCH
-FEE_GAP_RECOVERY_REQUIRED
-HALT_STATE_UNRESOLVED
-HALT_RISK_OPEN_POSITION
-CanonicalTradeabilityState
-classify_canonical_tradeability_state
-build_tradeability_operator_fields
-run_loop_allowed
-position_management_allowed
-new_entry_allowed
-closeout_allowed
-exit_allowed
-flatten_primary_recommendation
-recovery-report
-restart-checklist
+FULL_PROJECTION_REBUILD_PORTFOLIO_ANCHOR_SOURCE_MODE
+PORTFOLIO_ANCHORED_REPAIR_SOURCE_MODE
+_classify_target_lot_provenance
+TargetLotProvenance
+fill_qty_invariant_applies
+target_lot_qty_fill_mismatch
+portfolio_target_qty_mismatch
+build_position_authority_assessment
+build_lot_projection_convergence
+projection_replay
+manual_full_projection_rebuild_publish
+full_projection_rebuild
+portfolio_anchor_projection
+safe_to_apply
+safe_to_correct
+semantic_contract_mismatch
+HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+MATERIALIZED_PROJECTION_FRAGMENTATION
 ```
 
 ## Repo facts to verify
 
-`recovery_policy.py` already has a useful policy structure. It defines `CanonicalTradeabilityState` and separates:
+`position_authority_state.py` already appears to classify target lot provenance:
 
 ```text
-run_loop_allowed
-position_management_allowed
-new_entry_allowed
-closeout_allowed
-```
+ledger / missing source mode
+→ fill_native_lot
+→ fill_qty_invariant_applies=True
 
-It also supports an `EXECUTABLE_OPEN_EXPOSURE` case where, if `run_loop_allowed and position_management_allowed`, the operator message says the bot may resume in position-management mode.
+full_projection_rebuild_portfolio_anchor
+→ portfolio_anchor_projection_lot
+→ fill_qty_invariant_applies=False
 
-The effective policy appears to be:
-
-```text
-position_management_allowed = run_loop_allowed and has_executable and exit_allowed
-```
-
-The EC2 state has `has_executable=1` and `exit_allowed=1`, but `position_management_allowed=0`. Therefore the immediate blocker is likely `run_loop_allowed=0`, not open exposure itself.
-
-`engine.py` already appears to contain stale `RISK_STATE_MISMATCH` clear logic:
-
-```text
-STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES = {
-  FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED,
-  MANUAL_RECOVERY_COMPLETED,
-  POSITION_AUTHORITY_REBUILD_COMPLETED,
-  RECENT_FILL_APPLIED,
-  RECONCILE_OK,
-}
-```
-
-It also contains:
-
-```text
-maybe_clear_stale_risk_state_mismatch_halt()
-_can_clear_stale_risk_state_mismatch_halt()
-```
-
-So the issue is probably **not** that stale-risk clear logic is absent. The current failure is likely that the clear predicate does not accept the current EC2 state.
-
-The most suspicious EC2 value is:
-
-```text
-last_reconcile_status=ok
-last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
-```
-
-But the same logs indicate the fee gap is historical/repaired and no longer resume-blocking:
-
-```text
-fee_gap_accounting_repair_incident=historical_fee_gap_repaired
-active_issue=0
-resume_blocking=0
-matching fee-gap accounting repair already recorded
-```
-
-Therefore the strongest current hypothesis is:
-
-```text
-The stale RISK_STATE_MISMATCH clear path exists,
-but last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED is not in the clear whitelist,
-even when the fee-gap incident is historical/repaired and no longer resume-blocking.
+portfolio_anchored_repair
+→ manual_external_position_adjustment_lot
+→ fill_qty_invariant_applies=False
 ```
 
 Verify this directly.
 
+If the classification exists, the bug is likely that this provenance is not preserved all the way to blocker generation, repair eligibility, post-assessment, and operator output.
+
 ## Working hypotheses
 
-Keep these as hypotheses until confirmed or falsified in code and tests.
+Keep these as hypotheses until verified or falsified in code and tests.
 
-### Hypothesis A — stale `RISK_STATE_MISMATCH` clear condition does not cover repaired historical fee-gap context
+### Hypothesis A — full projection rebuild replay over-materializes historical dust rows
 
-The clear function exists, but the reason-code whitelist is too narrow. The current EC2 state has `last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED`, and this blocks stale halt clear even though:
+The full projection rebuild deletes existing lot rows but then replays historical BUY/SELL evidence in a way that recreates many historical dust-tracking rows.
+
+Observed incident pattern:
 
 ```text
-fee_gap_active_issue=false
-fee_gap_resume_blocking=false
-fee_gap_repaired=true
-accounting_projection_ok=true
-broker_portfolio_converged=true
-lot_projection_converged=true
-broker_qty_known=true
-open_orders=0
-unresolved_fee_state=false
-recovery_required_count=0
+deleted_open_position_lot_count=16
+replayed_buy_count=16
+replayed_sell_count=12
+
+after replay:
+  dust_tracking_lot_count=16
+  dust_tracking_qty=0.00218797
+  projected_total_qty=0.00218797
+
+but current:
+  broker_qty=0.00039985
+  portfolio_qty=0.00039985
 ```
 
-Verification target:
+Hypothesis:
 
 ```text
-Create a test around _can_clear_stale_risk_state_mismatch_halt() or the public surface that triggers it.
-
-Fixture:
-  halt_reason_code=RISK_STATE_MISMATCH
-  halt_state_unresolved=true
-  last_reconcile_status=ok
-  last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
-  fee_gap_active_issue=false
-  fee_gap_resume_blocking=false
-  fee_gap_repaired=true
-  accounting_projection_ok=true
-  broker_portfolio_converged=true
-  lot_projection_converged=true
-  broker_qty_known=true
-  broker snapshot stale=false
-  open_orders=0
-  unresolved_fee_state=false
-  recovery_required_count=0
-  submit_unknown=0
-  canonical_state=OPEN_EXECUTABLE
+Full projection rebuild uses historical fill residuals too strongly and does not terminally anchor the materialized projection to current broker/portfolio quantity.
 ```
 
-Expected desired behavior:
+Verification:
 
 ```text
-stale halt clear allowed
-halt_state_unresolved=false
-run_loop_allowed=true
-```
-
-Falsification condition:
-
-```text
-If FEE_GAP_RECOVERY_REQUIRED is active, resume_blocking=true, active_issue=true, current broker/portfolio mismatch exists, active fee pending exists, projection drift exists, unresolved order exists, broker snapshot is stale/missing, submit_unknown exists, or risk/loss/panic state is active, then halt must remain blocked.
-```
-
-### Hypothesis B — clean `OPEN_EXECUTABLE` already has partial policy support but is unreachable because stale halt keeps `run_loop_allowed=false`
-
-The current repo likely already supports `position_management_allowed` if `run_loop_allowed=true`, `has_executable=true`, and `exit_allowed=true`.
-
-Verification target:
-
-```text
-Create a direct policy fixture for recovery_policy.py:
-
-Given:
-  run_loop_allowed=true
-  has_executable=true
-  exit_allowed=true
-  canonical_state=OPEN_EXECUTABLE
-
-Expected:
-  position_management_allowed=true
-  operator_next_action=resume_position_management
-  strategy_tradeability_state=position_management_allowed
-```
-
-Falsification condition:
-
-```text
-If run_loop_allowed=true still produces position_management_allowed=false, then recovery_policy.py itself needs additional modification.
-```
-
-### Hypothesis C — `HALT_RISK_OPEN_POSITION` is still over-applied to clean open exposure
-
-The current logs show `HALT_RISK_OPEN_POSITION` even though other surfaces show no active order, fee, broker, or projection blocker.
-
-Verification target:
-
-```text
-Find where HALT_RISK_OPEN_POSITION ResumeBlocker is created.
-Find whether it is triggered solely because position_present=true or canonical_state=OPEN_EXECUTABLE.
-Find whether it checks current active blockers:
-  broker mismatch
-  active fee issue
-  unresolved order
-  submit_unknown
-  projection drift
-  stale broker snapshot
-  kill switch
-  loss limit
-  panic stop
+1. Inspect full projection rebuild replay code.
+2. Identify whether external_position_adjustments, manual_flat_accounting_repairs,
+   position_authority_repairs, portfolio-anchor publications, and current broker snapshot
+   are included in the replay terminal state.
+3. Build a fixture:
+   - historical dust_tracking_lot_count=16
+   - historical projected_total_qty=0.00218797
+   - current broker_qty=0.00039985
+   - current portfolio_qty=0.00039985
+4. Run full projection rebuild.
 ```
 
 Expected desired behavior:
 
 ```text
-Clean canonical open exposure does not emit HALT_RISK_OPEN_POSITION.
-HALT_RISK_OPEN_POSITION only appears when open exposure is combined with a current unresolved risk/evidence blocker.
+post_rebuild_projected_total_qty=0.00039985
+projection_converged=true
+no recreated 0.00218797 dust projection
 ```
 
 Falsification condition:
 
 ```text
-If actual local or remote open orders are still present, or broker/portfolio mismatch still exists, then HALT_RISK_OPEN_POSITION may be correct.
+If canonical ledger + external adjustments + broker snapshot actually prove the account should hold 0.00218797 BTC, then broker/portfolio are wrong and full rebuild is correct.
 ```
 
-### Hypothesis D — higher-level root cause is policy convergence failure after evidence convergence
+But current mobile app / broker snapshot / portfolio evidence suggests broker/portfolio are the anchor.
 
-The bot has gradually improved evidence convergence:
+### Hypothesis B — portfolio-anchor projection rows still receive fill-native invariant checks
+
+Observed incident pattern:
 
 ```text
-historical fee_pending ≠ active blocker
-order-level paid_fee ≠ per-fill fee without allocation
-accounts snapshot visible ≠ formal broker rebuild evidence
-open_position_lots ≠ canonical truth
+portfolio_qty=0.00039985
+broker_qty=0.00039985
+projected_total_qty=0.00039985
+projection_converged=true
+
+but:
+target_lot_qty_fill_mismatch=
+  target_qty=0.000399850000,
+  fill_qty=0.000599990000
+semantic_contract_mismatch
 ```
 
-The remaining issue is policy convergence:
+Hypothesis:
 
 ```text
-current evidence converged
-≠ stale halt cleared
-≠ clean open exposure promoted to position-management-ready
+Rows sourced from full_projection_rebuild_portfolio_anchor or portfolio_anchored_repair are still checked as if they were ledger/fill-native rows.
 ```
 
-Verification target:
+Verification:
 
 ```text
-Check whether health, recovery-report, restart-checklist, repair-plan, and audit-ledger agree on:
-  current evidence converged
-  stale halt clear status
-  HALT_RISK_OPEN_POSITION status
-  run_loop_allowed
-  position_management_allowed
-  new_entry_allowed
-  exit/closeout allowed
-  flatten recommendation
+1. Check _classify_target_lot_provenance() on the current target row.
+2. Confirm whether kind=portfolio_anchor_projection_lot and fill_qty_invariant_applies=False.
+3. Find where target_lot_qty_fill_mismatch is emitted.
+4. Confirm whether that blocker is guarded by target_lot_provenance.fill_qty_invariant_applies.
+5. Confirm whether post-rebuild/post-publish assessment uses the newly published source_mode, not stale pre-rebuild classification.
+```
+
+Expected desired behavior:
+
+```text
+For source_mode=full_projection_rebuild_portfolio_anchor:
+  no target_lot_qty_fill_mismatch
+  no fill-native target_qty == original_buy_fill_qty requirement
+  semantic_contract_check_applicable=false
+  semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
+```
+
+Falsification condition:
+
+```text
+If the row is actually source_mode=ledger and not a portfolio-anchor projection, fill-native invariant may be valid.
+```
+
+### Hypothesis C — correction path compares target residual to entire portfolio instead of target residual plus other active qty
+
+Observed prior pattern:
+
+```text
+portfolio_qty=0.00049980
+other_active_qty=0.00039982
+target_residual_qty=0.00009998
+```
+
+Hypothesis:
+
+```text
+position authority correction eligibility computes other_active_qty but still emits portfolio_target_qty_mismatch by comparing portfolio_qty to target_residual_qty alone.
+```
+
+Verification:
+
+```text
+1. Locate portfolio_target_qty_mismatch generation.
+2. Check whether it compares portfolio_qty to target_total_qty / target_residual only.
+3. Check whether it uses portfolio_target_remainder_qty = max(0, portfolio_qty - other_active_qty).
+4. Build a multi-lot fixture:
+   other_active_qty=0.00039982
+   target_residual_qty=0.00009998
+   portfolio_qty=0.00049980
+```
+
+Expected desired behavior:
+
+```text
+portfolio_qty == other_active_qty + target_residual_qty
+no portfolio_target_qty_mismatch
+safe_to_correct or no conflict, assuming all other evidence is coherent
+```
+
+Falsification condition:
+
+```text
+If other_active_qty is stale/invalid and not broker/portfolio-supported, it must not be accepted blindly.
+```
+
+### Hypothesis D — repair flow does not enforce a single final post-state before recommending apply
+
+Observed output mixes:
+
+```text
+safe_to_apply=true
+recommended_command=... --apply --yes
+```
+
+with:
+
+```text
+projection_replay after projected_total_qty=0.00218797
+portfolio_qty=0.00039985
+projection_converged=false
+semantic_contract_mismatch
+safe_to_correct=false
+```
+
+Hypothesis:
+
+```text
+repair-plan / rebuild-position-authority reports safe_to_apply for one stage while later replay/post-assessment evidence disproves final convergence.
+```
+
+Verification:
+
+```text
+1. Trace rebuild-position-authority preview/apply pipeline:
+   pre-assessment
+   replay
+   publish/write
+   post-publish assessment
+   operator recommendation
+2. Confirm final recommended_command is emitted only after final post-state passes all gates.
+3. Confirm safe_to_apply is not stale from pre-replay or replay-only stage.
+```
+
+Expected desired behavior:
+
+```text
+safe_to_apply=true only when final post-publish assessment is converged and semantically valid.
+```
+
+If replay/post-publish would produce:
+
+```text
+projected_total_qty=0.00218797
+portfolio_qty=0.00039985
+projection_converged=false
+```
+
+then:
+
+```text
+safe_to_apply=false
+recommended_command absent
+operator_next_action=review_rebuild_replay
 ```
 
 ## Required design changes
 
-### 1. Change stale halt clear predicate from reason-whitelist-centered to active-blocker-absence-centered
+### 1. Make full projection rebuild broker/portfolio-anchored at terminal state
 
-Do not rely primarily on `last_reconcile_reason_code` whitelist. Reason codes can remain useful diagnostic context, but stale halt clear should be governed by current active evidence.
-
-Desired predicate shape:
+If the command is called `full_projection_rebuild`, its final success invariant must be:
 
 ```text
-halt_reason_code == RISK_STATE_MISMATCH
-last_reconcile_status == ok
-startup_gate_reason is None
-accounting_projection_ok == true
-broker_portfolio_converged == true
-lot_projection_converged == true
-broker_qty_known == true
-broker snapshot stale == false
-unresolved_fee_state == false
-unresolved_open_order_count == 0
-recovery_required_count == 0
-remote_open_order_count == 0
-submit_unknown_count == 0
-fee_gap_resume_blocking == false
-external_position_repair_needed == false
-position_authority_repair_needed == false
-risk_loss_breach == false
-kill_switch == false
-panic_stop == false
+post_rebuild_projected_total_qty == portfolio_qty == broker_qty
 ```
 
-Allow stale halt clear even when:
+within the repository’s quantity tolerance.
+
+This must be true after publish/write, not only in a preview sub-object.
+
+If historical replay creates old dust rows that exceed current portfolio/broker quantity, the rebuild must either:
 
 ```text
-last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
+collapse / trim / re-anchor projection rows to broker/portfolio quantity
 ```
 
-only if the fee-gap incident is historical/repaired and non-blocking:
+or fail closed with:
 
 ```text
-fee_gap_active_issue=false
-fee_gap_resume_blocking=false
-matching fee-gap accounting repair already recorded
+safe_to_apply=false
+operator_next_action=review_rebuild_replay
 ```
 
-Continue to block if:
+Do not allow a successful apply that leaves:
 
 ```text
-fee_gap_active_issue=true
-fee_gap_resume_blocking=true
-current broker/portfolio mismatch exists
-active fee pending exists
-projection drift exists
-unresolved order exists
-submit_unknown exists
-broker snapshot stale/missing
-kill switch/loss limit/panic stop active
-source conflict active
+projected_total_qty != portfolio_qty
 ```
 
-Do **not** clear true risk halts. This change is only for stale `RISK_STATE_MISMATCH` after verified convergence.
+### 2. Make projection row invariants provenance-aware
 
-### 2. Add clear failure observability
-
-When `RISK_STATE_MISMATCH` remains unresolved, operator output must explain why.
-
-Add fields to `health`, `recovery-report`, `restart-checklist`, or a shared diagnostic object:
+Introduce or strengthen typed internal concepts equivalent to:
 
 ```text
-stale_halt_clear_candidate=true/false
-stale_halt_clear_allowed=true/false
-stale_halt_clear_blockers=[...]
-stale_halt_clear_reason_code_allowed=true/false
-stale_halt_clear_current_evidence_converged=true/false
-halt_reason_current_evidence=stale/current
-fee_gap_resume_blocking=true/false
-fee_gap_active_issue=true/false
+FillNativeLot:
+  source_mode=ledger or equivalent
+  invariant=original fill qty + lifecycle residual
+
+PortfolioAnchorProjectionLot:
+  source_mode=full_projection_rebuild_portfolio_anchor
+  invariant=current broker/portfolio projection convergence
+
+ManualPortfolioRepairLot:
+  source_mode=portfolio_anchored_repair
+  invariant=repair event + current broker/portfolio convergence
 ```
 
-For the current EC2 case, expected diagnostic before the fix would be something like:
+Rules:
 
 ```text
-stale_halt_clear_candidate=true
-current_evidence_converged=true
-fee_gap_resume_blocking=false
-stale_halt_clear_blockers=last_reconcile_reason_code_not_whitelisted:FEE_GAP_RECOVERY_REQUIRED
+target_lot_qty_fill_mismatch may only be emitted for FillNativeLot.
 ```
 
-After the fix, this should become:
+For `PortfolioAnchorProjectionLot`, skip fill-native invariant and report:
 
 ```text
-stale_halt_clear_candidate=true
-current_evidence_converged=true
-fee_gap_resume_blocking=false
-stale_halt_clear_allowed=true
-halt_reason_current_evidence=stale
+semantic_contract_check_applicable=false
+semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
 ```
 
-### 3. Promote clean `OPEN_EXECUTABLE` to position-management-ready once stale halt clears
+For `ManualPortfolioRepairLot`, skip fill-native invariant only if matching repair/publication evidence is present and current broker/portfolio convergence holds.
 
-After stale halt is cleared, the current clean open position should produce:
+### 3. Ensure target provenance is reloaded after rebuild/publish
+
+If rebuild writes new `open_position_lots` rows with source mode:
 
 ```text
-canonical_state=OPEN_EXECUTABLE
-tradeability_state=OPEN_POSITION_READY or equivalent
-run_loop_allowed=1
-position_management_allowed=1
-exit_allowed=1
-closeout_allowed=1 if normal exit authority is available
-new_entry_allowed=0 or strategy/risk-controlled
-flatten_primary_recommendation=0
-recommended_action=resume_position_management
-recommended_command=uv run python bot.py resume
+full_projection_rebuild_portfolio_anchor
 ```
 
-This is not `resume --force`. It is normal resume based on current verified evidence.
+then any post-assessment must reload target rows from the DB and re-run provenance classification.
 
-### 4. Redefine `HALT_RISK_OPEN_POSITION`
+Do not reuse stale pre-rebuild classification.
 
-`HALT_RISK_OPEN_POSITION` must not mean “there is open exposure.”
-
-It should mean:
+Expected:
 
 ```text
-open exposure exists
-AND current unresolved risk/evidence blocker exists
+post_publish_target_lot_provenance.kind=portfolio_anchor_projection_lot
+post_publish_target_lot_provenance.fill_qty_invariant_applies=false
 ```
 
-Examples where it may be valid:
+### 4. Fix multi-lot target residual vs portfolio total comparison
+
+Where `portfolio_target_qty_mismatch` is generated, ensure the check uses:
 
 ```text
-open exposure + current broker/portfolio mismatch
-open exposure + stale/missing broker snapshot
-open exposure + unresolved local or remote order
-open exposure + submit_unknown
-open exposure + active fee pending
-open exposure + projection drift
-open exposure + kill switch/loss limit/panic stop
+portfolio_target_remainder_qty = max(0, portfolio_qty - other_active_qty)
 ```
 
-Examples where it must not be emitted:
+or equivalent.
+
+For a multi-lot case:
 
 ```text
-open exposure + broker/portfolio/replay/projection converged + active risk none
+portfolio_qty=0.00049980
+other_active_qty=0.00039982
+target_residual_qty=0.00009998
 ```
 
-For clean canonical open exposure, guidance should say:
+the correct result is:
 
 ```text
-Canonical open exposure is present and accounted.
-Resume in position-management mode is allowed.
-New entries are blocked or strategy-controlled while the existing position is open.
-Emergency flatten is available but not the primary recommendation.
+portfolio_target_remainder_qty=0.00009998
+no portfolio_target_qty_mismatch
 ```
 
-### 5. Keep fail-closed behavior for unsafe states
+Do not accept `other_active_qty` blindly. It must itself be part of a converged projection or supported by broker/portfolio/replay evidence.
 
-Do not weaken safety.
+### 5. Enforce final repair-plan/apply consistency
 
-Continue to block run/resume if any active blocker exists:
+A repair command may show intermediate preview details, but final recommendation must depend on final post-state.
+
+Required final gates:
 
 ```text
-broker/portfolio mismatch
-active fee pending
-unresolved local order
-stray remote open order
-submit_unknown
-projection drift
-broker snapshot stale/missing
-risk loss limit breach
-kill switch
-panic stop
-source conflict
+broker_portfolio_converged=true
+accounting_projection_ok=true
+post_rebuild_projection_converged=true
+post_rebuild_projected_total_qty == portfolio_qty
+active fee issue=0
+unresolved local order=0
+remote open order=0
+submit_unknown=0
+semantic contract passed
+  OR semantic contract intentionally skipped due to recognized projection provenance
 ```
+
+If any final gate fails:
+
+```text
+safe_to_apply=false
+recommended_command absent
+operator_next_action=review_position_authority_evidence or review_rebuild_replay
+```
+
+## Required observability changes
+
+Improve `rebuild-position-authority`, `repair-plan`, `recovery-report`, and related operator surfaces so they clearly distinguish stages.
+
+Add fields equivalent to:
+
+```text
+repair_kind
+truth_source
+pre_projected_total_qty
+replay_projected_total_qty
+post_publish_projected_total_qty
+portfolio_qty
+broker_qty
+projection_converged_before
+projection_converged_after_replay
+projection_converged_after_publish
+source_mode_of_new_rows
+target_lot_provenance_kind
+fill_qty_invariant_applies
+semantic_contract_check_applicable
+semantic_contract_check_skipped_reason
+final_safe_to_apply
+rollback_path
+```
+
+The operator must not see an unqualified:
+
+```text
+safe_to_apply=true
+```
+
+next to evidence that final projection still diverges.
 
 ## Required tests
 
-Add incident-shaped regression tests.
+Add incident-shaped regression tests using the actual quantities.
 
-### Test 1 — repaired historical `FEE_GAP_RECOVERY_REQUIRED` clears stale `RISK_STATE_MISMATCH`
-
-Fixture:
-
-```text
-halt_reason_code=RISK_STATE_MISMATCH
-halt_state_unresolved=true
-last_reconcile_status=ok
-last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
-fee_gap_active_issue=false
-fee_gap_resume_blocking=false
-fee_gap_repaired=true
-accounting_projection_ok=true
-broker_portfolio_converged=true
-lot_projection_converged=true
-broker_qty_known=true
-broker_snapshot_stale=false
-open_orders=0
-unresolved_fee_state=false
-recovery_required_count=0
-submit_unknown=0
-canonical_state=OPEN_EXECUTABLE
-```
-
-Expected:
-
-```text
-stale halt clear allowed
-halt_state_unresolved=false
-run_loop_allowed=true
-```
-
-### Test 2 — active fee-gap still blocks stale halt clear
-
-Same fixture as Test 1, but:
-
-```text
-fee_gap_active_issue=true
-or fee_gap_resume_blocking=true
-```
-
-Expected:
-
-```text
-halt remains unresolved
-run_loop_allowed=false
-stale_halt_clear_blockers includes fee_gap
-```
-
-### Test 3 — clean `OPEN_EXECUTABLE` becomes position-management-ready
+### Test 1 — historical fragmented dust rows do not survive full projection rebuild
 
 Fixture:
 
 ```text
-canonical_state=OPEN_EXECUTABLE
-run_loop_allowed=true
-has_executable=true
-exit_allowed=true
-broker/portfolio/replay/projection all match
-active fee issue=0
-open orders=0
-risk breach=0
+historical open_position_lots:
+  dust_tracking_lot_count=16
+  projected_total_qty=0.00218797
+
+current portfolio/broker:
+  qty=0.00039985
 ```
 
 Expected:
 
 ```text
-position_management_allowed=true
-exit_allowed=true
-new_entry_allowed=false or strategy-controlled
-operator_next_action=resume_position_management
-flatten_primary_recommendation=false
+after full_projection_rebuild:
+  projected_total_qty=0.00039985
+  projection_converged=true
+  no recreated 0.00218797 dust projection
+  post_rebuild source_mode=full_projection_rebuild_portfolio_anchor
 ```
 
-### Test 4 — clean open exposure does not emit `HALT_RISK_OPEN_POSITION`
+### Test 2 — portfolio-anchor lot skips fill-native invariant
 
 Fixture:
 
 ```text
-OPEN_EXECUTABLE
-broker_portfolio_converged=true
-accounting_projection_ok=true
-lot_projection_converged=true
-broker_qty_known=true
-active fee issue=0
-open orders=0
-submit_unknown=0
-risk breach=0
+original BUY fill_qty=0.00059999
+current broker/portfolio qty=0.00039985
+target row source_mode=full_projection_rebuild_portfolio_anchor
 ```
 
 Expected:
 
 ```text
-HALT_RISK_OPEN_POSITION absent
-recommended_command != flatten-position
-flatten_primary_recommendation=false
+no target_lot_qty_fill_mismatch
+no semantic_contract_mismatch from fill qty
+semantic_contract_check_applicable=false
+semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
+projection_converged=true
 ```
 
-### Test 5 — unsafe open exposure remains blocked
+### Test 3 — fill-native lot still enforces fill residual invariant
 
-Use variants:
+Fixture:
 
 ```text
-current broker mismatch
-active fee pending
-unresolved order
-remote open order
-projection drift
-broker snapshot stale
-submit_unknown
-kill switch
-daily loss limit
-position loss limit
-panic stop
-source conflict
+source_mode=ledger
+target_qty != expected fill/lifecycle residual
+no portfolio-anchor repair evidence
 ```
 
 Expected:
 
 ```text
-run_loop_allowed=false
-position_management_allowed=false
-recommended_action=diagnose/repair/emergency depending on cause
-flatten primary only for true emergency/risk policy states
+target_lot_qty_fill_mismatch emitted
+semantic_contract_mismatch emitted
+safe_to_correct=false
 ```
 
-### Test 6 — stale halt diagnostics explain why clear failed
+### Test 4 — multi-lot partial close uses other_active_qty correctly
 
-Fixture where clear fails because of one active blocker.
-
-Expected output fields include:
+Fixture:
 
 ```text
-stale_halt_clear_candidate=true
-stale_halt_clear_allowed=false
-stale_halt_clear_blockers=[specific blocker]
-halt_reason_current_evidence=current
+other_active_qty=0.00039982
+target_residual_qty=0.00009998
+portfolio_qty=0.00049980
+broker_qty=0.00049980
+```
+
+Expected:
+
+```text
+portfolio_target_remainder_qty=0.00009998
+no portfolio_target_qty_mismatch
+portfolio total accepted because:
+  portfolio_qty == other_active_qty + target_residual_qty
+```
+
+### Test 5 — other_active_qty is not blindly trusted
+
+Fixture:
+
+```text
+other_active_qty is stale or unsupported
+portfolio_qty does not converge with projected_total_qty
+```
+
+Expected:
+
+```text
+safe_to_correct=false
+operator_next_action=review_position_authority_evidence
+```
+
+### Test 6 — repair-plan final state controls recommendation
+
+Fixture where replay would produce:
+
+```text
+replay_projected_total_qty=0.00218797
+portfolio_qty=0.00039985
+projection_converged_after_replay=false
+```
+
+Expected:
+
+```text
+safe_to_apply=false
+recommended_command absent
+```
+
+Fixture where post-publish anchor produces:
+
+```text
+post_publish_projected_total_qty=0.00039985
+portfolio_qty=0.00039985
+projection_converged_after_publish=true
+source_mode=full_projection_rebuild_portfolio_anchor
+```
+
+Expected:
+
+```text
+safe_to_apply=true
+recommended_command present only after final post-state gates pass
 ```
 
 ### Test 7 — recovery surfaces agree
 
-For clean canonical open exposure with stale halt resolved:
+For a repaired anchored projection state:
+
+```text
+broker_portfolio_converged=true
+accounting_projection_ok=true
+projection_converged=true
+source_mode=full_projection_rebuild_portfolio_anchor
+```
+
+Expected:
 
 ```text
 recovery-report
+repair-plan
 restart-checklist
 health
-repair-plan
 audit-ledger
 ```
 
-Expected consistency:
+all agree:
 
 ```text
-halt_state_unresolved=false
-HALT_STATE_UNRESOLVED absent
-HALT_RISK_OPEN_POSITION absent
-run_loop_allowed=true
-position_management_allowed=true
-exit_allowed=true
-new_entry_allowed=false or strategy-controlled
-flatten_primary_recommendation=false
-recommended_action=resume_position_management
+no LOT_AUTHORITY_CONFLICT
+no HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+no semantic_contract_mismatch
+run_loop policy determined by actual exposure/dust state
 ```
 
 ## Verification commands
@@ -689,150 +736,153 @@ recommended_action=resume_position_management
 Run targeted tests first:
 
 ```bash
-uv run pytest tests/test_operator_commands.py -k "risk_state_mismatch or halt or open_exposure or restart_checklist or recovery_report or flatten"
-uv run pytest tests/test_runtime_readiness.py -k "halt or open_exposure or tradeability or resume"
-uv run pytest tests/test_recovery_report.py -k "halt or open_exposure or fee_gap or flatten"
-uv run pytest tests/test_position_authority_recovery_state.py -k "open_exposure or tradeability or resume"
-uv run pytest tests/test_accounting_projection.py -k "projection or open_exposure or position"
+uv run pytest tests/test_position_authority_recovery_state.py -k "projection or provenance or portfolio_anchor or fill_native or target_lot or multi_lot"
+uv run pytest tests/test_operator_commands.py -k "rebuild_position_authority or repair_plan or recovery_report or projection"
+uv run pytest tests/test_accounting_projection.py -k "projection or lot or authority"
+uv run pytest tests/test_runtime_readiness.py -k "authority or projection or dust"
 ```
 
-Then run broader relevant suites:
+Then broader relevant suites:
 
 ```bash
+uv run pytest tests/test_position_authority_recovery_state.py
 uv run pytest tests/test_operator_commands.py
 uv run pytest tests/test_accounting_projection.py
 ```
 
 If modules or test names differ, search the test suite and run the closest relevant tests.
 
-If any command fails, report:
-
-```text
-exact command
-failing tests
-failure summary
-whether related or unrelated
-what narrower test was added or run
-```
+Report exact commands and results.
 
 ## EC2 validation after patch
 
-Do **not** flatten the current BTC position as a prerequisite.
+Do **not** start the bot, resume, flatten, or apply repair blindly before validation.
 
-Do **not** use `resume --force`.
-
-After deploying the patch to EC2, run:
+First run preview/diagnostics only:
 
 ```bash
-MODE=live uv run bithumb-bot recovery-report --json
-MODE=live uv run bithumb-bot restart-checklist
-MODE=live uv run bithumb-bot health
+MODE=live uv run bithumb-bot rebuild-position-authority
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
 MODE=live uv run bithumb-bot repair-plan --json
+MODE=live uv run bithumb-bot recovery-report --json
 MODE=live uv run bithumb-bot audit-ledger
+MODE=live uv run bithumb-bot health
 ```
 
-Expected:
+Expected safe preview state for this incident:
 
 ```text
-accounting_projection_ok=1
-broker_portfolio_converged=1
-lot_projection_converged=1
-broker_qty_known=1
-unresolved_fee_state=0
-open_orders=0
-recovery_required_count=0
-halt_state_unresolved=false
-HALT_STATE_UNRESOLVED absent
-HALT_RISK_OPEN_POSITION absent for clean exposure
-run_loop_allowed=1
-position_management_allowed=1
-exit_allowed=1
-new_entry_allowed=0 or strategy-controlled
-flatten_primary_recommendation=0
-recommended_action=resume_position_management
-recommended_command=uv run python bot.py resume
+broker_portfolio_converged=true
+accounting_projection_ok=true
+active fee issue=0
+unresolved order=0
+remote open order=0
+submit_unknown=0
 ```
 
-Only after that should the operator consider:
+If full projection rebuild is recommended, expected preview must clearly show:
+
+```text
+truth_source=broker_portfolio_anchor
+post_rebuild_projected_total_qty == portfolio_qty == broker_qty
+source_mode_of_new_rows=full_projection_rebuild_portfolio_anchor
+fill_qty_invariant_applies=false
+semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
+final_safe_to_apply=true
+```
+
+Only then consider:
 
 ```bash
-MODE=live uv run bithumb-bot resume
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes
 ```
 
-Expected after resume:
+After apply, immediately run:
+
+```bash
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
+MODE=live uv run bithumb-bot repair-plan --json
+MODE=live uv run bithumb-bot recovery-report --json
+MODE=live uv run bithumb-bot audit-ledger
+MODE=live uv run bithumb-bot health
+```
+
+Expected post-apply:
 
 ```text
-bot runs with existing 0.00079982 BTC position
-new BUY entries are blocked or risk-controlled while position is open
-normal SELL/exit evaluation remains available through strategy/run-loop authority
-emergency flatten remains available but is not the default recommendation
+projected_total_qty == portfolio_qty == broker_qty
+projection_converged=true
+target_lot_provenance_kind=portfolio_anchor_projection_lot
+fill_qty_invariant_applies=false
+no target_lot_qty_fill_mismatch
+no semantic_contract_mismatch
+no LOT_AUTHORITY_CONFLICT
+no HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
 ```
+
+Only after that should `resume` or `systemctl start` be considered.
 
 ## Scope boundaries
 
 Do:
 
 ```text
-- Fix stale RISK_STATE_MISMATCH clear predicate so it uses current active evidence, not only reason-code whitelist.
-- Allow historical/repaired non-blocking FEE_GAP_RECOVERY_REQUIRED context to clear stale RISK_STATE_MISMATCH.
-- Add observability for stale halt clear blockers.
-- Promote clean OPEN_EXECUTABLE to position-management-ready once run loop is safe.
-- Ensure HALT_RISK_OPEN_POSITION is not emitted solely because open exposure exists.
-- Keep emergency flatten available but not primary for clean canonical exposure.
-- Add incident-fixture regression tests.
+- Make full projection rebuild terminally broker/portfolio anchored.
+- Make lot/projection invariants provenance-aware.
+- Ensure post-publish assessment reloads target provenance from current DB rows.
+- Fix multi-lot target residual vs portfolio total comparison using other_active_qty safely.
+- Make repair safe_to_apply depend on final post-state.
+- Add clear observability for replay vs publish vs post-assessment.
+- Add incident-shaped regression tests.
 ```
 
 Do not:
 
 ```text
-- Require flattening 0.00079982 BTC to start.
-- Use resume --force as the solution.
-- Clear true risk halts.
-- Ignore active broker/portfolio mismatch.
-- Ignore active fee pending.
-- Ignore unresolved orders.
-- Ignore projection drift.
-- Ignore stale/missing broker snapshot.
 - Treat open_position_lots as canonical truth.
-- Make flatten-position the normal position-management mechanism.
-- Add manual DB update workarounds.
-- Hide blockers without changing policy semantics.
+- Let historical dust rows override broker/portfolio current truth.
+- Apply fill-native invariant to portfolio-anchor projection rows.
+- Recommend apply if final projection remains divergent.
+- Hide semantic_contract_mismatch without a provenance-specific reason.
+- Ignore active fee issues, unresolved orders, submit_unknown, stale broker snapshots, or broker/portfolio mismatch.
+- Require flattening the current BTC position.
+- Use resume --force.
+- Directly edit the DB.
 ```
 
-## Long-term design recommendations to include in the final report
+## Long-term design recommendations to include in final report
 
-Discuss, but do not necessarily fully implement unless small and natural:
+Discuss, even if not fully implemented now:
 
 ```text
-1. Explicit tradeability state machine:
-   FORENSIC_BLOCKED
-   FLAT_READY
-   DUST_ONLY_READY
-   OPEN_POSITION_READY
-   EXIT_ONLY_READY
-   EMERGENCY_FLATTEN_ONLY
-   PANIC_STOPPED
+1. Event-sourced accounting core:
+   canonical events = fills/trades/fees/adjustments/broker evidence
+   projections = open_position_lots/trade_lifecycles/exposure/dust
 
-2. Position carry policy across restart:
-   ALLOW_POSITION_CARRY_ON_RESTART=true
-   ALLOW_NEW_ENTRY_WHILE_OPEN=false
-   ALLOW_EXIT_WHILE_OPEN=true
-   ALLOW_EMERGENCY_FLATTEN=true
+2. Typed projection rows:
+   FillNativeLot
+   PortfolioAnchorProjectionLot
+   ManualPortfolioRepairLot
 
-3. Recovery-policy convergence graph:
-   current evidence
-   stale evidence
-   active blockers
-   cleared historical blockers
-   allowed actions
-   forbidden actions
-   why flatten is or is not primary
+3. Deterministic projection rebuild:
+   rebuild must be reproducible from canonical events + broker anchor + projection policy
 
-4. Clear distinction between:
-   emergency flatten
-   strategy-driven exit
-   position-management resume
-   new-entry resume
+4. Operator repair workflow:
+   doctor --live --explain
+   repair-plan --live
+   repair-apply --plan-id
+
+5. Repair plan schema:
+   preconditions
+   truth source
+   tables touched
+   before/after portfolio
+   before/after projection
+   provenance of new rows
+   idempotency key
+   rollback path
+   final gates
+   why safe
 ```
 
 ## Final report format
@@ -842,21 +892,21 @@ When finished, produce a report with exactly these sections:
 ```text
 1. Summary
    - What changed.
-   - Why this fixes stale halt clearance instead of bypassing gates.
-   - Why this avoids requiring manual flatten of a canonical position.
+   - Why this addresses projection semantics instead of masking the blocker.
+   - Why this avoids repeated manual repair / flatten loops.
 
 2. Hypothesis results
-   - Hypothesis A: stale RISK_STATE_MISMATCH clear condition does not cover repaired historical fee-gap context — confirmed / falsified / partially confirmed.
-   - Hypothesis B: clean OPEN_EXECUTABLE policy exists but is unreachable due to run_loop_allowed=false — confirmed / falsified / partially confirmed.
-   - Hypothesis C: HALT_RISK_OPEN_POSITION is over-applied to clean open exposure — confirmed / falsified / partially confirmed.
-   - Hypothesis D: higher-level policy convergence failure after evidence convergence — confirmed / falsified / partially confirmed.
+   - Hypothesis A: full projection rebuild over-materializes historical dust rows — confirmed / falsified / partially confirmed.
+   - Hypothesis B: portfolio-anchor projection row receives fill-native invariant — confirmed / falsified / partially confirmed.
+   - Hypothesis C: correction path compares target residual to whole portfolio — confirmed / falsified / partially confirmed.
+   - Hypothesis D: repair flow final safe_to_apply is not governed by final post-state — confirmed / falsified / partially confirmed.
 
 3. Design assessment
-   - Stale halt clear model after the patch.
-   - How current active blockers differ from historical/repaired reason codes.
-   - How canonical open exposure becomes position-management-ready.
-   - When HALT_RISK_OPEN_POSITION is still valid.
-   - When flatten-position is still recommended.
+   - Canonical truth vs derived projection.
+   - Lot provenance model.
+   - Invariants by provenance type.
+   - Full projection rebuild terminal invariant.
+   - How multi-lot partial close is handled.
    - What still fails closed.
 
 4. Code changes
@@ -867,12 +917,11 @@ When finished, produce a report with exactly these sections:
 
 5. Tests
    - Tests added/updated.
-   - Historical repaired fee-gap stale halt clear tests.
-   - Active fee-gap block tests.
-   - Clean OPEN_EXECUTABLE position-management tests.
-   - HALT_RISK_OPEN_POSITION suppression tests for clean exposure.
-   - Unsafe exposure blocked tests.
-   - Stale halt clear observability tests.
+   - Historical fragmentation tests.
+   - Portfolio-anchor invariant tests.
+   - Fill-native invariant tests.
+   - Multi-lot partial-close tests.
+   - Repair-plan final-state tests.
    - Cross-surface consistency tests.
 
 6. Verification
@@ -882,10 +931,11 @@ When finished, produce a report with exactly these sections:
 
 7. EC2 operational follow-up
    - Commands to run on EC2.
-   - Expected output before resume.
-   - Expected output after resume.
-   - Expected behavior on the next strategy SELL/exit decision.
+   - Expected preview output.
+   - When apply is safe.
+   - Expected post-apply output.
+   - When resume/systemctl start is safe.
 ```
 
-The goal is not to make the bot less strict. The goal is to make it strict about **current active blockers**, not stale historical reason codes or the mere existence of a correctly accounted open position.
+The goal is not to make the bot less strict. The goal is to make it strict about the right thing: **current broker/portfolio anchored projection correctness with explicit provenance**, not accidental historical dust materialization or invalid fill-native checks against portfolio-anchor rows.
 

@@ -3776,8 +3776,38 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         f"projection_kind={plan.get('projection_kind') or 'unknown'} "
         f"rebuildable={1 if bool(plan.get('rebuildable')) else 0} "
         f"safe_to_rebuild={1 if bool(plan.get('safe_to_rebuild')) else 0} "
+        f"final_safe_to_rebuild={1 if bool(plan.get('final_safe_to_rebuild')) else 0} "
         f"reason={plan.get('reason') or 'none'}"
     )
+    if plan.get("repair_kind"):
+        print(
+            "  "
+            f"repair_kind={plan.get('repair_kind') or 'unknown'} "
+            f"truth_source={plan.get('truth_source') or 'unknown'} "
+            f"pre_projected_total_qty={float(plan.get('pre_projected_total_qty') or 0.0):.12f} "
+            f"replay_projected_total_qty={float(plan.get('replay_projected_total_qty') or 0.0):.12f} "
+            f"post_publish_projected_total_qty={float(plan.get('post_publish_projected_total_qty') or 0.0):.12f}"
+        )
+        print(
+            "  "
+            f"projection_converged_before={1 if bool(plan.get('projection_converged_before')) else 0} "
+            "projection_converged_after_replay="
+            f"{1 if bool(plan.get('projection_converged_after_replay')) else 0} "
+            "projection_converged_after_publish="
+            f"{1 if bool(plan.get('projection_converged_after_publish')) else 0} "
+            "source_mode_of_new_rows="
+            f"{'|'.join(str(item) for item in (plan.get('source_mode_of_new_rows') or [])) or 'none'}"
+        )
+        print(
+            "  "
+            f"target_lot_provenance_kind={plan.get('target_lot_provenance_kind') or 'unknown'} "
+            f"fill_qty_invariant_applies={1 if bool(plan.get('fill_qty_invariant_applies')) else 0} "
+            "semantic_contract_check_applicable="
+            f"{1 if bool(plan.get('semantic_contract_check_applicable')) else 0} "
+            "semantic_contract_check_skipped_reason="
+            f"{plan.get('semantic_contract_check_skipped_reason') or 'none'} "
+            f"rollback_path={plan.get('rollback_path') or 'none'}"
+        )
     print("  candidate_repairs:")
     for candidate in plan.get("candidate_repairs") or []:
         print(
@@ -3785,7 +3815,8 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
             f"name={candidate.get('name') or 'unknown'} "
             f"needed={1 if bool(candidate.get('needed')) else 0} "
             f"active_issue={1 if bool(candidate.get('active_issue')) else 0} "
-            f"safe_to_apply={1 if bool(candidate.get('safe_to_apply')) else 0}"
+            f"safe_to_apply={1 if bool(candidate.get('safe_to_apply')) else 0} "
+            f"final_safe_to_apply={1 if bool(candidate.get('final_safe_to_apply')) else 0}"
         )
         print(f"      preconditions={candidate.get('preconditions') or 'none'}")
         print(
@@ -4355,11 +4386,45 @@ def cmd_rebuild_position_authority(
                 f"submit_unknown={int(preview.get('submit_unknown_count') or 0)} "
                 f"unresolved_fee_pending={1 if bool(preview.get('unresolved_fee_pending')) else 0}"
             )
+            print(
+                "  "
+                f"repair_kind={preview.get('repair_kind') or 'full_projection_rebuild'} "
+                f"truth_source={preview.get('truth_source') or 'unknown'} "
+                f"pre_projected_total_qty={float(preview.get('pre_projected_total_qty') or 0.0):.12f} "
+                f"replay_projected_total_qty={float(preview.get('replay_projected_total_qty') or 0.0):.12f} "
+                f"post_publish_projected_total_qty={float(preview.get('post_publish_projected_total_qty') or 0.0):.12f}"
+            )
+            print(
+                "  "
+                f"projection_converged_before={1 if bool(preview.get('projection_converged_before')) else 0} "
+                "projection_converged_after_replay="
+                f"{1 if bool(preview.get('projection_converged_after_replay')) else 0} "
+                "projection_converged_after_publish="
+                f"{1 if bool(preview.get('projection_converged_after_publish')) else 0} "
+                "source_mode_of_new_rows="
+                f"{'|'.join(str(item) for item in (preview.get('source_mode_of_new_rows') or [])) or 'none'}"
+            )
+            print(
+                "  "
+                f"fill_qty_invariant_applies={1 if bool(preview.get('target_lot_fill_qty_invariant_applies')) else 0} "
+                "semantic_contract_check_applicable="
+                f"{1 if bool(preview.get('semantic_contract_check_applicable')) else 0} "
+                "semantic_contract_check_skipped_reason="
+                f"{preview.get('semantic_contract_check_skipped_reason') or 'none'} "
+                f"final_safe_to_apply={1 if bool(preview.get('final_safe_to_apply')) else 0}"
+            )
             gate_report = preview.get("full_projection_rebuild_gate_report") or {}
             print(
                 "  "
                 "full_projection_rebuild_gate_reasons="
                 f"{'|'.join(str(item) for item in gate_report.get('reasons') or []) or 'none'}"
+            )
+            post_state_preview = preview.get("full_projection_rebuild_post_state_preview") or {}
+            print(
+                "  "
+                "final_gate_failures="
+                f"{'|'.join(str(item) for item in (post_state_preview.get('final_gate_failures') or [])) or 'none'} "
+                f"rollback_path={preview.get('rollback_path') or 'none'}"
             )
         print(f"  next_required_action={preview['next_required_action']}")
         print(f"  recommended_command={preview['recommended_command']}")
