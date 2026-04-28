@@ -36,6 +36,10 @@ from .runtime_readiness import build_broker_position_evidence, compute_runtime_r
 
 _EPS = 1e-12
 FULL_PROJECTION_REBUILD_REASON = "full_projection_materialized_rebuild"
+FLAT_STALE_LOT_PROJECTION_REPAIR_REASON = "flat_stale_lot_projection_repair"
+FLAT_STALE_LOT_PROJECTION_REPAIR_COMMAND = (
+    "uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes"
+)
 
 
 def _fetch_anchor_buy_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -218,6 +222,200 @@ def _query_runtime_gate_counts(conn: sqlite3.Connection) -> dict[str, int]:
         "recovery_required_count": int((open_order_row or {"recovery_required_count": 0})["recovery_required_count"] or 0),
         "pending_submit_count": int((open_order_row or {"pending_submit_count": 0})["pending_submit_count"] or 0),
         "submit_unknown_count": int((open_order_row or {"submit_unknown_count": 0})["submit_unknown_count"] or 0),
+    }
+
+
+def _portfolio_asset_qty(conn: sqlite3.Connection) -> float:
+    row = conn.execute(
+        "SELECT asset_qty, asset_available, asset_locked FROM portfolio WHERE id=1"
+    ).fetchone()
+    if row is None:
+        return 0.0
+    try:
+        keys = row.keys()
+    except AttributeError:
+        keys = ()
+    if "asset_available" in keys:
+        return normalize_asset_qty(float(row["asset_available"] or 0.0) + float(row["asset_locked"] or 0.0))
+    return normalize_asset_qty(float(row["asset_qty"] or 0.0))
+
+
+def _load_latest_terminal_sell_evidence(conn: sqlite3.Connection) -> dict[str, Any]:
+    latest_order = conn.execute(
+        """
+        SELECT id, client_order_id, exchange_order_id, status, side, qty_filled, qty_req, created_ts, updated_ts
+        FROM orders
+        ORDER BY updated_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    latest_trade = conn.execute(
+        """
+        SELECT id, ts, client_order_id, side, qty, asset_after
+        FROM trades
+        WHERE pair=?
+        ORDER BY ts DESC, id DESC
+        LIMIT 1
+        """,
+        (settings.PAIR,),
+    ).fetchone()
+    order_dict = dict(latest_order) if latest_order is not None else None
+    trade_dict = dict(latest_trade) if latest_trade is not None else None
+    return {
+        "latest_terminal_order": order_dict,
+        "latest_trade": trade_dict,
+        "latest_sell_client_order_id": (
+            str(latest_order["client_order_id"]) if latest_order is not None else None
+        ),
+        "latest_sell_exchange_order_id": (
+            str(latest_order["exchange_order_id"]) if latest_order is not None and latest_order["exchange_order_id"] else None
+        ),
+        "latest_sell_qty": (
+            normalize_asset_qty(float(latest_order["qty_filled"] or latest_order["qty_req"] or 0.0))
+            if latest_order is not None
+            else 0.0
+        ),
+        "latest_trade_id": int(latest_trade["id"]) if latest_trade is not None else None,
+        "latest_trade_asset_after": (
+            normalize_asset_qty(float(latest_trade["asset_after"] or 0.0)) if latest_trade is not None else None
+        ),
+        "latest_trade_qty": (
+            normalize_asset_qty(float(latest_trade["qty"] or 0.0)) if latest_trade is not None else 0.0
+        ),
+    }
+
+
+def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> dict[str, Any]:
+    snapshot = compute_runtime_readiness_snapshot(conn)
+    readiness = snapshot.as_dict()
+    projection = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    broker_evidence = build_broker_position_evidence(snapshot.reconcile_metadata, pair=settings.PAIR)
+    broker_qty = normalize_asset_qty(float(broker_evidence.get("broker_qty") or 0.0))
+    broker_qty_known = bool(broker_evidence.get("broker_qty_known"))
+    portfolio_qty = _portfolio_asset_qty(conn)
+    projected_total_qty = normalize_asset_qty(float(projection.get("projected_total_qty") or 0.0))
+    stale_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT id, pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                   qty_open, executable_lot_count, dust_tracking_lot_count, internal_lot_size,
+                   lot_min_qty, lot_qty_step, lot_min_notional_krw, lot_max_qty_decimals,
+                   lot_rule_source_mode, position_semantic_basis, position_state, entry_fee_total,
+                   strategy_name, entry_decision_id, entry_decision_linkage
+            FROM open_position_lots
+            WHERE pair=? AND qty_open > 1e-12
+            ORDER BY id ASC
+            """,
+            (settings.PAIR,),
+        ).fetchall()
+    ]
+    stale_total_qty = normalize_asset_qty(sum(float(row.get("qty_open") or 0.0) for row in stale_rows))
+    latest_sell = _load_latest_terminal_sell_evidence(conn)
+    gate_counts = _query_runtime_gate_counts(conn)
+    remote_open_order_count = int(snapshot.reconcile_metadata.get("remote_open_order_found", 0) or 0)
+    try:
+        accounting_replay = compute_accounting_replay(conn)
+        replay_qty = normalize_asset_qty(float(accounting_replay.get("replay_qty") or 0.0))
+        accounting_projection_ok = bool(abs(replay_qty - portfolio_qty) <= _EPS)
+    except RuntimeError as exc:
+        accounting_replay = {"error": str(exc)}
+        accounting_projection_ok = False
+
+    blockers: list[str] = []
+    if not broker_qty_known:
+        blockers.append("broker_qty_unknown")
+    if abs(broker_qty) > _EPS:
+        blockers.append("broker_not_flat")
+    if abs(portfolio_qty) > _EPS:
+        blockers.append("portfolio_not_flat")
+    broker_portfolio_converged = bool(broker_qty_known and abs(broker_qty - portfolio_qty) <= _EPS)
+    if not broker_portfolio_converged:
+        blockers.append("broker_portfolio_not_converged")
+    if int(gate_counts["unresolved_open_order_count"]) > 0:
+        blockers.append("open_orders_present")
+    if remote_open_order_count > 0:
+        blockers.append("remote_open_orders_present")
+    if int(gate_counts["pending_submit_count"]) > 0:
+        blockers.append("pending_submit_present")
+    if int(gate_counts["submit_unknown_count"]) > 0:
+        blockers.append("submit_unknown_present")
+    if int(gate_counts["recovery_required_count"]) > 0:
+        blockers.append("recovery_required_orders_present")
+    if not accounting_projection_ok:
+        blockers.append("accounting_projection_mismatch")
+
+    latest_order = latest_sell.get("latest_terminal_order") or {}
+    latest_trade = latest_sell.get("latest_trade") or {}
+    terminal_sell_ok = bool(
+        latest_order
+        and str(latest_order.get("side") or "").upper() == "SELL"
+        and str(latest_order.get("status") or "").upper() == "FILLED"
+        and latest_trade
+        and str(latest_trade.get("side") or "").upper() == "SELL"
+        and str(latest_trade.get("client_order_id") or "") == str(latest_order.get("client_order_id") or "")
+        and abs(normalize_asset_qty(float(latest_trade.get("asset_after") or 0.0))) <= _EPS
+    )
+    if not terminal_sell_ok:
+        blockers.append("missing_terminal_flat_sell_evidence")
+
+    if projected_total_qty <= _EPS:
+        blockers.append("stale_lot_projection_not_present")
+    if not stale_rows:
+        blockers.append("stale_lot_rows_missing")
+    if any(str(row.get("position_state") or "") != DUST_TRACKING_STATE for row in stale_rows):
+        blockers.append("non_dust_tracking_lot_rows_present")
+    if any(int(row.get("executable_lot_count") or 0) != 0 for row in stale_rows):
+        blockers.append("executable_lot_rows_present")
+    if abs(stale_total_qty - projected_total_qty) > _EPS:
+        blockers.append("stale_lot_total_projection_mismatch")
+    if terminal_sell_ok and abs(stale_total_qty - normalize_asset_qty(float(latest_trade.get("qty") or 0.0))) > _EPS:
+        blockers.append("stale_lot_qty_latest_sell_qty_mismatch")
+
+    blockers = list(dict.fromkeys(blockers))
+    needed = bool(projected_total_qty > _EPS and abs(portfolio_qty) <= _EPS and stale_rows)
+    safe = bool(needed and not blockers)
+    return {
+        "needed": needed,
+        "safe_to_apply": safe,
+        "final_safe_to_apply": safe,
+        "repair_mode": "flat_stale_projection_repair",
+        "reason": "flat_stale_lot_projection_detected" if needed else "flat_stale_lot_projection_not_present",
+        "blockers": blockers,
+        "why_unsafe": blockers,
+        "broker_qty": broker_qty,
+        "broker_qty_known": broker_qty_known,
+        "portfolio_qty": portfolio_qty,
+        "broker_portfolio_converged": broker_portfolio_converged,
+        "remote_open_order_count": remote_open_order_count,
+        **gate_counts,
+        "accounting_projection_ok": accounting_projection_ok,
+        "accounting_replay": accounting_replay,
+        "latest_sell_client_order_id": latest_sell.get("latest_sell_client_order_id"),
+        "latest_sell_exchange_order_id": latest_sell.get("latest_sell_exchange_order_id"),
+        "latest_sell_qty": latest_sell.get("latest_sell_qty"),
+        "latest_trade_id": latest_sell.get("latest_trade_id"),
+        "latest_sell_trade_id": latest_sell.get("latest_trade_id"),
+        "latest_trade_asset_after": latest_sell.get("latest_trade_asset_after"),
+        "latest_trade": latest_sell.get("latest_trade"),
+        "latest_terminal_order": latest_sell.get("latest_terminal_order"),
+        "stale_lot_row_count": len(stale_rows),
+        "stale_lot_qty_total": stale_total_qty,
+        "stale_lot_rows": stale_rows,
+        "projected_total_qty_before": projected_total_qty,
+        "projected_total_qty_after_preview": 0.0 if safe else projected_total_qty,
+        "expected_post_projection_converged": bool(safe),
+        "startup_gate_blockers": list(readiness.get("resume_blockers") or []),
+        "readiness_recovery_stage": readiness.get("recovery_stage"),
+        "recommended_command": FLAT_STALE_LOT_PROJECTION_REPAIR_COMMAND if safe else None,
+        "preview_command": "uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair",
+        "touched_tables": [
+            "open_position_lots",
+            "position_authority_repairs",
+            "position_authority_projection_publications",
+        ],
+        "expected_after": "open_position_lots projection converges to broker/portfolio flat state",
+        "preconditions": "broker_qty=0, portfolio_qty=0, latest SELL filled, stale dust_tracking projection present",
     }
 
 
@@ -814,7 +1012,130 @@ def _simulate_non_full_position_authority_repair(
     }
 
 
-def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: bool = False) -> dict[str, Any]:
+def build_position_authority_rebuild_preview(
+    conn,
+    *,
+    full_projection_rebuild: bool = False,
+    flat_stale_projection_repair: bool = False,
+) -> dict[str, Any]:
+    if flat_stale_projection_repair:
+        flat_preview = build_flat_stale_lot_projection_repair_preview(conn)
+        return {
+            "needs_rebuild": bool(flat_preview.get("needed")),
+            "safe_to_apply": bool(flat_preview.get("safe_to_apply")),
+            "final_safe_to_apply": bool(flat_preview.get("final_safe_to_apply")),
+            "pre_gate_passed": bool(flat_preview.get("safe_to_apply")),
+            "action_state": (
+                "safe_to_apply_now" if bool(flat_preview.get("safe_to_apply")) else "blocked_pending_evidence"
+            ),
+            "eligibility_reason": (
+                "flat stale lot projection repair applicable"
+                if bool(flat_preview.get("safe_to_apply"))
+                else ", ".join(str(item) for item in flat_preview.get("blockers") or [])
+                or str(flat_preview.get("reason") or "flat stale lot projection repair not applicable")
+            ),
+            "recovery_stage": str(flat_preview.get("readiness_recovery_stage") or "UNKNOWN"),
+            "repair_mode": "flat_stale_projection_repair",
+            "next_required_action": (
+                "apply_flat_stale_lot_projection_repair"
+                if bool(flat_preview.get("safe_to_apply"))
+                else "review_position_authority_evidence"
+            ),
+            "operator_next_action": (
+                "apply_flat_stale_lot_projection_repair"
+                if bool(flat_preview.get("safe_to_apply"))
+                else "review_position_authority_evidence"
+            ),
+            "preview_command": str(flat_preview.get("preview_command") or ""),
+            "recommended_command": flat_preview.get("recommended_command"),
+            "position_authority_assessment": build_position_authority_assessment(conn, pair=settings.PAIR),
+            "portfolio_qty": float(flat_preview.get("portfolio_qty") or 0.0),
+            "accounted_buy_qty": 0.0,
+            "accounted_sell_qty": float(flat_preview.get("latest_sell_qty") or 0.0),
+            "accounted_net_qty": 0.0,
+            "accounted_buy_fill_count": 0,
+            "sell_trade_count": 1 if flat_preview.get("latest_sell_trade_id") is not None else 0,
+            "existing_lot_rows": int(flat_preview.get("stale_lot_row_count") or 0),
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": int(flat_preview.get("stale_lot_row_count") or 0),
+            "authority_gap_reason": str(flat_preview.get("reason") or "none"),
+            "projection_converged": False,
+            "projected_total_qty": float(flat_preview.get("projected_total_qty_before") or 0.0),
+            "projected_qty_excess": float(flat_preview.get("projected_total_qty_before") or 0.0),
+            "lot_row_count": int(flat_preview.get("stale_lot_row_count") or 0),
+            "other_active_qty": 0.0,
+            "portfolio_projection_publication_present": False,
+            "portfolio_projection_repair_event_status": "none",
+            "target_lot_provenance_kind": "stale_dust_tracking_projection",
+            "target_lot_source_modes": sorted(
+                {
+                    str(row.get("lot_rule_source_mode") or "")
+                    for row in flat_preview.get("stale_lot_rows") or []
+                    if str(row.get("lot_rule_source_mode") or "")
+                }
+            ),
+            "target_lot_fill_qty_invariant_applies": False,
+            "semantic_contract_check_applicable": False,
+            "semantic_contract_check_skipped_reason": "verified_flat_stale_projection_reset",
+            "semantic_contract_check_passed": bool(flat_preview.get("safe_to_apply")),
+            "portfolio_anchor_missing_evidence": [],
+            "manual_projection_missing_evidence": [],
+            "manual_db_update_unsafe": bool(not flat_preview.get("safe_to_apply")),
+            "sell_after_target_buy_qty": 0.0,
+            "target_lifecycle_matched_qty": 0.0,
+            "effective_closed_qty": float(flat_preview.get("latest_sell_qty") or 0.0),
+            "expected_residual_qty": 0.0,
+            "target_residual_qty_delta": 0.0,
+            "residual_qty_tolerance": _EPS,
+            "sell_after_qty_authority_mode": "terminal_flat_sell_evidence",
+            "lifecycle_matched_qty_accepted": False,
+            "lifecycle_matched_qty_acceptance_reason": "not_required_for_verified_flat_reset",
+            "needs_full_projection_rebuild": False,
+            "broker_qty": float(flat_preview.get("broker_qty") or 0.0),
+            "broker_qty_known": bool(flat_preview.get("broker_qty_known")),
+            "broker_qty_value_source": None,
+            "broker_qty_evidence_source": None,
+            "broker_qty_evidence_observed_ts_ms": None,
+            "balance_source": None,
+            "balance_source_stale": None,
+            "balance_snapshot_available_for_health": None,
+            "balance_snapshot_available_for_position_rebuild": None,
+            "missing_evidence_fields": [],
+            "position_rebuild_blockers": [],
+            "base_currency": None,
+            "quote_currency": None,
+            "asset_available": None,
+            "asset_locked": None,
+            "cash_available": None,
+            "cash_locked": None,
+            "remote_open_order_count": int(flat_preview.get("remote_open_order_count") or 0),
+            "broker_portfolio_converged": bool(flat_preview.get("broker_portfolio_converged")),
+            "accounting_projection_ok": bool(flat_preview.get("accounting_projection_ok")),
+            "unresolved_open_order_count": int(flat_preview.get("unresolved_open_order_count") or 0),
+            "pending_submit_count": int(flat_preview.get("pending_submit_count") or 0),
+            "submit_unknown_count": int(flat_preview.get("submit_unknown_count") or 0),
+            "unresolved_fee_pending": False,
+            "full_projection_rebuild_gate_report": None,
+            "repair_kind": "flat_stale_lot_projection_repair",
+            "truth_source": "broker_portfolio_terminal_sell_flat_evidence",
+            "pre_projected_total_qty": float(flat_preview.get("projected_total_qty_before") or 0.0),
+            "replay_projected_total_qty": None,
+            "post_publish_projected_total_qty": float(flat_preview.get("projected_total_qty_after_preview") or 0.0),
+            "projection_converged_before": False,
+            "projection_converged_after_replay": None,
+            "projection_converged_after_publish": bool(flat_preview.get("expected_post_projection_converged")),
+            "replay_projection_converged": None,
+            "post_publish_projection_converged": bool(flat_preview.get("expected_post_projection_converged")),
+            "source_mode_of_new_rows": [],
+            "rollback_path": "preview only; no DB changes committed",
+            "why_safe": (
+                "broker, portfolio, accounting replay, terminal SELL evidence, and dust-only stale rows prove flat reset"
+                if bool(flat_preview.get("safe_to_apply"))
+                else None
+            ),
+            "why_unsafe": list(flat_preview.get("blockers") or []),
+            "flat_stale_projection_repair_preview": flat_preview,
+        }
     snapshot = compute_runtime_readiness_snapshot(conn)
     authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
     lot_snapshot = snapshot.lot_snapshot
@@ -864,6 +1185,9 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
     full_projection_post_state_preview: dict[str, Any] | None = None
     post_state_preview: dict[str, Any] | None = None
     projection_convergence = dict(authority_assessment.get("projection_convergence") or {})
+    flat_preview = build_flat_stale_lot_projection_repair_preview(conn)
+    if not full_projection_rebuild and bool(flat_preview.get("needed")):
+        return build_position_authority_rebuild_preview(conn, flat_stale_projection_repair=True)
 
     if full_projection_rebuild or bool(authority_assessment.get("needs_full_projection_rebuild")):
         repair_mode = "full_projection_rebuild"
@@ -1334,6 +1658,139 @@ def _assert_post_repair_projection_converged(
     return convergence
 
 
+def apply_flat_stale_lot_projection_repair(
+    conn: sqlite3.Connection,
+    *,
+    note: str | None = None,
+) -> dict[str, Any]:
+    preview = build_flat_stale_lot_projection_repair_preview(conn)
+    if not bool(preview.get("safe_to_apply")):
+        if (
+            not bool(preview.get("needed"))
+            and float(preview.get("projected_total_qty_before") or 0.0) <= _EPS
+            and int(preview.get("stale_lot_row_count") or 0) == 0
+        ):
+            return {
+                "preview": preview,
+                "noop": True,
+                "lot_snapshot_before": summarize_position_lots(conn, pair=settings.PAIR).as_dict(),
+                "lot_snapshot_after": summarize_position_lots(conn, pair=settings.PAIR).as_dict(),
+                "post_repair_projection_convergence": build_lot_projection_convergence(conn, pair=settings.PAIR),
+            }
+        raise RuntimeError(
+            "flat stale lot projection repair is not safe to apply: "
+            f"{'|'.join(str(item) for item in preview.get('blockers') or []) or preview.get('reason') or 'unknown'}"
+        )
+
+    savepoint = "flat_stale_lot_projection_repair"
+    before = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+    convergence_before = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    readiness_before = compute_runtime_readiness_snapshot(conn).as_dict()
+    stale_rows = list(preview.get("stale_lot_rows") or [])
+    event_ts = int(time.time() * 1000)
+    repair_basis: dict[str, Any] = {
+        "event_type": FLAT_STALE_LOT_PROJECTION_REPAIR_REASON,
+        "repair_mode": "flat_stale_projection_repair",
+        "operator_command": FLAT_STALE_LOT_PROJECTION_REPAIR_COMMAND,
+        "operator_timestamp_ms": event_ts,
+        "preview": preview,
+        "broker_qty": float(preview.get("broker_qty") or 0.0),
+        "portfolio_qty": float(preview.get("portfolio_qty") or 0.0),
+        "latest_sell_client_order_id": preview.get("latest_sell_client_order_id"),
+        "latest_sell_exchange_order_id": preview.get("latest_sell_exchange_order_id"),
+        "latest_sell_qty": preview.get("latest_sell_qty"),
+        "latest_sell_trade_id": preview.get("latest_sell_trade_id"),
+        "latest_trade_id": preview.get("latest_trade_id"),
+        "latest_trade_asset_after": preview.get("latest_trade_asset_after"),
+        "latest_terminal_order": preview.get("latest_terminal_order"),
+        "latest_trade": preview.get("latest_trade"),
+        "open_position_lots_before_repair": stale_rows,
+        "projected_total_qty_before": preview.get("projected_total_qty_before"),
+        "startup_gate_blockers": list(preview.get("startup_gate_blockers") or []),
+        "readiness_recovery_stage": preview.get("readiness_recovery_stage"),
+        "lot_snapshot_before": before,
+        "projection_convergence_before": convergence_before,
+        "runtime_readiness_before": readiness_before,
+        "accounting_replay": preview.get("accounting_replay"),
+    }
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        ids = [int(row["id"]) for row in stale_rows]
+        placeholders = ",".join("?" for _ in ids)
+        deleted = conn.execute(
+            f"DELETE FROM open_position_lots WHERE pair=? AND id IN ({placeholders})",
+            (settings.PAIR, *ids),
+        ).rowcount
+        if int(deleted or 0) != len(ids):
+            raise RuntimeError("flat stale lot projection repair postcondition failed: stale row set changed")
+        after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+        repair_basis["lot_snapshot_after"] = after
+        convergence_after = _assert_post_repair_projection_converged(
+            conn,
+            repair_basis=repair_basis,
+            repair_mode="flat_stale_projection_repair",
+        )
+        if (
+            abs(float(convergence_after.get("projected_total_qty") or 0.0)) > _EPS
+            or abs(float(convergence_after.get("portfolio_qty") or 0.0)) > _EPS
+            or abs(float(preview.get("broker_qty") or 0.0)) > _EPS
+        ):
+            raise RuntimeError(
+                "flat stale lot projection repair postcondition failed: "
+                f"projected_total_qty={float(convergence_after.get('projected_total_qty') or 0.0):.12f},"
+                f"portfolio_qty={float(convergence_after.get('portfolio_qty') or 0.0):.12f},"
+                f"broker_qty={float(preview.get('broker_qty') or 0.0):.12f}"
+            )
+        post_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+        repair_basis["position_authority_assessment_after"] = post_assessment
+        if any(
+            bool(post_assessment.get(key))
+            for key in (
+                "needs_full_projection_rebuild",
+                "needs_correction",
+                "needs_portfolio_projection_repair",
+                "needs_residual_normalization",
+            )
+        ):
+            raise RuntimeError(
+                "flat stale lot projection repair postcondition failed: "
+                f"blockers={'|'.join(str(item) for item in post_assessment.get('blockers') or []) or 'none'}"
+            )
+        publication = record_position_authority_projection_publication(
+            conn,
+            event_ts=event_ts,
+            pair=settings.PAIR,
+            target_trade_id=int(preview.get("latest_sell_trade_id") or 0),
+            source="manual_flat_stale_lot_projection_repair_publish",
+            publish_basis=repair_basis,
+            note=note,
+        )
+        repair_basis["projection_publication"] = publication
+        repair = record_position_authority_repair(
+            conn,
+            event_ts=event_ts,
+            source="manual_flat_stale_lot_projection_repair",
+            reason=FLAT_STALE_LOT_PROJECTION_REPAIR_REASON,
+            repair_basis=repair_basis,
+            note=note,
+        )
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    return {
+        "preview": preview,
+        "repair": repair,
+        "projection_publication": publication,
+        "repair_basis": repair_basis,
+        "lot_snapshot_before": before,
+        "lot_snapshot_after": after,
+        "post_repair_projection_convergence": convergence_after,
+        "post_repair_assessment": post_assessment,
+    }
+
+
 def _load_position_authority_history_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     repair_summary = conn.execute(
         """
@@ -1607,7 +2064,10 @@ def apply_position_authority_rebuild(
     *,
     note: str | None = None,
     full_projection_rebuild: bool = False,
+    flat_stale_projection_repair: bool = False,
 ) -> dict[str, Any]:
+    if flat_stale_projection_repair:
+        return apply_flat_stale_lot_projection_repair(conn, note=note)
     preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=full_projection_rebuild)
     if full_projection_rebuild:
         return _apply_full_projection_rebuild(conn, note=note)

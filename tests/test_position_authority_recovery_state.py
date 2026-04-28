@@ -39,7 +39,9 @@ from bithumb_bot.oms import set_status
 from bithumb_bot.position_authority_repair import (
     _simulate_non_full_position_authority_repair,
     _replace_with_portfolio_anchored_projection,
+    apply_flat_stale_lot_projection_repair,
     apply_position_authority_rebuild,
+    build_flat_stale_lot_projection_repair_preview,
     build_position_authority_rebuild_preview,
 )
 from bithumb_bot.position_authority_state import build_position_authority_assessment
@@ -312,6 +314,113 @@ def _record_portfolio_projection_broker_evidence(*, broker_qty: float) -> None:
         },
         now_epoch_sec=1.0,
     )
+
+
+def _materialize_flat_stale_projection_fixture(
+    conn,
+    *,
+    broker_qty: float = 0.0,
+    portfolio_qty: float = 0.0,
+    open_order_status: str | None = None,
+    include_terminal_sell: bool = True,
+) -> list[int]:
+    _apply_filled_order(
+        conn,
+        client_order_id="live_1777186500000_buy_aee54bab",
+        side="BUY",
+        qty=0.00039982,
+        ts_ms=1_777_186_500_000,
+        fill_id="flat-stale-buy-fill-1",
+    )
+    _apply_filled_order(
+        conn,
+        client_order_id="live_1777248060000_buy_aee958b7",
+        side="BUY",
+        qty=0.00009998,
+        ts_ms=1_777_248_060_000,
+        fill_id="flat-stale-buy-fill-2",
+    )
+    if include_terminal_sell:
+        _apply_filled_order(
+            conn,
+            client_order_id="live_1777367760000_sell_ae50365f",
+            side="SELL",
+            qty=0.0004998,
+            ts_ms=1_777_367_760_000,
+            fill_id="flat-stale-sell-fill",
+        )
+    conn.execute("DELETE FROM open_position_lots WHERE pair=?", (settings.PAIR,))
+    buy_rows = conn.execute(
+        """
+        SELECT id, client_order_id, ts, price
+        FROM trades
+        WHERE client_order_id IN (?, ?)
+        ORDER BY id ASC
+        """,
+        ("live_1777186500000_buy_aee54bab", "live_1777248060000_buy_aee958b7"),
+    ).fetchall()
+    quantities = [0.00039982, 0.00009998]
+    stale_ids: list[int] = []
+    for idx, row in enumerate(buy_rows):
+        cursor = conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                int(row["id"]),
+                str(row["client_order_id"]),
+                f"flat-stale-buy-fill-{idx + 1}",
+                int(row["ts"]),
+                float(row["price"]),
+                quantities[idx],
+                0,
+                1,
+                1,
+                LOT_SIZE,
+                LOT_SIZE,
+                0.0001,
+                0.0,
+                8,
+                "ledger",
+                "lot-native",
+                "dust_tracking",
+                1.0,
+            ),
+        )
+        stale_ids.append(int(cursor.lastrowid))
+    if open_order_status:
+        record_order_if_missing(
+            conn,
+            client_order_id="blocking_open_order",
+            side="BUY",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_777_367_900_000,
+            status=open_order_status,
+            internal_lot_size=LOT_SIZE,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+    if abs(portfolio_qty) > 1e-12:
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=portfolio_qty)
+    replay = compute_accounting_replay(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=float(replay.get("replay_cash") or settings.START_CASH_KRW),
+        cash_locked=0.0,
+        asset_available=portfolio_qty,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    _record_portfolio_projection_broker_evidence(broker_qty=broker_qty)
+    return stale_ids
 
 
 def _insert_live_incident_stale_dust_projection(conn) -> None:
@@ -2873,6 +2982,192 @@ def test_residual_only_repair_plan_inactive_candidates_do_not_carry_recommended_
     assert rebuild_candidate["needed"] is False
     assert rebuild_candidate["recommended_command"] is None
     assert rebuild_candidate["command_applicable"] is False
+
+
+def test_flat_stale_lot_projection_detector_identifies_ec2_style_case(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(conn)
+        preview = build_flat_stale_lot_projection_repair_preview(conn)
+    finally:
+        conn.close()
+
+    assert preview["needed"] is True
+    assert preview["safe_to_apply"] is True
+    assert preview["repair_mode"] == "flat_stale_projection_repair"
+    assert preview["stale_lot_row_count"] == 2
+    assert preview["stale_lot_qty_total"] == pytest.approx(0.0004998)
+    assert preview["latest_sell_client_order_id"] == "live_1777367760000_sell_ae50365f"
+    assert preview["recommended_command"] == (
+        "uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes"
+    )
+
+
+def test_flat_stale_lot_projection_apply_clears_projection_and_records_audit(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        stale_ids = _materialize_flat_stale_projection_fixture(conn)
+        before_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()["cnt"]
+        result = apply_flat_stale_lot_projection_repair(conn, note="test flat stale repair")
+        conn.commit()
+        convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+        after_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()["cnt"]
+        repair_row = conn.execute(
+            "SELECT repair_basis FROM position_authority_repairs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert convergence["projected_total_qty"] == pytest.approx(0.0)
+    assert convergence["portfolio_qty"] == pytest.approx(0.0)
+    assert convergence["converged"] is True
+    assert after_count == before_count + 1
+    assert result["projection_publication"]["created"] is True
+    basis = json.loads(repair_row["repair_basis"])
+    assert basis["latest_sell_client_order_id"] == "live_1777367760000_sell_ae50365f"
+    assert basis["latest_sell_qty"] == pytest.approx(0.0004998)
+    assert [row["id"] for row in basis["open_position_lots_before_repair"]] == stale_ids
+    assert basis["post_repair_projection_convergence"]["converged"] is True
+
+
+def test_flat_stale_lot_projection_recovery_report_clears_position_authority_blocker(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(conn)
+    finally:
+        conn.close()
+
+    before = _load_recovery_report()
+    assert before["lot_projection_converged"] is False
+    assert before["position_authority_rebuild_preview"]["repair_mode"] == "flat_stale_projection_repair"
+    assert before["position_authority_rebuild_preview"]["safe_to_apply"] is True
+
+    conn = ensure_db(str(recovery_db))
+    try:
+        apply_flat_stale_lot_projection_repair(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    after = _load_recovery_report()
+    assert after["lot_projection_converged"] is True
+    assert after["runtime_readiness"]["projection_converged"] is True
+    assert "POSITION_AUTHORITY_CORRECTION_REQUIRED" not in after["runtime_readiness"]["resume_blockers"]
+    assert "AUTHORITY_PROJECTION_NON_CONVERGED" not in after["runtime_readiness"]["resume_blockers"]
+    assert after["can_resume"] is True
+
+
+@pytest.mark.parametrize(
+    ("broker_qty", "portfolio_qty", "expected_blocker"),
+    [
+        (0.0001, 0.0, "broker_not_flat"),
+        (0.0, 0.0001, "portfolio_not_flat"),
+    ],
+)
+def test_flat_stale_lot_projection_unsafe_when_broker_or_portfolio_not_flat(
+    recovery_db,
+    broker_qty,
+    portfolio_qty,
+    expected_blocker,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(
+            conn,
+            broker_qty=broker_qty,
+            portfolio_qty=portfolio_qty,
+        )
+        preview = build_flat_stale_lot_projection_repair_preview(conn)
+        count_before = conn.execute("SELECT COUNT(*) AS cnt FROM open_position_lots").fetchone()["cnt"]
+        with pytest.raises(RuntimeError):
+            apply_flat_stale_lot_projection_repair(conn)
+        count_after = conn.execute("SELECT COUNT(*) AS cnt FROM open_position_lots").fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert expected_blocker in preview["blockers"]
+    assert count_after == count_before
+
+
+def test_flat_stale_lot_projection_unsafe_when_open_orders_exist(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(conn, open_order_status="NEW")
+        preview = build_flat_stale_lot_projection_repair_preview(conn)
+        with pytest.raises(RuntimeError):
+            apply_flat_stale_lot_projection_repair(conn)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "open_orders_present" in preview["blockers"]
+
+
+def test_flat_stale_lot_projection_unsafe_without_terminal_sell_evidence(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(conn, include_terminal_sell=False)
+        preview = build_flat_stale_lot_projection_repair_preview(conn)
+        with pytest.raises(RuntimeError):
+            apply_flat_stale_lot_projection_repair(conn)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "missing_terminal_flat_sell_evidence" in preview["blockers"]
+
+
+def test_flat_stale_lot_projection_repair_is_idempotent(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(conn)
+        first = apply_flat_stale_lot_projection_repair(conn)
+        conn.commit()
+        second_preview = build_flat_stale_lot_projection_repair_preview(conn)
+        second = apply_flat_stale_lot_projection_repair(conn)
+        repair_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    assert first["repair"]["created"] is True
+    assert second_preview["needed"] is False
+    assert second["noop"] is True
+    assert repair_count == 1
+
+
+def test_flat_stale_lot_projection_operator_commands_and_repair_plan(recovery_db, capsys):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(conn)
+    finally:
+        conn.close()
+
+    capsys.readouterr()
+    app_main(["repair-plan", "--json"])
+    plan = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    candidate = next(
+        item for item in plan["candidate_repairs"] if item["name"] == "flat-stale-lot-projection-repair"
+    )
+    assert candidate["needed"] is True
+    assert candidate["active_issue"] is True
+    assert candidate["safe_to_apply"] is True
+    assert candidate["final_safe_to_apply"] is True
+    assert candidate["recommended_command"] == (
+        "uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes"
+    )
+
+    app_main(["rebuild-position-authority", "--flat-stale-projection-repair"])
+    preview_out = capsys.readouterr().out
+    assert "repair_mode=flat_stale_projection_repair" in preview_out
+    assert "safe_to_apply=1" in preview_out
+    assert "stale_lot_qty_total=0.000499800000" in preview_out
+
+    app_main(["rebuild-position-authority", "--flat-stale-projection-repair", "--apply", "--yes"])
+    apply_out = capsys.readouterr().out
+    assert "[REBUILD-POSITION-AUTHORITY] applied" in apply_out
+    assert "new_projected_total_qty=0.000000000000" in apply_out
+    assert "projection_converged_after=1" in apply_out
 
 
 def test_diagnose_fill_trade_linkage_reports_matchable_and_unmatchable_rows(

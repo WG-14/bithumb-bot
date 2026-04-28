@@ -155,6 +155,7 @@ def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any
     manual_flat_preview = dict(report.get("manual_flat_accounting_repair_preview") or {})
     external_position_preview = dict(report.get("external_position_accounting_repair_preview") or {})
     position_preview = dict(report.get("position_authority_rebuild_preview") or {})
+    flat_stale_preview = dict(position_preview.get("flat_stale_projection_repair_preview") or {})
 
     candidates = [
         {
@@ -222,6 +223,53 @@ def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any
             "recommended_command": str(
                 external_position_preview.get("recommended_command")
                 or "uv run python bot.py external-position-accounting-repair"
+            ),
+        },
+        {
+            "name": "flat-stale-lot-projection-repair",
+            "needed": bool(
+                position_preview.get("repair_mode") == "flat_stale_projection_repair"
+                and (flat_stale_preview.get("needed") or position_preview.get("needs_rebuild"))
+            ),
+            "active_issue": bool(position_preview.get("repair_mode") == "flat_stale_projection_repair"),
+            "safe_to_apply": bool(flat_stale_preview.get("safe_to_apply") or position_preview.get("safe_to_apply")),
+            "pre_gate_passed": bool(position_preview.get("pre_gate_passed")),
+            "final_safe_to_apply": bool(position_preview.get("final_safe_to_apply")),
+            "preconditions": str(
+                flat_stale_preview.get("preconditions")
+                or "broker_qty=0, portfolio_qty=0, latest SELL filled, stale dust_tracking projection present"
+            ),
+            "touched_tables": [
+                "open_position_lots",
+                "position_authority_repairs",
+                "position_authority_projection_publications",
+            ],
+            "expected_after": str(
+                flat_stale_preview.get("expected_after")
+                or "open_position_lots projection converges to broker/portfolio flat state"
+            ),
+            "idempotency_key": "flat_stale_lot_projection_repair:<latest_sell_trade_id>:<stale_lot_qty_total>",
+            "rollback_or_backup": _backup_guidance(mode),
+            "repair_kind": "flat_stale_lot_projection_repair",
+            "truth_source": "broker_portfolio_terminal_sell_flat_evidence",
+            "broker_qty": flat_stale_preview.get("broker_qty", position_preview.get("broker_qty")),
+            "portfolio_qty": flat_stale_preview.get("portfolio_qty", position_preview.get("portfolio_qty")),
+            "stale_lot_row_count": flat_stale_preview.get("stale_lot_row_count"),
+            "stale_lot_qty_total": flat_stale_preview.get("stale_lot_qty_total"),
+            "latest_sell_client_order_id": flat_stale_preview.get("latest_sell_client_order_id"),
+            "latest_sell_trade_id": flat_stale_preview.get("latest_sell_trade_id"),
+            "latest_sell_qty": flat_stale_preview.get("latest_sell_qty"),
+            "projected_total_qty_before": flat_stale_preview.get("projected_total_qty_before"),
+            "projected_total_qty_after_preview": flat_stale_preview.get("projected_total_qty_after_preview"),
+            "projection_converged_after_publish": flat_stale_preview.get("expected_post_projection_converged"),
+            "operator_next_action": position_preview.get("operator_next_action"),
+            "preview_command": flat_stale_preview.get("preview_command") or position_preview.get("preview_command"),
+            "why_safe": position_preview.get("why_safe"),
+            "why_unsafe": list(flat_stale_preview.get("blockers") or position_preview.get("why_unsafe") or []),
+            "recommended_command": str(
+                flat_stale_preview.get("recommended_command")
+                or position_preview.get("recommended_command")
+                or ""
             ),
         },
         {

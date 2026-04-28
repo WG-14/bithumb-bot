@@ -4753,13 +4753,17 @@ def cmd_rebuild_position_authority(
     confirm: bool = False,
     note: str | None = None,
     full_projection_rebuild: bool = False,
+    flat_stale_projection_repair: bool = False,
 ) -> None:
+    if full_projection_rebuild and flat_stale_projection_repair:
+        print("[REBUILD-POSITION-AUTHORITY] refused: choose one repair mode flag")
+        raise SystemExit(1)
     conn = ensure_db()
     try:
-        preview = build_position_authority_rebuild_preview(
-            conn,
-            full_projection_rebuild=bool(full_projection_rebuild),
-        )
+        preview_kwargs = {"full_projection_rebuild": bool(full_projection_rebuild)}
+        if flat_stale_projection_repair:
+            preview_kwargs["flat_stale_projection_repair"] = True
+        preview = build_position_authority_rebuild_preview(conn, **preview_kwargs)
         repair_summary = get_position_authority_repair_summary(conn)
         print("[REBUILD-POSITION-AUTHORITY] preview")
         print(
@@ -4822,7 +4826,7 @@ def cmd_rebuild_position_authority(
                 f"{'|'.join(str(item) for item in (preview.get('portfolio_anchor_missing_evidence') or []) + (preview.get('manual_projection_missing_evidence') or [])) or 'none'} "
                 f"manual_db_update_unsafe={1 if bool(preview.get('manual_db_update_unsafe')) else 0}"
             )
-        if preview.get("repair_mode") == "full_projection_rebuild":
+        if preview.get("repair_mode") in {"full_projection_rebuild", "flat_stale_projection_repair"}:
             print(
                 "  "
                 f"projection_converged={1 if bool(preview.get('projection_converged')) else 0} "
@@ -4857,7 +4861,7 @@ def cmd_rebuild_position_authority(
             )
             print(
                 "  "
-                f"repair_kind={preview.get('repair_kind') or 'full_projection_rebuild'} "
+                f"repair_kind={preview.get('repair_kind') or preview.get('repair_mode') or 'full_projection_rebuild'} "
                 f"truth_source={preview.get('truth_source') or 'unknown'} "
                 f"pre_projected_total_qty={float(preview.get('pre_projected_total_qty') or 0.0):.12f} "
                 f"replay_projected_total_qty={float(preview.get('replay_projected_total_qty') or 0.0):.12f} "
@@ -4889,6 +4893,23 @@ def cmd_rebuild_position_authority(
                 f"{'|'.join(str(item) for item in gate_report.get('reasons') or []) or 'none'}"
             )
             post_state_preview = preview.get("full_projection_rebuild_post_state_preview") or {}
+            if preview.get("repair_mode") == "flat_stale_projection_repair":
+                flat_preview = preview.get("flat_stale_projection_repair_preview") or {}
+                print(
+                    "  "
+                    f"repair_mode=flat_stale_projection_repair "
+                    f"stale_lot_row_count={int(flat_preview.get('stale_lot_row_count') or 0)} "
+                    f"stale_lot_qty_total={float(flat_preview.get('stale_lot_qty_total') or 0.0):.12f} "
+                    f"latest_sell_client_order_id={flat_preview.get('latest_sell_client_order_id') or 'none'} "
+                    f"latest_sell_trade_id={flat_preview.get('latest_sell_trade_id') or 'none'} "
+                    f"latest_sell_qty={float(flat_preview.get('latest_sell_qty') or 0.0):.12f}"
+                )
+                print(
+                    "  "
+                    "flat_stale_projection_blockers="
+                    f"{'|'.join(str(item) for item in (flat_preview.get('blockers') or [])) or 'none'}"
+                )
+                post_state_preview = {"final_gate_failures": flat_preview.get("blockers") or []}
             print(
                 "  "
                 "final_gate_failures="
@@ -4909,11 +4930,13 @@ def cmd_rebuild_position_authority(
             print("[REBUILD-POSITION-AUTHORITY] confirmation required: re-run with --apply --yes")
             raise SystemExit(1)
 
-        result = apply_position_authority_rebuild(
-            conn,
-            note=note,
-            full_projection_rebuild=bool(full_projection_rebuild),
-        )
+        apply_kwargs = {
+            "note": note,
+            "full_projection_rebuild": bool(full_projection_rebuild),
+        }
+        if flat_stale_projection_repair:
+            apply_kwargs["flat_stale_projection_repair"] = True
+        result = apply_position_authority_rebuild(conn, **apply_kwargs)
         if bool(result.get("noop")):
             after = result["lot_snapshot_after"]
             repair = None
@@ -4939,7 +4962,7 @@ def cmd_rebuild_position_authority(
         metadata={},
     )
     print("[REBUILD-POSITION-AUTHORITY] applied")
-    if preview.get("repair_mode") == "full_projection_rebuild":
+    if preview.get("repair_mode") in {"full_projection_rebuild", "flat_stale_projection_repair"}:
         publication = result.get("projection_publication") or {}
         before = result.get("lot_snapshot_before") or {}
         convergence = result.get("post_repair_projection_convergence") or {}
@@ -4965,6 +4988,17 @@ def cmd_rebuild_position_authority(
             f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)} "
             f"post_repair_projection_converged={1 if bool(convergence.get('converged')) else 0}"
         )
+        if preview.get("repair_mode") == "flat_stale_projection_repair":
+            flat_preview = preview.get("flat_stale_projection_repair_preview") or {}
+            print(
+                "  "
+                f"repair_mode=flat_stale_projection_repair "
+                f"stale_lot_row_count={int(flat_preview.get('stale_lot_row_count') or 0)} "
+                f"stale_lot_qty_total={float(flat_preview.get('stale_lot_qty_total') or 0.0):.12f} "
+                f"latest_sell_client_order_id={flat_preview.get('latest_sell_client_order_id') or 'none'} "
+                f"latest_sell_trade_id={flat_preview.get('latest_sell_trade_id') or 'none'} "
+                f"projection_converged_after={1 if bool(convergence.get('converged')) else 0}"
+            )
         print(f"  trading_auto_cleared={1 if auto_cleared else 0}")
     else:
         print(
@@ -6020,6 +6054,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     rebuild_position_authority.add_argument("--full-projection-rebuild", action="store_true")
+    rebuild_position_authority.add_argument("--flat-stale-projection-repair", action="store_true")
     rebuild_position_authority.add_argument("--apply", action="store_true")
     rebuild_position_authority.add_argument("--yes", action="store_true")
     rebuild_position_authority.add_argument("--note")
@@ -6182,6 +6217,7 @@ def main(argv: list[str] | None = None) -> int:
             confirm=bool(args.yes),
             note=str(args.note) if args.note is not None else None,
             full_projection_rebuild=bool(args.full_projection_rebuild),
+            flat_stale_projection_repair=bool(args.flat_stale_projection_repair),
         )
     elif args.cmd == "record-external-cash-adjustment":
         cmd_record_external_cash_adjustment(
