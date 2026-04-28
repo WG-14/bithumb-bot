@@ -38,6 +38,7 @@ def _isolated_db(tmp_path):
         "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
+        "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
         "RESIDUAL_LIVE_SELL_MODE": settings.RESIDUAL_LIVE_SELL_MODE,
         "RESIDUAL_BUY_SIZING_MODE": settings.RESIDUAL_BUY_SIZING_MODE,
     }
@@ -1132,6 +1133,70 @@ def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_
     assert executor_calls[0]["execution_submit_plan"]["authority"] == "residual_inventory_policy"
     assert executor_calls[0]["execution_submit_plan"]["qty"] == pytest.approx(0.0004998)
     assert trade["source"] == "residual_inventory"
+
+
+def test_target_delta_live_service_uses_target_plan_without_residual_mode() -> None:
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "telemetry")
+    decision = build_execution_decision_summary(
+        decision_context={
+            "raw_signal": "SELL",
+            "market_price": 115_000_000.0,
+            "sellable_executable_lot_count": 0,
+            "exit_allowed": False,
+            "exit_block_reason": "dust_only_remainder",
+        },
+        readiness_payload={
+            "broker_position_evidence": {
+                "broker_qty_known": True,
+                "broker_qty": 0.0004998,
+                "balance_source_stale": False,
+            },
+            "projection_converged": True,
+            "projection_convergence": {"converged": True},
+            "broker_portfolio_converged": True,
+            "open_order_count": 0,
+            "unresolved_open_order_count": 0,
+            "recovery_required_count": 0,
+            "submit_unknown_count": 0,
+            "accounting_projection_ok": True,
+            "active_fee_accounting_blocker": False,
+            "residual_proof_min_qty": 0.0001,
+            "residual_proof_min_notional_krw": 5000.0,
+        },
+        raw_signal="SELL",
+        final_signal="HOLD",
+        previous_target_exposure_krw=0.0,
+    )
+    assert decision.target_submit_plan is not None
+    assert decision.residual_submit_plan is None
+
+    executor_calls: list[dict[str, object]] = []
+
+    def _standard_pipeline_executor(*_args, **kwargs):
+        executor_calls.append(dict(kwargs))
+        return {"source": "target_delta", "authority": "target_position_delta"}
+
+    service = LiveSignalExecutionService(
+        broker=_ResidualFakeBroker(),
+        executor=_standard_pipeline_executor,
+        harmless_dust_recorder=lambda **_k: False,
+    )
+    trade = service.execute(
+        SignalExecutionRequest(
+            signal="SELL",
+            ts=123,
+            market_price=115_000_000.0,
+            decision_context={"execution_decision": decision.as_dict()},
+        )
+    )
+
+    assert trade == {"source": "target_delta", "authority": "target_position_delta"}
+    assert len(executor_calls) == 1
+    assert executor_calls[0]["execution_submit_plan"]["source"] == "target_delta"
+    assert executor_calls[0]["execution_submit_plan"]["authority"] == "target_position_delta"
+    assert executor_calls[0]["execution_submit_plan"]["side"] == "SELL"
+    assert executor_calls[0]["execution_submit_plan"]["qty"] == pytest.approx(0.0004998)
 
 
 def test_default_live_service_wrapper_preserves_residual_execution_submit_plan(monkeypatch) -> None:

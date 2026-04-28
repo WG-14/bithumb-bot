@@ -493,6 +493,9 @@ class Settings:
         os.getenv("TARGET_HOLD_POLICY", "maintain_previous_target").strip().lower()
         or "maintain_previous_target"
     )
+    REQUIRE_BROKER_LOCAL_CONVERGENCE: bool = parse_bool_env("REQUIRE_BROKER_LOCAL_CONVERGENCE", "true")
+    BLOCK_ON_OPEN_ORDER: bool = parse_bool_env("BLOCK_ON_OPEN_ORDER", "true")
+    BLOCK_ON_SUBMIT_UNKNOWN: bool = parse_bool_env("BLOCK_ON_SUBMIT_UNKNOWN", "true")
     RESIDUAL_INVENTORY_MODE: str = os.getenv("RESIDUAL_INVENTORY_MODE", "block").strip().lower() or "block"
     RESIDUAL_LIVE_SELL_MODE: str = os.getenv("RESIDUAL_LIVE_SELL_MODE", "telemetry").strip().lower() or "telemetry"
     RESIDUAL_BUY_SIZING_MODE: str = os.getenv("RESIDUAL_BUY_SIZING_MODE", "telemetry").strip().lower() or "telemetry"

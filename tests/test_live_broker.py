@@ -1145,6 +1145,7 @@ def _reset_pretrade_guards():
         "ENTRY_EDGE_BUFFER_RATIO": settings.ENTRY_EDGE_BUFFER_RATIO,
         "RESIDUAL_LIVE_SELL_MODE": settings.RESIDUAL_LIVE_SELL_MODE,
         "RESIDUAL_BUY_SIZING_MODE": settings.RESIDUAL_BUY_SIZING_MODE,
+        "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
         "PAIR": settings.PAIR,
     }
 
@@ -1589,6 +1590,31 @@ def _residual_execution_submit_plan() -> dict[str, object]:
     }
 
 
+def _target_delta_execution_submit_plan(*, side: str = "SELL", qty: float = 0.0004998) -> dict[str, object]:
+    return {
+        "side": side,
+        "source": "target_delta",
+        "authority": "target_position_delta",
+        "final_action": "REBALANCE_TO_TARGET",
+        "qty": qty,
+        "notional_krw": qty * 115_679_000.0,
+        "target_exposure_krw": 0.0 if side == "SELL" else 100_000.0,
+        "current_effective_exposure_krw": qty * 115_679_000.0,
+        "delta_krw": (-qty if side == "SELL" else qty) * 115_679_000.0,
+        "submit_expected": True,
+        "pre_submit_proof_status": "passed",
+        "block_reason": "none",
+        "intent_type": "target_delta_rebalance",
+        "strategy_context": "target_delta",
+        "target_qty": 0.0 if side == "SELL" else qty,
+        "target_delta_qty": -qty if side == "SELL" else qty,
+        "target_delta_side": side,
+        "target_dust_classification": "executable_delta",
+        "target_position_truth_state": "converged",
+        "idempotency_key": "target-delta-test-key",
+    }
+
+
 def test_live_execute_signal_consumes_residual_plan_as_standard_submit_intent(monkeypatch, tmp_path):
     db_path = str(tmp_path / "residual_standard_submit_intent.sqlite")
     object.__setattr__(settings, "DB_PATH", db_path)
@@ -1644,6 +1670,65 @@ def test_live_execute_signal_consumes_residual_plan_as_standard_submit_intent(mo
     assert feasibility.order_qty == pytest.approx(0.0004998)
     assert feasibility.normalized_qty == pytest.approx(0.0004998)
     assert feasibility.submit_qty_source == "residual_inventory_policy"
+
+
+def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "target_delta_standard_submit_intent.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "telemetry")
+    _stub_live_effective_order_rules(monkeypatch)
+
+    conn = ensure_db(db_path)
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0004998,
+            asset_locked=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    captured: dict[str, object] = {}
+
+    def _capture_standard_pipeline(*, submission_ready, **_kwargs):
+        captured["submission_ready"] = submission_ready
+        return {"status": "captured"}
+
+    monkeypatch.setattr(live_module, "execute_live_submission_and_application", _capture_standard_pipeline)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        115_679_000.0,
+        execution_submit_plan=_target_delta_execution_submit_plan(),
+    )
+
+    assert trade == {"status": "captured"}
+    assert broker.place_order_calls == 0
+    submission_ready = captured["submission_ready"]
+    intent = submission_ready.intent
+    feasibility = submission_ready.feasibility
+    assert intent.side == "SELL"
+    assert intent.intent_type == "target_delta_rebalance"
+    assert intent.strategy_context == "target_delta"
+    assert intent.use_qty_intent_key is True
+    assert intent.submit_qty_source == "target_position_delta"
+    assert intent.exit_sizing.qty_source == "target_position_delta"
+    assert feasibility.side == "SELL"
+    assert feasibility.order_qty == pytest.approx(0.0004998)
+    assert feasibility.normalized_qty == pytest.approx(0.0004998)
+    assert feasibility.submit_qty_source == "target_position_delta"
 
 
 def test_live_residual_sell_duplicate_intent_is_deduped(monkeypatch, tmp_path):

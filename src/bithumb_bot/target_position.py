@@ -5,7 +5,10 @@ from dataclasses import dataclass
 
 
 TARGET_ENGINE_MODE_SHADOW = "shadow"
+TARGET_ENGINE_MODE_TARGET_DELTA = "target_delta"
 TARGET_STATE_PERSISTENCE_NOT_PERSISTED = "not_yet_persisted"
+TARGET_STATE_PERSISTENCE_PERSISTED = "persisted"
+TARGET_STATE_PERSISTENCE_MISSING = "missing"
 
 
 @dataclass(frozen=True)
@@ -15,6 +18,17 @@ class TargetPositionSettings:
     target_exposure_krw: float | None = None
     max_order_krw: float = 0.0
     hold_policy: str = "maintain_previous_target"
+
+
+@dataclass(frozen=True)
+class TargetPositionState:
+    pair: str
+    target_exposure_krw: float
+    target_qty: float
+    last_signal: str
+    last_decision_id: int | None
+    last_reference_price: float
+    updated_ts: int
 
 
 @dataclass(frozen=True)
@@ -163,12 +177,24 @@ def build_target_position_decision(
             payload.get("min_notional_krw", payload.get("residual_proof_min_notional_krw"))
         )
 
+    engine_mode = (
+        TARGET_ENGINE_MODE_TARGET_DELTA
+        if str(settings.execution_engine or "lot_native").strip().lower() == TARGET_ENGINE_MODE_TARGET_DELTA
+        and not bool(settings.shadow_enabled)
+        else TARGET_ENGINE_MODE_SHADOW
+    )
+    state_persistence = (
+        TARGET_STATE_PERSISTENCE_PERSISTED
+        if previous_target_exposure_krw is not None or engine_mode == TARGET_ENGINE_MODE_TARGET_DELTA
+        else TARGET_STATE_PERSISTENCE_NOT_PERSISTED
+    )
+
     base = {
-        "engine_mode": TARGET_ENGINE_MODE_SHADOW,
+        "engine_mode": engine_mode,
         "raw_signal": signal,
         "previous_target_exposure_krw": previous_target_exposure_krw,
         "hold_policy": str(settings.hold_policy or "maintain_previous_target"),
-        "state_persistence": TARGET_STATE_PERSISTENCE_NOT_PERSISTED,
+        "state_persistence": state_persistence,
         "reference_price": price,
         "current_qty": None,
         "current_exposure_krw": None,
@@ -196,6 +222,11 @@ def build_target_position_decision(
         if previous_target_exposure_krw is None:
             return _decision(
                 new_target_exposure_krw=None,
+                state_persistence=(
+                    TARGET_STATE_PERSISTENCE_MISSING
+                    if engine_mode == TARGET_ENGINE_MODE_TARGET_DELTA
+                    else TARGET_STATE_PERSISTENCE_NOT_PERSISTED
+                ),
                 block_reason="missing_persistent_target_state",
                 dust_classification="hold_target_unknown",
             )

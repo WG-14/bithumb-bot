@@ -96,9 +96,11 @@ class ExecutionDecisionSummary:
     residual_submit_plan: dict[str, object] | None
     buy_submit_plan: dict[str, object] | None
     target_shadow_decision: dict[str, object] | None
+    target_submit_plan: dict[str, object] | None
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "execution_engine": _execution_engine(),
             "raw_signal": self.raw_signal,
             "final_signal": self.final_signal,
             "final_action": self.final_action,
@@ -123,6 +125,9 @@ class ExecutionDecisionSummary:
             "buy_submit_plan": None if self.buy_submit_plan is None else dict(self.buy_submit_plan),
             "target_shadow_decision": (
                 None if self.target_shadow_decision is None else dict(self.target_shadow_decision)
+            ),
+            "target_submit_plan": (
+                None if self.target_submit_plan is None else dict(self.target_submit_plan)
             ),
         }
 
@@ -189,6 +194,11 @@ def _residual_live_sell_mode() -> str:
 def _residual_buy_sizing_mode() -> str:
     mode = str(getattr(settings, "RESIDUAL_BUY_SIZING_MODE", "telemetry") or "telemetry").strip().lower()
     return mode if mode in {"off", "telemetry", "delta"} else "telemetry"
+
+
+def _execution_engine() -> str:
+    engine = str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
+    return engine if engine in {"lot_native", "target_delta"} else "lot_native"
 
 
 def _residual_intent_ts(payload: dict[str, object]) -> int:
@@ -371,6 +381,7 @@ def build_execution_decision_summary(
     raw_signal: str | None = None,
     final_signal: str | None = None,
     final_reason: str | None = None,
+    previous_target_exposure_krw: float | None = None,
 ) -> ExecutionDecisionSummary:
     payload: dict[str, object] = dict(decision_context or {})
     if isinstance(readiness_payload, dict):
@@ -444,11 +455,13 @@ def build_execution_decision_summary(
     residual_submit_plan: dict[str, object] | None = None
     buy_submit_plan: dict[str, object] | None = None
     target_shadow_decision: dict[str, object] | None = None
+    target_submit_plan: dict[str, object] | None = None
+    execution_engine = _execution_engine()
 
-    if bool(getattr(settings, "TARGET_EXECUTION_SHADOW", False)):
-        target_shadow_decision = build_target_position_decision(
+    if bool(getattr(settings, "TARGET_EXECUTION_SHADOW", False)) or execution_engine == "target_delta":
+        target_decision = build_target_position_decision(
             raw_signal=raw,
-            previous_target_exposure_krw=None,
+            previous_target_exposure_krw=previous_target_exposure_krw,
             current_position_snapshot=None,
             readiness_payload=payload,
             order_rules={
@@ -459,13 +472,98 @@ def build_execution_decision_summary(
             },
             reference_price=payload.get("market_price", payload.get("last_close", payload.get("close"))),
             settings=TargetPositionSettings(
-                execution_engine=str(getattr(settings, "EXECUTION_ENGINE", "lot_native")),
-                shadow_enabled=True,
+                execution_engine=execution_engine,
+                shadow_enabled=execution_engine != "target_delta",
                 target_exposure_krw=getattr(settings, "TARGET_EXPOSURE_KRW", None),
                 max_order_krw=float(getattr(settings, "MAX_ORDER_KRW", 0.0) or 0.0),
                 hold_policy=str(getattr(settings, "TARGET_HOLD_POLICY", "maintain_previous_target")),
             ),
-        ).as_dict()
+        )
+        target_shadow_decision = target_decision.as_dict()
+        if execution_engine == "target_delta":
+            target_idempotency_key = None
+            if target_decision.would_submit and target_decision.delta_side in {"BUY", "SELL"}:
+                target_idempotency_key = build_order_intent_key(
+                    symbol=str(settings.PAIR),
+                    side=str(target_decision.delta_side),
+                    strategy_context="target_delta",
+                    intent_ts=_residual_intent_ts(payload),
+                    intent_type="target_delta_rebalance",
+                    qty=float(target_decision.submit_qty or 0.0),
+                )
+            target_submit_plan = ExecutionSubmitPlan(
+                side=str(target_decision.delta_side),
+                source="target_delta",
+                authority="target_position_delta",
+                final_action=(
+                    "REBALANCE_TO_TARGET"
+                    if target_decision.would_submit
+                    else (
+                        "HOLD_TARGET_TRUE_DUST"
+                        if target_decision.block_reason == "delta_below_exchange_min"
+                        else "BLOCK_TARGET_DELTA"
+                    )
+                ),
+                qty=target_decision.submit_qty,
+                notional_krw=target_decision.submit_notional_krw,
+                target_exposure_krw=target_decision.new_target_exposure_krw,
+                current_effective_exposure_krw=target_decision.current_exposure_krw,
+                delta_krw=target_decision.delta_notional_krw,
+                submit_expected=bool(target_decision.would_submit),
+                pre_submit_proof_status=("passed" if target_decision.would_submit else "failed"),
+                block_reason=str(target_decision.block_reason),
+                idempotency_key=target_idempotency_key,
+            ).as_dict()
+            target_submit_plan.update(
+                {
+                    "intent_type": "target_delta_rebalance",
+                    "strategy_context": "target_delta",
+                    "target_qty": target_decision.target_qty,
+                    "target_previous_exposure_krw": target_decision.previous_target_exposure_krw,
+                    "target_delta_qty": target_decision.delta_qty,
+                    "target_delta_side": target_decision.delta_side,
+                    "target_dust_classification": target_decision.dust_classification,
+                    "target_position_truth_state": target_decision.position_truth_state,
+                }
+            )
+
+    if execution_engine == "target_delta":
+        if target_submit_plan is not None:
+            action = str(target_submit_plan["final_action"])
+            submit_expected = bool(target_submit_plan["submit_expected"])
+            proof_status = str(target_submit_plan["pre_submit_proof_status"])
+            block_reason = str(target_submit_plan["block_reason"])
+        else:
+            action = "BLOCK_TARGET_DELTA"
+            submit_expected = False
+            proof_status = "failed"
+            block_reason = "target_delta_decision_missing"
+        return ExecutionDecisionSummary(
+            raw_signal=raw,
+            final_signal=final,
+            final_action=action,
+            submit_expected=submit_expected,
+            pre_submit_proof_status=proof_status,
+            block_reason=block_reason,
+            strategy_sell_candidate=strategy_candidate,
+            residual_sell_candidate=residual_candidate_dict,
+            target_exposure_krw=(
+                None if target_shadow_decision is None else target_shadow_decision.get("target_new_exposure_krw")
+            ),
+            current_effective_exposure_krw=(
+                None if target_shadow_decision is None else target_shadow_decision.get("target_current_exposure_krw")
+            ),
+            tracked_residual_exposure_krw=tracked_residual_exposure_krw,
+            buy_delta_krw=(
+                None if target_shadow_decision is None else target_shadow_decision.get("target_delta_notional_krw")
+            ),
+            residual_live_sell_mode=residual_live_sell_mode,
+            residual_buy_sizing_mode=residual_buy_sizing_mode,
+            residual_submit_plan=None,
+            buy_submit_plan=None,
+            target_shadow_decision=target_shadow_decision,
+            target_submit_plan=target_submit_plan,
+        )
 
     if raw == "BUY":
         if not bool(payload.get("residual_inventory_policy_allows_run", True)):
@@ -643,6 +741,7 @@ def build_execution_decision_summary(
         residual_submit_plan=residual_submit_plan,
         buy_submit_plan=buy_submit_plan,
         target_shadow_decision=target_shadow_decision,
+        target_submit_plan=target_submit_plan,
     )
 
 
@@ -715,6 +814,45 @@ class LiveSignalExecutionService:
             if isinstance(execution_decision.get("residual_submit_plan"), dict)
             else {}
         )
+        target_plan = (
+            dict(execution_decision.get("target_submit_plan"))
+            if isinstance(execution_decision.get("target_submit_plan"), dict)
+            else {}
+        )
+        if (
+            target_plan
+            and str(target_plan.get("source")) == "target_delta"
+            and str(target_plan.get("authority")) == "target_position_delta"
+        ):
+            if str(target_plan.get("block_reason") or "none") != "none":
+                return None
+            if not bool(target_plan.get("submit_expected")):
+                return None
+            plan_side = str(target_plan.get("side") or "").upper()
+            if plan_side not in {"BUY", "SELL"}:
+                return None
+            try:
+                return self.executor(
+                    self.broker,
+                    plan_side,
+                    request.ts,
+                    request.market_price,
+                    strategy_name=request.strategy_name,
+                    decision_id=request.decision_id,
+                    decision_reason=request.decision_reason,
+                    exit_rule_name=request.exit_rule_name,
+                    execution_submit_plan=target_plan,
+                )
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                return {
+                    "status": "blocked",
+                    "reason": "executor_missing_execution_submit_plan_support",
+                    "side": plan_side,
+                    "source": "target_delta",
+                    "authority": "target_position_delta",
+                }
         if (
             request.signal == "SELL"
             and residual_plan

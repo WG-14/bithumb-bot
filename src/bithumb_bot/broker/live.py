@@ -2324,6 +2324,77 @@ def _determine_live_execution_intent(
             use_qty_intent_key=True,
         )
 
+    if (
+        isinstance(execution_submit_plan, dict)
+        and str(execution_submit_plan.get("source") or "") == "target_delta"
+        and str(execution_submit_plan.get("authority") or "") == "target_position_delta"
+    ):
+        target_side = str(execution_submit_plan.get("side") or signal or "").upper()
+        target_qty = float(execution_submit_plan.get("qty") or 0.0)
+        if target_side not in {"BUY", "SELL"} or target_qty <= POSITION_EPSILON:
+            return None
+        if str(execution_submit_plan.get("block_reason") or "none") != "none":
+            return None
+        if not bool(execution_submit_plan.get("submit_expected")):
+            return None
+        target_sizing = SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="target_delta_rebalance",
+            budget_krw=float(execution_submit_plan.get("notional_krw") or 0.0),
+            requested_qty=target_qty,
+            exchange_constrained_qty=target_qty,
+            lifecycle_executable_qty=target_qty,
+            executable_qty=target_qty,
+            rejected_qty_remainder=0.0,
+            unused_budget_krw=0.0,
+            internal_lot_size=0.0,
+            intended_lot_count=0,
+            executable_lot_count=0,
+            qty_source="target_position_delta",
+            effective_min_trade_qty=float(position_state.effective_rules.min_qty),
+            min_qty=float(position_state.effective_rules.min_qty),
+            qty_step=float(position_state.effective_rules.qty_step),
+            min_notional_krw=float(position_state.effective_rules.min_notional_krw),
+            non_executable_reason="executable",
+        )
+        position_state.decision_observability.update(
+            {
+                "execution_engine": "target_delta",
+                "target_engine_mode": "target_delta",
+                "target_previous_exposure_krw": execution_submit_plan.get("target_previous_exposure_krw"),
+                "target_new_exposure_krw": execution_submit_plan.get("target_exposure_krw"),
+                "target_current_exposure_krw": execution_submit_plan.get("current_effective_exposure_krw"),
+                "target_qty": execution_submit_plan.get("target_qty"),
+                "target_delta_qty": execution_submit_plan.get("target_delta_qty"),
+                "target_delta_side": execution_submit_plan.get("target_delta_side"),
+                "target_delta_notional_krw": execution_submit_plan.get("delta_krw"),
+                "target_dust_classification": execution_submit_plan.get("target_dust_classification"),
+                "target_position_truth_state": execution_submit_plan.get("target_position_truth_state"),
+                "submit_qty_source": "target_position_delta",
+                "submit_qty_source_truth_source": "target_position_delta",
+                "position_state_source": "broker_verified_current_position",
+                "position_state_source_truth_source": "target_delta.broker_position_evidence",
+                "sell_qty_basis_qty": target_qty,
+                "sell_qty_basis_source": "target_position_delta",
+                "sell_qty_basis_qty_truth_source": "target_delta.delta_qty",
+                "sell_qty_basis_source_truth_source": "target_delta.target_position_delta",
+            }
+        )
+        return _LiveExecutionIntent(
+            side=target_side,
+            order_qty=target_qty,
+            submit_qty_source="target_position_delta",
+            harmless_dust_checked=True,
+            entry_sizing=(target_sizing if target_side == "BUY" else None),
+            exit_sizing=(target_sizing if target_side == "SELL" else None),
+            canonical_sell=None,
+            diagnostic_sell_qty=None,
+            intent_type="target_delta_rebalance",
+            strategy_context="target_delta",
+            use_qty_intent_key=True,
+        )
+
     if signal == "BUY" and normalized_exposure.effective_flat:
         if not math.isfinite(float(market_price)) or float(market_price) <= 0:
             reason = f"invalid market/reference price: {market_price}"
@@ -2794,12 +2865,18 @@ def _evaluate_live_execution_feasibility(
         and str(intent.intent_type or "") == "residual_close"
         and str(intent.strategy_context or "") == _residual_order_intent_strategy_context()
     )
+    target_delta_sell_intent = (
+        intent.side == "SELL"
+        and str(intent.submit_qty_source or "") == "target_position_delta"
+        and str(intent.intent_type or "") == "target_delta_rebalance"
+        and str(intent.strategy_context or "") == "target_delta"
+    )
     try:
         if pretrade_needs_live_reference:
             reference_quote = _load_live_reference_quote(pair=settings.PAIR)
         if intent.side == "BUY":
             normalized_qty = float(order_qty)
-        elif residual_policy_sell_intent:
+        elif residual_policy_sell_intent or target_delta_sell_intent:
             normalized_qty = float(order_qty)
         else:
             normalized_qty = adjust_sell_order_qty_for_dust_safety(qty=order_qty, market_price=market_price)

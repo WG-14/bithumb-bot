@@ -16,6 +16,7 @@ from .decision_context import (
     materialize_strategy_decision_context,
     normalize_strategy_decision_context,
 )
+from .target_position import TargetPositionState
 
 
 # The lot-state contract is intentionally tiny and safety-critical:
@@ -1701,6 +1702,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS target_position_state (
+            pair TEXT PRIMARY KEY,
+            target_exposure_krw REAL NOT NULL,
+            target_qty REAL NOT NULL,
+            last_signal TEXT NOT NULL,
+            last_decision_id INTEGER,
+            last_reference_price REAL NOT NULL,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+
+    _ensure_column(conn, "target_position_state", "target_exposure_krw", "target_exposure_krw REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "target_position_state", "target_qty", "target_qty REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "target_position_state", "last_signal", "last_signal TEXT NOT NULL DEFAULT 'HOLD'")
+    _ensure_column(conn, "target_position_state", "last_decision_id", "last_decision_id INTEGER")
+    _ensure_column(conn, "target_position_state", "last_reference_price", "last_reference_price REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "target_position_state", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0")
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS open_position_lots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pair TEXT NOT NULL,
@@ -1922,6 +1944,67 @@ def record_strategy_decision(
         ),
     )
     return int(row.lastrowid)
+
+
+def load_target_position_state(conn: sqlite3.Connection, *, pair: str) -> TargetPositionState | None:
+    row = conn.execute(
+        """
+        SELECT pair, target_exposure_krw, target_qty, last_signal, last_decision_id,
+               last_reference_price, updated_ts
+        FROM target_position_state
+        WHERE pair=?
+        """,
+        (str(pair),),
+    ).fetchone()
+    if row is None:
+        return None
+    return TargetPositionState(
+        pair=str(row["pair"]),
+        target_exposure_krw=float(row["target_exposure_krw"] or 0.0),
+        target_qty=float(row["target_qty"] or 0.0),
+        last_signal=str(row["last_signal"] or "HOLD"),
+        last_decision_id=(None if row["last_decision_id"] is None else int(row["last_decision_id"])),
+        last_reference_price=float(row["last_reference_price"] or 0.0),
+        updated_ts=int(row["updated_ts"] or 0),
+    )
+
+
+def upsert_target_position_state(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    target_exposure_krw: float,
+    target_qty: float,
+    last_signal: str,
+    last_decision_id: int | None,
+    last_reference_price: float,
+    updated_ts: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO target_position_state(
+            pair, target_exposure_krw, target_qty, last_signal, last_decision_id,
+            last_reference_price, updated_ts
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pair) DO UPDATE SET
+            target_exposure_krw=excluded.target_exposure_krw,
+            target_qty=excluded.target_qty,
+            last_signal=excluded.last_signal,
+            last_decision_id=excluded.last_decision_id,
+            last_reference_price=excluded.last_reference_price,
+            updated_ts=excluded.updated_ts
+        """,
+        (
+            str(pair),
+            float(target_exposure_krw),
+            float(target_qty),
+            str(last_signal or "HOLD").upper(),
+            None if last_decision_id is None else int(last_decision_id),
+            float(last_reference_price),
+            int(updated_ts),
+        ),
+    )
 
 
 def init_portfolio(conn: sqlite3.Connection) -> None:

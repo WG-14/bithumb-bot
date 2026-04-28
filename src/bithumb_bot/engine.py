@@ -27,6 +27,8 @@ from .db_core import (
     get_portfolio_breakdown,
     portfolio_asset_total,
     portfolio_cash_total,
+    load_target_position_state,
+    upsert_target_position_state,
 )
 from .db_core import record_strategy_decision
 from .external_position_repair import build_external_position_accounting_repair_preview
@@ -3027,6 +3029,18 @@ def run_loop(short_n: int, long_n: int) -> None:
                 signal = str(context.pop("signal", "HOLD"))
                 reason = str(context.pop("reason", ""))
                 readiness_payload: dict[str, object] = {}
+                previous_target_exposure_krw = None
+                if (
+                    str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
+                    == "target_delta"
+                ):
+                    previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+                    previous_target_exposure_krw = (
+                        None
+                        if previous_target_state is None
+                        else float(previous_target_state.target_exposure_krw)
+                    )
+                execution_decision: dict[str, object] = {}
                 try:
                     readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
                     execution_decision = build_execution_decision_summary(
@@ -3035,6 +3049,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                         raw_signal=str(context.get("raw_signal") or context.get("base_signal") or signal),
                         final_signal=signal,
                         final_reason=reason,
+                        previous_target_exposure_krw=previous_target_exposure_krw,
                     ).as_dict()
                     context["execution_decision"] = execution_decision
                     context["final_action"] = execution_decision["final_action"]
@@ -3065,12 +3080,13 @@ def run_loop(short_n: int, long_n: int) -> None:
                         if key in readiness_payload:
                             context[key] = readiness_payload[key]
                 except Exception as exc:
-                    context["execution_decision"] = {
+                    execution_decision = {
                         "final_action": "BLOCK_RECOVERY",
                         "submit_expected": False,
                         "pre_submit_proof_status": "failed",
                         "block_reason": f"execution_decision_unavailable:{type(exc).__name__}",
                     }
+                    context["execution_decision"] = execution_decision
                 exit_ctx = context.get("exit")
                 if isinstance(exit_ctx, dict):
                     raw_rule = exit_ctx.get("rule")
@@ -3100,6 +3116,19 @@ def run_loop(short_n: int, long_n: int) -> None:
                     pre_submit_proof_status=str(context.get("pre_submit_proof_status") or "-"),
                     execution_block_reason=str(context.get("execution_block_reason") or "-"),
                     residual_inventory_state=str(context.get("residual_inventory_state") or "-"),
+                    execution_engine=str(context.get("execution_decision", {}).get("execution_engine") if isinstance(context.get("execution_decision"), dict) else "-"),
+                    target_engine_mode=str(context.get("target_engine_mode") or "-"),
+                    target_previous_exposure_krw=str(context.get("target_previous_exposure_krw") or "-"),
+                    target_new_exposure_krw=str(context.get("target_new_exposure_krw") or "-"),
+                    target_current_qty=str(context.get("target_current_qty") or "-"),
+                    target_qty=str(context.get("target_qty") or "-"),
+                    target_delta_qty=str(context.get("target_delta_qty") or "-"),
+                    target_delta_side=str(context.get("target_delta_side") or "-"),
+                    target_delta_notional_krw=str(context.get("target_delta_notional_krw") or "-"),
+                    target_would_submit=1 if bool(context.get("target_would_submit")) else 0,
+                    target_block_reason=str(context.get("target_block_reason") or "-"),
+                    target_position_truth_state=str(context.get("target_position_truth_state") or "-"),
+                    target_dust_classification=str(context.get("target_dust_classification") or "-"),
                     reason=reason,
                 )
                 try:
@@ -3114,6 +3143,30 @@ def run_loop(short_n: int, long_n: int) -> None:
                         confidence=float(confidence_raw) if confidence_raw is not None else None,
                         context=context,
                     )
+                    target_decision = (
+                        execution_decision.get("target_shadow_decision")
+                        if isinstance(execution_decision, dict)
+                        and isinstance(execution_decision.get("target_shadow_decision"), dict)
+                        else None
+                    )
+                    if (
+                        str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
+                        == "target_delta"
+                        and isinstance(target_decision, dict)
+                        and target_decision.get("target_new_exposure_krw") is not None
+                        and target_decision.get("target_qty") is not None
+                        and target_decision.get("target_reference_price") is not None
+                    ):
+                        upsert_target_position_state(
+                            conn,
+                            pair=settings.PAIR,
+                            target_exposure_krw=float(target_decision["target_new_exposure_krw"] or 0.0),
+                            target_qty=float(target_decision["target_qty"] or 0.0),
+                            last_signal=signal,
+                            last_decision_id=decision_id,
+                            last_reference_price=float(target_decision["target_reference_price"] or 0.0),
+                            updated_ts=int(now * 1000),
+                        )
                     conn.commit()
                 except Exception as exc:
                     _log_loop_event(
@@ -3126,7 +3179,26 @@ def run_loop(short_n: int, long_n: int) -> None:
             finally:
                 conn.close()
 
-            if r["signal"] not in ("BUY", "SELL"):
+            execution_plan = (
+                decision_context_for_trade.get("execution_decision", {})
+                if isinstance(decision_context_for_trade, dict)
+                and isinstance(decision_context_for_trade.get("execution_decision"), dict)
+                else {}
+            )
+            target_submit_plan = (
+                execution_plan.get("target_submit_plan")
+                if isinstance(execution_plan, dict)
+                and isinstance(execution_plan.get("target_submit_plan"), dict)
+                else None
+            )
+            target_delta_submit = bool(
+                str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
+                == "target_delta"
+                and isinstance(target_submit_plan, dict)
+                and bool(target_submit_plan.get("submit_expected"))
+                and str(target_submit_plan.get("block_reason") or "none") == "none"
+            )
+            if r["signal"] not in ("BUY", "SELL") and not target_delta_submit:
                 continue
 
             trade = None
