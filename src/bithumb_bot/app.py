@@ -40,6 +40,7 @@ from .db_core import (
     record_manual_flat_accounting_repair,
     record_external_cash_adjustment,
     summarize_fill_accounting_incident_projection,
+    upsert_target_position_state,
 )
 from .utils_time import kst_str, parse_interval_sec
 from .engine import (
@@ -99,6 +100,10 @@ from .repair_plan import build_recovery_policy_from_report, build_repair_plan_pr
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .execution_service import build_execution_decision_summary
+from .target_position import (
+    TARGET_ORIGIN_OPERATOR_CLOSEOUT,
+    resolve_startup_target_position_policy,
+)
 from .reporting import (
     build_fee_rate_drift_diagnostics,
     cmd_experiment_report,
@@ -143,6 +148,7 @@ LIVE_COMMAND_GUARDS = {
     "run": "startup",
     "cancel-open-orders": "preflight",
     "flatten-position": "preflight",
+    "target-closeout": "preflight",
     "panic-stop": "preflight",
     "recover-order": "preflight",
 }
@@ -2200,10 +2206,21 @@ def cmd_target_delta_dry_run(short_n: int, long_n: int) -> None:
 
         readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
         previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+        startup_policy = resolve_startup_target_position_policy(
+            existing_target_state=previous_target_state,
+            readiness_payload=readiness_payload,
+            order_rules={
+                "min_qty": readiness_payload.get("min_qty", readiness_payload.get("residual_proof_min_qty")),
+                "min_notional_krw": readiness_payload.get(
+                    "min_notional_krw", readiness_payload.get("residual_proof_min_notional_krw")
+                ),
+            },
+            reference_price=signal_result.get("market_price", signal_result.get("last_close", signal_result.get("close"))),
+            raw_signal=str(signal_result.get("raw_signal") or signal_result.get("base_signal") or signal_result.get("signal") or "HOLD"),
+        )
+        readiness_payload = {**readiness_payload, **startup_policy.as_dict()}
         previous_target_exposure_krw = (
-            None
-            if previous_target_state is None
-            else float(previous_target_state.target_exposure_krw)
+            None if startup_policy.target_exposure_krw is None else float(startup_policy.target_exposure_krw)
         )
     finally:
         conn.close()
@@ -2239,6 +2256,9 @@ def cmd_target_delta_dry_run(short_n: int, long_n: int) -> None:
     )
     output = {
         "target_current_qty": target_decision.get("target_current_qty"),
+        "target_policy_action": target_decision.get("target_policy_action"),
+        "target_origin": target_decision.get("target_origin"),
+        "target_adoption_reason": target_decision.get("target_adoption_reason"),
         "target_previous_exposure_krw": target_decision.get("target_previous_exposure_krw"),
         "target_new_exposure_krw": target_decision.get("target_new_exposure_krw"),
         "target_delta_side": target_submit_plan.get("target_delta_side", target_decision.get("target_delta_side")),
@@ -2255,6 +2275,39 @@ def cmd_target_delta_dry_run(short_n: int, long_n: int) -> None:
     }
     print("[TARGET-DELTA-DRY-RUN]")
     print(json.dumps(output, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_target_closeout() -> None:
+    if settings.MODE != "live":
+        print(f"[TARGET-CLOSEOUT] failed: MODE={settings.MODE} (live only)")
+        raise SystemExit(1)
+    try:
+        validate_live_mode_preflight(settings)
+    except LiveModeValidationError as e:
+        print(f"[TARGET-CLOSEOUT] failed: {e}")
+        raise SystemExit(1)
+
+    conn = ensure_db()
+    try:
+        upsert_target_position_state(
+            conn,
+            pair=settings.PAIR,
+            target_exposure_krw=0.0,
+            target_qty=0.0,
+            last_signal="OPERATOR_CLOSEOUT",
+            last_decision_id=None,
+            last_reference_price=0.0,
+            updated_ts=int(time.time() * 1000),
+            target_origin=TARGET_ORIGIN_OPERATOR_CLOSEOUT,
+            adoption_reason="explicit_operator_closeout",
+            adopted_broker_qty=None,
+            adopted_broker_exposure_krw=None,
+            created_from_signal="OPERATOR_CLOSEOUT",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    print("[TARGET-CLOSEOUT] persisted target=0 origin=operator_closeout")
 
 
 def _last_reconcile_failed(state) -> bool:
@@ -5757,6 +5810,14 @@ def main(argv: list[str] | None = None) -> int:
     target_delta_dry_run.add_argument("--short", type=int, default=SMA_SHORT)
     target_delta_dry_run.add_argument("--long", type=int, default=SMA_LONG)
     sub.add_parser(
+        "target-closeout",
+        help="explicitly persist target_delta closeout target",
+        description=(
+            "Persist target=0 with origin=operator_closeout. The normal target_delta "
+            "submit path may close the broker position only when live submit gates allow it."
+        ),
+    )
+    sub.add_parser(
         "pause",
         help="persistently pause new trading",
         description="Persistently disable trading until explicit resume.",
@@ -6157,6 +6218,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_broker_diagnose()
     elif args.cmd == "target-delta-dry-run":
         cmd_target_delta_dry_run(args.short, args.long)
+    elif args.cmd == "target-closeout":
+        cmd_target_closeout()
     elif args.cmd == "pause":
         cmd_pause()
     elif args.cmd == "resume":

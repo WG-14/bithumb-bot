@@ -9,6 +9,17 @@ TARGET_ENGINE_MODE_TARGET_DELTA = "target_delta"
 TARGET_STATE_PERSISTENCE_NOT_PERSISTED = "not_yet_persisted"
 TARGET_STATE_PERSISTENCE_PERSISTED = "persisted"
 TARGET_STATE_PERSISTENCE_MISSING = "missing"
+TARGET_ORIGIN_STRATEGY_BUY = "strategy_buy"
+TARGET_ORIGIN_STRATEGY_SELL = "strategy_sell"
+TARGET_ORIGIN_ADOPTED_EXISTING_POSITION = "adopted_existing_position"
+TARGET_ORIGIN_FLAT_START = "flat_start"
+TARGET_ORIGIN_TRUE_DUST_FLAT = "true_dust_flat"
+TARGET_ORIGIN_OPERATOR_CLOSEOUT = "operator_closeout"
+TARGET_POLICY_USE_EXISTING_TARGET = "use_existing_target"
+TARGET_POLICY_INITIALIZE_FLAT_TARGET = "initialize_flat_target"
+TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION = "adopt_existing_broker_position"
+TARGET_POLICY_INITIALIZE_TRUE_DUST_FLAT = "initialize_true_dust_flat"
+TARGET_POLICY_BLOCK_UNSAFE_STATE = "block_unsafe_state"
 
 
 @dataclass(frozen=True)
@@ -29,6 +40,44 @@ class TargetPositionState:
     last_decision_id: int | None
     last_reference_price: float
     updated_ts: int
+    target_origin: str = ""
+    adoption_reason: str = ""
+    adopted_broker_qty: float | None = None
+    adopted_broker_exposure_krw: float | None = None
+    created_from_signal: str = ""
+
+
+@dataclass(frozen=True)
+class StartupTargetPositionPolicyDecision:
+    policy_action: str
+    target_exposure_krw: float | None
+    target_qty: float | None
+    target_origin: str
+    adoption_reason: str
+    adopted_broker_qty: float | None
+    adopted_broker_exposure_krw: float | None
+    created_from_signal: str
+    would_submit_on_startup: bool
+    block_reason: str
+    position_truth_state: str
+    dust_classification: str
+    existing_state_present: bool
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "target_policy_action": self.policy_action,
+            "target_origin": self.target_origin,
+            "target_adoption_reason": self.adoption_reason,
+            "target_adopted_broker_qty": self.adopted_broker_qty,
+            "target_adopted_exposure_krw": self.adopted_broker_exposure_krw,
+            "target_startup_policy_state": self.position_truth_state,
+            "target_existing_state_present": bool(self.existing_state_present),
+            "target_missing_state_resolution": self.policy_action,
+            "target_closeout_requested": self.target_origin == TARGET_ORIGIN_OPERATOR_CLOSEOUT,
+            "target_strategy_signal_source": self.created_from_signal,
+            "target_would_submit_on_startup": bool(self.would_submit_on_startup),
+            "target_startup_policy_block_reason": self.block_reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -54,6 +103,16 @@ class TargetPositionDecision:
     dust_classification: str
     order_rule_min_qty: float | None
     order_rule_min_notional_krw: float | None
+    target_policy_action: str = ""
+    target_origin: str = ""
+    target_adoption_reason: str = ""
+    target_adopted_broker_qty: float | None = None
+    target_adopted_exposure_krw: float | None = None
+    target_startup_policy_state: str = ""
+    target_existing_state_present: bool = False
+    target_missing_state_resolution: str = ""
+    target_closeout_requested: bool = False
+    target_strategy_signal_source: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -78,6 +137,16 @@ class TargetPositionDecision:
             "target_dust_classification": self.dust_classification,
             "target_order_rule_min_qty": self.order_rule_min_qty,
             "target_order_rule_min_notional_krw": self.order_rule_min_notional_krw,
+            "target_policy_action": self.target_policy_action,
+            "target_origin": self.target_origin,
+            "target_adoption_reason": self.target_adoption_reason,
+            "target_adopted_broker_qty": self.target_adopted_broker_qty,
+            "target_adopted_exposure_krw": self.target_adopted_exposure_krw,
+            "target_startup_policy_state": self.target_startup_policy_state,
+            "target_existing_state_present": bool(self.target_existing_state_present),
+            "target_missing_state_resolution": self.target_missing_state_resolution,
+            "target_closeout_requested": bool(self.target_closeout_requested),
+            "target_strategy_signal_source": self.target_strategy_signal_source,
         }
 
 
@@ -109,6 +178,18 @@ def _configured_target_exposure(settings: TargetPositionSettings) -> float:
     if explicit is not None and explicit >= 0.0:
         return float(explicit)
     return max(0.0, float(settings.max_order_krw or 0.0))
+
+
+def _origin_for_signal(signal: str, payload: dict[str, object]) -> str:
+    normalized = str(signal or "HOLD").upper()
+    if normalized == "BUY":
+        return TARGET_ORIGIN_STRATEGY_BUY
+    if normalized == "SELL":
+        return TARGET_ORIGIN_STRATEGY_SELL
+    explicit = str(payload.get("target_origin") or "").strip()
+    if explicit:
+        return explicit
+    return ""
 
 
 def _first_truth_blocker(payload: dict[str, object], broker_evidence: dict[str, object]) -> str | None:
@@ -147,6 +228,126 @@ def _first_truth_blocker(payload: dict[str, object], broker_evidence: dict[str, 
     if "accounting_projection_ok" in payload and not bool(payload.get("accounting_projection_ok")):
         return "accounting_projection_not_ok"
     return None
+
+
+def resolve_startup_target_position_policy(
+    *,
+    existing_target_state: TargetPositionState | None,
+    readiness_payload: dict[str, object] | None,
+    order_rules: dict[str, object] | None,
+    reference_price: float | None,
+    raw_signal: str = "HOLD",
+) -> StartupTargetPositionPolicyDecision:
+    signal = str(raw_signal or "HOLD").upper()
+    if existing_target_state is not None:
+        return StartupTargetPositionPolicyDecision(
+            policy_action=TARGET_POLICY_USE_EXISTING_TARGET,
+            target_exposure_krw=float(existing_target_state.target_exposure_krw),
+            target_qty=float(existing_target_state.target_qty),
+            target_origin=str(existing_target_state.target_origin or ""),
+            adoption_reason=str(existing_target_state.adoption_reason or ""),
+            adopted_broker_qty=existing_target_state.adopted_broker_qty,
+            adopted_broker_exposure_krw=existing_target_state.adopted_broker_exposure_krw,
+            created_from_signal=str(existing_target_state.created_from_signal or signal),
+            would_submit_on_startup=False,
+            block_reason="none",
+            position_truth_state="existing_target",
+            dust_classification="not_applicable",
+            existing_state_present=True,
+        )
+
+    payload = dict(readiness_payload or {})
+    rules = dict(order_rules or {})
+    broker_evidence = _dict_value(payload.get("broker_position_evidence"))
+    price = _as_float(reference_price)
+    min_qty = _as_float(rules.get("min_qty"))
+    if min_qty is None:
+        min_qty = _as_float(payload.get("min_qty", payload.get("residual_proof_min_qty")))
+    min_notional = _as_float(rules.get("min_notional_krw"))
+    if min_notional is None:
+        min_notional = _as_float(
+            payload.get("min_notional_krw", payload.get("residual_proof_min_notional_krw"))
+        )
+
+    def _blocked(reason: str) -> StartupTargetPositionPolicyDecision:
+        return StartupTargetPositionPolicyDecision(
+            policy_action=TARGET_POLICY_BLOCK_UNSAFE_STATE,
+            target_exposure_krw=None,
+            target_qty=None,
+            target_origin="",
+            adoption_reason="",
+            adopted_broker_qty=None,
+            adopted_broker_exposure_krw=None,
+            created_from_signal=signal,
+            would_submit_on_startup=False,
+            block_reason=reason,
+            position_truth_state="blocked",
+            dust_classification="unknown",
+            existing_state_present=False,
+        )
+
+    if price is None or price <= 0.0:
+        return _blocked("missing_reference_price")
+    if min_qty is None:
+        return _blocked("missing_order_rule_min_qty")
+    if min_notional is None:
+        return _blocked("missing_order_rule_min_notional_krw")
+    truth_blocker = _first_truth_blocker(payload, broker_evidence)
+    if truth_blocker is not None:
+        return _blocked(truth_blocker)
+    broker_qty = _as_float(broker_evidence.get("broker_qty"))
+    if broker_qty is None:
+        return _blocked("broker_qty_unknown")
+
+    broker_qty = max(0.0, float(broker_qty))
+    broker_exposure = broker_qty * float(price)
+    if broker_qty <= 1e-12:
+        return StartupTargetPositionPolicyDecision(
+            policy_action=TARGET_POLICY_INITIALIZE_FLAT_TARGET,
+            target_exposure_krw=0.0,
+            target_qty=0.0,
+            target_origin=TARGET_ORIGIN_FLAT_START,
+            adoption_reason="broker_local_flat",
+            adopted_broker_qty=None,
+            adopted_broker_exposure_krw=None,
+            created_from_signal=signal,
+            would_submit_on_startup=False,
+            block_reason="none",
+            position_truth_state="converged",
+            dust_classification="flat",
+            existing_state_present=False,
+        )
+    if broker_qty + 1e-12 < float(min_qty) or broker_exposure + 1e-9 < float(min_notional):
+        return StartupTargetPositionPolicyDecision(
+            policy_action=TARGET_POLICY_INITIALIZE_TRUE_DUST_FLAT,
+            target_exposure_krw=0.0,
+            target_qty=0.0,
+            target_origin=TARGET_ORIGIN_TRUE_DUST_FLAT,
+            adoption_reason="broker_qty_below_exchange_minimum",
+            adopted_broker_qty=broker_qty,
+            adopted_broker_exposure_krw=broker_exposure,
+            created_from_signal=signal,
+            would_submit_on_startup=False,
+            block_reason="none",
+            position_truth_state="converged",
+            dust_classification="true_dust",
+            existing_state_present=False,
+        )
+    return StartupTargetPositionPolicyDecision(
+        policy_action=TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+        target_exposure_krw=broker_exposure,
+        target_qty=broker_qty,
+        target_origin=TARGET_ORIGIN_ADOPTED_EXISTING_POSITION,
+        adoption_reason="safe_converged_executable_broker_position",
+        adopted_broker_qty=broker_qty,
+        adopted_broker_exposure_krw=broker_exposure,
+        created_from_signal=signal,
+        would_submit_on_startup=False,
+        block_reason="none",
+        position_truth_state="converged",
+        dust_classification="executable_position",
+        existing_state_present=False,
+    )
 
 
 def build_target_position_decision(
@@ -209,6 +410,16 @@ def build_target_position_decision(
         "dust_classification": "unknown",
         "order_rule_min_qty": min_qty,
         "order_rule_min_notional_krw": min_notional,
+        "target_policy_action": str(payload.get("target_policy_action") or ""),
+        "target_origin": _origin_for_signal(signal, payload),
+        "target_adoption_reason": str(payload.get("target_adoption_reason") or ""),
+        "target_adopted_broker_qty": _as_float(payload.get("target_adopted_broker_qty")),
+        "target_adopted_exposure_krw": _as_float(payload.get("target_adopted_exposure_krw")),
+        "target_startup_policy_state": str(payload.get("target_startup_policy_state") or ""),
+        "target_existing_state_present": bool(payload.get("target_existing_state_present")),
+        "target_missing_state_resolution": str(payload.get("target_missing_state_resolution") or ""),
+        "target_closeout_requested": bool(payload.get("target_closeout_requested")),
+        "target_strategy_signal_source": str(payload.get("target_strategy_signal_source") or signal),
     }
 
     def _decision(**overrides: object) -> TargetPositionDecision:

@@ -146,6 +146,11 @@ class _LoopConn:
                     "last_decision_id": state.last_decision_id,
                     "last_reference_price": state.last_reference_price,
                     "updated_ts": state.updated_ts,
+                    "target_origin": state.target_origin,
+                    "adoption_reason": state.adoption_reason,
+                    "adopted_broker_qty": state.adopted_broker_qty,
+                    "adopted_broker_exposure_krw": state.adopted_broker_exposure_krw,
+                    "created_from_signal": state.created_from_signal,
                 }
             )
 
@@ -159,6 +164,15 @@ class _LoopConn:
                 last_decision_id=(None if params[4] is None else int(params[4])),
                 last_reference_price=float(params[5]),
                 updated_ts=int(params[6]),
+                target_origin=str(params[7] if len(params) > 7 else ""),
+                adoption_reason=str(params[8] if len(params) > 8 else ""),
+                adopted_broker_qty=(
+                    None if len(params) <= 9 or params[9] is None else float(params[9])
+                ),
+                adopted_broker_exposure_krw=(
+                    None if len(params) <= 10 or params[10] is None else float(params[10])
+                ),
+                created_from_signal=str(params[11] if len(params) > 11 else ""),
             )
             return _Rows(None, rowcount=1)
 
@@ -1429,14 +1443,47 @@ def _target_delta_readiness(
             "executable_delta",
         ),
         (
-            "hold_without_persisted_target_fails_closed",
+            "adopted_target_hold_maintains_position",
+            TargetPositionState(
+                pair=settings.PAIR,
+                target_exposure_krw=49_980.0,
+                target_qty=0.0004998,
+                last_signal="HOLD",
+                last_decision_id=7,
+                last_reference_price=100_000_000.0,
+                updated_ts=1000,
+                target_origin="adopted_existing_position",
+                adoption_reason="safe_converged_executable_broker_position",
+                adopted_broker_qty=0.0004998,
+                adopted_broker_exposure_krw=49_980.0,
+                created_from_signal="HOLD",
+            ),
+            0.0004998,
+            0,
+            None,
+            0.0,
+            "delta_below_exchange_min",
+            "true_dust",
+        ),
+        (
+            "hold_without_persisted_target_adopts_executable_broker_position",
+            None,
+            0.0004998,
+            0,
+            None,
+            0.0,
+            "delta_below_exchange_min",
+            "true_dust",
+        ),
+        (
+            "hold_without_persisted_target_initializes_flat",
             None,
             0.0,
             0,
             None,
             0.0,
-            "missing_persistent_target_state",
-            "hold_target_unknown",
+            "delta_below_exchange_min",
+            "true_dust",
         ),
         (
             "unsafe_readiness_blocks_target_delta_submit",
@@ -1524,6 +1571,18 @@ def test_run_loop_target_delta_persisted_target_state_reaches_live_execution(
     assert isinstance(target_plan, dict)
     assert target_plan["block_reason"] == expected_block_reason
     assert target_plan["target_dust_classification"] == expected_dust_classification
+    if case_id == "hold_without_persisted_target_adopts_executable_broker_position":
+        assert target_plan["target_policy_action"] == "adopt_existing_broker_position"
+        assert target_plan["target_origin"] == "adopted_existing_position"
+        assert target_plan["target_delta_side"] == "NONE"
+        assert context["target_adopted_broker_qty"] == pytest.approx(0.0004998)
+        assert loop_conn.target_state is not None
+        assert loop_conn.target_state.target_origin == "adopted_existing_position"
+        assert loop_conn.target_state.target_qty == pytest.approx(0.0004998)
+    if case_id == "hold_without_persisted_target_initializes_flat":
+        assert target_plan["target_policy_action"] == "initialize_flat_target"
+        assert loop_conn.target_state is not None
+        assert loop_conn.target_state.target_origin == "flat_start"
 
     if expected_forwarded_side is None:
         assert executor_calls == []
@@ -1543,7 +1602,68 @@ def test_run_loop_target_delta_persisted_target_state_reaches_live_execution(
     if expected_block_reason == "none":
         assert loop_conn.target_state is not None
         assert loop_conn.target_state.last_signal == "HOLD"
-        assert loop_conn.target_state.last_decision_id == 42
+
+
+def test_run_loop_target_delta_adopted_target_strategy_sell_submits_delta_sell(monkeypatch) -> None:
+    loop_conn = _prepare_run_loop(
+        monkeypatch,
+        asset_qty=0.0004998,
+        target_state=TargetPositionState(
+            pair=settings.PAIR,
+            target_exposure_krw=49_980.0,
+            target_qty=0.0004998,
+            last_signal="HOLD",
+            last_decision_id=7,
+            last_reference_price=100_000_000.0,
+            updated_ts=1000,
+            target_origin="adopted_existing_position",
+            adoption_reason="safe_converged_executable_broker_position",
+            adopted_broker_qty=0.0004998,
+            adopted_broker_exposure_krw=49_980.0,
+            created_from_signal="HOLD",
+        ),
+    )
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "telemetry")
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.evaluate_startup_safety_gate", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda _conn, _short, _long, **_kwargs: {
+            "ts": 9000,
+            "last_close": 100_000_000.0,
+            "curr_s": 0.5,
+            "curr_l": 1.0,
+            "signal": "SELL",
+            "raw_signal": "SELL",
+            "reason": "strategy sell after adoption",
+        },
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_runtime_readiness_snapshot",
+        lambda _conn: SimpleNamespace(as_dict=lambda: _target_delta_readiness(broker_qty=0.0004998)),
+    )
+    executor_calls: list[dict[str, object]] = []
+    monkeypatch.setattr("bithumb_bot.engine.record_strategy_decision", lambda _conn, **_kwargs: 42)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda _broker, side, ts, market_price, **kwargs: executor_calls.append(
+            {"side": side, "execution_submit_plan": kwargs.get("execution_submit_plan")}
+        ),
+    )
+
+    run_loop(5, 20)
+
+    assert len(executor_calls) == 1
+    forwarded = executor_calls[0]["execution_submit_plan"]
+    assert isinstance(forwarded, dict)
+    assert forwarded["side"] == "SELL"
+    assert forwarded["qty"] == pytest.approx(0.0004998)
+    assert forwarded["target_origin"] == "strategy_sell"
+    assert loop_conn.target_state is not None
+    assert loop_conn.target_state.target_origin == "strategy_sell"
+    assert loop_conn.target_state.target_exposure_krw == 0.0
+    assert loop_conn.target_state.last_decision_id == 42
 
 
 def test_default_live_service_wrapper_preserves_residual_execution_submit_plan(monkeypatch) -> None:

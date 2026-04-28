@@ -409,6 +409,16 @@ def build_execution_decision_summary(
             "active_fee_accounting_blocker",
             "accounting_projection_ok",
             "idempotency_scope",
+            "target_policy_action",
+            "target_origin",
+            "target_adoption_reason",
+            "target_adopted_broker_qty",
+            "target_adopted_exposure_krw",
+            "target_startup_policy_state",
+            "target_existing_state_present",
+            "target_missing_state_resolution",
+            "target_closeout_requested",
+            "target_strategy_signal_source",
         ):
             if key in readiness_payload:
                 payload[key] = readiness_payload[key]
@@ -524,6 +534,16 @@ def build_execution_decision_summary(
                     "target_delta_side": target_decision.delta_side,
                     "target_dust_classification": target_decision.dust_classification,
                     "target_position_truth_state": target_decision.position_truth_state,
+                    "target_origin": target_decision.target_origin,
+                    "target_policy_action": target_decision.target_policy_action,
+                    "target_adoption_reason": target_decision.target_adoption_reason,
+                    "target_adopted_broker_qty": target_decision.target_adopted_broker_qty,
+                    "target_adopted_exposure_krw": target_decision.target_adopted_exposure_krw,
+                    "target_startup_policy_state": target_decision.target_startup_policy_state,
+                    "target_existing_state_present": target_decision.target_existing_state_present,
+                    "target_missing_state_resolution": target_decision.target_missing_state_resolution,
+                    "target_closeout_requested": target_decision.target_closeout_requested,
+                    "target_strategy_signal_source": target_decision.target_strategy_signal_source,
                 }
             )
 

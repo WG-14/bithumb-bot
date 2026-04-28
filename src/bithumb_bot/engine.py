@@ -75,6 +75,13 @@ from .execution_service import (
     paper_execute,
     record_harmless_dust_exit_suppression,
 )
+from .target_position import (
+    TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+    TARGET_POLICY_INITIALIZE_FLAT_TARGET,
+    TARGET_POLICY_INITIALIZE_TRUE_DUST_FLAT,
+    TARGET_POLICY_USE_EXISTING_TARGET,
+    resolve_startup_target_position_policy,
+)
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
@@ -105,6 +112,67 @@ def _load_previous_target_exposure_for_run_loop(conn) -> float | None:
     if previous_target_state is None:
         return None
     return float(previous_target_state.target_exposure_krw)
+
+
+def _resolve_target_position_state_for_run_loop(
+    conn,
+    *,
+    readiness_payload: dict[str, object],
+    reference_price: float | None,
+    raw_signal: str,
+    updated_ts: int,
+) -> dict[str, object]:
+    if not _run_loop_uses_target_delta():
+        return {
+            "previous_target_exposure_krw": None,
+            "target_policy_metadata": {},
+            "target_state": None,
+        }
+    previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+    policy = resolve_startup_target_position_policy(
+        existing_target_state=previous_target_state,
+        readiness_payload=readiness_payload,
+        order_rules={
+            "min_qty": readiness_payload.get("min_qty", readiness_payload.get("residual_proof_min_qty")),
+            "min_notional_krw": readiness_payload.get(
+                "min_notional_krw", readiness_payload.get("residual_proof_min_notional_krw")
+            ),
+        },
+        reference_price=reference_price,
+        raw_signal=raw_signal,
+    )
+    metadata = policy.as_dict()
+    if policy.policy_action in {
+        TARGET_POLICY_INITIALIZE_FLAT_TARGET,
+        TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+        TARGET_POLICY_INITIALIZE_TRUE_DUST_FLAT,
+    }:
+        upsert_target_position_state(
+            conn,
+            pair=settings.PAIR,
+            target_exposure_krw=float(policy.target_exposure_krw or 0.0),
+            target_qty=float(policy.target_qty or 0.0),
+            last_signal=str(raw_signal or "HOLD").upper(),
+            last_decision_id=None,
+            last_reference_price=float(reference_price or 0.0),
+            updated_ts=int(updated_ts),
+            target_origin=policy.target_origin,
+            adoption_reason=policy.adoption_reason,
+            adopted_broker_qty=policy.adopted_broker_qty,
+            adopted_broker_exposure_krw=policy.adopted_broker_exposure_krw,
+            created_from_signal=policy.created_from_signal,
+        )
+        previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+    previous_exposure = (
+        None if previous_target_state is None else float(previous_target_state.target_exposure_krw)
+    )
+    if policy.policy_action == TARGET_POLICY_USE_EXISTING_TARGET and previous_target_state is not None:
+        metadata.setdefault("target_origin", str(previous_target_state.target_origin or ""))
+    return {
+        "previous_target_exposure_krw": previous_exposure,
+        "target_policy_metadata": metadata,
+        "target_state": previous_target_state,
+    }
 
 
 def _persist_target_position_state_for_run_loop(
@@ -140,6 +208,19 @@ def _persist_target_position_state_for_run_loop(
         last_decision_id=decision_id,
         last_reference_price=float(target_decision["target_reference_price"] or 0.0),
         updated_ts=int(updated_ts),
+        target_origin=str(target_decision.get("target_origin") or ""),
+        adoption_reason=str(target_decision.get("target_adoption_reason") or ""),
+        adopted_broker_qty=(
+            None
+            if target_decision.get("target_adopted_broker_qty") is None
+            else float(target_decision.get("target_adopted_broker_qty") or 0.0)
+        ),
+        adopted_broker_exposure_krw=(
+            None
+            if target_decision.get("target_adopted_exposure_krw") is None
+            else float(target_decision.get("target_adopted_exposure_krw") or 0.0)
+        ),
+        created_from_signal=str(target_decision.get("target_strategy_signal_source") or signal),
     )
     return True
 
@@ -3082,14 +3163,36 @@ def run_loop(short_n: int, long_n: int) -> None:
                 signal = str(context.pop("signal", "HOLD"))
                 reason = str(context.pop("reason", ""))
                 readiness_payload: dict[str, object] = {}
-                previous_target_exposure_krw = _load_previous_target_exposure_for_run_loop(conn)
+                previous_target_exposure_krw: float | None = None
                 execution_decision: dict[str, object] = {}
                 try:
                     readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
+                    raw_signal_for_target = str(
+                        context.get("raw_signal") or context.get("base_signal") or signal
+                    )
+                    target_resolution = _resolve_target_position_state_for_run_loop(
+                        conn,
+                        readiness_payload=readiness_payload,
+                        reference_price=context.get("market_price", context.get("last_close", context.get("close"))),
+                        raw_signal=raw_signal_for_target,
+                        updated_ts=int(now * 1000),
+                    )
+                    previous_target_exposure_krw = (
+                        target_resolution["previous_target_exposure_krw"]
+                        if isinstance(target_resolution, dict)
+                        else None
+                    )
+                    target_policy_metadata = (
+                        target_resolution.get("target_policy_metadata", {})
+                        if isinstance(target_resolution, dict)
+                        else {}
+                    )
+                    if isinstance(target_policy_metadata, dict):
+                        readiness_payload = {**readiness_payload, **target_policy_metadata}
                     execution_decision = build_execution_decision_summary(
                         decision_context=context,
                         readiness_payload=readiness_payload,
-                        raw_signal=str(context.get("raw_signal") or context.get("base_signal") or signal),
+                        raw_signal=raw_signal_for_target,
                         final_signal=signal,
                         final_reason=reason,
                         previous_target_exposure_krw=previous_target_exposure_krw,
@@ -3105,6 +3208,9 @@ def run_loop(short_n: int, long_n: int) -> None:
                     if isinstance(target_shadow, dict):
                         for target_key, target_value in target_shadow.items():
                             context[target_key] = target_value
+                    if isinstance(target_policy_metadata, dict):
+                        for target_key, target_value in target_policy_metadata.items():
+                            context.setdefault(target_key, target_value)
                     for key in (
                         "residual_inventory_mode",
                         "residual_inventory_state",
@@ -3119,6 +3225,16 @@ def run_loop(short_n: int, long_n: int) -> None:
                         "residual_sell_candidate",
                         "unresolved_open_order_count",
                         "submit_unknown_count",
+                        "target_policy_action",
+                        "target_origin",
+                        "target_adoption_reason",
+                        "target_adopted_broker_qty",
+                        "target_adopted_exposure_krw",
+                        "target_startup_policy_state",
+                        "target_existing_state_present",
+                        "target_missing_state_resolution",
+                        "target_closeout_requested",
+                        "target_strategy_signal_source",
                     ):
                         if key in readiness_payload:
                             context[key] = readiness_payload[key]
@@ -3172,6 +3288,16 @@ def run_loop(short_n: int, long_n: int) -> None:
                     target_block_reason=str(context.get("target_block_reason") or "-"),
                     target_position_truth_state=str(context.get("target_position_truth_state") or "-"),
                     target_dust_classification=str(context.get("target_dust_classification") or "-"),
+                    target_policy_action=str(context.get("target_policy_action") or "-"),
+                    target_origin=str(context.get("target_origin") or "-"),
+                    target_adoption_reason=str(context.get("target_adoption_reason") or "-"),
+                    target_adopted_broker_qty=str(context.get("target_adopted_broker_qty") or "-"),
+                    target_adopted_exposure_krw=str(context.get("target_adopted_exposure_krw") or "-"),
+                    target_startup_policy_state=str(context.get("target_startup_policy_state") or "-"),
+                    target_existing_state_present=1 if bool(context.get("target_existing_state_present")) else 0,
+                    target_missing_state_resolution=str(context.get("target_missing_state_resolution") or "-"),
+                    target_closeout_requested=1 if bool(context.get("target_closeout_requested")) else 0,
+                    target_strategy_signal_source=str(context.get("target_strategy_signal_source") or "-"),
                     reason=reason,
                 )
                 try:

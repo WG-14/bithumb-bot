@@ -1720,6 +1720,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "target_position_state", "last_decision_id", "last_decision_id INTEGER")
     _ensure_column(conn, "target_position_state", "last_reference_price", "last_reference_price REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "target_position_state", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "target_position_state", "target_origin", "target_origin TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "target_position_state", "adoption_reason", "adoption_reason TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "target_position_state", "adopted_broker_qty", "adopted_broker_qty REAL")
+    _ensure_column(conn, "target_position_state", "adopted_broker_exposure_krw", "adopted_broker_exposure_krw REAL")
+    _ensure_column(conn, "target_position_state", "created_from_signal", "created_from_signal TEXT NOT NULL DEFAULT ''")
 
     conn.execute(
         """
@@ -1950,7 +1955,8 @@ def load_target_position_state(conn: sqlite3.Connection, *, pair: str) -> Target
     row = conn.execute(
         """
         SELECT pair, target_exposure_krw, target_qty, last_signal, last_decision_id,
-               last_reference_price, updated_ts
+               last_reference_price, updated_ts, target_origin, adoption_reason,
+               adopted_broker_qty, adopted_broker_exposure_krw, created_from_signal
         FROM target_position_state
         WHERE pair=?
         """,
@@ -1966,6 +1972,17 @@ def load_target_position_state(conn: sqlite3.Connection, *, pair: str) -> Target
         last_decision_id=(None if row["last_decision_id"] is None else int(row["last_decision_id"])),
         last_reference_price=float(row["last_reference_price"] or 0.0),
         updated_ts=int(row["updated_ts"] or 0),
+        target_origin=str(row["target_origin"] or ""),
+        adoption_reason=str(row["adoption_reason"] or ""),
+        adopted_broker_qty=(
+            None if row["adopted_broker_qty"] is None else float(row["adopted_broker_qty"])
+        ),
+        adopted_broker_exposure_krw=(
+            None
+            if row["adopted_broker_exposure_krw"] is None
+            else float(row["adopted_broker_exposure_krw"])
+        ),
+        created_from_signal=str(row["created_from_signal"] or ""),
     )
 
 
@@ -1979,21 +1996,32 @@ def upsert_target_position_state(
     last_decision_id: int | None,
     last_reference_price: float,
     updated_ts: int,
+    target_origin: str = "",
+    adoption_reason: str = "",
+    adopted_broker_qty: float | None = None,
+    adopted_broker_exposure_krw: float | None = None,
+    created_from_signal: str = "",
 ) -> None:
     conn.execute(
         """
         INSERT INTO target_position_state(
             pair, target_exposure_krw, target_qty, last_signal, last_decision_id,
-            last_reference_price, updated_ts
+            last_reference_price, updated_ts, target_origin, adoption_reason,
+            adopted_broker_qty, adopted_broker_exposure_krw, created_from_signal
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(pair) DO UPDATE SET
             target_exposure_krw=excluded.target_exposure_krw,
             target_qty=excluded.target_qty,
             last_signal=excluded.last_signal,
             last_decision_id=excluded.last_decision_id,
             last_reference_price=excluded.last_reference_price,
-            updated_ts=excluded.updated_ts
+            updated_ts=excluded.updated_ts,
+            target_origin=excluded.target_origin,
+            adoption_reason=excluded.adoption_reason,
+            adopted_broker_qty=excluded.adopted_broker_qty,
+            adopted_broker_exposure_krw=excluded.adopted_broker_exposure_krw,
+            created_from_signal=excluded.created_from_signal
         """,
         (
             str(pair),
@@ -2003,6 +2031,15 @@ def upsert_target_position_state(
             None if last_decision_id is None else int(last_decision_id),
             float(last_reference_price),
             int(updated_ts),
+            str(target_origin or ""),
+            str(adoption_reason or ""),
+            None if adopted_broker_qty is None else float(adopted_broker_qty),
+            (
+                None
+                if adopted_broker_exposure_krw is None
+                else float(adopted_broker_exposure_krw)
+            ),
+            str(created_from_signal or ""),
         ),
     )
 

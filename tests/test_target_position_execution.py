@@ -10,11 +10,23 @@ from bithumb_bot.engine import (
 )
 from bithumb_bot.execution_service import build_execution_decision_summary
 from bithumb_bot.target_position import (
+    TARGET_ORIGIN_ADOPTED_EXISTING_POSITION,
+    TARGET_ORIGIN_FLAT_START,
+    TARGET_ORIGIN_OPERATOR_CLOSEOUT,
+    TARGET_ORIGIN_STRATEGY_BUY,
+    TARGET_ORIGIN_STRATEGY_SELL,
+    TARGET_ORIGIN_TRUE_DUST_FLAT,
+    TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+    TARGET_POLICY_BLOCK_UNSAFE_STATE,
+    TARGET_POLICY_INITIALIZE_FLAT_TARGET,
+    TARGET_POLICY_INITIALIZE_TRUE_DUST_FLAT,
     TARGET_STATE_PERSISTENCE_NOT_PERSISTED,
     TARGET_STATE_PERSISTENCE_MISSING,
     TARGET_STATE_PERSISTENCE_PERSISTED,
+    TargetPositionState,
     TargetPositionSettings,
     build_target_position_decision,
+    resolve_startup_target_position_policy,
 )
 
 
@@ -220,6 +232,177 @@ def test_target_delta_hold_without_persisted_target_fails_closed() -> None:
     assert decision.state_persistence == TARGET_STATE_PERSISTENCE_MISSING
 
 
+def test_startup_policy_missing_target_adopts_executable_broker_position_without_submit() -> None:
+    policy = resolve_startup_target_position_policy(
+        existing_target_state=None,
+        readiness_payload=_readiness(broker_qty=0.0004998),
+        order_rules=_rules(),
+        reference_price=114_120_000.0,
+        raw_signal="HOLD",
+    )
+
+    assert policy.policy_action == TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION
+    assert policy.target_origin == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+    assert policy.target_qty == pytest.approx(0.0004998)
+    assert policy.target_exposure_krw == pytest.approx(0.0004998 * 114_120_000.0)
+    assert policy.adopted_broker_qty == pytest.approx(0.0004998)
+    assert policy.would_submit_on_startup is False
+    assert policy.block_reason == "none"
+
+    decision = build_target_position_decision(
+        raw_signal="HOLD",
+        previous_target_exposure_krw=policy.target_exposure_krw,
+        current_position_snapshot=None,
+        readiness_payload=_readiness(broker_qty=0.0004998) | policy.as_dict(),
+        order_rules=_rules(),
+        reference_price=114_120_000.0,
+        settings=_target_delta_settings(),
+    )
+    assert decision.target_origin == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+    assert decision.delta_side == "NONE"
+    assert decision.would_submit is False
+    assert decision.target_qty == pytest.approx(0.0004998)
+
+
+def test_startup_policy_missing_target_flat_broker_initializes_flat_without_submit() -> None:
+    policy = resolve_startup_target_position_policy(
+        existing_target_state=None,
+        readiness_payload=_readiness(broker_qty=0.0),
+        order_rules=_rules(),
+        reference_price=100_000_000.0,
+        raw_signal="HOLD",
+    )
+
+    assert policy.policy_action == TARGET_POLICY_INITIALIZE_FLAT_TARGET
+    assert policy.target_origin == TARGET_ORIGIN_FLAT_START
+    assert policy.target_exposure_krw == 0.0
+    assert policy.target_qty == 0.0
+    assert policy.would_submit_on_startup is False
+
+
+def test_startup_policy_missing_target_below_min_initializes_true_dust_flat() -> None:
+    policy = resolve_startup_target_position_policy(
+        existing_target_state=None,
+        readiness_payload=_readiness(broker_qty=0.00000004),
+        order_rules=_rules(),
+        reference_price=100_000_000.0,
+        raw_signal="HOLD",
+    )
+
+    assert policy.policy_action == TARGET_POLICY_INITIALIZE_TRUE_DUST_FLAT
+    assert policy.target_origin == TARGET_ORIGIN_TRUE_DUST_FLAT
+    assert policy.dust_classification == "true_dust"
+    assert policy.target_exposure_krw == 0.0
+    assert policy.would_submit_on_startup is False
+
+
+def test_startup_policy_existing_target_is_preserved() -> None:
+    existing = TargetPositionState(
+        pair="KRW-BTC",
+        target_exposure_krw=57_816.0,
+        target_qty=0.0004998,
+        last_signal="HOLD",
+        last_decision_id=10,
+        last_reference_price=115_680_000.0,
+        updated_ts=123,
+        target_origin=TARGET_ORIGIN_ADOPTED_EXISTING_POSITION,
+        adoption_reason="safe_converged_executable_broker_position",
+        adopted_broker_qty=0.0004998,
+        adopted_broker_exposure_krw=57_816.0,
+        created_from_signal="HOLD",
+    )
+
+    policy = resolve_startup_target_position_policy(
+        existing_target_state=existing,
+        readiness_payload=_readiness(broker_qty=0.001),
+        order_rules=_rules(),
+        reference_price=100_000_000.0,
+        raw_signal="HOLD",
+    )
+
+    assert policy.policy_action == "use_existing_target"
+    assert policy.target_exposure_krw == pytest.approx(57_816.0)
+    assert policy.target_qty == pytest.approx(0.0004998)
+    assert policy.target_origin == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+
+
+def test_target_delta_strategy_signals_change_adopted_target_authoritatively() -> None:
+    readiness = _readiness(broker_qty=0.0004998)
+
+    sell = build_target_position_decision(
+        raw_signal="SELL",
+        previous_target_exposure_krw=57_816.0,
+        current_position_snapshot=None,
+        readiness_payload=readiness
+        | {
+            "target_origin": TARGET_ORIGIN_ADOPTED_EXISTING_POSITION,
+            "target_policy_action": TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+        },
+        order_rules=_rules(),
+        reference_price=100_000_000.0,
+        settings=_target_delta_settings(target_exposure_krw=70_000.0),
+    )
+    assert sell.new_target_exposure_krw == 0.0
+    assert sell.target_origin == TARGET_ORIGIN_STRATEGY_SELL
+    assert sell.delta_side == "SELL"
+    assert sell.would_submit is True
+
+    buy = build_target_position_decision(
+        raw_signal="BUY",
+        previous_target_exposure_krw=57_816.0,
+        current_position_snapshot=None,
+        readiness_payload=readiness
+        | {
+            "target_origin": TARGET_ORIGIN_ADOPTED_EXISTING_POSITION,
+            "target_policy_action": TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+        },
+        order_rules=_rules(),
+        reference_price=100_000_000.0,
+        settings=_target_delta_settings(target_exposure_krw=70_000.0),
+    )
+    assert buy.new_target_exposure_krw == 70_000.0
+    assert buy.target_origin == TARGET_ORIGIN_STRATEGY_BUY
+    assert buy.delta_side == "BUY"
+    assert buy.submit_notional_krw == pytest.approx(20_020.0)
+
+
+def test_operator_closeout_target_allows_hold_cycle_target_delta_sell() -> None:
+    decision = build_target_position_decision(
+        raw_signal="HOLD",
+        previous_target_exposure_krw=0.0,
+        current_position_snapshot=None,
+        readiness_payload=_readiness(broker_qty=0.0004998)
+        | {
+            "target_origin": TARGET_ORIGIN_OPERATOR_CLOSEOUT,
+            "target_closeout_requested": True,
+            "target_strategy_signal_source": "OPERATOR_CLOSEOUT",
+        },
+        order_rules=_rules(),
+        reference_price=100_000_000.0,
+        settings=_target_delta_settings(),
+    )
+
+    assert decision.target_origin == TARGET_ORIGIN_OPERATOR_CLOSEOUT
+    assert decision.target_closeout_requested is True
+    assert decision.new_target_exposure_krw == 0.0
+    assert decision.delta_side == "SELL"
+    assert decision.would_submit is True
+
+
+def test_startup_policy_unsafe_readiness_blocks_adoption() -> None:
+    policy = resolve_startup_target_position_policy(
+        existing_target_state=None,
+        readiness_payload=_readiness(broker_qty=0.0004998, open_order_count=1),
+        order_rules=_rules(),
+        reference_price=100_000_000.0,
+        raw_signal="HOLD",
+    )
+
+    assert policy.policy_action == TARGET_POLICY_BLOCK_UNSAFE_STATE
+    assert policy.target_exposure_krw is None
+    assert policy.block_reason == "open_order_count_nonzero"
+
+
 def test_target_state_persistence_survives_restart_simulation(tmp_path) -> None:
     db_path = str(tmp_path / "target_state.sqlite")
     conn = ensure_db(db_path)
@@ -233,6 +416,9 @@ def test_target_state_persistence_survives_restart_simulation(tmp_path) -> None:
             last_decision_id=7,
             last_reference_price=100_000_000.0,
             updated_ts=1234,
+            target_origin=TARGET_ORIGIN_OPERATOR_CLOSEOUT,
+            adoption_reason="explicit_operator_closeout",
+            created_from_signal="OPERATOR_CLOSEOUT",
         )
         conn.commit()
     finally:
@@ -248,6 +434,8 @@ def test_target_state_persistence_survives_restart_simulation(tmp_path) -> None:
     assert state.target_exposure_krw == 0.0
     assert state.last_signal == "SELL"
     assert state.last_decision_id == 7
+    assert state.target_origin == TARGET_ORIGIN_OPERATOR_CLOSEOUT
+    assert state.adoption_reason == "explicit_operator_closeout"
 
 
 def test_target_delta_unsafe_readiness_blocks_submit() -> None:
