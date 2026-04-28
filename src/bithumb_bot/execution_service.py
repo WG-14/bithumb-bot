@@ -8,6 +8,7 @@ from .config import settings
 from .db_core import ensure_db
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .oms import build_order_intent_key
+from .target_position import TargetPositionSettings, build_target_position_decision
 
 if False:  # pragma: no cover
     from .broker.base import Broker
@@ -94,6 +95,7 @@ class ExecutionDecisionSummary:
     residual_buy_sizing_mode: str
     residual_submit_plan: dict[str, object] | None
     buy_submit_plan: dict[str, object] | None
+    target_shadow_decision: dict[str, object] | None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -119,6 +121,9 @@ class ExecutionDecisionSummary:
                 None if self.residual_submit_plan is None else dict(self.residual_submit_plan)
             ),
             "buy_submit_plan": None if self.buy_submit_plan is None else dict(self.buy_submit_plan),
+            "target_shadow_decision": (
+                None if self.target_shadow_decision is None else dict(self.target_shadow_decision)
+            ),
         }
 
 
@@ -438,6 +443,29 @@ def build_execution_decision_summary(
     residual_buy_sizing_mode = _residual_buy_sizing_mode()
     residual_submit_plan: dict[str, object] | None = None
     buy_submit_plan: dict[str, object] | None = None
+    target_shadow_decision: dict[str, object] | None = None
+
+    if bool(getattr(settings, "TARGET_EXECUTION_SHADOW", False)):
+        target_shadow_decision = build_target_position_decision(
+            raw_signal=raw,
+            previous_target_exposure_krw=None,
+            current_position_snapshot=None,
+            readiness_payload=payload,
+            order_rules={
+                "min_qty": payload.get("min_qty", payload.get("residual_proof_min_qty")),
+                "min_notional_krw": payload.get(
+                    "min_notional_krw", payload.get("residual_proof_min_notional_krw")
+                ),
+            },
+            reference_price=payload.get("market_price", payload.get("last_close", payload.get("close"))),
+            settings=TargetPositionSettings(
+                execution_engine=str(getattr(settings, "EXECUTION_ENGINE", "lot_native")),
+                shadow_enabled=True,
+                target_exposure_krw=getattr(settings, "TARGET_EXPOSURE_KRW", None),
+                max_order_krw=float(getattr(settings, "MAX_ORDER_KRW", 0.0) or 0.0),
+                hold_policy=str(getattr(settings, "TARGET_HOLD_POLICY", "maintain_previous_target")),
+            ),
+        ).as_dict()
 
     if raw == "BUY":
         if not bool(payload.get("residual_inventory_policy_allows_run", True)):
@@ -614,6 +642,7 @@ def build_execution_decision_summary(
         residual_buy_sizing_mode=residual_buy_sizing_mode,
         residual_submit_plan=residual_submit_plan,
         buy_submit_plan=buy_submit_plan,
+        target_shadow_decision=target_shadow_decision,
     )
 
 

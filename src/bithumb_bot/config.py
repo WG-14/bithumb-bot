@@ -482,6 +482,17 @@ class Settings:
     # paper portfolio
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
+    EXECUTION_ENGINE: str = os.getenv("EXECUTION_ENGINE", "lot_native").strip().lower() or "lot_native"
+    TARGET_EXECUTION_SHADOW: bool = parse_bool_env("TARGET_EXECUTION_SHADOW", "false")
+    TARGET_EXPOSURE_KRW: float | None = (
+        None
+        if os.getenv("TARGET_EXPOSURE_KRW") in (None, "")
+        else parse_non_negative_float_env("TARGET_EXPOSURE_KRW", os.getenv("TARGET_EXPOSURE_KRW", "0"))
+    )
+    TARGET_HOLD_POLICY: str = (
+        os.getenv("TARGET_HOLD_POLICY", "maintain_previous_target").strip().lower()
+        or "maintain_previous_target"
+    )
     RESIDUAL_INVENTORY_MODE: str = os.getenv("RESIDUAL_INVENTORY_MODE", "block").strip().lower() or "block"
     RESIDUAL_LIVE_SELL_MODE: str = os.getenv("RESIDUAL_LIVE_SELL_MODE", "telemetry").strip().lower() or "telemetry"
     RESIDUAL_BUY_SIZING_MODE: str = os.getenv("RESIDUAL_BUY_SIZING_MODE", "telemetry").strip().lower() or "telemetry"
@@ -841,6 +852,10 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
 
     if cfg.MAX_ORDER_KRW <= 0 or not math.isfinite(float(cfg.MAX_ORDER_KRW)):
         issues.append("MAX_ORDER_KRW must be > 0")
+    if str(cfg.EXECUTION_ENGINE) not in {"lot_native", "target_delta"}:
+        issues.append("EXECUTION_ENGINE must be one of: lot_native, target_delta")
+    if str(cfg.TARGET_HOLD_POLICY) not in {"maintain_previous_target"}:
+        issues.append("TARGET_HOLD_POLICY must be maintain_previous_target")
     if str(cfg.RESIDUAL_LIVE_SELL_MODE) not in {"telemetry", "dry_run", "enabled"}:
         issues.append("RESIDUAL_LIVE_SELL_MODE must be one of: telemetry, dry_run, enabled")
     if str(cfg.RESIDUAL_BUY_SIZING_MODE) not in {"off", "telemetry", "delta"}:

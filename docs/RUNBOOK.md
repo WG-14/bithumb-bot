@@ -224,6 +224,15 @@ Expected BUY sizing behavior:
 
 - `RESIDUAL_BUY_SIZING_MODE=telemetry`: target/current/delta are reported, but the existing BUY sizing remains unchanged.
 - `RESIDUAL_BUY_SIZING_MODE=delta`: BUY sizing uses `target_exposure_krw - current_effective_exposure_krw`; if tracked residual already covers target, no BUY submits.
+
+### Target Position Shadow Mode
+
+- `TARGET_EXECUTION_SHADOW=true` does not change live order behavior.
+- It compares the current lot-native execution decision against a target-position decision using current position, target position, and target delta telemetry.
+- It is intended to validate whether target-position execution would remove residual/dust deadlocks before any live migration.
+- Do not switch live execution to `EXECUTION_ENGINE=target_delta` until shadow telemetry has been reviewed and a separate migration patch proves the submit path.
+- Because target state is not persisted yet, HOLD target continuity is reported as `target_state_persistence=not_yet_persisted` and `target_block_reason=missing_persistent_target_state`.
+- Compare `raw_signal`, `final_signal`, `final_action`, `submit_expected`, `execution_block_reason`, `residual_live_sell_mode`, and `residual_buy_sizing_mode` against `target_delta_side`, `target_would_submit`, `target_submit_qty`, `target_delta_notional_krw`, `target_block_reason`, and `target_position_truth_state` in `decision-telemetry` or `ops-report`.
 8. Run `uv run bithumb-bot reconcile` if state needs to be refreshed.
 9. Re-run `health` and confirm `trading_enabled` is healthy, `can_resume=true`, and the current dust indicators do not contradict resume.
 10. Resume only after the state is understood.

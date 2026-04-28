@@ -3043,6 +3043,10 @@ def run_loop(short_n: int, long_n: int) -> None:
                     context["execution_block_reason"] = execution_decision["block_reason"]
                     context["residual_live_sell_mode"] = execution_decision.get("residual_live_sell_mode")
                     context["residual_buy_sizing_mode"] = execution_decision.get("residual_buy_sizing_mode")
+                    target_shadow = execution_decision.get("target_shadow_decision")
+                    if isinstance(target_shadow, dict):
+                        for target_key, target_value in target_shadow.items():
+                            context[target_key] = target_value
                     for key in (
                         "residual_inventory_mode",
                         "residual_inventory_state",

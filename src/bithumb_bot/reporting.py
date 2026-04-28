@@ -322,6 +322,12 @@ class DecisionTelemetrySummary:
     buy_delta_krw: float | None
     residual_live_sell_mode: str
     residual_buy_sizing_mode: str
+    target_delta_side: str
+    target_would_submit: bool
+    target_submit_qty: float | None
+    target_delta_notional_krw: float | None
+    target_block_reason: str
+    target_position_truth_state: str
     buy_flow_state: str
     entry_blocked: bool
     entry_allowed: bool
@@ -369,6 +375,28 @@ def _format_external_cash_adjustment_summary(summary: dict[str, object] | None) 
         f"source={summary.get('last_source') or '-'} "
         f"reason={summary.get('last_reason') or '-'}"
     )
+
+
+def _target_shadow_from_context(context: dict[str, object]) -> dict[str, object]:
+    execution_decision = context.get("execution_decision")
+    nested = (
+        execution_decision.get("target_shadow_decision")
+        if isinstance(execution_decision, dict)
+        and isinstance(execution_decision.get("target_shadow_decision"), dict)
+        else None
+    )
+    source = dict(nested or {})
+    for key in (
+        "target_delta_side",
+        "target_would_submit",
+        "target_submit_qty",
+        "target_delta_notional_krw",
+        "target_block_reason",
+        "target_position_truth_state",
+    ):
+        if key not in source and key in context:
+            source[key] = context[key]
+    return source
 
 
 def _summarize_external_cash_adjustment_json(raw: str | None, *, keys: list[str]) -> str:
@@ -828,6 +856,12 @@ class RecentDecisionFlowSummary:
     buy_delta_krw: float | None
     residual_live_sell_mode: str
     residual_buy_sizing_mode: str
+    target_delta_side: str
+    target_would_submit: bool
+    target_submit_qty: float | None
+    target_delta_notional_krw: float | None
+    target_block_reason: str
+    target_position_truth_state: str
     buy_flow_state: str
     entry_blocked: bool
     entry_allowed: bool
@@ -1801,6 +1835,7 @@ def fetch_recent_decision_flow(
     for row in rows:
         context = _load_json_dict(str(row["context_json"] or ""))
         exposure = resolve_canonical_position_exposure_snapshot(context)
+        target_shadow = _target_shadow_from_context(context)
         summaries.append(
             RecentDecisionFlowSummary(
                 decision_id=int(row["decision_id"]),
@@ -1830,6 +1865,20 @@ def fetch_recent_decision_flow(
                 buy_delta_krw=(None if row["buy_delta_krw"] is None else float(row["buy_delta_krw"])),
                 residual_live_sell_mode=str(row["residual_live_sell_mode"]),
                 residual_buy_sizing_mode=str(row["residual_buy_sizing_mode"]),
+                target_delta_side=str(target_shadow.get("target_delta_side") or "-"),
+                target_would_submit=bool(target_shadow.get("target_would_submit")),
+                target_submit_qty=(
+                    None
+                    if target_shadow.get("target_submit_qty") is None
+                    else float(target_shadow.get("target_submit_qty") or 0.0)
+                ),
+                target_delta_notional_krw=(
+                    None
+                    if target_shadow.get("target_delta_notional_krw") is None
+                    else float(target_shadow.get("target_delta_notional_krw") or 0.0)
+                ),
+                target_block_reason=str(target_shadow.get("target_block_reason") or "-"),
+                target_position_truth_state=str(target_shadow.get("target_position_truth_state") or "-"),
                 buy_flow_state=_derive_buy_flow_state(
                     raw_signal=str(row["raw_signal"]),
                     final_signal=str(row["final_signal"]),
@@ -1994,6 +2043,7 @@ def fetch_decision_telemetry_summary(
         execution_decision = (
             context.get("execution_decision") if isinstance(context.get("execution_decision"), dict) else {}
         )
+        target_shadow = _target_shadow_from_context(context)
         target_exposure_krw = execution_decision.get("target_exposure_krw")
         current_effective_exposure_krw = execution_decision.get("current_effective_exposure_krw")
         tracked_residual_exposure_krw = execution_decision.get("tracked_residual_exposure_krw")
@@ -2048,6 +2098,12 @@ def fetch_decision_telemetry_summary(
             buy_delta_krw,
             residual_live_sell_mode,
             residual_buy_sizing_mode,
+            target_shadow.get("target_delta_side"),
+            bool(target_shadow.get("target_would_submit")),
+            target_shadow.get("target_submit_qty"),
+            target_shadow.get("target_delta_notional_krw"),
+            target_shadow.get("target_block_reason"),
+            target_shadow.get("target_position_truth_state"),
         )
         grouped[key] = grouped.get(key, 0) + 1
 
@@ -2067,6 +2123,12 @@ def fetch_decision_telemetry_summary(
                 buy_delta_krw=(None if key[35] is None else float(key[35])),
                 residual_live_sell_mode=str(key[36]),
                 residual_buy_sizing_mode=str(key[37]),
+                target_delta_side=str(key[38] or "-"),
+                target_would_submit=bool(key[39]),
+                target_submit_qty=(None if key[40] is None else float(key[40])),
+                target_delta_notional_krw=(None if key[41] is None else float(key[41])),
+                target_block_reason=str(key[42] or "-"),
+                target_position_truth_state=str(key[43] or "-"),
                 buy_flow_state=_derive_buy_flow_state(
                     raw_signal=str(key[2]),
                     final_signal=str(key[3]),
@@ -4421,6 +4483,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"target_exposure_krw={_fmt_float(float(row.target_exposure_krw or 0.0), 0)} "
                 f"current_effective_exposure_krw={_fmt_float(float(row.current_effective_exposure_krw or 0.0), 0)} "
                 f"buy_delta_krw={_fmt_float(float(row.buy_delta_krw or 0.0), 0)} "
+                f"target_delta_side={row.target_delta_side} "
+                f"target_would_submit={1 if row.target_would_submit else 0} "
+                f"target_submit_qty={_fmt_float(float(row.target_submit_qty or 0.0), 8)} "
+                f"target_delta_notional_krw={_fmt_float(float(row.target_delta_notional_krw or 0.0), 0)} "
+                f"target_block_reason={row.target_block_reason} "
+                f"target_position_truth_state={row.target_position_truth_state} "
                 f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
                 f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
                 f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "
@@ -4607,6 +4675,8 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         "final_action,submit_expected,pre_submit_proof_status,execution_block_reason,"
         "residual_live_sell_mode,residual_buy_sizing_mode,target_exposure_krw,"
         "current_effective_exposure_krw,tracked_residual_exposure_krw,buy_delta_krw,"
+        "target_delta_side,target_would_submit,target_submit_qty,target_delta_notional_krw,"
+        "target_block_reason,target_position_truth_state,"
         "raw_total_asset_qty,observed_position_qty,observed_submit_payload_qty,normalized_exposure_active,"
         "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
         "observed_sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
@@ -4623,6 +4693,9 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{row.execution_block_reason},{row.residual_live_sell_mode},{row.residual_buy_sizing_mode},"
             f"{float(row.target_exposure_krw or 0.0):.2f},{float(row.current_effective_exposure_krw or 0.0):.2f},"
             f"{float(row.tracked_residual_exposure_krw or 0.0):.2f},{float(row.buy_delta_krw or 0.0):.2f},"
+            f"{row.target_delta_side},{1 if row.target_would_submit else 0},"
+            f"{float(row.target_submit_qty or 0.0):.8f},{float(row.target_delta_notional_krw or 0.0):.2f},"
+            f"{row.target_block_reason},{row.target_position_truth_state},"
             f"{row.raw_total_asset_qty:.8f},{row.position_qty:.8f},"
             f"{row.submit_payload_qty:.8f},{1 if row.normalized_exposure_active else 0},"
             f"{row.normalized_exposure_qty:.8f},{row.open_exposure_qty:.8f},"

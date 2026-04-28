@@ -1,664 +1,734 @@
 You are working in the GitHub repo `WG-14/bithumb-bot`.
 
-This is a targeted follow-up patch after the current `main` commit `a1ae35b3db9ed9e65b71b8022215660122d5b7f2`.
+This is a repository-grounded architecture task, not another residual-policy patch. Inspect the current repo before editing. The objective is to move the bot toward a more robust, reproducible, and operable automated trading experiment system by introducing target-position execution, initially in shadow/telemetry mode, without weakening current live safety gates.
 
-Do not treat this as a generic refactor. This is a P0 safety/operability fix for residual-aware live execution.
-
-The previous patch moved in the right direction:
+Do not add more residual-specific branches as the primary solution. The core problem is deeper:
 
 ```text
-- execution_service no longer directly calls broker.place_order for residual SELL
-- residual SELL submit plan now includes a stable intent key shape via build_order_intent_key
-- accounting_projection_ok no longer appears to be aliased from projection_converged
-- order_sizing.py now supports residual-aware BUY exposure offset / delta sizing
+The bot currently behaves like a lot-native order lifecycle engine with residual/dust/recovery policies layered on top.
+
+It is not yet a target-position execution engine that computes:
+  current_position
+  target_position
+  delta = target_position - current_position
+
+Because of this, real-world partial fills, fees, step-size rounding, and residual BTC become exceptional states. Each exception adds another policy branch: dust_only_remainder, residual_inventory, closeout candidate, residual live sell mode, residual buy sizing mode, recovery gates, etc.
+
+This is making the repo safer in small patches but structurally more complex and harder to reason about.
 ```
 
-But there is still a likely P0 connection bug:
+## Repository evidence to inspect first
 
-```text
-LiveSignalExecutionService.execute()
-  -> self.executor(..., execution_submit_plan=residual_plan)
-  -> default self.executor = execution_service.live_execute_signal
-  -> execution_service.live_execute_signal wrapper may not accept execution_submit_plan
-  -> TypeError: unexpected keyword argument
-  -> fallback path retries without execution_submit_plan
-  -> residual submit plan is silently lost
-```
-
-If that hypothesis is true, `RESIDUAL_LIVE_SELL_MODE=enabled` still does not reliably reach the standard live submit pipeline with the residual plan. It may fall back to the old canonical SELL path and be blocked by lot-native strategy authority again.
-
-Your job is to verify this directly in the repo, fix it if confirmed, and add regression tests that prove the default `build_signal_execution_service()` path carries `execution_submit_plan` all the way to the live submit path without silently dropping it.
-
-## Non-negotiable safety constraints
-
-Do not weaken lot-native strategy SELL authority.
-
-Do not make `dust_tracking_qty`, aggregate residual quantity, or residual lots pretend to be canonical strategy executable lots.
-
-Keep these separate:
-
-```text
-strategy_sell_candidate:
-  authority = lot-native strategy position
-  source = sellable_executable_lot_count / sellable_executable_qty
-  used for normal strategy exits
-
-residual_sell_candidate:
-  authority = residual inventory policy
-  source = residual inventory model
-  used only through explicit residual policy + final pre-submit proof
-  must use standard order submission, OMS dedup, order recording, and recovery semantics
-```
-
-Do not manually flatten the live account. Do not special-case `0.00049980 BTC`.
-
-## Required first step: inspect current implementation
-
-Before changing code, inspect the actual current code path.
-
-Run:
+Before changing code, inspect the relevant repo surfaces directly:
 
 ```bash
-git rev-parse HEAD
-git status --short
-
 grep -RIn \
-  "def live_execute_signal\|execution_submit_plan\|residual_submit_plan\|LiveSignalExecutionService\|build_signal_execution_service" \
+  "SellExecutionAuthority\|sellable_executable_lot_count\|build_sell_execution_sizing\|_strategy_sell_candidate\|residual_sell_candidate" \
   src/bithumb_bot tests \
   --exclude-dir=.venv --exclude-dir=.git
 
 grep -RIn \
-  "RESIDUAL_LIVE_SELL_MODE\|RESIDUAL_BUY_SIZING_MODE\|residual_inventory_delta\|buy_sizing_residual_adjusted\|build_buy_execution_sizing" \
-  src/bithumb_bot tests \
+  "RESIDUAL_LIVE_SELL_MODE\|RESIDUAL_BUY_SIZING_MODE\|target_exposure_krw\|current_effective_exposure_krw\|buy_delta_krw\|residual_inventory_delta" \
+  src/bithumb_bot tests docs .env.example \
   --exclude-dir=.venv --exclude-dir=.git
 
 grep -RIn \
-  "accounting_projection_ok.*projection_converged\|missing_accounting_projection_ok\|accounting_projection_not_ok" \
+  "not fully unattended\|resume\|reconcile\|operator\|recovery-report\|halt" \
+  docs src tests \
+  --exclude-dir=.venv --exclude-dir=.git
+
+grep -RIn \
+  "ExecutionDecisionSummary\|ExecutionSubmitPlan\|build_execution_decision_summary\|run_standard_submit_pipeline\|StandardSubmitPipelineRequest" \
   src/bithumb_bot tests \
   --exclude-dir=.venv --exclude-dir=.git
 ```
+
+Also inspect:
+
+```text
+src/bithumb_bot/execution_service.py
+src/bithumb_bot/order_sizing.py
+src/bithumb_bot/broker/live.py
+docs/RUNBOOK.md
+.env.example
+tests/test_failsafe.py
+tests/test_order_sizing.py
+tests/test_live_broker.py
+```
+
+## Context from the live incident
+
+Do not treat this as a one-off bug. The live state showed the structural issue:
+
+```text
+Recent orders:
+  BUY  qty_req=0.0005  qty_filled=0.00049998
+  SELL qty_req=0.0004  qty_filled=0.0004
+
+Portfolio:
+  asset_qty=0.0004998
+
+Observed behavior:
+  raw_signal=SELL
+  final_action=CLOSE_RESIDUAL_CANDIDATE
+  submit_expected=0
+  pre_submit_proof_status=passed
+  execution_block_reason=residual_live_sell_mode_telemetry
+  residual_inventory_state=RESIDUAL_INVENTORY_TRACKED
+
+Also:
+  BUY can be blocked by dust_only_remainder / residual inventory.
+  Normal strategy SELL can be blocked because sellable_executable_lot_count=0.
+  Residual SELL can be recognized but blocked by residual policy mode.
+```
+
+This means the bot is not executing a simple model of:
+
+```text
+BUY signal  -> target_position = configured target exposure
+SELL signal -> target_position = 0
+Execute     -> order delta between current position and target position
+```
+
+Instead, it is operating through separate concepts:
+
+```text
+strategy lot authority
+open_position_lots
+dust_tracking_lot_count
+residual inventory tracking
+residual close candidate
+BUY entry gate
+SELL lot authority gate
+recovery/reporting gates
+```
+
+These safety surfaces are valuable, but they should not remain the primary execution model if the intended experiment is repeated BUY/SELL cycles with clean target exposure behavior.
 
 ## Hypotheses to verify or falsify
 
-Keep these as hypotheses until verified in code and tests.
+Keep these as hypotheses. Do not assume them until verified in repo code/tests.
 
-### H1: execution_submit_plan is dropped by the default live_execute_signal wrapper
-
-Hypothesis:
-
-```text
-execution_service.LiveSignalExecutionService.execute() passes execution_submit_plan=residual_plan,
-but execution_service.live_execute_signal() does not accept that keyword.
-The TypeError compatibility fallback catches the error and retries without execution_submit_plan.
-This silently drops the residual plan.
-```
-
-Verify:
-
-* Inspect `src/bithumb_bot/execution_service.py`.
-* Inspect `src/bithumb_bot/broker/live.py`.
-* Confirm the default `build_signal_execution_service(mode="live", ...)` path uses the wrapper, not a test-specific executor.
-* Confirm whether the wrapper and broker.live function signatures accept and forward `execution_submit_plan`.
-
-If confirmed, fix it.
-
-Expected fix:
-
-```python
-def live_execute_signal(
-    broker,
-    signal,
-    ts,
-    market_price,
-    *,
-    strategy_name=None,
-    decision_id=None,
-    decision_reason=None,
-    exit_rule_name=None,
-    execution_submit_plan=None,
-):
-    from .broker.live import live_execute_signal as _live_execute_signal
-
-    return _live_execute_signal(
-        broker,
-        signal,
-        ts,
-        market_price,
-        strategy_name=strategy_name,
-        decision_id=decision_id,
-        decision_reason=decision_reason,
-        exit_rule_name=exit_rule_name,
-        execution_submit_plan=execution_submit_plan,
-    )
-```
-
-Also update `broker.live.live_execute_signal(...)` to accept `execution_submit_plan` and consume it in the standard live submit path.
-
-### H2: TypeError fallback is unsafe for residual enabled path
+### H1: The primary execution model is lot-native, not target-position based
 
 Hypothesis:
 
 ```text
-The current TypeError fallback is acceptable for legacy generic BUY/SELL executors,
-but unsafe in the residual enabled path because it discards a required execution_submit_plan.
+SELL execution is primarily authorized by sellable_executable_lot_count / lot-native strategy position state.
+
+If broker/local shows sellable BTC but there is no strategy lot authority, normal SELL is blocked and the bot must route through residual-specific logic.
 ```
 
 Verify:
 
-* Inspect the `try/except TypeError` handling in `LiveSignalExecutionService.execute()`.
-* Determine whether residual enabled path can silently retry without plan.
+* Inspect `SellExecutionAuthority`, `build_sell_execution_sizing`, `_strategy_sell_candidate`, and live SELL sizing in `broker/live.py`.
+* Check whether normal SELL sizing uses broker current qty minus target qty, or lot-native executable lot count.
 
-If confirmed, fix it.
+Falsify if:
+
+```text
+SELL already uses target_qty - current_qty as the primary execution quantity and lot-native authority is only accounting/audit metadata.
+```
+
+### H2: Existing residual policies are partial substitutes for target-position execution
+
+Hypothesis:
+
+```text
+RESIDUAL_LIVE_SELL_MODE=enabled approximates:
+  SELL target=0 -> sell current residual position.
+
+RESIDUAL_BUY_SIZING_MODE=delta approximates:
+  BUY target exposure -> subtract current residual exposure.
+
+These are fragments of a target-position engine implemented as residual-specific side policies.
+```
+
+Verify:
+
+* Inspect `ExecutionDecisionSummary`, `ExecutionSubmitPlan`, `buy_delta_krw`, `target_exposure_krw`, `current_effective_exposure_krw`, `residual_inventory_delta`.
+* Confirm whether there is a general `EXECUTION_ENGINE=target_delta` abstraction. If not, this hypothesis is likely confirmed.
+
+Falsify if:
+
+```text
+There is already a general target-position engine and residual settings are only compatibility flags.
+```
+
+### H3: Real live fills repeatedly violate the assumption that one BUY and one SELL returns to zero
+
+Hypothesis:
+
+```text
+Bithumb fills, fees, qty steps, min order sizes, and rounding cause BUY/SELL quantities to differ. Residual BTC will recur in live operation.
+```
+
+Verify with live DB when available:
+
+```bash
+sqlite3 /home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite <<'SQL'
+.headers on
+.mode column
+SELECT id,
+       client_order_id,
+       status,
+       side,
+       qty_req,
+       qty_filled,
+       decision_reason
+FROM orders
+ORDER BY id DESC
+LIMIT 30;
+SQL
+```
+
+Falsify if:
+
+```text
+Every full BUY/SELL cycle reliably returns broker/local BTC to zero with no residual.
+```
+
+### H4: The repo’s operating model is safety-first limited unattended operation, while the desired experiment is closer to continuous target-exposure automation
+
+Hypothesis:
+
+```text
+The repo currently prioritizes explicit halt/resume/reconcile/recovery-report gates. This is safe, but it makes residual states feel like manual operation instead of automated execution.
+```
+
+Verify:
+
+* Inspect `docs/RUNBOOK.md`.
+* Inspect CLI commands around `reconcile`, `recovery-report`, `resume`, `health`, `panic-stop`.
+* Inspect whether live run can continue automatically through converged residual target deltas, or whether it keeps requiring policy-specific operator choices.
+
+Falsify if:
+
+```text
+The repo already has a target-exposure runtime that handles residuals as normal position state and only halts on inconsistent broker/local/order state.
+```
+
+## Design goal
+
+Introduce a target-position execution engine behind a feature flag, starting with shadow telemetry only.
+
+Do not replace the current live execution path in this patch unless explicitly safe and tested. The first goal is to make the target engine observable and comparable against the current lot-native engine.
+
+The target engine should model:
+
+```text
+Signal layer:
+  BUY / SELL / HOLD from the existing strategy
+
+Target layer:
+  BUY  -> target_exposure_krw = MAX_ORDER_KRW or configured target exposure
+  SELL -> target_exposure_krw = 0
+  HOLD -> maintain previous target exposure
+
+Position truth layer:
+  current_qty = broker/local converged BTC qty
+  current_exposure_krw = current_qty * reference_price
+
+Delta layer:
+  target_qty = target_exposure_krw / reference_price
+  delta_qty = target_qty - current_qty
+  delta_notional_krw = delta_qty * reference_price
+
+Execution classification:
+  delta_qty > order threshold  -> BUY candidate
+  delta_qty < -order threshold -> SELL candidate
+  abs(delta) below threshold   -> no-op / true dust
+  inconsistent state           -> blocked recovery
+```
+
+Important: lot-native state must remain available for accounting, PnL attribution, audit, and compatibility. But in the target engine, lot-native SELL authority should not be the primary execution quantity source.
+
+## Required implementation scope
+
+### 1. Add target-position shadow telemetry
+
+Add a new feature-flagged shadow engine. Suggested config names:
+
+```text
+EXECUTION_ENGINE=lot_native
+TARGET_EXECUTION_SHADOW=true
+TARGET_EXPOSURE_KRW=<default to MAX_ORDER_KRW unless explicitly configured>
+TARGET_HOLD_POLICY=maintain_previous_target
+```
+
+Acceptable alternative naming is fine if consistent with repo style.
+
+Initial behavior:
+
+```text
+EXECUTION_ENGINE=lot_native:
+  existing behavior unchanged
+
+TARGET_EXECUTION_SHADOW=true:
+  compute target-position decision in parallel
+  write target_delta telemetry into strategy decision context/logs/reports
+  do not alter actual order submission
+```
+
+Required target telemetry fields:
+
+```text
+target_engine_mode
+target_previous_exposure_krw
+target_new_exposure_krw
+target_hold_policy
+target_reference_price
+target_current_qty
+target_current_exposure_krw
+target_qty
+target_delta_qty
+target_delta_notional_krw
+target_delta_side
+target_would_submit
+target_submit_qty
+target_submit_notional_krw
+target_block_reason
+target_position_truth_state
+target_dust_classification
+target_order_rule_min_qty
+target_order_rule_min_notional_krw
+```
+
+### 2. Preserve existing safety gates in target shadow
+
+Target shadow must fail closed in telemetry if position truth is not reliable.
+
+Block target candidate with explicit reasons when:
+
+```text
+broker_qty unknown
+broker/local/portfolio not converged
+open_order_count > 0
+unresolved_open_order_count > 0
+recovery_required_count > 0
+submit_unknown_count > 0
+balance snapshot stale
+active fee/accounting blocker
+missing reference price
+missing order rules
+```
+
+Do not compute a misleading `would_submit=true` if proof/truth is unavailable.
+
+### 3. Define target HOLD semantics
+
+Implement HOLD as “maintain previous target,” not “reset to current.”
 
 Expected behavior:
 
 ```text
-For residual enabled path:
-  If executor does not support execution_submit_plan, fail closed.
-  Do not silently retry without the plan.
+After BUY changes target to TARGET_EXPOSURE_KRW:
+  HOLD keeps target exposure at TARGET_EXPOSURE_KRW.
 
-Failure should be explicit:
-  reason=executor_missing_execution_submit_plan_support
-  no broker submit
-  no standard fallback to canonical SELL path
+After SELL changes target to 0:
+  HOLD keeps target exposure at 0.
 ```
 
-Do not remove compatibility fallback for generic legacy execution if tests rely on it. Only prevent plan loss for residual enabled path.
-
-### H3: residual SELL still needs proof that it reaches the standard live path
-
-Hypothesis:
+For the first patch, if persistent target state is too invasive, implement a safe shadow approximation and explicitly mark it:
 
 ```text
-The code now tries to route residual SELL through the executor, but tests may not prove that the residual plan reaches broker.live.live_execute_signal and then the standard submit pipeline / OMS path.
+target_state_persistence=not_yet_persisted
+target_previous_exposure_krw=<derived or unknown>
+target_block_reason=missing_persistent_target_state
 ```
 
-Verify:
+But do not pretend HOLD semantics are solved if no target state is stored.
 
-* Inspect tests added in the latest patch.
-* Check whether there is a default-service test, not just a custom fake-executor test.
-* Check whether the test proves `execution_submit_plan` reaches broker.live or a standard-pipeline adapter.
+Preferred: add a small target state persistence table or reuse an existing metadata/state table if appropriate.
 
-If missing, add tests.
-
-Expected test coverage:
+Suggested schema:
 
 ```text
-default build_signal_execution_service() path
-RESIDUAL_LIVE_SELL_MODE=enabled
-LIVE_REAL_ORDER_ARMED=true
-LIVE_DRY_RUN=false
-raw_signal=SELL
-residual_submit_plan present
-proof passes
-
-Expect:
-  execution_submit_plan reaches broker.live.live_execute_signal
-  it is not dropped by wrapper TypeError fallback
-  residual plan source=residual_inventory
-  authority=residual_inventory_policy
-  side=SELL
-  qty=0.00049980
+target_position_state
+- id
+- strategy_name
+- pair
+- target_exposure_krw
+- target_qty
+- target_source_signal
+- target_source_decision_id
+- reference_price
+- updated_ts
+- mode
 ```
 
-### H4: BUY delta sizing support exists, but live path integration still needs proof
+If adding schema/migration is too much for the first patch, add telemetry-only calculation for BUY/SELL and explicitly block HOLD target continuity until persistence exists.
 
-Hypothesis:
+### 4. Compare current engine vs target shadow
+
+Every decision should show both:
 
 ```text
-order_sizing.py now supports residual-aware exposure offset,
-but broker/live.py may not yet pass residual_inventory_qty and residual_inventory_notional_krw into build_buy_execution_sizing() under RESIDUAL_BUY_SIZING_MODE=delta, or tests may not prove it.
+current engine:
+  final_action
+  submit_expected
+  execution_block_reason
+  residual_live_sell_mode
+  residual_buy_sizing_mode
+
+target shadow:
+  target_delta_side
+  target_would_submit
+  target_submit_qty
+  target_block_reason
 ```
 
-Verify:
-
-* Inspect `broker/live.py` around BUY sizing.
-* Confirm the actual call to `build_buy_execution_sizing()` receives:
-
-  * existing_exposure_qty
-  * residual_inventory_qty
-  * residual_inventory_notional_krw
-  * only when policy mode requires it, or with no effect when mode is telemetry/off.
-* Confirm actual budget/qty changes under delta mode.
-
-Expected behavior:
+This comparison is the point of the patch. It should let us see cases like:
 
 ```text
-MAX_ORDER_KRW=100000
-tracked_residual_exposure_krw=57816
-RESIDUAL_BUY_SIZING_MODE=delta
+current engine:
+  final_action=CLOSE_RESIDUAL_CANDIDATE
+  submit_expected=0
+  execution_block_reason=residual_live_sell_mode_telemetry
 
-actual BUY sizing:
-  budget_krw ~= 42184
-  qty_source=residual_inventory_delta
-  not 100000
+target shadow:
+  target_delta_side=SELL
+  target_submit_qty=0.0004998
+  target_would_submit=true
+  target_block_reason=none
 ```
 
-If not proven, add or update tests.
+### 5. Do not add new residual policy branches
 
-### H5: accounting_projection_ok fallback appears fixed, but must be locked by test
+Do not add another mode like `residual_auto_something`.
 
-Hypothesis:
+If you need to reuse current proof code, extract/generalize it toward:
 
 ```text
-The unsafe fallback from accounting_projection_ok to projection_converged has been removed, but a regression test is needed so it does not return.
+target_position_pre_submit_proof
 ```
 
-Verify:
+rather than adding a new residual-specific proof branch.
 
-* Inspect `build_execution_decision_summary()`.
-* Inspect `build_residual_sell_presubmit_proof()`.
+### 6. Keep standard submit pipeline untouched for now
 
-Expected test:
+For this patch, target shadow must not submit live orders unless explicitly requested and proven safe. The goal is to collect reproducible telemetry first.
+
+Do not bypass:
 
 ```text
-projection_converged=true
-accounting_projection_ok missing
-=> proof fails with missing_accounting_projection_ok
+run_standard_submit_pipeline
+OMS dedup
+order_events
+submit_unknown handling
+recovery gates
 ```
 
-and:
-
-```text
-projection_converged=true
-accounting_projection_ok=false
-=> proof fails with accounting_projection_not_ok
-```
-
-## Required design changes
-
-### 1. Preserve execution_submit_plan through the default live wrapper
-
-`execution_submit_plan` must be a supported keyword on:
-
-```text
-execution_service.live_execute_signal(...)
-broker.live.live_execute_signal(...)
-```
-
-and must reach the live submit path.
-
-Do not rely on custom test-only executors to prove this. The default service path must work.
-
-### 2. Residual enabled path must fail closed if plan-aware executor support is missing
-
-In `LiveSignalExecutionService.execute()`:
-
-```text
-If request.signal == SELL
-and residual_submit_plan.source == residual_inventory
-and residual_submit_plan.submit_expected == true
-and RESIDUAL_LIVE_SELL_MODE == enabled
-then execution_submit_plan is required.
-
-If executor rejects execution_submit_plan:
-  do not call executor again without plan
-  return explicit blocked result or raise a controlled error
-  no broker order
-```
-
-Choose the repo-consistent failure style. The important point is no silent plan loss.
-
-A test must assert this behavior.
-
-### 3. Broker live path must consume residual execution_submit_plan through standard pipeline
-
-`broker.live.live_execute_signal()` must recognize an `execution_submit_plan` with:
-
-```text
-source=residual_inventory
-authority=residual_inventory_policy
-side=SELL
-intent_type=residual_close
-```
-
-and convert it into the existing standard live submit pipeline request.
-
-It must preserve:
-
-```text
-side=SELL
-qty=residual_submit_plan.qty
-submit_qty_source=residual_inventory_policy
-intent_type=residual_close
-strategy_context=residual_inventory_policy
-decision_reason_code=CLOSE_RESIDUAL_CANDIDATE
-```
-
-It must not:
-
-```text
-- treat residual qty as canonical strategy sellable_executable_qty
-- mutate lot-native strategy SELL authority
-- bypass standard submit planning / order state / dedup / recovery machinery
-```
-
-### 4. BUY delta live path must be proven
-
-If not already wired, wire `RESIDUAL_BUY_SIZING_MODE=delta` into the actual live BUY sizing call.
-
-Actual live BUY sizing must use residual-aware effective exposure under delta mode. Telemetry-only mode must not change actual sizing.
-
-Expected policy:
-
-```text
-RESIDUAL_BUY_SIZING_MODE=telemetry:
-  compute/report residual delta
-  existing BUY sizing remains unchanged
-
-RESIDUAL_BUY_SIZING_MODE=delta:
-  existing exposure + tracked residual exposure reduce buy budget
-```
-
-### 5. Keep accounting proof fail-closed
-
-Do not reintroduce:
-
-```python
-payload["accounting_projection_ok"] = bool(readiness_payload.get("projection_converged"))
-```
-
-Missing accounting projection proof must fail closed.
+If you add submit-plan objects for target shadow, they must remain telemetry-only unless behind a separate explicit feature flag that defaults off.
 
 ## Required tests
 
-Add or update focused tests. Do not rely only on manual EC2 verification.
+Add focused regression tests. Do not rely on EC2 manual observation.
 
-### Test A: default wrapper preserves execution_submit_plan
+### Test group A: target shadow solves the EC2-shaped residual deadlock in telemetry
 
-Use the default `build_signal_execution_service(mode="live", broker=...)` path.
-
-Set up:
+Fixture:
 
 ```text
-RESIDUAL_LIVE_SELL_MODE=enabled
-LIVE_REAL_ORDER_ARMED=true
-LIVE_DRY_RUN=false
-request.signal=SELL
-request.decision_context.execution_decision.residual_submit_plan:
-  source=residual_inventory
-  authority=residual_inventory_policy
-  side=SELL
-  qty=0.00049980
-  submit_expected=true
-  block_reason=none
+raw_signal=SELL
+current broker/local qty=0.0004998
+portfolio qty=0.0004998
+broker/local converged=true
+projection/accounting ok=true
+open_order_count=0
+unresolved_open_order_count=0
+recovery_required_count=0
+submit_unknown_count=0
+min_qty=0.0001
+min_notional_krw=5000
+reference_price=115000000
+current lot-native sellable_executable_lot_count=0
+current final_action=CLOSE_RESIDUAL_CANDIDATE or STRATEGY_HOLD depending existing engine
 ```
 
-Mock or monkeypatch `bithumb_bot.broker.live.live_execute_signal` to capture kwargs.
+Expect target shadow:
+
+```text
+target_new_exposure_krw=0
+target_delta_side=SELL
+target_submit_qty≈0.0004998
+target_would_submit=true
+target_block_reason=none
+```
+
+### Test group B: target BUY subtracts current position exposure
+
+Fixture:
+
+```text
+raw_signal=BUY
+TARGET_EXPOSURE_KRW=100000
+current_qty=0.0004998
+reference_price=115000000
+current_exposure≈57477
+```
 
 Expect:
 
 ```text
-captured execution_submit_plan is present
-captured execution_submit_plan.source == residual_inventory
-captured execution_submit_plan.qty == 0.00049980
+target_new_exposure_krw=100000
+target_delta_side=BUY
+target_delta_notional_krw≈42523
+target_submit_notional_krw≈42523
+target_would_submit=true if above min_notional
 ```
 
-This test must use the default wrapper path, not inject a custom executor that already accepts the keyword.
+### Test group C: true dust becomes no-op, not recovery/residual policy branch
 
-### Test B: residual enabled path does not silently fallback without plan
+Fixture:
 
-Use an executor that raises `TypeError("unexpected keyword argument 'execution_submit_plan'")`.
+```text
+raw_signal=SELL
+target_exposure_krw=0
+current_qty=0.00000004
+reference_price=115000000
+notional < min_notional
+```
 
 Expect:
 
 ```text
-no second call without execution_submit_plan
-no broker submit
-controlled fail-closed result or controlled exception
-reason=executor_missing_execution_submit_plan_support
+target_delta_side=NONE
+target_would_submit=false
+target_dust_classification=true_dust
+target_block_reason=delta_below_exchange_min
 ```
 
-Do not accept a test where the code retries without plan.
+### Test group D: broker/local mismatch blocks target shadow
 
-### Test C: broker.live consumes execution_submit_plan as residual standard submit
-
-Mock or hook the standard pipeline / submit adapter in `broker.live`.
-
-Set up residual SELL plan:
+Fixture:
 
 ```text
-source=residual_inventory
-authority=residual_inventory_policy
-side=SELL
-qty=0.00049980
-intent_type=residual_close
-strategy_context=residual_inventory_policy
-idempotency_key=<stable>
+broker_qty=0.0005
+portfolio_qty=0.0004
+projection_converged=false or broker_portfolio_converged=false
 ```
-
-Expect the standard pipeline request receives:
-
-```text
-side=SELL
-order_qty=0.00049980
-submit_qty_source=residual_inventory_policy
-intent_type=residual_close
-strategy_context=residual_inventory_policy
-use_qty_intent_key=true or equivalent
-```
-
-Assert the low-level direct `broker.place_order` path is not called by the service layer.
-
-### Test D: duplicate residual SELL intent is deduped
-
-Use DB-level or pipeline-level test.
-
-First residual SELL enabled attempt claims/submits intent.
-
-Second identical residual SELL enabled attempt with same:
-
-```text
-symbol
-side
-intent_ts
-intent_type=residual_close
-strategy_context=residual_inventory_policy
-qty
-```
-
-must not create a second broker submit.
 
 Expect:
 
 ```text
-second attempt suppressed/deduped
-reason identifies existing residual intent or unresolved order
+target_would_submit=false
+target_block_reason=broker_local_not_converged or projection_not_converged
 ```
 
-### Test E: BUY delta affects actual sizing under delta mode
+### Test group E: HOLD semantics are explicit
 
-Set:
+If target state is persisted:
 
 ```text
-RESIDUAL_BUY_SIZING_MODE=delta
-MAX_ORDER_KRW=100000
-market_price=100000000
-tracked_residual_exposure_krw=57816
-current_effective_exposure_krw=57816
+BUY decision sets target=TARGET_EXPOSURE_KRW
+subsequent HOLD keeps target=TARGET_EXPOSURE_KRW
+SELL decision sets target=0
+subsequent HOLD keeps target=0
 ```
 
-Expect actual sizing:
+If target state is not persisted in this patch:
 
 ```text
-budget_krw ~= 42184
-qty_source=residual_inventory_delta
-buy_sizing_residual_adjusted=true
-notional is not 100000
+HOLD target shadow must be blocked or marked degraded:
+target_block_reason=missing_persistent_target_state
+target_state_persistence=not_yet_persisted
 ```
 
-Also test telemetry mode:
+Do not silently treat HOLD as current-position no-op without explaining the policy.
+
+### Test group F: existing behavior remains unchanged
+
+With:
 
 ```text
-RESIDUAL_BUY_SIZING_MODE=telemetry
-same residual exposure
-actual sizing remains existing configured sizing
-telemetry still reports buy_delta
+EXECUTION_ENGINE=lot_native
+TARGET_EXECUTION_SHADOW=false
 ```
 
-### Test F: accounting_projection_ok missing fails closed
+expect current tests to pass and no live submit behavior changes.
 
-Add tests:
-
-```text
-projection_converged=true
-accounting_projection_ok missing
-=> residual proof fails with missing_accounting_projection_ok
-```
-
-and:
-
-```text
-projection_converged=true
-accounting_projection_ok=false
-=> residual proof fails with accounting_projection_not_ok
-```
-
-## Test commands to run
-
-At minimum:
+Run existing focused tests:
 
 ```bash
 uv run pytest -q tests/test_failsafe.py
+uv run pytest -q tests/test_live_broker.py
 uv run pytest -q tests/test_order_sizing.py
 uv run pytest -q tests/test_decision_telemetry.py
 uv run pytest -q tests/test_position_authority_recovery_state.py
 ```
 
-Also run targeted selection:
+Also add/run new target execution tests, for example:
 
 ```bash
-uv run pytest -q tests -k "residual or execution_submit_plan or buy_delta or accounting_projection_ok or order_sizing"
+uv run pytest -q tests/test_target_position_execution.py
+uv run pytest -q tests -k "target_position or target_delta or residual or execution"
 ```
 
-If any command is too broad or unavailable, state exactly what was run instead. Do not claim tests passed if they were not run.
+If a command is too broad or unavailable, report exactly what was run instead.
 
-## Scope
+## Operator/reporting requirements
 
-In scope:
+Update `decision-telemetry`, `ops-report`, and logs where appropriate so target shadow fields are visible.
+
+Operators must be able to compare:
 
 ```text
-- Add execution_submit_plan parameter to wrappers and broker live function.
-- Ensure residual enabled path cannot silently drop execution_submit_plan.
-- Route residual SELL submit plan into the standard live submit pipeline.
-- Ensure residual SELL dedup uses stable OMS intent semantics.
-- Prove residual-aware BUY delta changes actual sizing under delta mode.
-- Lock accounting_projection_ok fail-closed behavior with tests.
-- Add/update focused tests.
+raw_signal
+final_signal
+final_action
+submit_expected
+execution_block_reason
+residual_live_sell_mode
+residual_buy_sizing_mode
+
+target_delta_side
+target_would_submit
+target_submit_qty
+target_delta_notional_krw
+target_block_reason
+target_position_truth_state
 ```
 
-Out of scope:
+Update `docs/RUNBOOK.md` with a short “Target Position Shadow Mode” section:
 
 ```text
-- Manually flattening EC2 account.
-- Special-casing a BTC amount.
-- Weakening lot-native SELL authority.
-- Treating dust_tracking as open strategy exposure.
-- Enabling residual live SELL by default.
-- Removing fail-closed recovery gates.
-- Replacing the entire strategy engine.
+- This mode does not change live order behavior.
+- It compares the current lot-native execution decision against target-position execution.
+- It is intended to validate whether target-position execution would remove residual/dust deadlocks.
+- Do not switch live execution to target_delta until shadow telemetry has been reviewed.
 ```
 
-## Operational expectation
+## Out of scope for this patch
 
-Do not change safe defaults.
+Do not fully replace live execution with target_delta yet.
 
-Default live settings should remain:
+Do not remove existing residual modes yet.
+
+Do not delete lot-native state, open_position_lots, or position authority.
+
+Do not bypass recovery-report, broker/local convergence checks, OMS dedup, or standard submit pipeline.
+
+Do not enable target live order submission by default.
+
+Do not add more residual-specific policies as the primary fix.
+
+## Suggested implementation shape
+
+Prefer adding a new module rather than expanding residual logic further:
 
 ```text
-RESIDUAL_LIVE_SELL_MODE=telemetry
-RESIDUAL_BUY_SIZING_MODE=telemetry
+src/bithumb_bot/target_position.py
 ```
 
-But after this patch, when operators deliberately enable:
+Possible objects:
 
-```text
-RESIDUAL_LIVE_SELL_MODE=enabled
-RESIDUAL_BUY_SIZING_MODE=delta
+```python
+@dataclass(frozen=True)
+class TargetPositionDecision:
+    engine_mode: str
+    raw_signal: str
+    previous_target_exposure_krw: float | None
+    new_target_exposure_krw: float | None
+    reference_price: float | None
+    current_qty: float | None
+    current_exposure_krw: float | None
+    target_qty: float | None
+    delta_qty: float | None
+    delta_notional_krw: float | None
+    delta_side: str
+    submit_qty: float | None
+    submit_notional_krw: float | None
+    would_submit: bool
+    block_reason: str
+    position_truth_state: str
+    dust_classification: str
 ```
 
-the code path must be real and tested:
+Add a pure function:
 
-```text
-- residual SELL plan reaches broker.live standard pipeline with source=residual_inventory
-- residual SELL does not bypass OMS/dedup/order-state machinery
-- residual BUY delta affects actual sizing
-- missing accounting projection proof fails closed
+```python
+build_target_position_decision(
+    raw_signal: str,
+    previous_target_state: ...,
+    current_position_snapshot: ...,
+    readiness_payload: dict[str, object],
+    order_rules: ...,
+    reference_price: float,
+    settings: ...
+) -> TargetPositionDecision
 ```
+
+Keep it pure and unit-testable. Do not reach into the broker or DB inside the core decision function.
 
 ## Final report format
 
-When finished, report in this exact format:
+When finished, report in this exact structure:
 
 ```markdown
 ## Summary
 
 - What changed
-- Why this fixes the residual execution connection bug rather than adding more telemetry
+- Why this is a structural target-position step, not another residual policy patch
 
 ## Hypothesis Review
 
-### H1: execution_submit_plan was dropped by default live wrapper
+### H1: execution is lot-native rather than target-position based
 - Verdict: confirmed / partially confirmed / falsified / inconclusive
 - Evidence:
 - Changes made:
 
-### H2: residual enabled TypeError fallback could silently lose plan
+### H2: residual policies are target-position substitutes
 - Verdict:
 - Evidence:
 - Changes made:
 
-### H3: residual SELL needed proof it reaches standard live path
+### H3: live fills repeatedly create residuals
 - Verdict:
 - Evidence:
 - Changes made:
 
-### H4: BUY delta live path needed proof
-- Verdict:
-- Evidence:
-- Changes made:
-
-### H5: accounting_projection_ok fail-closed needed regression lock
+### H4: safety-first operating model differs from desired continuous automation
 - Verdict:
 - Evidence:
 - Changes made:
 
 ## Design Decisions
 
-- How lot-native strategy SELL authority is preserved
-- How residual SELL authority remains separate
-- How execution_submit_plan is carried through wrappers
-- How residual enabled path fails closed if plan-aware execution is unavailable
-- How residual SELL reaches standard submit/dedup path
-- How BUY delta sizing is actually applied under delta mode
+- How target-position shadow is computed
+- How HOLD semantics are handled
+- How current position truth is established
+- How true dust vs executable delta vs inconsistent state is classified
+- How lot-native authority remains preserved for accounting/audit
+- Why live order behavior is unchanged in this patch
 
 ## Tests
 
-List exact commands run and results.
+List exact commands run and pass/fail results.
 
 ## Operational Impact
 
-- Default behavior after deployment
-- What changes only when RESIDUAL_LIVE_SELL_MODE=enabled
-- What changes only when RESIDUAL_BUY_SIZING_MODE=delta
-- How to verify safely on EC2 without manual flattening
+- What new telemetry appears in decision-telemetry / ops-report / logs
+- How to compare current engine vs target shadow
+- What remains unchanged in live trading
+- How this informs future migration to EXECUTION_ENGINE=target_delta
 
 ## Remaining Follow-ups
 
-- Any remaining standard pipeline / order state / dedup work
-- Any remaining runbook/observability work
-- Any risk or migration note
+- Persisted target state, if not implemented
+- Migrating BUY sizing to target delta
+- Migrating SELL execution to target delta
+- Deprecating residual-specific modes
+- Any safety or recovery risks
 ```
 
-The final state must make this true:
+The final patch should make this true:
 
 ```text
-Residual enabled execution cannot silently lose its execution_submit_plan.
+The repo now has a testable target-position shadow engine that shows what the bot would do if execution were based on current_position vs target_position.
 
-A sellable residual SELL candidate, when explicitly enabled and proof-passing, reaches the same standard live submission machinery as normal orders while preserving separate residual authority.
+Residual BTC is no longer only analyzed through residual-specific policy branches; it is also visible as ordinary current_position in target-delta telemetry.
 
-BUY delta sizing is real under delta mode, not just telemetry.
-
-Missing accounting projection proof fails closed.
+Live order behavior remains unchanged until target-delta execution is explicitly enabled in a later, separately tested patch.
 ```
 
