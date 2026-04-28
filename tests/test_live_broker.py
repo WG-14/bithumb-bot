@@ -1640,8 +1640,9 @@ def test_live_execute_signal_consumes_residual_plan_as_standard_submit_intent(mo
 
     captured: dict[str, object] = {}
 
-    def _capture_standard_pipeline(*, submission_ready, **_kwargs):
+    def _capture_standard_pipeline(*, submission_ready, **kwargs):
         captured["submission_ready"] = submission_ready
+        captured["position_state"] = kwargs["position_state"]
         return {"status": "captured"}
 
     monkeypatch.setattr(live_module, "execute_live_submission_and_application", _capture_standard_pipeline)
@@ -1699,8 +1700,9 @@ def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(
 
     captured: dict[str, object] = {}
 
-    def _capture_standard_pipeline(*, submission_ready, **_kwargs):
+    def _capture_standard_pipeline(*, submission_ready, **kwargs):
         captured["submission_ready"] = submission_ready
+        captured["position_state"] = kwargs["position_state"]
         return {"status": "captured"}
 
     monkeypatch.setattr(live_module, "execute_live_submission_and_application", _capture_standard_pipeline)
@@ -1735,6 +1737,64 @@ def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(
     assert feasibility.order_qty == pytest.approx(0.0004998)
     assert feasibility.normalized_qty == pytest.approx(0.0004998)
     assert feasibility.submit_qty_source == "target_position_delta"
+    assert intent.canonical_sell is None
+    assert intent.diagnostic_sell_qty is None
+    decision_observability = captured["position_state"].decision_observability
+    assert decision_observability["execution_engine"] == "target_delta"
+    assert decision_observability["execution_submit_plan_source"] == "target_delta"
+    assert decision_observability["execution_submit_plan_authority"] == "target_position_delta"
+    assert decision_observability["target_delta_side"] == "SELL"
+    assert decision_observability["target_delta_idempotency_key"] == "target-delta-test-key"
+    assert decision_observability["submit_qty_source"] == "target_position_delta"
+
+
+def test_target_delta_engine_rejects_residual_plan_without_lot_native_fallback(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "target_delta_rejects_residual_plan.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "enabled")
+    _stub_live_effective_order_rules(monkeypatch)
+
+    conn = ensure_db(db_path)
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0004998,
+            asset_locked=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        live_module,
+        "execute_live_submission_and_application",
+        lambda *_args, **_kwargs: pytest.fail("target_delta must not submit a residual plan"),
+    )
+    monkeypatch.setattr(
+        live_module,
+        "build_sell_execution_sizing",
+        lambda *_args, **_kwargs: pytest.fail("target_delta invalid plan must not fall back to lot-native sizing"),
+    )
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        115_679_000.0,
+        execution_submit_plan=_residual_execution_submit_plan(),
+    )
+
+    assert trade is None
+    assert broker.place_order_calls == 0
 
 
 def test_live_residual_sell_duplicate_intent_is_deduped(monkeypatch, tmp_path):

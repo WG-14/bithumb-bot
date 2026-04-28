@@ -2262,6 +2262,40 @@ def _maybe_record_harmless_dust_sell_suppression(
     )
 
 
+def _execution_engine() -> str:
+    engine = str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
+    return engine if engine in {"lot_native", "target_delta"} else "lot_native"
+
+
+def _target_delta_submit_plan(
+    execution_submit_plan: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if not isinstance(execution_submit_plan, dict):
+        return None
+    if str(execution_submit_plan.get("source") or "") != "target_delta":
+        return None
+    if str(execution_submit_plan.get("authority") or "") != "target_position_delta":
+        return None
+    target_side = str(execution_submit_plan.get("side") or "").upper()
+    if target_side not in {"BUY", "SELL"}:
+        return None
+    try:
+        target_qty = float(execution_submit_plan.get("qty") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if target_qty <= POSITION_EPSILON:
+        return None
+    if str(execution_submit_plan.get("block_reason") or "none") != "none":
+        return None
+    if not bool(execution_submit_plan.get("submit_expected")):
+        return None
+    return {
+        **execution_submit_plan,
+        "side": target_side,
+        "qty": target_qty,
+    }
+
+
 def _determine_live_execution_intent(
     *,
     broker: Broker,
@@ -2278,6 +2312,82 @@ def _determine_live_execution_intent(
     conn = position_state.conn
     decision_observability = position_state.decision_observability
     normalized_exposure = position_state.normalized_exposure
+
+    if _execution_engine() == "target_delta":
+        target_plan = _target_delta_submit_plan(execution_submit_plan)
+        if target_plan is None:
+            return None
+        target_side = str(target_plan["side"])
+        target_qty = float(target_plan["qty"])
+        target_sizing = SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="target_delta_rebalance",
+            budget_krw=float(target_plan.get("notional_krw") or 0.0),
+            requested_qty=target_qty,
+            exchange_constrained_qty=target_qty,
+            lifecycle_executable_qty=target_qty,
+            executable_qty=target_qty,
+            rejected_qty_remainder=0.0,
+            unused_budget_krw=0.0,
+            internal_lot_size=0.0,
+            intended_lot_count=0,
+            executable_lot_count=0,
+            qty_source="target_position_delta",
+            effective_min_trade_qty=float(position_state.effective_rules.min_qty),
+            min_qty=float(position_state.effective_rules.min_qty),
+            qty_step=float(position_state.effective_rules.qty_step),
+            min_notional_krw=float(position_state.effective_rules.min_notional_krw),
+            non_executable_reason="executable",
+        )
+        position_state.decision_observability.update(
+            {
+                "execution_engine": "target_delta",
+                "execution_submit_plan_source": "target_delta",
+                "execution_submit_plan_authority": "target_position_delta",
+                "target_engine_mode": "target_delta",
+                "target_previous_exposure_krw": target_plan.get("target_previous_exposure_krw"),
+                "target_new_exposure_krw": target_plan.get("target_exposure_krw"),
+                "target_current_exposure_krw": target_plan.get("current_effective_exposure_krw"),
+                "target_qty": target_plan.get("target_qty"),
+                "target_delta_qty": target_plan.get("target_delta_qty"),
+                "target_delta_side": target_side,
+                "target_delta_notional_krw": target_plan.get("delta_krw"),
+                "target_delta_intent_type": "target_delta_rebalance",
+                "target_delta_strategy_context": "target_delta",
+                "target_delta_idempotency_key": target_plan.get("idempotency_key"),
+                "target_dust_classification": target_plan.get("target_dust_classification"),
+                "target_position_truth_state": target_plan.get("target_position_truth_state"),
+                "source": "target_delta",
+                "authority": "target_position_delta",
+                "submit_qty_source": "target_position_delta",
+                "submit_qty_source_truth_source": "target_position_delta",
+                "position_state_source": "broker_verified_current_position",
+                "position_state_source_truth_source": "target_delta.broker_position_evidence",
+                "sell_qty_basis_qty": target_qty,
+                "sell_qty_basis_source": "target_position_delta",
+                "sell_qty_basis_qty_truth_source": "target_delta.delta_qty",
+                "sell_qty_basis_source_truth_source": "target_delta.target_position_delta",
+            }
+        )
+        return _LiveExecutionIntent(
+            side=target_side,
+            order_qty=target_qty,
+            submit_qty_source="target_position_delta",
+            harmless_dust_checked=True,
+            entry_sizing=(target_sizing if target_side == "BUY" else None),
+            exit_sizing=(target_sizing if target_side == "SELL" else None),
+            canonical_sell=None,
+            diagnostic_sell_qty=None,
+            intent_type="target_delta_rebalance",
+            strategy_context="target_delta",
+            use_qty_intent_key=True,
+            idempotency_key=(
+                str(target_plan.get("idempotency_key"))
+                if target_plan.get("idempotency_key") is not None
+                else None
+            ),
+        )
 
     if (
         signal == "SELL"
@@ -2322,82 +2432,6 @@ def _determine_live_execution_intent(
             diagnostic_sell_qty=None,
             intent_type="residual_close",
             strategy_context=_residual_order_intent_strategy_context(),
-            use_qty_intent_key=True,
-            idempotency_key=(
-                str(execution_submit_plan.get("idempotency_key"))
-                if execution_submit_plan.get("idempotency_key") is not None
-                else None
-            ),
-        )
-
-    if (
-        isinstance(execution_submit_plan, dict)
-        and str(execution_submit_plan.get("source") or "") == "target_delta"
-        and str(execution_submit_plan.get("authority") or "") == "target_position_delta"
-    ):
-        target_side = str(execution_submit_plan.get("side") or signal or "").upper()
-        target_qty = float(execution_submit_plan.get("qty") or 0.0)
-        if target_side not in {"BUY", "SELL"} or target_qty <= POSITION_EPSILON:
-            return None
-        if str(execution_submit_plan.get("block_reason") or "none") != "none":
-            return None
-        if not bool(execution_submit_plan.get("submit_expected")):
-            return None
-        target_sizing = SimpleNamespace(
-            allowed=True,
-            block_reason="none",
-            decision_reason_code="target_delta_rebalance",
-            budget_krw=float(execution_submit_plan.get("notional_krw") or 0.0),
-            requested_qty=target_qty,
-            exchange_constrained_qty=target_qty,
-            lifecycle_executable_qty=target_qty,
-            executable_qty=target_qty,
-            rejected_qty_remainder=0.0,
-            unused_budget_krw=0.0,
-            internal_lot_size=0.0,
-            intended_lot_count=0,
-            executable_lot_count=0,
-            qty_source="target_position_delta",
-            effective_min_trade_qty=float(position_state.effective_rules.min_qty),
-            min_qty=float(position_state.effective_rules.min_qty),
-            qty_step=float(position_state.effective_rules.qty_step),
-            min_notional_krw=float(position_state.effective_rules.min_notional_krw),
-            non_executable_reason="executable",
-        )
-        position_state.decision_observability.update(
-            {
-                "execution_engine": "target_delta",
-                "target_engine_mode": "target_delta",
-                "target_previous_exposure_krw": execution_submit_plan.get("target_previous_exposure_krw"),
-                "target_new_exposure_krw": execution_submit_plan.get("target_exposure_krw"),
-                "target_current_exposure_krw": execution_submit_plan.get("current_effective_exposure_krw"),
-                "target_qty": execution_submit_plan.get("target_qty"),
-                "target_delta_qty": execution_submit_plan.get("target_delta_qty"),
-                "target_delta_side": execution_submit_plan.get("target_delta_side"),
-                "target_delta_notional_krw": execution_submit_plan.get("delta_krw"),
-                "target_dust_classification": execution_submit_plan.get("target_dust_classification"),
-                "target_position_truth_state": execution_submit_plan.get("target_position_truth_state"),
-                "submit_qty_source": "target_position_delta",
-                "submit_qty_source_truth_source": "target_position_delta",
-                "position_state_source": "broker_verified_current_position",
-                "position_state_source_truth_source": "target_delta.broker_position_evidence",
-                "sell_qty_basis_qty": target_qty,
-                "sell_qty_basis_source": "target_position_delta",
-                "sell_qty_basis_qty_truth_source": "target_delta.delta_qty",
-                "sell_qty_basis_source_truth_source": "target_delta.target_position_delta",
-            }
-        )
-        return _LiveExecutionIntent(
-            side=target_side,
-            order_qty=target_qty,
-            submit_qty_source="target_position_delta",
-            harmless_dust_checked=True,
-            entry_sizing=(target_sizing if target_side == "BUY" else None),
-            exit_sizing=(target_sizing if target_side == "SELL" else None),
-            canonical_sell=None,
-            diagnostic_sell_qty=None,
-            intent_type="target_delta_rebalance",
-            strategy_context="target_delta",
             use_qty_intent_key=True,
             idempotency_key=(
                 str(execution_submit_plan.get("idempotency_key"))
