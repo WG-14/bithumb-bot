@@ -1199,6 +1199,108 @@ def test_target_delta_live_service_uses_target_plan_without_residual_mode() -> N
     assert executor_calls[0]["execution_submit_plan"]["qty"] == pytest.approx(0.0004998)
 
 
+@pytest.mark.parametrize(
+    "target_plan",
+    [
+        None,
+        {
+            "source": "residual_inventory",
+            "authority": "residual_inventory_policy",
+            "side": "SELL",
+            "qty": 0.0004998,
+            "submit_expected": True,
+            "block_reason": "none",
+        },
+        {
+            "source": "target_delta",
+            "authority": "target_position_delta",
+            "side": "SELL",
+            "qty": 0.0004998,
+            "submit_expected": False,
+            "block_reason": "none",
+        },
+        {
+            "source": "target_delta",
+            "authority": "target_position_delta",
+            "side": "SELL",
+            "qty": 0.0004998,
+            "submit_expected": True,
+            "block_reason": "delta_below_exchange_min",
+        },
+        {
+            "source": "target_delta",
+            "authority": "target_position_delta",
+            "side": "NONE",
+            "qty": 0.0004998,
+            "submit_expected": True,
+            "block_reason": "none",
+        },
+        {
+            "source": "target_delta",
+            "authority": "target_position_delta",
+            "side": "SELL",
+            "qty": 0.0,
+            "submit_expected": True,
+            "block_reason": "none",
+        },
+    ],
+)
+def test_target_delta_live_service_blocks_invalid_target_plan_without_fallback(target_plan) -> None:
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "enabled")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+
+    executor_calls: list[dict[str, object]] = []
+    recorder_calls: list[dict[str, object]] = []
+
+    decision: dict[str, object] = {
+        "residual_submit_plan": {
+            "source": "residual_inventory",
+            "authority": "residual_inventory_policy",
+            "side": "SELL",
+            "qty": 0.0004998,
+            "submit_expected": True,
+            "block_reason": "none",
+        }
+    }
+    if target_plan is not None:
+        decision["target_submit_plan"] = target_plan
+
+    service = LiveSignalExecutionService(
+        broker=_ResidualFakeBroker(),
+        executor=lambda *_args, **kwargs: executor_calls.append(dict(kwargs)) or {"status": "unexpected"},
+        harmless_dust_recorder=lambda **kwargs: recorder_calls.append(dict(kwargs)) or True,
+    )
+    trade = service.execute(
+        SignalExecutionRequest(
+            signal="SELL",
+            ts=123,
+            market_price=115_000_000.0,
+            decision_context={
+                "execution_decision": decision,
+                "sellable_executable_lot_count": 0,
+                "exit_allowed": False,
+                "exit_block_reason": "dust_only_remainder",
+                "raw_total_asset_qty": 0.0004998,
+                "position_state": {
+                    "normalized_exposure": {
+                        "sellable_executable_lot_count": 0,
+                        "sellable_executable_qty": 0.0,
+                        "exit_allowed": False,
+                        "exit_block_reason": "dust_only_remainder",
+                        "raw_total_asset_qty": 0.0004998,
+                    }
+                },
+            },
+        )
+    )
+
+    assert trade is None
+    assert executor_calls == []
+    assert recorder_calls == []
+
+
 def test_default_live_service_wrapper_preserves_residual_execution_submit_plan(monkeypatch) -> None:
     from bithumb_bot.broker import live as live_module
 

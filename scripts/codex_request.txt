@@ -1,553 +1,619 @@
 You are working in the `WG-14/bithumb-bot` repository.
 
-Your task is not to add another short-term residual/dust workaround. The priority is to verify and implement a structural simplification of the execution model.
+Your task is to continue the target-delta execution refactor. Do not add another residual/dust workaround. The previous patch appears to have introduced the correct target-position model and target submit summary, but the remaining risk is that the execution path may still stop at decision/summary generation and may not actually use `target_submit_plan` as the live order authority.
 
-Core problem hypothesis to verify, not assume blindly:
+The core priority is to close the execution loop.
 
-The current bot has grown complex because execution is still centered on lot-native authority, dust tracking, residual inventory policy, and recovery-specific branches. Entry and exit decisions are partially separated, but the repository does not have one clear execution-level definition of “current position.” As a result, real exchange leftovers after BUY/SELL cycles can become neither a normal strategy lot nor true dust. This creates states where BUY is blocked because BTC remains, normal SELL is blocked because there is no sellable strategy lot, and residual SELL requires separate policy gates. This is likely why dust/residual policy keeps expanding.
+## Core hypothesis to verify
 
-The desired long-term behavior is:
+Treat this as a hypothesis to verify in the code, not as an assumption:
+
+The repository now has a reasonable `target_delta` decision model in `target_position.py` and `execution_service.py`, including persisted/missing target state, BUY target exposure, SELL target zero, HOLD maintaining previous target, and safety blockers. However, the live execution path may still be incomplete because:
 
 ```text
-The bot may buy once and sell once.
-The exchange may leave residual BTC due to fills, fees, rounding, min quantity, or min notional constraints.
-If the bot is stopped and restarted, it should read the current broker balance, validate safety conditions, compare current position against target position, and converge safely.
-Residual BTC should not break the bot’s state machine.
-Only below-exchange-minimum deltas should be treated as true dust.
-Executable residual BTC should be treated as current position, not as a separate exceptional class.
+1. execution_service.py creates target_submit_plan
+2. but LiveSignalExecutionService.execute() may not reliably consume target_submit_plan
+3. broker/live.py may still route SELL through lot-native sell authority
+4. target_delta SELL may accidentally fall back to sellable_executable_lot_count / residual policy / harmless dust suppression
+5. engine.py may import target state helpers but not fully load/upsert target state through the run loop
 ```
 
-Do not dilute this into a general refactor. Work directly in this repo and produce concrete code changes, tests, and a final report.
+Your job is to verify these points directly in the repository and patch whatever is still incomplete.
 
-## Required investigation
-
-Inspect the current implementation before changing code. Focus on these areas:
-
-* `src/bithumb_bot/target_position.py`
-* `src/bithumb_bot/execution_service.py`
-* `src/bithumb_bot/dust.py`
-* `src/bithumb_bot/strategy/sma.py`
-* `src/bithumb_bot/decision_context.py`
-* readiness / recovery / reconciliation code that provides:
-
-  * broker quantity known/stale state
-  * broker/local convergence
-  * open order count
-  * unresolved open orders
-  * submit unknown count
-  * recovery required count
-  * accounting projection status
-* live execution path:
-
-  * `src/bithumb_bot/broker/live.py`
-  * related submission/sizing helpers
-* database schema / migration utilities
-* tests covering residual, dust, live execution, target shadow, strategy decision, and recovery gates
-
-Verify these current facts in code:
-
-1. `target_position.py` already models the desired direction, but only as shadow/not-yet-persisted behavior.
-2. Actual live execution is still primarily lot-native.
-3. Normal strategy SELL still depends on `sellable_executable_lot_count` / lot authority.
-4. Residual inventory is handled as a separate execution path.
-5. `RESIDUAL_LIVE_SELL_MODE` and `RESIDUAL_BUY_SIZING_MODE` are symptoms of missing primary target-position execution, not the desired final model.
-6. HOLD behavior requires persistent target state; without persisted target state, the bot cannot know what target to maintain after restart.
-
-Keep the hypothesis falsifiable. If any of the above is wrong, explain exactly what the code actually does and adjust the design accordingly.
-
-## Design objective
-
-Promote target-position / delta execution from shadow telemetry toward a primary execution model behind a feature flag.
-
-The new model should be:
+Do not weaken the problem into a general cleanup task. The goal is very specific:
 
 ```text
-Signal Layer:
-  Strategy emits BUY / SELL / HOLD.
-
-Target Policy Layer:
-  BUY  -> target_exposure_krw = TARGET_EXPOSURE_KRW if set, else MAX_ORDER_KRW.
-  SELL -> target_exposure_krw = 0.
-  HOLD -> maintain previous persisted target_exposure_krw.
-
-Position Truth Layer:
-  Primary execution current position = broker-verified current BTC quantity.
-  This must be gated by existing safety checks.
-  Do not blindly trust broker balance if readiness/recovery state is unsafe.
-
-Delta Execution Layer:
-  target_qty = target_exposure_krw / reference_price
-  delta_qty = target_qty - current_broker_qty
-
-Order Rule Layer:
-  If abs(delta_qty) and abs(delta_notional) satisfy exchange min_qty and min_notional:
-    submit BUY or SELL for the delta.
-  Else:
-    classify as true_dust / below exchange minimum and do not submit.
-
-Accounting / Audit Layer:
-  Existing lot-native authority, fills, fees, PnL, and recovery diagnostics remain important.
-  But in target_delta execution mode, lot authority must not be the primary SELL sizing authority.
+When EXECUTION_ENGINE=target_delta:
+  live execution must use target_submit_plan as the primary submit authority.
+  SELL must not require strategy lot authority.
+  executable leftover BTC must be treated as current position.
+  only below-minimum delta is true dust.
+  residual policy must not be required for target_delta SELL.
 ```
 
-This is the architectural priority:
+## Desired end state
+
+The bot should support this operator-level behavior:
 
 ```text
-current_position + target_position + delta
+The bot buys.
+The bot sells.
+The exchange may leave leftover BTC due to fees, fills, rounding, min qty, or min notional.
+The bot may stop and restart.
+After restart, the bot reads broker-verified current BTC, validates readiness/recovery safety gates, compares current position to persisted target position, and converges by delta.
+If target=0 and leftover BTC is executable, it sells it.
+If target=0 and leftover BTC is below exchange minimum, it records/no-ops as true_dust.
+The state machine must not get stuck because leftover BTC is not a strategy lot.
 ```
 
-not:
+## Priority order
+
+Work in this order. Do not start with cosmetic cleanup.
 
 ```text
-strategy lot + residual inventory + dust tracking + special close candidate
+Priority 1:
+  Verify and patch live execution so target_submit_plan is actually consumed and submitted.
+
+Priority 2:
+  Verify and patch run_loop target state load/upsert behavior.
+
+Priority 3:
+  Verify and patch harmless dust / lot-native suppression so it cannot block target_delta executable deltas.
+
+Priority 4:
+  Add integration tests proving the above.
 ```
 
-## Scope constraints
+## Files to inspect first
 
-Implement this behind a feature flag. Do not break the existing `lot_native` engine.
-
-Add or use a setting such as:
+Inspect at least:
 
 ```text
-EXECUTION_ENGINE=lot_native | target_delta
-TARGET_EXECUTION_SHADOW=true | false
-TARGET_EXPOSURE_KRW=<optional>
-TARGET_HOLD_POLICY=maintain_previous_target
-REQUIRE_BROKER_LOCAL_CONVERGENCE=true
-BLOCK_ON_OPEN_ORDER=true
-BLOCK_ON_SUBMIT_UNKNOWN=true
+src/bithumb_bot/target_position.py
+src/bithumb_bot/execution_service.py
+src/bithumb_bot/engine.py
+src/bithumb_bot/broker/live.py
+src/bithumb_bot/broker/live_submit_orchestrator.py
+src/bithumb_bot/broker/live_submission_execution.py
+src/bithumb_bot/db_core.py
+src/bithumb_bot/config.py
+src/bithumb_bot/dust.py
+src/bithumb_bot/decision_context.py
+src/bithumb_bot/runtime_readiness.py
+tests/test_target_position_execution.py
+tests/test_failsafe.py
 ```
 
-Use existing settings if they already exist; avoid duplicate names.
-
-Do not add more residual/dust policy branches unless absolutely necessary for migration compatibility. Prefer deleting or bypassing residual-specific logic in `target_delta` mode.
-
-Do not remove existing residual behavior for `lot_native` mode in this task unless it is clearly dead code and tests prove it.
-
-## Required implementation
-
-### 1. Persist target position state
-
-Add durable target state storage.
-
-Minimum fields:
+Search for:
 
 ```text
-pair
-target_exposure_krw
-target_qty
-last_signal
-last_decision_id
-last_reference_price
-updated_ts
-```
-
-Use the repo’s existing DB/migration style.
-
-Rules:
-
-```text
-BUY:
-  persist target_exposure_krw = TARGET_EXPOSURE_KRW if set, else MAX_ORDER_KRW
-
-SELL:
-  persist target_exposure_krw = 0
-
-HOLD:
-  preserve previous target_exposure_krw
-```
-
-If HOLD occurs and no previous target exists, fail closed in `target_delta` mode with a clear block reason such as:
-
-```text
-missing_persistent_target_state
-```
-
-Do not silently assume flat unless existing startup/recovery policy explicitly proves that flat target is safe.
-
-### 2. Make target-position decision first-class
-
-Extend `build_target_position_decision()` or add a closely related function so that it can operate in both:
-
-```text
-shadow
 target_delta
+target_submit_plan
+execution_submit_plan
+target_position_state
+load_target_position_state
+upsert_target_position_state
+sellable_executable_lot_count
+harmless_dust
+dust_only_remainder
+residual_submit_plan
+RESIDUAL_LIVE_SELL_MODE
 ```
 
-modes.
+## Required verification
 
-It must return structured fields including at least:
+First verify and document the current state in your own notes before patching:
+
+### Verify target decision model
+
+Confirm whether `target_position.py` currently supports:
 
 ```text
-target_engine_mode
-target_state_persistence
-target_previous_exposure_krw
-target_new_exposure_krw
-target_reference_price
-target_current_qty
-target_current_exposure_krw
-target_qty
-target_delta_qty
-target_delta_notional_krw
-target_delta_side
-target_would_submit
-target_submit_qty
-target_submit_notional_krw
-target_block_reason
-target_position_truth_state
-target_dust_classification
-target_order_rule_min_qty
-target_order_rule_min_notional_krw
+TARGET_ENGINE_MODE_TARGET_DELTA
+TARGET_STATE_PERSISTENCE_PERSISTED
+TARGET_STATE_PERSISTENCE_MISSING
+TargetPositionState
+BUY -> configured target exposure
+SELL -> target exposure 0
+HOLD -> previous target exposure
+HOLD without previous target -> missing_persistent_target_state
+broker_qty_unknown blocker
+balance_snapshot_stale blocker
+broker_local_not_converged blocker
+projection_not_converged blocker
+open_order_count_nonzero blocker
+submit_unknown_count_nonzero blocker
+recovery_required_count_nonzero blocker
+accounting_projection_not_ok blocker
+delta_below_exchange_min -> true_dust
+executable delta -> executable_delta
 ```
 
-In `target_delta` mode, this decision should be the authoritative execution plan if all safety checks pass.
+If already correct, do not rewrite it unnecessarily.
 
-### 3. Define position truth clearly
+### Verify execution summary
 
-In `target_delta` mode:
+Confirm whether `execution_service.py` currently creates:
 
 ```text
-current position = broker_qty
+target_submit_plan.source = "target_delta"
+target_submit_plan.authority = "target_position_delta"
+target_submit_plan.intent_type = "target_delta_rebalance"
+target_submit_plan.side = BUY or SELL
+target_submit_plan.qty = target_decision.submit_qty
+target_submit_plan.submit_expected = target_decision.would_submit
 ```
 
-But only when safety gates pass.
+Confirm whether `target_delta` mode returns an `ExecutionDecisionSummary` without residual submit dependency.
 
-Block execution if any of these are unsafe:
+If this is already correct, preserve it.
+
+### Verify live execution gap
+
+Confirm whether `LiveSignalExecutionService.execute()` actually does this in `EXECUTION_ENGINE=target_delta`:
 
 ```text
-broker_qty_unknown
-balance_snapshot_stale
-broker_local_not_converged
-projection_not_converged
-open_order_count_nonzero
-unresolved_open_order_count_nonzero
-submit_unknown_count_nonzero
-recovery_required_count_nonzero
-active_fee_accounting_blocker
-accounting_projection_not_ok
+read execution_decision.target_submit_plan
+require plan.source == "target_delta"
+require plan.submit_expected == true
+require plan.block_reason == "none"
+pass execution_submit_plan=target_submit_plan into live_execute_signal(...)
 ```
 
-Use existing readiness payload fields where possible. Do not invent an unrelated safety system.
+If it does not, implement it.
 
-If broker/local convergence can be checked in more than one way, centralize the decision and log which evidence source was used.
+### Verify broker live submit gap
 
-### 4. Implement target_delta execution path
+Confirm whether `src/bithumb_bot/broker/live.py` treats `execution_submit_plan.source == "target_delta"` as a first-class plan.
 
-When:
+For target_delta plan, live execution must use:
 
 ```text
-EXECUTION_ENGINE=target_delta
+side = plan["side"]
+qty = plan["qty"]
+notional = plan["notional_krw"]
+source = "target_delta"
+authority = "target_position_delta"
+intent_type = "target_delta_rebalance"
+strategy_context = "target_delta"
+idempotency_key = plan["idempotency_key"] if present
 ```
 
-the live execution summary and submission path should use target delta, not residual candidate logic.
-
-Expected behavior:
+It must not re-derive SELL quantity from:
 
 ```text
-raw_signal=BUY:
-  target_exposure_krw > 0
-  compute delta vs current broker_qty
-  submit BUY only for positive executable delta
-
-raw_signal=SELL:
-  target_exposure_krw = 0
-  compute delta vs current broker_qty
-  submit SELL for executable current broker quantity
-
-raw_signal=HOLD:
-  maintain previous target
-  submit only if current broker_qty has drifted enough from target to produce executable delta
-  otherwise no-op
+sellable_executable_lot_count
+sellable_executable_qty
+position_state.normalized_exposure.sellable_executable_lot_count
+position_state.normalized_exposure.sellable_executable_qty
+residual_sell_candidate
+RESIDUAL_LIVE_SELL_MODE
 ```
 
-If delta is below exchange minimum:
+If `broker/live.py` currently falls back to lot-native SELL sizing for `target_delta`, patch it.
+
+### Verify run_loop target state persistence
+
+Confirm whether `engine.py` actually does this in the live run loop:
 
 ```text
-submit_expected=false
-target_dust_classification=true_dust
-target_block_reason=delta_below_exchange_min
+1. Load target_position_state for settings.PAIR before execution summary.
+2. Pass previous_target_exposure_krw into build_execution_decision_summary.
+3. Build target_delta decision/plan.
+4. For BUY and SELL signals, persist new_target_exposure_krw from target decision.
+5. For HOLD, preserve existing target state.
+6. Include target_submit_plan in decision_context passed to LiveSignalExecutionService.
+7. After restart, HOLD has access to previous target state.
 ```
 
-If delta is executable:
+If imports exist but this flow is incomplete, patch it.
+
+Do not silently initialize HOLD to flat unless existing safety/recovery logic explicitly proves that flat target is safe. In target_delta mode, HOLD without persisted target must fail closed as `missing_persistent_target_state`.
+
+### Verify harmless dust suppression
+
+Confirm whether existing harmless dust suppression can run before target_delta submit.
+
+In target_delta mode:
 
 ```text
-submit_expected=true
+target_dust_classification == "true_dust":
+  no-op/suppress is allowed.
+
+target_dust_classification == "executable_delta":
+  suppression is not allowed.
+  live submit must proceed if safety gates and submit plan pass.
+```
+
+Patch any path where old lot-native dust fields such as these block executable target_delta:
+
+```text
+dust_only_remainder
+harmless_dust
+sellable_executable_lot_count=0
+no_executable_exit_lot
+```
+
+Those fields may remain valid for `EXECUTION_ENGINE=lot_native`, but they must not block target_delta executable deltas.
+
+## Required implementation details
+
+### LiveSignalExecutionService target_delta branch
+
+Implement an explicit branch near the top of `LiveSignalExecutionService.execute()`:
+
+```python
+if _execution_engine() == "target_delta":
+    execution_decision = ...
+    target_plan = execution_decision.get("target_submit_plan")
+    if not isinstance(target_plan, dict):
+        return None
+    if target_plan.get("source") != "target_delta":
+        return None
+    if target_plan.get("block_reason") != "none":
+        return None
+    if not target_plan.get("submit_expected"):
+        return None
+    if target_plan.get("side") not in {"BUY", "SELL"}:
+        return None
+    if float(target_plan.get("qty") or 0.0) <= 0.0:
+        return None
+
+    return self.executor(
+        self.broker,
+        target_plan["side"],
+        request.ts,
+        request.market_price,
+        strategy_name=request.strategy_name,
+        decision_id=request.decision_id,
+        decision_reason=request.decision_reason,
+        exit_rule_name=request.exit_rule_name,
+        execution_submit_plan=target_plan,
+    )
+```
+
+Use the repo’s actual helper names and style. Do not copy this blindly if the surrounding API differs.
+
+### broker/live.py target_delta plan handling
+
+Add a clear target_delta submit-plan path. It should be easy to audit in logs.
+
+At minimum:
+
+```text
+if execution_submit_plan.source == "target_delta":
+  validate side/qty/notional/idempotency fields
+  create intent using target_delta_rebalance
+  use qty from execution_submit_plan as submit qty
+  skip lot-native sell authority checks
+  skip residual policy checks
+  still run generic live safety gates:
+    kill switch
+    unresolved order gate
+    open order gate
+    broker/local readiness if currently enforced
+    min qty / min notional / qty step checks
+    live dry run / live real order armed checks
+    idempotency/dedup checks
+  submit through standard pipeline
+```
+
+Do not bypass safety. Bypass only the obsolete lot-native/residual authority for target_delta.
+
+### Observability
+
+Add structured logs / decision context fields that make these cases obvious:
+
+Executable leftover after restart:
+
+```text
+execution_engine=target_delta
+source=target_delta
+authority=target_position_delta
+target_previous_exposure_krw=0
+target_new_exposure_krw=0
+target_current_qty=0.0004998
+target_qty=0
+target_delta_side=SELL
+target_delta_qty=-0.0004998
+target_submit_qty=0.0004998
 target_dust_classification=executable_delta
-target_block_reason=none
-```
-
-Do not call this residual. Do not require `RESIDUAL_LIVE_SELL_MODE=enabled` for target-delta SELL. That mode belongs to the old residual path.
-
-### 5. Keep lot-native accounting, but demote it from execution authority in target_delta mode
-
-Do not delete accounting.
-
-In `target_delta` mode:
-
-* lot-native records may still be used for:
-
-  * audit
-  * PnL
-  * lifecycle diagnostics
-  * recovery reports
-  * reconciliation
-* but SELL sizing should not require:
-
-  * `sellable_executable_lot_count > 0`
-  * strategy lot authority
-  * residual sell candidate
-
-If a broker balance exists and safety gates pass, the target delta determines the order.
-
-### 6. Simplify dust semantics
-
-In `target_delta` mode, dust should mean only:
-
-```text
-abs(target_qty - current_qty) is below exchange min_qty or min_notional
-```
-
-Executable leftover BTC is not dust. It is current position.
-
-Update naming, comments, logs, and tests accordingly.
-
-Keep existing dust classifications for old paths if necessary, but avoid extending them as the new execution model.
-
-### 7. Observability
-
-Add structured logs and decision context fields so an operator can see:
-
-```text
-execution_engine
-target_engine_mode
-raw_signal
-final_signal
-previous_target_exposure_krw
-new_target_exposure_krw
-current_broker_qty
-current_exposure_krw
-target_qty
-delta_qty
-delta_side
-delta_notional_krw
-would_submit
-submit_expected
-block_reason
-position_truth_state
-dust_classification
-readiness_gate_summary
-order_rule_min_qty
-order_rule_min_notional_krw
-```
-
-The logs must make this scenario obvious:
-
-```text
-target=0
-broker_qty=0.0004998
-delta_side=SELL
-delta_qty=-0.0004998
-would_submit=true
+target_position_truth_state=converged
+submit_expected=1
 block_reason=none
 ```
 
-And this scenario obvious:
+True dust after restart:
 
 ```text
-target=0
-broker_qty=0.00000004
-delta_below_exchange_min
-dust_classification=true_dust
-submit_expected=false
+execution_engine=target_delta
+target_new_exposure_krw=0
+target_current_qty=0.00000004
+target_delta_side=NONE
+target_dust_classification=true_dust
+target_block_reason=delta_below_exchange_min
+submit_expected=0
 ```
 
-### 8. Recovery and restart behavior
-
-Add tests and, if needed, implementation for restart-safe behavior:
-
-Scenario A:
+Unsafe state:
 
 ```text
-Previous target persisted as 0.
-Broker has executable BTC leftover after restart.
-Readiness is safe.
-Expected:
-  target_delta SELL is planned/submitted for broker current quantity.
-```
-
-Scenario B:
-
-```text
-Previous target persisted as 0.
-Broker has below-minimum BTC leftover after restart.
-Readiness is safe.
-Expected:
-  no submit.
-  classified as true_dust.
-  bot can continue and future BUY is not blocked solely because of this true dust.
-```
-
-Scenario C:
-
-```text
-Previous target persisted as target_exposure_krw > 0.
-Broker has partial BTC exposure after restart.
-Readiness is safe.
-Expected:
-  BUY only the missing delta if executable.
-  no full duplicate BUY.
-```
-
-Scenario D:
-
-```text
-Previous target missing.
-Signal is HOLD.
-Expected:
-  fail closed with missing_persistent_target_state.
-```
-
-Scenario E:
-
-```text
-Broker/local not converged or open order exists.
-Expected:
-  no target_delta submit.
-  clear unsafe_state block reason.
+execution_engine=target_delta
+target_position_truth_state=blocked
+target_block_reason=open_order_count_nonzero
+submit_expected=0
 ```
 
 ## Required tests
 
-Add or update tests for at least:
+Add or update tests. Prefer focused tests that directly prove the missing execution links.
 
-1. `target_position.py`
+### 1. LiveSignalExecutionService consumes target_submit_plan
 
-   * BUY target calculation
-   * SELL target zero
-   * HOLD maintains persisted target
-   * HOLD without persisted target blocks
-   * executable delta classification
-   * true dust classification
-   * unsafe state blockers
+Create a test where:
 
-2. `execution_service.py`
+```text
+EXECUTION_ENGINE=target_delta
+decision_context.execution_decision.target_submit_plan = {
+  source: "target_delta",
+  authority: "target_position_delta",
+  side: "SELL",
+  qty: 0.0004998,
+  notional_krw: ...
+  submit_expected: true,
+  block_reason: "none",
+  intent_type: "target_delta_rebalance"
+}
+```
 
-   * `EXECUTION_ENGINE=target_delta` bypasses residual SELL mode
-   * target_delta SELL does not require `sellable_executable_lot_count`
-   * target_delta BUY sizes only missing delta
-   * below-minimum delta no-ops as true dust
-   * unsafe readiness blocks submit
+Expected:
 
-3. DB persistence
+```text
+executor is called once
+executor receives signal/side SELL
+executor receives execution_submit_plan equal to target_submit_plan
+residual_submit_plan is ignored
+RESIDUAL_LIVE_SELL_MODE=telemetry does not block
+```
 
-   * target state is created/updated on BUY and SELL
-   * target state survives restart simulation
-   * HOLD reads previous target
+### 2. target_delta blocked plan is not submitted
 
-4. Live submission path
+Cases:
 
-   * target_delta submit plan carries explicit side, qty, notional, source, authority, idempotency key
-   * SELL current broker qty path does not route through residual policy
-   * existing lot_native behavior remains unchanged when `EXECUTION_ENGINE=lot_native`
+```text
+submit_expected=false
+block_reason != "none"
+side=NONE
+qty=0
+missing target_submit_plan
+source != target_delta
+```
 
-5. Regression tests for current failure mode
+Expected:
 
-   * broker has executable BTC
-   * no sellable strategy lot
-   * `RESIDUAL_LIVE_SELL_MODE=telemetry`
-   * signal SELL / target=0
-   * in `lot_native`, old behavior may block or residual-telemetry as before
-   * in `target_delta`, expected executable SELL plan with no residual policy dependency
+```text
+executor not called
+no residual fallback
+```
 
-Run the repository’s full test suite or the most relevant test set if full suite is too large. Report the exact command and result.
+### 3. broker/live.py target_delta SELL does not require lot-native SELL authority
+
+Construct a live execution test where:
+
+```text
+execution_submit_plan.source = "target_delta"
+side = SELL
+qty = 0.0004998
+sellable_executable_lot_count = 0
+exit_allowed = false or no strategy lot
+RESIDUAL_LIVE_SELL_MODE = telemetry
+```
+
+Expected:
+
+```text
+target_delta path uses execution_submit_plan.qty
+does not call build_sell_execution_sizing as the authority for qty
+does not block on no_executable_exit_lot
+does not block on residual_live_sell_mode_telemetry
+submits or reaches standard pipeline with target_delta qty
+```
+
+Mock the broker/submit pipeline as needed. Do not place live real orders.
+
+### 4. harmless dust suppression cannot block executable target_delta
+
+Test:
+
+```text
+EXECUTION_ENGINE=target_delta
+target_submit_plan says executable_delta SELL
+old context says harmless_dust or dust_only_remainder
+sellable_executable_lot_count=0
+```
+
+Expected:
+
+```text
+target_delta submit proceeds
+harmless dust suppression not recorded
+```
+
+Separate test:
+
+```text
+target_dust_classification=true_dust
+block_reason=delta_below_exchange_min
+```
+
+Expected:
+
+```text
+no submit
+safe no-op
+```
+
+### 5. run_loop target state integration
+
+Add integration-style tests around `engine.py` or the smallest testable function it uses.
+
+Cases:
+
+```text
+A. Restart with target=0 and executable broker BTC:
+   persisted target_position_state target_exposure_krw=0
+   broker_qty=0.0004998
+   readiness safe
+   signal SELL or HOLD with target=0
+   expected target_delta SELL plan reaches LiveSignalExecutionService
+
+B. Restart with target=0 and below-minimum broker BTC:
+   expected no submit, true_dust, no state-machine corruption
+
+C. Restart with target>0 and partial broker exposure:
+   expected BUY only missing delta, not full duplicate BUY
+
+D. HOLD with missing target:
+   expected missing_persistent_target_state and no submit
+
+E. Unsafe readiness:
+   broker/local not converged or open order count > 0
+   expected no submit, clear target_block_reason
+```
+
+### 6. lot_native regression
+
+Prove `EXECUTION_ENGINE=lot_native` behavior is unchanged:
+
+```text
+residual path still behaves as before
+lot-native SELL still uses sellable_executable_lot_count
+harmless dust suppression still applies in lot_native
+```
 
 ## Acceptance criteria
 
-The work is acceptable only if all of these are true:
+This work is complete only if all of these are true:
 
-1. `lot_native` mode still works as before.
-2. `target_delta` mode persists target state.
-3. `target_delta` mode uses broker-verified current position as primary execution truth after readiness gates pass.
-4. `target_delta` mode computes orders from `target_qty - current_qty`.
-5. Executable leftover BTC after restart is treated as current position and can be sold when target is zero.
-6. Below-minimum leftover BTC is treated as true dust and does not corrupt the state machine.
-7. SELL in `target_delta` mode does not require strategy lot authority.
-8. Residual policy settings are not required for target_delta SELL.
-9. Unsafe broker/local/recovery states fail closed with clear block reasons.
-10. Logs and decision context clearly show target/current/delta reasoning.
+```text
+1. target_delta summary creation still works.
+2. target_submit_plan is consumed by LiveSignalExecutionService.
+3. broker/live.py has a first-class target_delta execution_submit_plan path.
+4. target_delta SELL uses plan.qty from target_position_delta, not sellable_executable_lot_count.
+5. target_delta SELL does not depend on RESIDUAL_LIVE_SELL_MODE.
+6. target_delta executable_delta is not suppressed by harmless dust / dust_only_remainder / no_executable_exit_lot.
+7. target state is loaded and upserted in the run loop, not only tested in isolation.
+8. HOLD uses persisted target state after restart.
+9. HOLD without persisted target fails closed.
+10. unsafe readiness states block target_delta submit with explicit reasons.
+11. true dust is only below exchange min delta.
+12. lot_native remains backward compatible.
+13. Tests prove live execution and run_loop integration, not only pure target_position calculation.
+```
 
 ## Non-goals
 
-Do not rewrite the strategy logic unless required to pass target state through.
+Do not rewrite the strategy.
 
-Do not remove recovery safety gates.
+Do not delete lot-native mode.
 
-Do not make broker balance blindly authoritative without convergence/readiness checks.
+Do not delete recovery safety gates.
 
-Do not add another residual-specific workaround as the main fix.
+Do not make broker balance blindly authoritative.
 
-Do not make live orders less safe.
+Do not make live ordering less safe.
 
-Do not require perfect zero BTC after every SELL. The correct model is convergence to target with true dust tolerated.
+Do not add more residual/dust policy switches as the solution.
+
+Do not treat executable leftover BTC as dust in target_delta mode.
+
+Do not require perfect zero BTC after SELL. The correct behavior is convergence to target with below-minimum true dust tolerated.
+
+## Suggested test commands
+
+Run the most relevant tests first:
+
+```bash
+pytest tests/test_target_position_execution.py -q
+pytest tests/test_failsafe.py -q
+```
+
+Then run any new live execution / engine integration tests you add.
+
+If feasible, run the full suite:
+
+```bash
+pytest -q
+```
+
+If full suite is too slow or fails for unrelated environment reasons, report the exact command, failure, and why it is unrelated.
 
 ## Final report format
 
-When finished, report in this exact structure:
+When done, report exactly in this structure:
 
 ```markdown
-# Target-Delta Execution Refactor Report
+# Target-Delta Execution Closure Report
 
 ## Summary
-- What changed:
-- What did not change:
-- Current default execution mode:
+- What was already correct:
+- What was incomplete:
+- What changed in this patch:
 
-## Verified Problem
-- Files inspected:
-- Evidence that lot-native/residual/dust policy caused the issue:
-- Which parts of the original hypothesis were confirmed:
-- Which parts were disproven or adjusted:
+## Verified Execution Path
+- target_position.py:
+- execution_service.py:
+- LiveSignalExecutionService:
+- broker/live.py:
+- engine.py run_loop target state:
 
-## Design Implemented
-- Target state persistence:
-- Position truth definition:
-- Delta execution behavior:
-- Dust semantics:
-- Safety gates:
+## Key Behavior Proven
+### Executable leftover BTC with target=0
+- Input:
+- Expected:
+- Actual:
 
-## Behavior Examples
-### Restart with executable leftover and target=0
-- Input state:
-- Expected behavior:
-- Actual behavior:
+### True dust leftover with target=0
+- Input:
+- Expected:
+- Actual:
 
-### Restart with true dust and target=0
-- Input state:
-- Expected behavior:
-- Actual behavior:
+### HOLD after restart with persisted target
+- Input:
+- Expected:
+- Actual:
 
-### Partial exposure and BUY target
-- Input state:
-- Expected behavior:
-- Actual behavior:
+### HOLD without persisted target
+- Input:
+- Expected:
+- Actual:
+
+### Unsafe readiness
+- Input:
+- Expected:
+- Actual:
+
+## Safety and Compatibility
+- Safety gates preserved:
+- lot_native compatibility:
+- residual policy behavior in lot_native:
+- target_delta independence from residual policy:
 
 ## Tests
+- New/updated tests:
 - Commands run:
 - Results:
-- New/updated test files:
-- Important regression cases covered:
 
-## Operational Notes
-- New/changed settings:
-- How to enable target_delta safely:
-- How to inspect logs:
-- Rollback path to lot_native:
+## Observability
+- New/verified log fields:
+- Example target_delta executable log:
+- Example true_dust log:
+- Example unsafe_state log:
 
 ## Remaining Risks / Follow-ups
 - Known limitations:
-- Recommended next cleanup:
-- Residual/dust code that can be deprecated later:
+- Recommended cleanup after this:
 ```
 
-Remember: the goal is not to make dust handling more elaborate. The goal is to make dust/residual stop being the center of execution by moving execution authority to persisted target position plus broker-verified current position plus delta.
+Remember the main point: the previous patch appears to have created the target_delta brain. This task is to connect that brain to the hands. `target_submit_plan` must become the actual live execution authority in `EXECUTION_ENGINE=target_delta`, and old lot-native/dust/residual suppression must not intercept executable target deltas.
 

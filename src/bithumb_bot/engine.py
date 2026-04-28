@@ -91,6 +91,59 @@ STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES = {
 }
 
 
+def _run_loop_uses_target_delta() -> bool:
+    return (
+        str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
+        == "target_delta"
+    )
+
+
+def _load_previous_target_exposure_for_run_loop(conn) -> float | None:
+    if not _run_loop_uses_target_delta():
+        return None
+    previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+    if previous_target_state is None:
+        return None
+    return float(previous_target_state.target_exposure_krw)
+
+
+def _persist_target_position_state_for_run_loop(
+    conn,
+    *,
+    execution_decision: dict[str, object],
+    signal: str,
+    decision_id: int | None,
+    updated_ts: int,
+) -> bool:
+    if not _run_loop_uses_target_delta():
+        return False
+    target_decision = (
+        execution_decision.get("target_shadow_decision")
+        if isinstance(execution_decision, dict)
+        and isinstance(execution_decision.get("target_shadow_decision"), dict)
+        else None
+    )
+    if not isinstance(target_decision, dict):
+        return False
+    if (
+        target_decision.get("target_new_exposure_krw") is None
+        or target_decision.get("target_qty") is None
+        or target_decision.get("target_reference_price") is None
+    ):
+        return False
+    upsert_target_position_state(
+        conn,
+        pair=settings.PAIR,
+        target_exposure_krw=float(target_decision["target_new_exposure_krw"] or 0.0),
+        target_qty=float(target_decision["target_qty"] or 0.0),
+        last_signal=signal,
+        last_decision_id=decision_id,
+        last_reference_price=float(target_decision["target_reference_price"] or 0.0),
+        updated_ts=int(updated_ts),
+    )
+    return True
+
+
 def _risk_state_mismatch_recent_context(state) -> bool:
     return bool(
         state.halt_reason_code == RISK_STATE_MISMATCH
@@ -3029,17 +3082,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                 signal = str(context.pop("signal", "HOLD"))
                 reason = str(context.pop("reason", ""))
                 readiness_payload: dict[str, object] = {}
-                previous_target_exposure_krw = None
-                if (
-                    str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
-                    == "target_delta"
-                ):
-                    previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
-                    previous_target_exposure_krw = (
-                        None
-                        if previous_target_state is None
-                        else float(previous_target_state.target_exposure_krw)
-                    )
+                previous_target_exposure_krw = _load_previous_target_exposure_for_run_loop(conn)
                 execution_decision: dict[str, object] = {}
                 try:
                     readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
@@ -3143,30 +3186,13 @@ def run_loop(short_n: int, long_n: int) -> None:
                         confidence=float(confidence_raw) if confidence_raw is not None else None,
                         context=context,
                     )
-                    target_decision = (
-                        execution_decision.get("target_shadow_decision")
-                        if isinstance(execution_decision, dict)
-                        and isinstance(execution_decision.get("target_shadow_decision"), dict)
-                        else None
+                    _persist_target_position_state_for_run_loop(
+                        conn,
+                        execution_decision=execution_decision,
+                        signal=signal,
+                        decision_id=decision_id,
+                        updated_ts=int(now * 1000),
                     )
-                    if (
-                        str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
-                        == "target_delta"
-                        and isinstance(target_decision, dict)
-                        and target_decision.get("target_new_exposure_krw") is not None
-                        and target_decision.get("target_qty") is not None
-                        and target_decision.get("target_reference_price") is not None
-                    ):
-                        upsert_target_position_state(
-                            conn,
-                            pair=settings.PAIR,
-                            target_exposure_krw=float(target_decision["target_new_exposure_krw"] or 0.0),
-                            target_qty=float(target_decision["target_qty"] or 0.0),
-                            last_signal=signal,
-                            last_decision_id=decision_id,
-                            last_reference_price=float(target_decision["target_reference_price"] or 0.0),
-                            updated_ts=int(now * 1000),
-                        )
                     conn.commit()
                 except Exception as exc:
                     _log_loop_event(

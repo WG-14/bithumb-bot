@@ -4,6 +4,10 @@ import pytest
 
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, load_target_position_state, upsert_target_position_state
+from bithumb_bot.engine import (
+    _load_previous_target_exposure_for_run_loop,
+    _persist_target_position_state_for_run_loop,
+)
 from bithumb_bot.execution_service import build_execution_decision_summary
 from bithumb_bot.target_position import (
     TARGET_STATE_PERSISTENCE_NOT_PERSISTED,
@@ -376,3 +380,155 @@ def test_target_delta_buy_sizes_only_missing_delta() -> None:
     assert summary.target_submit_plan["side"] == "BUY"
     assert summary.target_submit_plan["qty"] == pytest.approx(0.0006)
     assert summary.target_submit_plan["notional_krw"] == pytest.approx(60_000.0)
+
+
+def test_engine_run_loop_target_state_helper_preserves_restart_hold_target(tmp_path) -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    old_pair = settings.PAIR
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "PAIR", "KRW-BTC")
+        db_path = str(tmp_path / "target_restart_hold.sqlite")
+        conn = ensure_db(db_path)
+        try:
+            upsert_target_position_state(
+                conn,
+                pair="KRW-BTC",
+                target_exposure_krw=0.0,
+                target_qty=0.0,
+                last_signal="SELL",
+                last_decision_id=7,
+                last_reference_price=100_000_000.0,
+                updated_ts=1000,
+            )
+            conn.commit()
+
+            previous_target = _load_previous_target_exposure_for_run_loop(conn)
+            summary = build_execution_decision_summary(
+                decision_context={"raw_signal": "HOLD", "market_price": 100_000_000.0},
+                readiness_payload=_readiness(broker_qty=0.0004998) | {
+                    "residual_proof_min_qty": 0.0001,
+                    "residual_proof_min_notional_krw": 5000.0,
+                },
+                raw_signal="HOLD",
+                final_signal="HOLD",
+                previous_target_exposure_krw=previous_target,
+            ).as_dict()
+
+            persisted = _persist_target_position_state_for_run_loop(
+                conn,
+                execution_decision=summary,
+                signal="HOLD",
+                decision_id=8,
+                updated_ts=2000,
+            )
+            conn.commit()
+            state = load_target_position_state(conn, pair="KRW-BTC")
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "PAIR", old_pair)
+
+    target_plan = summary["target_submit_plan"]
+    assert previous_target == 0.0
+    assert isinstance(target_plan, dict)
+    assert target_plan["side"] == "SELL"
+    assert target_plan["qty"] == pytest.approx(0.0004998)
+    assert target_plan["target_dust_classification"] == "executable_delta"
+    assert persisted is True
+    assert state is not None
+    assert state.target_exposure_krw == 0.0
+    assert state.last_signal == "HOLD"
+    assert state.last_decision_id == 8
+
+
+def test_engine_run_loop_target_state_helper_missing_hold_fails_closed(tmp_path) -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    old_pair = settings.PAIR
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "PAIR", "KRW-BTC")
+        conn = ensure_db(str(tmp_path / "target_missing_hold.sqlite"))
+        try:
+            previous_target = _load_previous_target_exposure_for_run_loop(conn)
+            summary = build_execution_decision_summary(
+                decision_context={"raw_signal": "HOLD", "market_price": 100_000_000.0},
+                readiness_payload=_readiness(broker_qty=0.0004998) | {
+                    "residual_proof_min_qty": 0.0001,
+                    "residual_proof_min_notional_krw": 5000.0,
+                },
+                raw_signal="HOLD",
+                final_signal="HOLD",
+                previous_target_exposure_krw=previous_target,
+            ).as_dict()
+            persisted = _persist_target_position_state_for_run_loop(
+                conn,
+                execution_decision=summary,
+                signal="HOLD",
+                decision_id=9,
+                updated_ts=3000,
+            )
+            conn.commit()
+            state = load_target_position_state(conn, pair="KRW-BTC")
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "PAIR", old_pair)
+
+    target = summary["target_shadow_decision"]
+    target_plan = summary["target_submit_plan"]
+    assert previous_target is None
+    assert isinstance(target, dict)
+    assert target["target_block_reason"] == "missing_persistent_target_state"
+    assert target["target_state_persistence"] == TARGET_STATE_PERSISTENCE_MISSING
+    assert isinstance(target_plan, dict)
+    assert target_plan["submit_expected"] is False
+    assert target_plan["block_reason"] == "missing_persistent_target_state"
+    assert persisted is False
+    assert state is None
+
+
+def test_engine_run_loop_target_state_helper_true_dust_noops_without_corruption(tmp_path) -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    old_pair = settings.PAIR
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "PAIR", "KRW-BTC")
+        conn = ensure_db(str(tmp_path / "target_true_dust.sqlite"))
+        try:
+            upsert_target_position_state(
+                conn,
+                pair="KRW-BTC",
+                target_exposure_krw=0.0,
+                target_qty=0.0,
+                last_signal="SELL",
+                last_decision_id=7,
+                last_reference_price=100_000_000.0,
+                updated_ts=1000,
+            )
+            conn.commit()
+            previous_target = _load_previous_target_exposure_for_run_loop(conn)
+            summary = build_execution_decision_summary(
+                decision_context={"raw_signal": "HOLD", "market_price": 100_000_000.0},
+                readiness_payload=_readiness(broker_qty=0.00000004) | {
+                    "residual_proof_min_qty": 0.0001,
+                    "residual_proof_min_notional_krw": 5000.0,
+                },
+                raw_signal="HOLD",
+                final_signal="HOLD",
+                previous_target_exposure_krw=previous_target,
+            ).as_dict()
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "PAIR", old_pair)
+
+    target_plan = summary["target_submit_plan"]
+    assert isinstance(target_plan, dict)
+    assert target_plan["submit_expected"] is False
+    assert target_plan["side"] == "NONE"
+    assert target_plan["block_reason"] == "delta_below_exchange_min"
+    assert target_plan["target_dust_classification"] == "true_dust"

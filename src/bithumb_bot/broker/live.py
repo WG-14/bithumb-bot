@@ -209,6 +209,7 @@ class _LiveExecutionIntent:
     intent_type: str | None = None
     strategy_context: str | None = None
     use_qty_intent_key: bool = False
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2322,6 +2323,11 @@ def _determine_live_execution_intent(
             intent_type="residual_close",
             strategy_context=_residual_order_intent_strategy_context(),
             use_qty_intent_key=True,
+            idempotency_key=(
+                str(execution_submit_plan.get("idempotency_key"))
+                if execution_submit_plan.get("idempotency_key") is not None
+                else None
+            ),
         )
 
     if (
@@ -2393,6 +2399,11 @@ def _determine_live_execution_intent(
             intent_type="target_delta_rebalance",
             strategy_context="target_delta",
             use_qty_intent_key=True,
+            idempotency_key=(
+                str(execution_submit_plan.get("idempotency_key"))
+                if execution_submit_plan.get("idempotency_key") is not None
+                else None
+            ),
         )
 
     if signal == "BUY" and normalized_exposure.effective_flat:

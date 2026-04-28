@@ -485,7 +485,8 @@ def execute_live_submission_and_application(
     use_qty_intent_key = bool(getattr(intent, "use_qty_intent_key", False))
     intended_lot_count_for_intent = None if use_qty_intent_key else int(lot_sizing.intended_lot_count)
     executable_lot_count_for_intent = None if use_qty_intent_key else int(lot_sizing.executable_lot_count)
-    intent_key = build_order_intent_key(
+    plan_idempotency_key = str(getattr(intent, "idempotency_key", "") or "").strip()
+    intent_key = plan_idempotency_key or build_order_intent_key(
         symbol=settings.PAIR,
         side=feasibility.side,
         strategy_context=strategy_context,

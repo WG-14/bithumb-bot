@@ -1704,6 +1704,11 @@ def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(
         return {"status": "captured"}
 
     monkeypatch.setattr(live_module, "execute_live_submission_and_application", _capture_standard_pipeline)
+    monkeypatch.setattr(
+        live_module,
+        "build_sell_execution_sizing",
+        lambda *_args, **_kwargs: pytest.fail("target_delta SELL must not use lot-native sell sizing authority"),
+    )
 
     broker = _FakeBroker()
     trade = live_execute_signal(
@@ -1723,6 +1728,7 @@ def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(
     assert intent.intent_type == "target_delta_rebalance"
     assert intent.strategy_context == "target_delta"
     assert intent.use_qty_intent_key is True
+    assert intent.idempotency_key == "target-delta-test-key"
     assert intent.submit_qty_source == "target_position_delta"
     assert intent.exit_sizing.qty_source == "target_position_delta"
     assert feasibility.side == "SELL"

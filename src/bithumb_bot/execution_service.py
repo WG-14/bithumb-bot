@@ -819,17 +819,25 @@ class LiveSignalExecutionService:
             if isinstance(execution_decision.get("target_submit_plan"), dict)
             else {}
         )
-        if (
-            target_plan
-            and str(target_plan.get("source")) == "target_delta"
-            and str(target_plan.get("authority")) == "target_position_delta"
-        ):
+        if _execution_engine() == "target_delta":
+            if not target_plan:
+                return None
+            if str(target_plan.get("source")) != "target_delta":
+                return None
+            if str(target_plan.get("authority")) != "target_position_delta":
+                return None
             if str(target_plan.get("block_reason") or "none") != "none":
                 return None
             if not bool(target_plan.get("submit_expected")):
                 return None
             plan_side = str(target_plan.get("side") or "").upper()
             if plan_side not in {"BUY", "SELL"}:
+                return None
+            try:
+                plan_qty = float(target_plan.get("qty") or 0.0)
+            except (TypeError, ValueError):
+                return None
+            if plan_qty <= 0.0:
                 return None
             try:
                 return self.executor(
