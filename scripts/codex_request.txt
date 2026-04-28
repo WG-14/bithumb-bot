@@ -1,150 +1,93 @@
 You are working in the `WG-14/bithumb-bot` repository.
 
-This is not another dust/residual workaround task. The core issue is now clear: the repository does not have one coherent position policy. It currently mixes at least three different meanings of “position”:
+The recent patch moved in the right direction: startup position adoption policy now exists in the target-position model, and the core `resolve_startup_target_position_policy()` logic appears to be present. However, do not consider this complete until the run-loop integration is explicitly proven. The previous real live issue was not a sizing bug; it was a policy bug: missing or forced `target=0` allowed target-delta to close broker BTC even when the strategy signal was HOLD.
+
+Your task is to verify and harden the integration so that the accidental closeout cannot happen again.
+
+## Core problem to preserve
+
+Do not weaken this into a generic test cleanup.
+
+The root cause is:
 
 ```text
-1. Strategy position:
-   - SMA strategy emits BUY / SELL / HOLD.
-   - Exit rules evaluate only when strategy thinks it is in position.
+The repo has multiple competing meanings of position:
+1. strategy position
+2. lot-native position
+3. broker/target position
 
-2. Lot-native position:
-   - open_position_lots
-   - executable_lot_count
-   - dust_tracking_lot_count
-   - sellable_executable_lot_count
-   - entry_allowed / exit_allowed
-
-3. Broker/target position:
-   - broker_qty
-   - target_position_state
-   - target_qty - current_qty = delta
+The desired target-delta model is:
+  strategy changes target
+  execution converges broker current position to target
+  startup adopts existing broker position unless strategy SELL or explicit closeout says otherwise
 ```
 
-These are not aligned. That is the root cause. Do not treat this as a small bug in SELL sizing.
-
-## Core problem
-
-The repo keeps getting tangled because it alternates between these incompatible models:
+The key new policy must be:
 
 ```text
-lot-native:
-  Only the strategy lot created by the bot is a real position.
-  Non-lot BTC becomes dust/residual/recovery state.
-
-target-delta:
-  Broker current BTC is the current position.
-  Orders are computed from target position minus current broker position.
+If target_position_state is missing and broker/local safely show executable BTC,
+the bot must adopt that broker BTC as the current target and submit no order.
 ```
 
-This has produced the failure mode we just observed:
+It must not do this:
 
 ```text
-broker has BTC
-local portfolio has BTC
-but open strategy lot is absent
-sellable_executable_lot_count = 0
-dust_tracking_lot_count > 0
-entry_allowed = false
-exit_allowed = false
-
-Result:
-  BUY is blocked because BTC remains.
-  Strategy SELL is blocked because no strategy lot exists.
-  Residual/dust policy becomes the escape hatch.
+missing target + broker BTC + HOLD
+→ target=0
+→ REBALANCE_TO_TARGET
+→ SELL
 ```
 
-The target-delta execution engine is directionally correct, but it was used incorrectly when we manually inserted `target_position_state target=0`. That caused the bot to sell existing BTC even though strategy signal was HOLD.
+That is the accidental closeout we are preventing.
 
-That SELL was technically correct under target_delta, but structurally wrong as a default startup policy:
+## Current hypothesis to verify
+
+Treat this as a hypothesis, not an assumption:
 
 ```text
-raw_signal=HOLD
-final_signal=HOLD
-reason=sma no crossover
+Already implemented:
+- target_position.py defines target origins:
+  strategy_buy
+  strategy_sell
+  adopted_existing_position
+  flat_start
+  true_dust_flat
+  operator_closeout
 
-target_position_state target = 0
-broker_qty = 0.0004998
-delta = -0.0004998
-=> target_delta SELL
+- target_position.py defines startup policy actions:
+  use_existing_target
+  initialize_flat_target
+  adopt_existing_broker_position
+  initialize_true_dust_flat
+  block_unsafe_state
+
+- TargetPositionState includes adoption metadata.
+- resolve_startup_target_position_policy() exists and adopts executable broker BTC without submit.
+- engine.py includes _resolve_target_position_state_for_run_loop() and calls the startup adoption policy.
+
+Still not proven strongly enough:
+- run_loop always goes through _resolve_target_position_state_for_run_loop(), not the old _load_previous_target_exposure_for_run_loop path, when EXECUTION_ENGINE=target_delta.
+- missing target + broker executable BTC + HOLD cannot produce target_delta SELL.
+- tests currently include adoption unit tests, but may not include a true run_loop integration regression test.
+- old tests may still encode “missing target + HOLD = missing_persistent_target_state” in helper-level paths, which is now only valid when bypassing the startup adoption resolver, not for the real run loop.
 ```
 
-This is not an ideal automatic trading structure. It is a closeout behavior disguised as normal startup behavior.
+## Priority
 
-## New design center
-
-The next patch must implement a **startup position adoption policy**.
-
-Do not add more residual sell modes.
-Do not add more dust classifications.
-Do not make target_delta always close current BTC to zero.
-Do not confuse explicit closeout with strategy SELL.
-
-The correct model is:
+Patch only what is needed to make this true and tested:
 
 ```text
-Strategy changes target.
-Execution converges current broker position to target.
-Startup adopts existing broker position unless explicit policy says close it.
-```
+Priority 1:
+  Prove run_loop missing-target adoption prevents accidental SELL.
 
-## Required policy
+Priority 2:
+  Prove _resolve_target_position_state_for_run_loop persists adopted target and feeds previous_target_exposure_krw into execution summary.
 
-Implement and test this policy in `WG-14/bithumb-bot`:
+Priority 3:
+  Clarify or update obsolete helper tests that still treat missing target + HOLD as fail-closed in paths where startup adoption should apply.
 
-```text
-1. target_position_state exists and is fresh/valid:
-   Use it.
-   Do not overwrite it just because broker_qty exists.
-
-2. target_position_state missing + broker/local flat:
-   Initialize target_position_state to target=0.
-   Do not submit an order.
-
-3. target_position_state missing + broker/local has executable BTC:
-   Adopt current broker exposure as the target.
-   Initialize target_position_state to current broker exposure.
-   Record target origin as adopted_existing_position.
-   Do not submit an order on startup/HOLD.
-   Continue running.
-   The next strategy SELL should set target=0 and then sell.
-
-4. target_position_state missing + broker BTC below exchange minimum:
-   Classify as true_dust.
-   Initialize target=0 or a dust-flat target state.
-   Do not submit an order.
-
-5. Strategy BUY:
-   Set target_exposure_krw = TARGET_EXPOSURE_KRW if configured, otherwise MAX_ORDER_KRW.
-   Execute delta from current broker position to target.
-
-6. Strategy SELL:
-   Set target_exposure_krw = 0.
-   Execute delta from current broker position to zero.
-
-7. Explicit operator closeout command:
-   Only this should force target=0 outside strategy SELL.
-   This must be separate from normal startup adoption.
-```
-
-## Key distinction
-
-This must be enforced in code:
-
-```text
-Strategy SELL:
-  Strategy explicitly says SELL.
-  Target becomes 0.
-  target_delta may sell.
-
-Startup adoption:
-  No target exists, but broker BTC exists.
-  Target becomes current exposure.
-  target_delta must not sell.
-
-Operator closeout:
-  Operator explicitly asks to close current position.
-  Target becomes 0.
-  target_delta may sell.
+Priority 4:
+  Preserve all existing target_delta live submit and recovery behavior.
 ```
 
 ## Files to inspect
@@ -155,13 +98,8 @@ Inspect and modify as needed:
 src/bithumb_bot/target_position.py
 src/bithumb_bot/engine.py
 src/bithumb_bot/execution_service.py
-src/bithumb_bot/strategy/sma.py
-src/bithumb_bot/dust.py
-src/bithumb_bot/decision_context.py
-src/bithumb_bot/runtime_readiness.py
 src/bithumb_bot/db_core.py
-src/bithumb_bot/app.py
-src/bithumb_bot/broker/live.py
+src/bithumb_bot/strategy/sma.py
 tests/test_target_position_execution.py
 tests/test_failsafe.py
 ```
@@ -169,42 +107,59 @@ tests/test_failsafe.py
 Search for:
 
 ```text
-target_position_state
-previous_target_exposure_krw
-target_delta
-broker_qty
-broker_position_evidence
-sellable_executable_lot_count
-dust_tracking_lot_count
-entry_allowed
-exit_allowed
-residual_inventory
-startup
-run_loop
-closeout
-flatten
+resolve_startup_target_position_policy
+_resolve_target_position_state_for_run_loop
+_load_previous_target_exposure_for_run_loop
+_persist_target_position_state_for_run_loop
+TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION
+TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+missing_persistent_target_state
+REBALANCE_TO_TARGET
+target_delta_side
+target_submit_plan
+live_execute_signal
 ```
 
-## Required implementation
+## Required verification and code review
 
-### 1. Add target origin / adoption metadata
+### 1. Verify target_position.py
 
-Extend target position persistence if needed.
-
-At minimum, target state should be able to distinguish:
+Confirm that `resolve_startup_target_position_policy()` behaves as follows:
 
 ```text
-strategy_buy
-strategy_sell
-adopted_existing_position
-flat_start
-true_dust_flat
-operator_closeout
+existing target state:
+  policy_action=use_existing_target
+  would_submit_on_startup=false
+
+missing target + broker_qty=0:
+  policy_action=initialize_flat_target
+  target=0
+  would_submit_on_startup=false
+
+missing target + broker_qty executable:
+  policy_action=adopt_existing_broker_position
+  target_exposure_krw=broker_qty * reference_price
+  target_qty=broker_qty
+  target_origin=adopted_existing_position
+  would_submit_on_startup=false
+
+missing target + broker qty below min:
+  policy_action=initialize_true_dust_flat
+  target=0 or dust-flat
+  would_submit_on_startup=false
+
+unsafe readiness:
+  policy_action=block_unsafe_state
+  no submit
 ```
 
-If schema migration is too large, use a compatible metadata column or adjacent table. Do not break existing DBs.
+If this is already correct, do not rewrite it.
 
-Recommended fields:
+### 2. Verify db_core.py schema migration
+
+Confirm existing DBs get target-position metadata columns safely.
+
+Required persisted fields:
 
 ```text
 target_origin
@@ -212,228 +167,193 @@ adoption_reason
 adopted_broker_qty
 adopted_broker_exposure_krw
 created_from_signal
-updated_ts
 ```
 
-If you add fields, add migration and tests.
+If the table creation has the fields but `_ensure_column()` migration is missing for existing DBs, add it. This is critical because live DBs may already have `target_position_state` from the prior patch without these columns.
 
-### 2. Implement startup adoption resolver
-
-Add a focused function, for example:
-
-```python
-resolve_startup_target_position_policy(...)
-```
-
-It should take existing target state, readiness payload, broker position evidence, order rules, reference price, and execution settings.
-
-It should return a structured decision:
+Add a migration test if missing:
 
 ```text
-policy_action:
-  use_existing_target
-  initialize_flat_target
-  adopt_existing_broker_position
-  initialize_true_dust_flat
-  block_unsafe_state
-
-target_exposure_krw
-target_qty
-target_origin
-would_submit_on_startup
-block_reason
-position_truth_state
-dust_classification
+Create old target_position_state schema without new columns.
+Run ensure_schema().
+Verify all new columns exist.
+Verify load/upsert still work.
 ```
 
-Critical rule:
+### 3. Verify engine.py run_loop integration
+
+The real run-loop path must be:
 
 ```text
-adopt_existing_broker_position must never submit an order.
-```
-
-### 3. Wire adoption into run_loop
-
-In `engine.py`, before building target_delta execution summary for a missing target state, apply startup adoption policy.
-
-Desired flow:
-
-```text
-load target_position_state
-
 if EXECUTION_ENGINE=target_delta:
-  if target state missing:
-    resolve startup adoption policy
-
-    if safe flat:
-      persist target=0 origin=flat_start
-
-    if executable broker position:
-      persist target=current broker exposure origin=adopted_existing_position
-      continue with target equal to current position
-      do not sell on startup/HOLD
-
-    if true dust:
-      persist target=0 origin=true_dust_flat
-      do not sell
-
-    if unsafe:
-      block submit and surface clear reason
-
-build_execution_decision_summary with previous_target_exposure_krw from resolved target
+  load target_position_state
+  if missing:
+    call resolve_startup_target_position_policy()
+    if safe executable broker qty:
+      persist adopted target
+      use adopted target exposure as previous_target_exposure_krw
+  then build_execution_decision_summary(previous_target_exposure_krw=resolved_exposure)
 ```
 
-Do not make missing target state automatically mean target=0 when broker has executable BTC. That is the bug.
-
-### 4. Keep target changes strategy-driven
-
-Target should change to zero only when:
+Do not let the run loop build the target-delta summary from:
 
 ```text
-raw_signal == SELL
+previous_target_exposure_krw=None
 ```
 
-or when an explicit operator closeout command is executed.
+when broker has executable BTC and startup adoption should apply.
 
-HOLD should maintain target.
+If `_load_previous_target_exposure_for_run_loop()` is still used in the real target-delta run loop path, replace that usage with `_resolve_target_position_state_for_run_loop()`.
 
-BUY should set target to configured exposure.
+### 4. Verify execution_service.py after adoption
 
-Startup adoption should set target to current exposure, not zero.
-
-### 5. Separate explicit closeout command
-
-If the repo already has flatten/closeout commands, clarify that they are operator closeout operations.
-
-If needed, add a new explicit command such as:
-
-```text
-bithumb-bot target-closeout
-```
-
-or wire existing flatten/closeout behavior so that:
-
-```text
-operator closeout:
-  persists target=0 with target_origin=operator_closeout
-  may execute target_delta SELL if armed
-```
-
-Normal startup must not do this.
-
-## Required behavior examples
-
-### Example A: missing target, broker has executable BTC
-
-Input:
-
-```text
-target_position_state: missing
-broker_qty: 0.0004998
-price: 114,120,000
-min_qty: 0.0001
-min_notional_krw: 5000
-broker/local converged: true
-open_order_count: 0
-submit_unknown_count: 0
-recovery_required_count: 0
-raw_signal: HOLD
-```
+After adoption, for `raw_signal=HOLD` and `broker_qty == adopted target qty`:
 
 Expected:
 
 ```text
-policy_action=adopt_existing_broker_position
-target_exposure_krw ~= broker_qty * price
-target_qty=0.0004998
-target_origin=adopted_existing_position
+final_action should not be REBALANCE_TO_TARGET
 submit_expected=false
 target_delta_side=NONE
-no SELL
+target_dust_classification=true_dust or converged/noop classification, but not executable_delta SELL
+no target_submit_plan with side=SELL and submit_expected=true
 ```
 
-### Example B: missing target, broker flat
+If the current logic still labels zero delta as `delta_below_exchange_min/true_dust`, that is acceptable only if it does not submit and observability is clear. Prefer a clearer classification such as `target_converged` if already consistent with the code style, but do not make a broad refactor just for naming.
 
-Input:
+## Required tests
 
-```text
-target_position_state: missing
-broker_qty: 0
-raw_signal: HOLD
-safe readiness
-```
+Add or update tests. These are not optional.
 
-Expected:
+### Test A: direct run-loop resolver adoption
 
-```text
-policy_action=initialize_flat_target
-target=0
-submit_expected=false
-```
+Add a test for `_resolve_target_position_state_for_run_loop()`.
 
-### Example C: missing target, broker below minimum
-
-Input:
+Setup:
 
 ```text
-target_position_state: missing
-broker_qty below min_qty or below min_notional
-safe readiness
-```
-
-Expected:
-
-```text
-policy_action=initialize_true_dust_flat
-target=0 or dust-flat target
-dust_classification=true_dust
-submit_expected=false
-```
-
-### Example D: existing adopted position, strategy HOLD
-
-Input:
-
-```text
-target_origin=adopted_existing_position
-target_qty=0.0004998
-broker_qty=0.0004998
+EXECUTION_ENGINE=target_delta
+target_position_state missing
+readiness_payload has:
+  broker_position_evidence.broker_qty_known=true
+  broker_position_evidence.broker_qty=0.0004998
+  broker_position_evidence.balance_source_stale=false
+  broker_portfolio_converged=true
+  projection_converged=true
+  accounting_projection_ok=true
+  open_order_count=0
+  unresolved_open_order_count=0
+  recovery_required_count=0
+  submit_unknown_count=0
+order rules:
+  min_qty=0.0001
+  min_notional_krw=5000
+reference_price=114120000
 raw_signal=HOLD
 ```
 
 Expected:
 
 ```text
-target maintained
-delta=0
-submit_expected=false
+policy metadata:
+  target_policy_action=adopt_existing_broker_position
+  target_origin=adopted_existing_position
+  target_adopted_broker_qty=0.0004998
+
+DB:
+  target_position_state exists
+  target_exposure_krw ~= 0.0004998 * 114120000
+  target_qty=0.0004998
+  target_origin=adopted_existing_position
+
+return:
+  previous_target_exposure_krw is not None
 ```
 
-### Example E: existing adopted position, strategy SELL
+### Test B: execution summary after adoption does not sell
 
-Input:
+Using the resolved exposure from Test A, call `build_execution_decision_summary()` with:
 
 ```text
-target_origin=adopted_existing_position
+raw_signal=HOLD
+final_signal=HOLD
 broker_qty=0.0004998
-raw_signal=SELL
+reference_price=114120000
+previous_target_exposure_krw=adopted_exposure
+readiness payload includes policy metadata
 ```
 
 Expected:
 
 ```text
-target set to 0
-target_origin=strategy_sell
-delta_side=SELL
-submit_expected=true if safety gates pass
+submit_expected=false
+target_submit_plan.submit_expected=false
+target_submit_plan.side != SELL
+target_shadow_decision.target_delta_side=NONE
+target_shadow_decision.target_origin=adopted_existing_position
+final_action != REBALANCE_TO_TARGET
 ```
 
-### Example F: existing adopted position, strategy BUY
+If existing code emits `BLOCK_TARGET_DELTA` with `delta_below_exchange_min` for exact convergence, that is acceptable only if no submit occurs. Prefer `HOLD_TARGET_CONVERGED` if easy and consistent.
 
-Input:
+### Test C: full run_loop integration prevents accidental closeout
+
+Use the existing `_LoopConn` / `run_loop` test style in `tests/test_failsafe.py`.
+
+Setup:
 
 ```text
-target_origin=adopted_existing_position
+EXECUTION_ENGINE=target_delta
+target_position_state missing
+asset_qty/broker_qty = 0.0004998
+compute_signal returns HOLD
+readiness safe
+live_execute_signal monkeypatched to fail if called
+```
+
+Expected:
+
+```text
+run_loop does not call live_execute_signal
+target_position_state is persisted with origin=adopted_existing_position
+no SELL is submitted
+no REBALANCE_TO_TARGET SELL occurs
+```
+
+This is the most important regression test.
+
+### Test D: after adoption, strategy SELL closes
+
+Setup:
+
+```text
+target_position_state exists:
+  target_origin=adopted_existing_position
+  target_qty=0.0004998
+  target_exposure_krw ~= current exposure
+
+broker_qty=0.0004998
+raw_signal=SELL
+safe readiness
+```
+
+Expected:
+
+```text
+target_origin becomes strategy_sell
+target_new_exposure_krw=0
+target_delta_side=SELL
+submit_expected=true
+```
+
+This proves adoption does not permanently trap a position.
+
+### Test E: after adoption, strategy BUY adjusts only delta
+
+Setup:
+
+```text
+target_position_state exists from adoption
 broker_qty=0.0004998
 raw_signal=BUY
 TARGET_EXPOSURE_KRW=70000
@@ -442,105 +362,55 @@ TARGET_EXPOSURE_KRW=70000
 Expected:
 
 ```text
-target_exposure_krw=70000
-delta = target - current
+target_origin=strategy_buy
+target_new_exposure_krw=70000
 BUY only missing delta if target > current
-or no-op if current already covers target
+no full duplicate BUY
 ```
 
-### Example G: explicit operator closeout
+### Test F: unsafe startup blocks adoption
 
-Input:
+Setup:
 
 ```text
-operator command=target-closeout
+target_position_state missing
 broker_qty=0.0004998
+open_order_count=1 or broker_portfolio_converged=false
 ```
 
 Expected:
 
 ```text
-target_origin=operator_closeout
-target=0
-target_delta SELL allowed if live armed and safety gates pass
+policy_action=block_unsafe_state
+no target adoption
+no submit
+clear block reason
 ```
 
-## Required tests
+### Test G: old helper test clarification
 
-Add tests before or with implementation.
-
-### target_position / adoption tests
-
-Add tests for:
+If a test still asserts:
 
 ```text
-missing target + executable broker qty adopts existing position without submit
-missing target + flat broker initializes target=0
-missing target + below-min broker qty initializes true_dust flat without submit
-existing target is preserved
-strategy SELL changes adopted target to 0
-strategy BUY changes target to configured exposure
-HOLD maintains adopted target
-unsafe readiness blocks adoption
+_load_previous_target_exposure_for_run_loop() returns None
+then build_execution_decision_summary(... HOLD ...) gives missing_persistent_target_state
 ```
 
-### engine/run_loop tests
+Do not delete it blindly. Clarify it as a low-level bypass test, or replace it with the real resolver path.
 
-Add integration-style tests proving:
+The real run-loop path should not use that result directly when startup adoption applies.
+
+Rename or comment such a test to make the distinction explicit:
 
 ```text
-run_loop with missing target and broker_qty=0.0004998:
-  persists adopted target
-  does not call live_execute_signal with SELL
-  logs target_origin=adopted_existing_position
-
-run_loop with adopted target and HOLD:
-  does not submit
-
-run_loop with adopted target and SELL:
-  submits target_delta SELL
-
-run_loop with missing target and broker/local mismatch:
-  no submit
-  clear block reason
-
-run_loop with below-min true dust:
-  no submit
-  target/dust state initialized safely
+test_target_delta_hold_without_startup_policy_fails_closed
 ```
 
-### regression tests
-
-Preserve:
-
-```text
-lot_native behavior
-existing residual recovery reports
-explicit operator flatten/closeout behavior
-target_delta live submit path
-```
-
-Add a regression test specifically for the failure we just caused:
-
-```text
-Given:
-  target_position_state missing
-  broker_qty=0.0004998
-  raw_signal=HOLD
-
-Must not:
-  initialize target=0
-  submit SELL
-  produce final_action=REBALANCE_TO_TARGET with SELL
-
-Must:
-  adopt broker position
-  submit_expected=false
-```
+and add the real resolver test alongside it.
 
 ## Observability requirements
 
-Add structured fields to decision context/logs:
+Ensure target adoption fields appear in strategy decision / execution decision context:
 
 ```text
 target_policy_action
@@ -551,13 +421,10 @@ target_adopted_exposure_krw
 target_startup_policy_state
 target_existing_state_present
 target_missing_state_resolution
-target_closeout_requested
-target_strategy_signal_source
+target_would_submit_on_startup
 ```
 
-Important log examples:
-
-Startup adoption:
+Add or verify log output for startup adoption:
 
 ```text
 execution_engine=target_delta
@@ -569,7 +436,7 @@ target_delta_side=NONE
 submit_expected=0
 ```
 
-Strategy SELL after adoption:
+Add or verify log output for strategy SELL after adoption:
 
 ```text
 execution_engine=target_delta
@@ -580,69 +447,63 @@ target_delta_side=SELL
 submit_expected=1
 ```
 
-Explicit operator closeout:
-
-```text
-target_origin=operator_closeout
-target_closeout_requested=1
-target_delta_side=SELL
-```
-
 ## Acceptance criteria
 
-This task is complete only if:
+This task is complete only if all are true:
 
 ```text
-1. Missing target state no longer implies target=0 when executable broker BTC exists.
-2. Existing executable broker BTC is adopted as current target on safe startup.
+1. Missing target + safe executable broker BTC adopts existing position.
+2. Startup adoption persists target_position_state.
 3. Startup adoption never submits an order.
-4. HOLD after adoption never closes the position.
-5. Strategy SELL after adoption sets target=0 and may sell.
-6. Strategy BUY after adoption adjusts target to configured exposure and buys only delta.
-7. Explicit closeout remains possible but is separate from startup adoption.
-8. target_delta remains the execution model for delta orders.
-9. lot-native remains available for accounting/audit/PnL/recovery diagnostics, not primary execution truth in target_delta mode.
-10. true_dust means only below exchange minimum delta.
-11. Tests prove the previous accidental closeout cannot happen again.
-12. Existing live submit and recovery tests still pass.
+4. run_loop uses the startup adoption resolver before target-delta execution summary.
+5. Missing target + broker BTC + HOLD cannot produce SELL.
+6. The previous accidental closeout is covered by a regression test.
+7. Existing target state is preserved.
+8. Strategy SELL after adoption can still set target=0 and submit SELL.
+9. Strategy BUY after adoption adjusts only the delta.
+10. Unsafe readiness blocks adoption and submit.
+11. Existing target_delta live submit tests still pass.
+12. Existing recovery/failsafe tests still pass.
+13. Existing live DB schema migrates safely to adoption metadata columns.
 ```
 
 ## Non-goals
 
-Do not add another residual sell mode.
+Do not add another residual mode.
 
-Do not add another dust class as the main fix.
+Do not add another dust escape hatch.
+
+Do not change live submit sizing unless tests prove it is broken.
 
 Do not remove lot-native accounting.
 
-Do not remove recovery gates.
+Do not delete recovery gates.
 
-Do not make broker balance blindly authoritative without convergence checks.
+Do not make broker balance authoritative without convergence checks.
 
-Do not force target=0 on startup just because target state is missing.
+Do not force target=0 on startup.
 
-Do not treat startup adoption as strategy BUY.
+Do not conflate startup adoption with strategy BUY or strategy SELL.
 
-Do not treat startup adoption as strategy SELL.
+Do not conflate startup adoption with operator closeout.
 
-Do not close positions unless strategy SELL or explicit operator closeout says to.
+## Suggested commands
 
-## Suggested test commands
-
-Run focused tests:
+Run the focused tests:
 
 ```bash
 uv run pytest tests/test_target_position_execution.py -q
 uv run pytest tests/test_failsafe.py -q
 ```
 
-Add any new test file if useful, for example:
+Then run adoption-focused tests:
 
 ```bash
-uv run pytest tests/test_target_position_adoption.py -q
+uv run pytest tests/test_target_position_execution.py -q -k "adopt or startup or target_state"
+uv run pytest tests/test_failsafe.py -q -k "target or adopt or run_loop"
 ```
 
-Then run the full relevant suite:
+Then run the full suite if feasible:
 
 ```bash
 uv run pytest -q
@@ -653,54 +514,52 @@ uv run pytest -q
 Report exactly in this structure:
 
 ```markdown
-# Startup Position Adoption Policy Report
+# Startup Adoption Run-Loop Integration Report
 
 ## Summary
-- What was wrong:
+- What was already correct:
+- What was missing:
 - What changed:
-- What did not change:
 
-## Root Cause Confirmed
-- Conflicting position definitions:
-- Why target=0 caused accidental closeout:
-- Why startup adoption is the correct policy:
+## Root Cause Guarded
+- Previous accidental closeout scenario:
+- How the new tests prevent recurrence:
 
-## Design Implemented
-- Startup adoption policy:
-- Target origin / metadata:
-- Strategy BUY behavior:
-- Strategy SELL behavior:
-- HOLD behavior:
-- Explicit closeout behavior:
-- Safety gates:
+## Code Changes
+### target_position.py
+- Findings/changes:
+
+### db_core.py
+- Findings/changes:
+
+### engine.py
+- Findings/changes:
+
+### execution_service.py
+- Findings/changes:
 
 ## Behavior Proven
-### Missing target + executable broker BTC
+### Missing target + executable broker BTC + HOLD
 - Input:
 - Expected:
 - Actual:
 
-### Missing target + flat broker
+### Existing adopted target + HOLD
 - Input:
 - Expected:
 - Actual:
 
-### Missing target + true dust
+### Existing adopted target + SELL
 - Input:
 - Expected:
 - Actual:
 
-### Adopted target + HOLD
+### Existing adopted target + BUY
 - Input:
 - Expected:
 - Actual:
 
-### Adopted target + SELL
-- Input:
-- Expected:
-- Actual:
-
-### Explicit closeout
+### Unsafe startup
 - Input:
 - Expected:
 - Actual:
@@ -711,21 +570,21 @@ Report exactly in this structure:
 - Results:
 
 ## Observability
-- New fields:
-- Example startup adoption log:
-- Example strategy SELL log:
-- Example closeout log:
+- New/verified fields:
+- Example adoption context/log:
+- Example strategy SELL after adoption context/log:
 
 ## Compatibility
 - lot_native:
 - target_delta:
-- recovery-report:
-- live submit path:
+- live submit:
+- recovery/failsafe:
+- DB migration:
 
 ## Remaining Risks / Follow-ups
 - Known limitations:
 - Recommended cleanup:
 ```
 
-Remember the key point: the bot should not sell existing broker BTC on startup just because target state is missing or was manually set to zero. Existing broker BTC should be adopted as current position unless strategy SELL or explicit operator closeout says otherwise.
+Remember: this is not about making SELL safer. This is about ensuring the bot does not decide to SELL at startup just because target state was missing. The startup policy must adopt existing broker BTC as the current target unless strategy SELL or explicit operator closeout tells it to close.
 

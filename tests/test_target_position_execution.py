@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, load_target_position_state, upsert_target_position_state
+from bithumb_bot.db_core import (
+    ensure_db,
+    ensure_schema,
+    load_target_position_state,
+    upsert_target_position_state,
+)
 from bithumb_bot.engine import (
     _load_previous_target_exposure_for_run_loop,
+    _resolve_target_position_state_for_run_loop,
     _persist_target_position_state_for_run_loop,
 )
 from bithumb_bot.execution_service import build_execution_decision_summary
@@ -264,6 +272,88 @@ def test_startup_policy_missing_target_adopts_executable_broker_position_without
     assert decision.target_qty == pytest.approx(0.0004998)
 
 
+def test_run_loop_resolver_missing_target_adopts_and_persists_broker_position(tmp_path) -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    old_pair = settings.PAIR
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "PAIR", "KRW-BTC")
+        conn = ensure_db(str(tmp_path / "target_startup_adoption.sqlite"))
+        try:
+            readiness = _readiness(broker_qty=0.0004998) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+            }
+            resolved = _resolve_target_position_state_for_run_loop(
+                conn,
+                readiness_payload=readiness,
+                reference_price=114_120_000.0,
+                raw_signal="HOLD",
+                updated_ts=123456,
+            )
+            conn.commit()
+            state = load_target_position_state(conn, pair="KRW-BTC")
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "PAIR", old_pair)
+
+    metadata = resolved["target_policy_metadata"]
+    expected_exposure = 0.0004998 * 114_120_000.0
+    assert metadata["target_policy_action"] == TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION
+    assert metadata["target_origin"] == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+    assert metadata["target_adopted_broker_qty"] == pytest.approx(0.0004998)
+    assert resolved["previous_target_exposure_krw"] == pytest.approx(expected_exposure)
+    assert state is not None
+    assert state.target_exposure_krw == pytest.approx(expected_exposure)
+    assert state.target_qty == pytest.approx(0.0004998)
+    assert state.target_origin == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+    assert state.adoption_reason == "safe_converged_executable_broker_position"
+    assert state.adopted_broker_qty == pytest.approx(0.0004998)
+    assert state.adopted_broker_exposure_krw == pytest.approx(expected_exposure)
+    assert state.created_from_signal == "HOLD"
+
+
+def test_execution_summary_after_startup_adoption_does_not_sell() -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        adopted_exposure = 0.0004998 * 114_120_000.0
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "HOLD", "market_price": 114_120_000.0},
+            readiness_payload=_readiness(broker_qty=0.0004998) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+                "target_policy_action": TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+                "target_origin": TARGET_ORIGIN_ADOPTED_EXISTING_POSITION,
+                "target_adoption_reason": "safe_converged_executable_broker_position",
+                "target_adopted_broker_qty": 0.0004998,
+                "target_adopted_exposure_krw": adopted_exposure,
+                "target_startup_policy_state": "converged",
+                "target_existing_state_present": False,
+                "target_missing_state_resolution": TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION,
+                "target_would_submit_on_startup": False,
+                "target_strategy_signal_source": "HOLD",
+            },
+            raw_signal="HOLD",
+            final_signal="HOLD",
+            previous_target_exposure_krw=adopted_exposure,
+        )
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+
+    assert summary.submit_expected is False
+    assert summary.final_action != "REBALANCE_TO_TARGET"
+    assert summary.target_submit_plan is not None
+    assert summary.target_submit_plan["submit_expected"] is False
+    assert summary.target_submit_plan["side"] != "SELL"
+    assert summary.target_submit_plan["target_delta_side"] == "NONE"
+    assert summary.target_shadow_decision is not None
+    assert summary.target_shadow_decision["target_origin"] == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+    assert summary.target_shadow_decision["target_delta_side"] == "NONE"
+
+
 def test_startup_policy_missing_target_flat_broker_initializes_flat_without_submit() -> None:
     policy = resolve_startup_target_position_policy(
         existing_target_state=None,
@@ -403,6 +493,39 @@ def test_startup_policy_unsafe_readiness_blocks_adoption() -> None:
     assert policy.block_reason == "open_order_count_nonzero"
 
 
+def test_run_loop_resolver_unsafe_missing_target_blocks_adoption_without_persist(tmp_path) -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    old_pair = settings.PAIR
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "PAIR", "KRW-BTC")
+        conn = ensure_db(str(tmp_path / "target_unsafe_startup.sqlite"))
+        try:
+            resolved = _resolve_target_position_state_for_run_loop(
+                conn,
+                readiness_payload=_readiness(broker_qty=0.0004998, open_order_count=1) | {
+                    "residual_proof_min_qty": 0.0001,
+                    "residual_proof_min_notional_krw": 5000.0,
+                },
+                reference_price=100_000_000.0,
+                raw_signal="HOLD",
+                updated_ts=123456,
+            )
+            state = load_target_position_state(conn, pair="KRW-BTC")
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "PAIR", old_pair)
+
+    metadata = resolved["target_policy_metadata"]
+    assert metadata["target_policy_action"] == TARGET_POLICY_BLOCK_UNSAFE_STATE
+    assert metadata["target_startup_policy_block_reason"] == "open_order_count_nonzero"
+    assert metadata["target_would_submit_on_startup"] is False
+    assert resolved["previous_target_exposure_krw"] is None
+    assert state is None
+
+
 def test_target_state_persistence_survives_restart_simulation(tmp_path) -> None:
     db_path = str(tmp_path / "target_state.sqlite")
     conn = ensure_db(db_path)
@@ -436,6 +559,62 @@ def test_target_state_persistence_survives_restart_simulation(tmp_path) -> None:
     assert state.last_decision_id == 7
     assert state.target_origin == TARGET_ORIGIN_OPERATOR_CLOSEOUT
     assert state.adoption_reason == "explicit_operator_closeout"
+
+
+def test_target_position_state_schema_migrates_adoption_metadata_columns() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            CREATE TABLE target_position_state (
+                pair TEXT PRIMARY KEY,
+                target_exposure_krw REAL NOT NULL,
+                target_qty REAL NOT NULL,
+                last_signal TEXT NOT NULL,
+                last_decision_id INTEGER,
+                last_reference_price REAL NOT NULL,
+                updated_ts INTEGER NOT NULL
+            )
+            """
+        )
+        ensure_schema(conn)
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(target_position_state)").fetchall()
+        }
+        for column in {
+            "target_origin",
+            "adoption_reason",
+            "adopted_broker_qty",
+            "adopted_broker_exposure_krw",
+            "created_from_signal",
+        }:
+            assert column in columns
+        upsert_target_position_state(
+            conn,
+            pair="KRW-BTC",
+            target_exposure_krw=57_038.976,
+            target_qty=0.0004998,
+            last_signal="HOLD",
+            last_decision_id=None,
+            last_reference_price=114_120_000.0,
+            updated_ts=123456,
+            target_origin=TARGET_ORIGIN_ADOPTED_EXISTING_POSITION,
+            adoption_reason="safe_converged_executable_broker_position",
+            adopted_broker_qty=0.0004998,
+            adopted_broker_exposure_krw=57_038.976,
+            created_from_signal="HOLD",
+        )
+        loaded = load_target_position_state(conn, pair="KRW-BTC")
+    finally:
+        conn.close()
+
+    assert loaded is not None
+    assert loaded.target_origin == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
+    assert loaded.adoption_reason == "safe_converged_executable_broker_position"
+    assert loaded.adopted_broker_qty == pytest.approx(0.0004998)
+    assert loaded.created_from_signal == "HOLD"
 
 
 def test_target_delta_unsafe_readiness_blocks_submit() -> None:
@@ -639,7 +818,7 @@ def test_engine_run_loop_target_state_helper_preserves_restart_hold_target(tmp_p
     assert state.last_decision_id == 8
 
 
-def test_engine_run_loop_target_state_helper_missing_hold_fails_closed(tmp_path) -> None:
+def test_target_delta_hold_without_startup_policy_fails_closed(tmp_path) -> None:
     old_engine = settings.EXECUTION_ENGINE
     old_pair = settings.PAIR
     try:

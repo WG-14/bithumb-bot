@@ -1604,6 +1604,64 @@ def test_run_loop_target_delta_persisted_target_state_reaches_live_execution(
         assert loop_conn.target_state.last_signal == "HOLD"
 
 
+def test_run_loop_target_delta_missing_target_holding_btc_adopts_without_closeout(monkeypatch) -> None:
+    loop_conn = _prepare_run_loop(
+        monkeypatch,
+        asset_qty=0.0004998,
+        target_state=None,
+    )
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "telemetry")
+    object.__setattr__(settings, "TARGET_EXPOSURE_KRW", None)
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.evaluate_startup_safety_gate", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda _conn, _short, _long, **_kwargs: {
+            "ts": 9000,
+            "last_close": 114_120_000.0,
+            "curr_s": 1.0,
+            "curr_l": 1.0,
+            "signal": "HOLD",
+            "raw_signal": "HOLD",
+            "reason": "regression missing target must not close broker btc",
+        },
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_runtime_readiness_snapshot",
+        lambda _conn: SimpleNamespace(as_dict=lambda: _target_delta_readiness(broker_qty=0.0004998)),
+    )
+
+    recorded_contexts: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "bithumb_bot.engine.record_strategy_decision",
+        lambda _conn, **kwargs: recorded_contexts.append(dict(kwargs["context"])) or 42,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("startup adoption must not submit")),
+    )
+
+    run_loop(5, 20)
+
+    assert len(recorded_contexts) == 1
+    context = recorded_contexts[0]
+    execution_decision = context["execution_decision"]
+    assert isinstance(execution_decision, dict)
+    target_plan = execution_decision["target_submit_plan"]
+    assert isinstance(target_plan, dict)
+    assert target_plan["target_policy_action"] == "adopt_existing_broker_position"
+    assert target_plan["target_origin"] == "adopted_existing_position"
+    assert target_plan["target_delta_side"] == "NONE"
+    assert target_plan["side"] != "SELL"
+    assert target_plan["submit_expected"] is False
+    assert execution_decision["final_action"] != "REBALANCE_TO_TARGET"
+    assert loop_conn.target_state is not None
+    assert loop_conn.target_state.target_origin == "adopted_existing_position"
+    assert loop_conn.target_state.target_qty == pytest.approx(0.0004998)
+    assert loop_conn.target_state.target_exposure_krw == pytest.approx(0.0004998 * 114_120_000.0)
+
+
 def test_run_loop_target_delta_adopted_target_strategy_sell_submits_delta_sell(monkeypatch) -> None:
     loop_conn = _prepare_run_loop(
         monkeypatch,
