@@ -1,509 +1,569 @@
 You are working in the `WG-14/bithumb-bot` repository.
 
-The recent patch moved in the right direction: startup position adoption policy now exists in the target-position model, and the core `resolve_startup_target_position_policy()` logic appears to be present. However, do not consider this complete until the run-loop integration is explicitly proven. The previous real live issue was not a sizing bug; it was a policy bug: missing or forced `target=0` allowed target-delta to close broker BTC even when the strategy signal was HOLD.
+This is not a trading-strategy patch. Do not change SMA entry/exit logic. Do not change target-delta submit sizing. Do not add another dust/residual workaround.
 
-Your task is to verify and harden the integration so that the accidental closeout cannot happen again.
+The current EC2 issue is now isolated to the recovery/repair system: after a successful target-delta SELL flattened broker and portfolio, the lot-native materialized projection in `open_position_lots` remained stale. Startup gate is correctly blocking because internal lot projection conflicts with broker/portfolio truth.
 
-## Core problem to preserve
-
-Do not weaken this into a generic test cleanup.
-
-The root cause is:
+Your task is to implement a safe, auditable repair path for this entire problem class:
 
 ```text
-The repo has multiple competing meanings of position:
-1. strategy position
-2. lot-native position
-3. broker/target position
-
-The desired target-delta model is:
-  strategy changes target
-  execution converges broker current position to target
-  startup adopts existing broker position unless strategy SELL or explicit closeout says otherwise
+broker/portfolio are flat
+latest SELL fully closed the remaining asset
+open_position_lots still projects positive dust_tracking/open lot quantity
+startup gate blocks with POSITION_AUTHORITY_CORRECTION_REQUIRED or AUTHORITY_PROJECTION_NON_CONVERGED
 ```
 
-The key new policy must be:
+The fix must make the repository more operationally robust and reproducible. Do not paper over this single EC2 instance with manual SQL or a one-off exception.
+
+## Current EC2 evidence to use as a concrete regression case
+
+The EC2 live DB currently shows:
 
 ```text
-If target_position_state is missing and broker/local safely show executable BTC,
-the bot must adopt that broker BTC as the current target and submit no order.
+latest order:
+  client_order_id=live_1777367760000_sell_ae50365f
+  status=FILLED
+  side=SELL
+  qty_filled=0.0004998
+
+latest trade:
+  side=SELL
+  qty=0.0004998
+  asset_after=0.0
+
+broker/portfolio:
+  broker_qty=0
+  portfolio_qty=0
+
+open_position_lots:
+  id=353
+    position_state=dust_tracking
+    qty_open=0.00039982
+    entry_client_order_id=live_1777186500000_buy_aee54bab
+    entry_trade_id=32
+    executable_lot_count=0
+    dust_tracking_lot_count=1
+    internal_lot_size=0.0004
+
+  id=355
+    position_state=dust_tracking
+    qty_open=0.00009998
+    entry_client_order_id=live_1777248060000_buy_aee958b7
+    entry_trade_id=34
+    executable_lot_count=0
+    dust_tracking_lot_count=1
+    internal_lot_size=0.0004
+
+  sum(qty_open)=0.00049980
 ```
 
-It must not do this:
+This stale sum equals the latest successful SELL qty. The actual portfolio is flat, but `open_position_lots` still claims stale dust-tracking exposure.
+
+Current recovery output says:
 
 ```text
-missing target + broker BTC + HOLD
-→ target=0
-→ REBALANCE_TO_TARGET
-→ SELL
+STARTUP_SAFETY_GATE_BLOCKED
+POSITION_AUTHORITY_CORRECTION_REQUIRED
+AUTHORITY_PROJECTION_NON_CONVERGED
+LOT_AUTHORITY_CONFLICT
+open_position_lots_projected_qty=0.000499800000
+broker_qty=0
+portfolio_qty=0
+safe_to_rebuild=0
+final_safe_to_rebuild=0
+recommended_command=none
 ```
 
-That is the accidental closeout we are preventing.
+This is correct as a safety block, but incomplete as an operational repair system. The system detects the conflict but does not provide a safe apply path.
 
-## Current hypothesis to verify
+## Core hypothesis to verify
 
-Treat this as a hypothesis, not an assumption:
+Treat this as a hypothesis, not a fact:
 
 ```text
-Already implemented:
-- target_position.py defines target origins:
-  strategy_buy
-  strategy_sell
-  adopted_existing_position
-  flat_start
-  true_dust_flat
-  operator_closeout
-
-- target_position.py defines startup policy actions:
-  use_existing_target
-  initialize_flat_target
-  adopt_existing_broker_position
-  initialize_true_dust_flat
-  block_unsafe_state
-
-- TargetPositionState includes adoption metadata.
-- resolve_startup_target_position_policy() exists and adopts executable broker BTC without submit.
-- engine.py includes _resolve_target_position_state_for_run_loop() and calls the startup adoption policy.
-
-Still not proven strongly enough:
-- run_loop always goes through _resolve_target_position_state_for_run_loop(), not the old _load_previous_target_exposure_for_run_loop path, when EXECUTION_ENGINE=target_delta.
-- missing target + broker executable BTC + HOLD cannot produce target_delta SELL.
-- tests currently include adoption unit tests, but may not include a true run_loop integration regression test.
-- old tests may still encode “missing target + HOLD = missing_persistent_target_state” in helper-level paths, which is now only valid when bypassing the startup adoption resolver, not for the real run loop.
+The target-delta SELL did the correct execution-side thing.
+The portfolio and broker truth became flat.
+The remaining problem is stale lot-native materialized projection.
+Existing repair-plan / rebuild-position-authority logic can handle some projection rebuilds, but not this specific flat-broker/flat-portfolio stale dust_tracking projection case.
+The current code detects the conflict but marks it unsafe because the existing full-projection/correction paths are too anchored to historical lot evidence and do not have a clean "verified flat closeout projection reset" path.
 ```
 
-## Priority
+Verify this in code before patching. If the hypothesis is wrong, explain the actual cause and patch accordingly.
 
-Patch only what is needed to make this true and tested:
+## Files to inspect first
 
-```text
-Priority 1:
-  Prove run_loop missing-target adoption prevents accidental SELL.
-
-Priority 2:
-  Prove _resolve_target_position_state_for_run_loop persists adopted target and feeds previous_target_exposure_krw into execution summary.
-
-Priority 3:
-  Clarify or update obsolete helper tests that still treat missing target + HOLD as fail-closed in paths where startup adoption should apply.
-
-Priority 4:
-  Preserve all existing target_delta live submit and recovery behavior.
-```
-
-## Files to inspect
-
-Inspect and modify as needed:
+Inspect at least:
 
 ```text
-src/bithumb_bot/target_position.py
-src/bithumb_bot/engine.py
-src/bithumb_bot/execution_service.py
+src/bithumb_bot/position_authority_repair.py
+src/bithumb_bot/repair_plan.py
+src/bithumb_bot/position_authority_state.py
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/lifecycle.py
 src/bithumb_bot/db_core.py
-src/bithumb_bot/strategy/sma.py
-tests/test_target_position_execution.py
+src/bithumb_bot/app.py
+src/bithumb_bot/recovery.py
+tests/test_position_authority_recovery_state.py
+tests/test_operator_commands.py
 tests/test_failsafe.py
+tests/test_accounting_projection.py
 ```
 
 Search for:
 
 ```text
-resolve_startup_target_position_policy
-_resolve_target_position_state_for_run_loop
-_load_previous_target_exposure_for_run_loop
-_persist_target_position_state_for_run_loop
-TARGET_POLICY_ADOPT_EXISTING_BROKER_POSITION
-TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
-missing_persistent_target_state
-REBALANCE_TO_TARGET
-target_delta_side
-target_submit_plan
-live_execute_signal
+full_projection_rebuild
+position_authority_repair
+record_position_authority_repair
+record_position_authority_projection_publication
+open_position_lots_projected_qty
+dust_tracking_lot_count
+AUTHORITY_PROJECTION_NON_CONVERGED
+POSITION_AUTHORITY_CORRECTION_REQUIRED
+portfolio_projection_qty_mismatch
+safe_to_rebuild
+final_safe_to_rebuild
+rebuild-position-authority
+repair-plan
+apply_portfolio_anchored_projection_repair_basis
+rebuild_lifecycle_projections_from_trades
 ```
 
-## Required verification and code review
+## Design objective
 
-### 1. Verify target_position.py
+Add a safe repair path for **verified flat-state stale lot projection**.
 
-Confirm that `resolve_startup_target_position_policy()` behaves as follows:
+This repair should activate only when the system has strong evidence that the real position is flat and the only remaining mismatch is stale `open_position_lots` projection.
+
+The repair should not weaken startup gates. It should produce an auditable repair event and make the post-repair materialized projection converge to broker/portfolio truth.
+
+## Required safety preconditions
+
+The new repair path may be considered only if all are true:
 
 ```text
-existing target state:
-  policy_action=use_existing_target
-  would_submit_on_startup=false
-
-missing target + broker_qty=0:
-  policy_action=initialize_flat_target
-  target=0
-  would_submit_on_startup=false
-
-missing target + broker_qty executable:
-  policy_action=adopt_existing_broker_position
-  target_exposure_krw=broker_qty * reference_price
-  target_qty=broker_qty
-  target_origin=adopted_existing_position
-  would_submit_on_startup=false
-
-missing target + broker qty below min:
-  policy_action=initialize_true_dust_flat
-  target=0 or dust-flat
-  would_submit_on_startup=false
-
-unsafe readiness:
-  policy_action=block_unsafe_state
-  no submit
+1. broker_qty_known = true
+2. broker_qty == 0 within asset epsilon
+3. portfolio_qty == 0 within asset epsilon
+4. broker_portfolio_converged = true
+5. no unresolved open orders
+6. no remote open orders
+7. no PENDING_SUBMIT
+8. no SUBMIT_UNKNOWN
+9. no RECOVERY_REQUIRED orders
+10. accounting projection is consistent with portfolio, or any inconsistency is explicitly reported and blocks repair
+11. latest terminal order is SELL and FILLED, or there is otherwise strong terminal SELL evidence
+12. latest trade after that SELL has asset_after == 0
+13. open_position_lots projected qty > 0
+14. open_position_lots rows are only stale materialized projection rows, preferably dust_tracking-only for this initial implementation
+15. no executable broker exposure exists
 ```
 
-If this is already correct, do not rewrite it.
-
-### 2. Verify db_core.py schema migration
-
-Confirm existing DBs get target-position metadata columns safely.
-
-Required persisted fields:
+For the concrete EC2 case, the first implementation may require:
 
 ```text
-target_origin
-adoption_reason
-adopted_broker_qty
-adopted_broker_exposure_krw
-created_from_signal
+open_position_lots rows with qty_open > 0 are all position_state='dust_tracking'
 ```
 
-If the table creation has the fields but `_ensure_column()` migration is missing for existing DBs, add it. This is critical because live DBs may already have `target_position_state` from the prior patch without these columns.
+If there are open_exposure rows as well, either handle them only if the same flat proof is strong enough, or block with a clear reason. Do not silently broaden the repair.
 
-Add a migration test if missing:
+## Required repair behavior
+
+When the preconditions pass, the repair must:
 
 ```text
-Create old target_position_state schema without new columns.
-Run ensure_schema().
-Verify all new columns exist.
-Verify load/upsert still work.
+1. Create a position_authority_repair event.
+2. Include complete evidence in repair_basis:
+   - broker_qty
+   - portfolio_qty
+   - latest SELL order id
+   - latest SELL trade id
+   - latest SELL qty
+   - latest trade asset_after
+   - open_position_lots rows before repair
+   - projected_total_qty before repair
+   - startup gate / readiness blocker reason
+   - operator command and timestamp
+3. Neutralize stale open_position_lots projection.
+4. Record a position_authority_projection_publication or equivalent audit record if that is the existing pattern.
+5. Verify postconditions:
+   - projected_total_qty == 0
+   - portfolio_qty == 0
+   - broker_qty == 0
+   - projection_converged = true
+   - semantic contract still passes
+   - no new startup gate blocker remains from position authority
+6. Make recovery-report show that this blocker is cleared.
 ```
 
-### 3. Verify engine.py run_loop integration
+Neutralization should use repository repair patterns. Prefer a repair function over direct command-level SQL.
 
-The real run-loop path must be:
+Acceptable approaches:
 
 ```text
-if EXECUTION_ENGINE=target_delta:
-  load target_position_state
-  if missing:
-    call resolve_startup_target_position_policy()
-    if safe executable broker qty:
-      persist adopted target
-      use adopted target exposure as previous_target_exposure_krw
-  then build_execution_decision_summary(previous_target_exposure_krw=resolved_exposure)
+- delete stale open_position_lots rows only inside a repair transaction with a position_authority_repair event and full before/after evidence
+- or mark/replace projection through an existing projection publication mechanism if that is the repository’s canonical pattern
 ```
 
-Do not let the run loop build the target-delta summary from:
+Unacceptable approaches:
 
 ```text
-previous_target_exposure_krw=None
+- manual SQL instructions as the fix
+- hidden deletion without audit event
+- bypassing startup gate
+- treating this as harmless dust
+- changing target_delta behavior
+- changing strategy SELL/BUY logic
 ```
 
-when broker has executable BTC and startup adoption should apply.
+## Required implementation
 
-If `_load_previous_target_exposure_for_run_loop()` is still used in the real target-delta run loop path, replace that usage with `_resolve_target_position_state_for_run_loop()`.
+### 1. Add a flat-state stale projection detector
 
-### 4. Verify execution_service.py after adoption
+Add a focused detector, likely in `position_authority_repair.py` or `position_authority_state.py`.
 
-After adoption, for `raw_signal=HOLD` and `broker_qty == adopted target qty`:
+Suggested function name:
 
-Expected:
+```python
+build_flat_stale_lot_projection_repair_preview(...)
+```
+
+It should return a structured preview with at least:
 
 ```text
-final_action should not be REBALANCE_TO_TARGET
-submit_expected=false
-target_delta_side=NONE
-target_dust_classification=true_dust or converged/noop classification, but not executable_delta SELL
-no target_submit_plan with side=SELL and submit_expected=true
+needed
+safe_to_apply
+final_safe_to_apply
+repair_mode=flat_stale_projection_repair
+reason
+blockers
+broker_qty
+portfolio_qty
+latest_sell_client_order_id
+latest_sell_exchange_order_id
+latest_sell_qty
+latest_trade_id
+latest_trade_asset_after
+stale_lot_row_count
+stale_lot_qty_total
+stale_lot_rows
+projected_total_qty_before
+projected_total_qty_after_preview
+expected_post_projection_converged
+recommended_command
 ```
 
-If the current logic still labels zero delta as `delta_below_exchange_min/true_dust`, that is acceptable only if it does not submit and observability is clear. Prefer a clearer classification such as `target_converged` if already consistent with the code style, but do not make a broad refactor just for naming.
+For the EC2 case, it should identify:
+
+```text
+needed=1
+safe_to_apply=1
+recommended_command=uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes
+```
+
+Use the repository’s actual command style. If `rebuild-position-authority` is not the right command, add or adapt the appropriate operator command.
+
+### 2. Add an apply path
+
+Add an apply function such as:
+
+```python
+apply_flat_stale_lot_projection_repair(...)
+```
+
+It should:
+
+```text
+- run inside a transaction
+- re-check all safety preconditions immediately before mutation
+- capture stale rows before mutation
+- record position_authority_repair with full repair_basis
+- neutralize stale open_position_lots rows
+- optionally record position_authority_projection_publication
+- compute post-repair projection convergence
+- fail/rollback if postconditions are not satisfied
+```
+
+### 3. Integrate with repair-plan
+
+`uv run bithumb-bot repair-plan` should surface this as a candidate when applicable.
+
+Expected candidate output:
+
+```text
+name=flat-stale-lot-projection-repair
+needed=1
+active_issue=1
+safe_to_apply=1
+final_safe_to_apply=1
+preconditions=broker_qty=0, portfolio_qty=0, latest SELL filled, stale dust_tracking projection present
+touched_tables=open_position_lots|position_authority_repairs|position_authority_projection_publications
+expected_after=open_position_lots projection converges to broker/portfolio flat state
+recommended_command=uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes
+```
+
+If preconditions fail, show exact blockers.
+
+### 4. Integrate with rebuild-position-authority
+
+Add CLI flags or reuse existing repair mode:
+
+```text
+uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes
+```
+
+The command must support:
+
+```text
+preview mode:
+  no mutation
+  print needed/safe_to_apply/postcondition preview
+
+apply mode:
+  require --apply --yes
+  backup recommendation or backup path in output
+  perform repair transaction
+  print before/after projection summary
+```
+
+Do not make this run implicitly during normal `run`.
+
+### 5. Recovery report and health behavior
+
+After a successful repair:
+
+```text
+recovery-report:
+  projection_converged=1
+  lot_projection_converged=1
+  POSITION_AUTHORITY_CORRECTION_REQUIRED gone
+  AUTHORITY_PROJECTION_NON_CONVERGED gone
+  resume_allowed=1, unless another unrelated blocker exists
+
+health:
+  no startup gate blocker from position authority
+```
+
+If unrelated blockers remain, report them separately. Do not mask them.
 
 ## Required tests
 
-Add or update tests. These are not optional.
+Add tests before or with implementation.
 
-### Test A: direct run-loop resolver adoption
+### Test A: detector identifies EC2-style stale flat projection
 
-Add a test for `_resolve_target_position_state_for_run_loop()`.
-
-Setup:
+Create a fixture with:
 
 ```text
-EXECUTION_ENGINE=target_delta
-target_position_state missing
-readiness_payload has:
-  broker_position_evidence.broker_qty_known=true
-  broker_position_evidence.broker_qty=0.0004998
-  broker_position_evidence.balance_source_stale=false
-  broker_portfolio_converged=true
-  projection_converged=true
-  accounting_projection_ok=true
-  open_order_count=0
-  unresolved_open_order_count=0
-  recovery_required_count=0
-  submit_unknown_count=0
-order rules:
-  min_qty=0.0001
-  min_notional_krw=5000
-reference_price=114120000
-raw_signal=HOLD
+broker_qty=0
+portfolio.asset_qty=0
+latest order FILLED SELL qty=0.0004998
+latest trade SELL qty=0.0004998 asset_after=0
+open_position_lots:
+  dust_tracking row qty_open=0.00039982
+  dust_tracking row qty_open=0.00009998
+no open orders
+no submit_unknown
+no recovery_required
 ```
 
 Expected:
 
 ```text
-policy metadata:
-  target_policy_action=adopt_existing_broker_position
-  target_origin=adopted_existing_position
-  target_adopted_broker_qty=0.0004998
-
-DB:
-  target_position_state exists
-  target_exposure_krw ~= 0.0004998 * 114120000
-  target_qty=0.0004998
-  target_origin=adopted_existing_position
-
-return:
-  previous_target_exposure_krw is not None
+needed=true
+safe_to_apply=true
+repair_mode=flat_stale_projection_repair
+stale_lot_qty_total=0.0004998
+recommended_command present
 ```
 
-### Test B: execution summary after adoption does not sell
+### Test B: apply clears projection and records audit event
 
-Using the resolved exposure from Test A, call `build_execution_decision_summary()` with:
+Using the same fixture, apply the repair.
+
+Expected:
 
 ```text
-raw_signal=HOLD
-final_signal=HOLD
-broker_qty=0.0004998
-reference_price=114120000
-previous_target_exposure_krw=adopted_exposure
-readiness payload includes policy metadata
+open_position_lots projected_total_qty=0
+position_authority_repairs count increments
+repair_basis contains stale row ids 353/355 equivalent test ids
+repair_basis contains latest SELL evidence
+post projection_converged=true
+```
+
+### Test C: recovery-report clears blocker after repair
+
+Before repair:
+
+```text
+startup gate blocked by position authority projection mismatch
+```
+
+After repair:
+
+```text
+position authority blocker gone
+resume_allowed=true unless unrelated blocker exists
+```
+
+### Test D: unsafe if broker not flat
+
+```text
+broker_qty > 0
+portfolio_qty=0
+stale lot rows present
 ```
 
 Expected:
 
 ```text
-submit_expected=false
-target_submit_plan.submit_expected=false
-target_submit_plan.side != SELL
-target_shadow_decision.target_delta_side=NONE
-target_shadow_decision.target_origin=adopted_existing_position
-final_action != REBALANCE_TO_TARGET
+safe_to_apply=false
+blocker=broker_not_flat or broker_portfolio_not_converged
+no mutation
 ```
 
-If existing code emits `BLOCK_TARGET_DELTA` with `delta_below_exchange_min` for exact convergence, that is acceptable only if no submit occurs. Prefer `HOLD_TARGET_CONVERGED` if easy and consistent.
-
-### Test C: full run_loop integration prevents accidental closeout
-
-Use the existing `_LoopConn` / `run_loop` test style in `tests/test_failsafe.py`.
-
-Setup:
+### Test E: unsafe if portfolio not flat
 
 ```text
-EXECUTION_ENGINE=target_delta
-target_position_state missing
-asset_qty/broker_qty = 0.0004998
-compute_signal returns HOLD
-readiness safe
-live_execute_signal monkeypatched to fail if called
+broker_qty=0
+portfolio_qty>0
 ```
 
 Expected:
 
 ```text
-run_loop does not call live_execute_signal
-target_position_state is persisted with origin=adopted_existing_position
-no SELL is submitted
-no REBALANCE_TO_TARGET SELL occurs
+safe_to_apply=false
+no mutation
 ```
 
-This is the most important regression test.
-
-### Test D: after adoption, strategy SELL closes
-
-Setup:
+### Test F: unsafe if open orders exist
 
 ```text
-target_position_state exists:
-  target_origin=adopted_existing_position
-  target_qty=0.0004998
-  target_exposure_krw ~= current exposure
-
-broker_qty=0.0004998
-raw_signal=SELL
-safe readiness
+NEW or PARTIAL order exists
 ```
 
 Expected:
 
 ```text
-target_origin becomes strategy_sell
-target_new_exposure_krw=0
-target_delta_side=SELL
-submit_expected=true
+safe_to_apply=false
+blocker=open_orders_present
+no mutation
 ```
 
-This proves adoption does not permanently trap a position.
-
-### Test E: after adoption, strategy BUY adjusts only delta
-
-Setup:
+### Test G: unsafe if latest SELL evidence missing
 
 ```text
-target_position_state exists from adoption
-broker_qty=0.0004998
-raw_signal=BUY
-TARGET_EXPOSURE_KRW=70000
+broker/portfolio flat
+stale lot rows present
+but no terminal SELL trade with asset_after=0
 ```
 
 Expected:
 
 ```text
-target_origin=strategy_buy
-target_new_exposure_krw=70000
-BUY only missing delta if target > current
-no full duplicate BUY
+safe_to_apply=false
+blocker=missing_terminal_flat_sell_evidence
+no mutation
 ```
 
-### Test F: unsafe startup blocks adoption
+### Test H: idempotency
 
-Setup:
+After successful repair, running preview/apply again should produce:
 
 ```text
-target_position_state missing
-broker_qty=0.0004998
-open_order_count=1 or broker_portfolio_converged=false
+needed=false
+safe_to_apply=false or no-op
+no duplicate destructive mutation
 ```
 
-Expected:
+### Test I: command-level test
+
+Add/update operator command tests for:
 
 ```text
-policy_action=block_unsafe_state
-no target adoption
-no submit
-clear block reason
+rebuild-position-authority --flat-stale-projection-repair
+rebuild-position-authority --flat-stale-projection-repair --apply --yes
+repair-plan candidate output
 ```
-
-### Test G: old helper test clarification
-
-If a test still asserts:
-
-```text
-_load_previous_target_exposure_for_run_loop() returns None
-then build_execution_decision_summary(... HOLD ...) gives missing_persistent_target_state
-```
-
-Do not delete it blindly. Clarify it as a low-level bypass test, or replace it with the real resolver path.
-
-The real run-loop path should not use that result directly when startup adoption applies.
-
-Rename or comment such a test to make the distinction explicit:
-
-```text
-test_target_delta_hold_without_startup_policy_fails_closed
-```
-
-and add the real resolver test alongside it.
 
 ## Observability requirements
 
-Ensure target adoption fields appear in strategy decision / execution decision context:
+Add logs / command output fields:
 
 ```text
-target_policy_action
-target_origin
-target_adoption_reason
-target_adopted_broker_qty
-target_adopted_exposure_krw
-target_startup_policy_state
-target_existing_state_present
-target_missing_state_resolution
-target_would_submit_on_startup
+repair_mode=flat_stale_projection_repair
+broker_qty
+portfolio_qty
+stale_lot_row_count
+stale_lot_qty_total
+latest_sell_client_order_id
+latest_sell_trade_id
+latest_sell_qty
+projected_total_qty_before
+projected_total_qty_after
+position_authority_repair_id
+projection_converged_after
+safe_to_apply
+final_safe_to_apply
+blockers
 ```
 
-Add or verify log output for startup adoption:
-
-```text
-execution_engine=target_delta
-target_policy_action=adopt_existing_broker_position
-target_origin=adopted_existing_position
-target_current_qty=0.0004998
-target_qty=0.0004998
-target_delta_side=NONE
-submit_expected=0
-```
-
-Add or verify log output for strategy SELL after adoption:
-
-```text
-execution_engine=target_delta
-target_origin=strategy_sell
-raw_signal=SELL
-target_new_exposure_krw=0
-target_delta_side=SELL
-submit_expected=1
-```
+Repair event `repair_basis` must include enough evidence for offline audit.
 
 ## Acceptance criteria
 
-This task is complete only if all are true:
+This task is complete only if:
 
 ```text
-1. Missing target + safe executable broker BTC adopts existing position.
-2. Startup adoption persists target_position_state.
-3. Startup adoption never submits an order.
-4. run_loop uses the startup adoption resolver before target-delta execution summary.
-5. Missing target + broker BTC + HOLD cannot produce SELL.
-6. The previous accidental closeout is covered by a regression test.
-7. Existing target state is preserved.
-8. Strategy SELL after adoption can still set target=0 and submit SELL.
-9. Strategy BUY after adoption adjusts only the delta.
-10. Unsafe readiness blocks adoption and submit.
-11. Existing target_delta live submit tests still pass.
-12. Existing recovery/failsafe tests still pass.
-13. Existing live DB schema migrates safely to adoption metadata columns.
+1. EC2-style flat broker/portfolio + stale dust_tracking projection is detected.
+2. The repair is offered by repair-plan with a clear recommended command.
+3. The repair is not offered when broker or portfolio is not flat.
+4. The repair is not offered when open/unresolved orders exist.
+5. The repair requires terminal SELL flat evidence.
+6. Applying the repair records position_authority_repair evidence.
+7. Applying the repair neutralizes stale open_position_lots projection.
+8. Applying the repair verifies postcondition projected_total_qty=portfolio_qty=broker_qty=0.
+9. recovery-report clears the position authority blocker after repair.
+10. Existing target_delta, startup adoption, live submit, and recovery tests still pass.
 ```
 
 ## Non-goals
 
-Do not add another residual mode.
+Do not change SMA strategy.
 
-Do not add another dust escape hatch.
+Do not change target-delta execution.
 
-Do not change live submit sizing unless tests prove it is broken.
+Do not change startup adoption.
 
-Do not remove lot-native accounting.
+Do not weaken startup gates.
 
-Do not delete recovery gates.
+Do not manually delete rows without repair evidence.
 
-Do not make broker balance authoritative without convergence checks.
+Do not silently ignore stale lot projection.
 
-Do not force target=0 on startup.
+Do not make the bot resume while projection is non-converged.
 
-Do not conflate startup adoption with strategy BUY or strategy SELL.
-
-Do not conflate startup adoption with operator closeout.
+Do not broaden this to arbitrary projection conflicts unless tests prove safety.
 
 ## Suggested commands
 
-Run the focused tests:
+Run focused tests:
 
 ```bash
-uv run pytest tests/test_target_position_execution.py -q
+uv run pytest tests/test_position_authority_recovery_state.py -q
+uv run pytest tests/test_operator_commands.py -q
 uv run pytest tests/test_failsafe.py -q
+uv run pytest tests/test_target_position_execution.py -q
 ```
 
-Then run adoption-focused tests:
+Run repair-plan/operator-focused subset:
 
 ```bash
-uv run pytest tests/test_target_position_execution.py -q -k "adopt or startup or target_state"
-uv run pytest tests/test_failsafe.py -q -k "target or adopt or run_loop"
+uv run pytest tests/test_position_authority_recovery_state.py -q -k "flat or stale or projection or authority"
+uv run pytest tests/test_operator_commands.py -q -k "rebuild_position_authority or repair_plan"
 ```
 
-Then run the full suite if feasible:
+Then run full suite if feasible:
 
 ```bash
 uv run pytest -q
@@ -514,52 +574,53 @@ uv run pytest -q
 Report exactly in this structure:
 
 ```markdown
-# Startup Adoption Run-Loop Integration Report
+# Flat Stale Lot Projection Repair Report
 
 ## Summary
-- What was already correct:
-- What was missing:
+- What was wrong:
 - What changed:
+- What did not change:
 
-## Root Cause Guarded
-- Previous accidental closeout scenario:
-- How the new tests prevent recurrence:
+## Root Cause Confirmed
+- Broker/portfolio truth:
+- Stale open_position_lots projection:
+- Why startup gate was correct:
+- Why existing repair-plan could not apply:
 
-## Code Changes
-### target_position.py
-- Findings/changes:
-
-### db_core.py
-- Findings/changes:
-
-### engine.py
-- Findings/changes:
-
-### execution_service.py
-- Findings/changes:
+## Design Implemented
+- Detector:
+- Apply path:
+- Repair event/audit evidence:
+- Postcondition checks:
+- CLI/repair-plan integration:
 
 ## Behavior Proven
-### Missing target + executable broker BTC + HOLD
+### EC2-style flat stale projection
 - Input:
 - Expected:
 - Actual:
 
-### Existing adopted target + HOLD
+### Unsafe broker not flat
 - Input:
 - Expected:
 - Actual:
 
-### Existing adopted target + SELL
+### Unsafe portfolio not flat
 - Input:
 - Expected:
 - Actual:
 
-### Existing adopted target + BUY
+### Unsafe open orders
 - Input:
 - Expected:
 - Actual:
 
-### Unsafe startup
+### Missing terminal SELL evidence
+- Input:
+- Expected:
+- Actual:
+
+### Idempotency
 - Input:
 - Expected:
 - Actual:
@@ -569,22 +630,23 @@ Report exactly in this structure:
 - Commands run:
 - Results:
 
-## Observability
-- New/verified fields:
-- Example adoption context/log:
-- Example strategy SELL after adoption context/log:
+## Operational Procedure
+- Preview command:
+- Apply command:
+- Post-repair verification commands:
+- Rollback/backup note:
 
 ## Compatibility
-- lot_native:
 - target_delta:
+- startup adoption:
+- lot_native accounting:
+- recovery-report:
 - live submit:
-- recovery/failsafe:
-- DB migration:
 
 ## Remaining Risks / Follow-ups
 - Known limitations:
 - Recommended cleanup:
 ```
 
-Remember: this is not about making SELL safer. This is about ensuring the bot does not decide to SELL at startup just because target state was missing. The startup policy must adopt existing broker BTC as the current target unless strategy SELL or explicit operator closeout tells it to close.
+Remember: this is not a trading fix. It is an operational recovery-system fix. The bot must not resume while `open_position_lots` projects BTC that broker and portfolio no longer hold, but the operator also needs a safe, auditable repair command for exactly this verified-flat stale projection case.
 
