@@ -41,6 +41,7 @@ from bithumb_bot.db_core import (
     record_external_cash_adjustment,
     record_manual_flat_accounting_repair,
     set_portfolio_breakdown,
+    upsert_target_position_state,
 )
 from bithumb_bot.engine import (
     ResumeBlocker,
@@ -3375,6 +3376,98 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert "overall=FAIL" in out
     assert "[FAIL] config/env loaded" in out
+
+
+def test_target_delta_dry_run_prints_submit_plan_without_real_order_arming(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    original_target_exposure = settings.TARGET_EXPOSURE_KRW
+    try:
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 100_000.0)
+        conn = ensure_db()
+        try:
+            upsert_target_position_state(
+                conn,
+                pair=settings.PAIR,
+                target_exposure_krw=100_000.0,
+                target_qty=0.001,
+                last_signal="BUY",
+                last_decision_id=7,
+                last_reference_price=100_000_000.0,
+                updated_ts=1000,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        monkeypatch.setattr(
+            app_module,
+            "compute_signal",
+            lambda _conn, _short, _long, **_kwargs: {
+                "ts": 9000,
+                "last_close": 100_000_000.0,
+                "curr_s": 1.0,
+                "curr_l": 1.0,
+                "signal": "HOLD",
+                "raw_signal": "HOLD",
+                "reason": "diagnostic_hold",
+            },
+        )
+        monkeypatch.setattr(
+            app_module,
+            "compute_runtime_readiness_snapshot",
+            lambda _conn: SimpleNamespace(
+                as_dict=lambda: {
+                    "broker_position_evidence": {
+                        "broker_qty_known": True,
+                        "broker_qty": 0.0004,
+                        "balance_source_stale": False,
+                    },
+                    "projection_converged": True,
+                    "projection_convergence": {"converged": True},
+                    "broker_portfolio_converged": True,
+                    "open_order_count": 0,
+                    "unresolved_open_order_count": 0,
+                    "recovery_required_count": 0,
+                    "submit_unknown_count": 0,
+                    "accounting_projection_ok": True,
+                    "active_fee_accounting_blocker": False,
+                    "residual_proof_min_qty": 0.0001,
+                    "residual_proof_min_notional_krw": 5000.0,
+                }
+            ),
+        )
+        monkeypatch.setattr(
+            app_module,
+            "validate_live_run_startup_contract",
+            lambda _settings: pytest.fail("target-delta-dry-run must not require real-order startup arming"),
+        )
+
+        app_main(["target-delta-dry-run", "--short", "5", "--long", "20"])
+    finally:
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", original_target_exposure)
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out[0] == "[TARGET-DELTA-DRY-RUN]"
+    payload = json.loads(out[-1])
+    assert payload["target_current_qty"] == pytest.approx(0.0004)
+    assert payload["target_previous_exposure_krw"] == pytest.approx(100_000.0)
+    assert payload["target_new_exposure_krw"] == pytest.approx(100_000.0)
+    assert payload["target_delta_side"] == "BUY"
+    assert payload["target_delta_qty"] == pytest.approx(0.0006)
+    assert payload["target_dust_classification"] == "executable_delta"
+    assert payload["submit_expected"] is True
+    assert payload["block_reason"] == "none"
+    assert payload["execution_submit_plan_source"] == "target_delta"
+    assert payload["execution_submit_plan_authority"] == "target_position_delta"
+    assert payload["target_submit_plan"]["source"] == "target_delta"
+    assert payload["target_submit_plan"]["authority"] == "target_position_delta"
 
 
 def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):

@@ -31,6 +31,7 @@ from .db_core import (
     get_position_authority_repair_summary,
     get_portfolio_breakdown,
     init_portfolio,
+    load_target_position_state,
     normalize_asset_qty,
     normalize_cash_amount,
     portfolio_asset_total,
@@ -97,6 +98,7 @@ from .position_state_snapshot import build_canonical_position_snapshot
 from .repair_plan import build_recovery_policy_from_report, build_repair_plan_preview_from_report
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
+from .execution_service import build_execution_decision_summary
 from .reporting import (
     build_fee_rate_drift_diagnostics,
     cmd_experiment_report,
@@ -2171,6 +2173,88 @@ def cmd_broker_diagnose() -> None:
 
     if fail_count:
         raise SystemExit(1)
+
+
+def cmd_target_delta_dry_run(short_n: int, long_n: int) -> None:
+    """Build and print a target_delta submit plan without entering the submit path."""
+    if settings.MODE != "live":
+        print(f"[TARGET-DELTA-DRY-RUN] failed: MODE={settings.MODE} (live only)")
+        raise SystemExit(1)
+
+    conn = ensure_db()
+    try:
+        try:
+            signal_result = compute_signal(
+                conn,
+                short_n,
+                long_n,
+                strategy_name=settings.STRATEGY_NAME,
+            )
+        except TypeError as exc:
+            if "strategy_name" not in str(exc):
+                raise
+            signal_result = compute_signal(conn, short_n, long_n)
+        if signal_result is None:
+            print("[TARGET-DELTA-DRY-RUN] failed: insufficient candle history for one decision cycle")
+            raise SystemExit(1)
+
+        readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
+        previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+        previous_target_exposure_krw = (
+            None
+            if previous_target_state is None
+            else float(previous_target_state.target_exposure_krw)
+        )
+    finally:
+        conn.close()
+
+    context = dict(signal_result)
+    signal = str(context.get("signal") or "HOLD").upper()
+    raw_signal = str(context.get("raw_signal") or context.get("base_signal") or signal).upper()
+    reason = str(context.get("reason") or "")
+
+    original_execution_engine = settings.EXECUTION_ENGINE
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        execution_decision = build_execution_decision_summary(
+            decision_context=context,
+            readiness_payload=readiness_payload,
+            raw_signal=raw_signal,
+            final_signal=signal,
+            final_reason=reason,
+            previous_target_exposure_krw=previous_target_exposure_krw,
+        ).as_dict()
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", original_execution_engine)
+
+    target_submit_plan = (
+        dict(execution_decision.get("target_submit_plan"))
+        if isinstance(execution_decision.get("target_submit_plan"), dict)
+        else {}
+    )
+    target_decision = (
+        dict(execution_decision.get("target_shadow_decision"))
+        if isinstance(execution_decision.get("target_shadow_decision"), dict)
+        else {}
+    )
+    output = {
+        "target_current_qty": target_decision.get("target_current_qty"),
+        "target_previous_exposure_krw": target_decision.get("target_previous_exposure_krw"),
+        "target_new_exposure_krw": target_decision.get("target_new_exposure_krw"),
+        "target_delta_side": target_submit_plan.get("target_delta_side", target_decision.get("target_delta_side")),
+        "target_delta_qty": target_submit_plan.get("target_delta_qty", target_decision.get("target_delta_qty")),
+        "target_dust_classification": target_submit_plan.get(
+            "target_dust_classification",
+            target_decision.get("target_dust_classification"),
+        ),
+        "submit_expected": bool(target_submit_plan.get("submit_expected")),
+        "block_reason": str(target_submit_plan.get("block_reason") or "target_submit_plan_missing"),
+        "execution_submit_plan_source": target_submit_plan.get("source"),
+        "execution_submit_plan_authority": target_submit_plan.get("authority"),
+        "target_submit_plan": target_submit_plan,
+    }
+    print("[TARGET-DELTA-DRY-RUN]")
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
 
 
 def _last_reconcile_failed(state) -> bool:
@@ -5662,6 +5746,16 @@ def main(argv: list[str] | None = None) -> int:
         help="read-only live broker/API diagnostics",
         description="Run read-only live broker diagnostics (no order create/cancel).",
     )
+    target_delta_dry_run = sub.add_parser(
+        "target-delta-dry-run",
+        help="read-only target_delta submit-plan diagnostic",
+        description=(
+            "Run one live target_delta decision cycle and print the target submit plan "
+            "without real-order arming or order submission."
+        ),
+    )
+    target_delta_dry_run.add_argument("--short", type=int, default=SMA_SHORT)
+    target_delta_dry_run.add_argument("--long", type=int, default=SMA_LONG)
     sub.add_parser(
         "pause",
         help="persistently pause new trading",
@@ -6061,6 +6155,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_cancel_open_orders()
     elif args.cmd == "broker-diagnose":
         cmd_broker_diagnose()
+    elif args.cmd == "target-delta-dry-run":
+        cmd_target_delta_dry_run(args.short, args.long)
     elif args.cmd == "pause":
         cmd_pause()
     elif args.cmd == "resume":
