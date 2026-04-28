@@ -1711,6 +1711,11 @@ def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(
         "build_sell_execution_sizing",
         lambda *_args, **_kwargs: pytest.fail("target_delta SELL must not use lot-native sell sizing authority"),
     )
+    monkeypatch.setattr(
+        live_module,
+        "_maybe_record_harmless_dust_sell_suppression",
+        lambda *_args, **_kwargs: pytest.fail("target_delta executable delta must not record harmless dust suppression"),
+    )
 
     broker = _FakeBroker()
     trade = live_execute_signal(

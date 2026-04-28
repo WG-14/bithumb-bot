@@ -349,11 +349,19 @@ def test_target_delta_execution_bypasses_residual_sell_mode_and_lot_authority() 
     assert summary.block_reason == "none"
     assert summary.strategy_sell_candidate is None
     assert summary.residual_submit_plan is None
+    assert summary.buy_submit_plan is None
     assert summary.target_submit_plan is not None
     assert summary.target_submit_plan["source"] == "target_delta"
     assert summary.target_submit_plan["authority"] == "target_position_delta"
+    assert summary.target_submit_plan["intent_type"] == "target_delta_rebalance"
+    assert summary.target_submit_plan["strategy_context"] == "target_delta"
     assert summary.target_submit_plan["side"] == "SELL"
     assert summary.target_submit_plan["qty"] == pytest.approx(0.0004998)
+    assert summary.target_submit_plan["submit_expected"] is True
+    assert summary.target_submit_plan["block_reason"] == "none"
+    assert summary.target_submit_plan["qty"] == pytest.approx(
+        summary.target_shadow_decision["target_submit_qty"]
+    )
 
 
 def test_target_delta_buy_sizes_only_missing_delta() -> None:

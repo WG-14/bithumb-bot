@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -22,6 +23,7 @@ from bithumb_bot.execution_service import (
 )
 from bithumb_bot.marketdata import _get_with_retry
 from bithumb_bot.public_api_orderbook import BestQuote
+from bithumb_bot.target_position import TargetPositionState
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +41,7 @@ def _isolated_db(tmp_path):
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
         "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
+        "TARGET_EXPOSURE_KRW": settings.TARGET_EXPOSURE_KRW,
         "RESIDUAL_LIVE_SELL_MODE": settings.RESIDUAL_LIVE_SELL_MODE,
         "RESIDUAL_BUY_SIZING_MODE": settings.RESIDUAL_BUY_SIZING_MODE,
     }
@@ -115,13 +118,49 @@ def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None
     finally:
         conn.close()
 class _LoopConn:
-    def __init__(self, *, open_order_created_ts: int | None = None, asset_qty: float = 0.0):
+    def __init__(
+        self,
+        *,
+        open_order_created_ts: int | None = None,
+        asset_qty: float = 0.0,
+        target_state: TargetPositionState | None = None,
+    ):
         self.open_order_created_ts = open_order_created_ts
         self.asset_qty = float(asset_qty)
         self.marked_recovery_required = 0
+        self.target_state = target_state
 
     def execute(self, query, params=None):
         q = " ".join(str(query).split())
+
+        if "FROM target_position_state" in q:
+            if self.target_state is None:
+                return _Rows(None)
+            state = self.target_state
+            return _Rows(
+                {
+                    "pair": state.pair,
+                    "target_exposure_krw": state.target_exposure_krw,
+                    "target_qty": state.target_qty,
+                    "last_signal": state.last_signal,
+                    "last_decision_id": state.last_decision_id,
+                    "last_reference_price": state.last_reference_price,
+                    "updated_ts": state.updated_ts,
+                }
+            )
+
+        if "INSERT INTO target_position_state" in q:
+            assert params is not None
+            self.target_state = TargetPositionState(
+                pair=str(params[0]),
+                target_exposure_krw=float(params[1]),
+                target_qty=float(params[2]),
+                last_signal=str(params[3]),
+                last_decision_id=(None if params[4] is None else int(params[4])),
+                last_reference_price=float(params[5]),
+                updated_ts=int(params[6]),
+            )
+            return _Rows(None, rowcount=1)
 
         if "FROM candles" in q:
             return _Rows({"ts": 10_000, "close": 100.0})
@@ -311,7 +350,12 @@ class _FlattenFailBroker(_DummyBroker):
     def place_order(self, *args, **kwargs):
         raise RuntimeError("place_order boom")
 
-def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float = 0.0):
+def _prepare_run_loop(
+    monkeypatch,
+    open_order_created_ts=None,
+    asset_qty: float = 0.0,
+    target_state: TargetPositionState | None = None,
+):
     monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
@@ -363,7 +407,11 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float 
         },
     )
 
-    loop_conn = _LoopConn(open_order_created_ts=open_order_created_ts, asset_qty=asset_qty)
+    loop_conn = _LoopConn(
+        open_order_created_ts=open_order_created_ts,
+        asset_qty=asset_qty,
+        target_state=target_state,
+    )
     monkeypatch.setattr("bithumb_bot.engine.ensure_db", lambda: loop_conn)
     monkeypatch.setattr("bithumb_bot.flatten.ensure_db", lambda: loop_conn)
     monkeypatch.setattr("bithumb_bot.flatten.init_portfolio", lambda _conn: None)
@@ -1299,6 +1347,203 @@ def test_target_delta_live_service_blocks_invalid_target_plan_without_fallback(t
     assert trade is None
     assert executor_calls == []
     assert recorder_calls == []
+
+
+def _target_state(*, exposure_krw: float) -> TargetPositionState:
+    return TargetPositionState(
+        pair=settings.PAIR,
+        target_exposure_krw=float(exposure_krw),
+        target_qty=0.0 if exposure_krw <= 0.0 else exposure_krw / 100_000_000.0,
+        last_signal="SELL" if exposure_krw <= 0.0 else "BUY",
+        last_decision_id=7,
+        last_reference_price=100_000_000.0,
+        updated_ts=1000,
+    )
+
+
+def _target_delta_readiness(
+    *,
+    broker_qty: float,
+    open_order_count: int = 0,
+) -> dict[str, object]:
+    return {
+        "broker_position_evidence": {
+            "broker_qty_known": True,
+            "broker_qty": broker_qty,
+            "balance_source_stale": False,
+        },
+        "projection_converged": True,
+        "projection_convergence": {"converged": True},
+        "broker_portfolio_converged": True,
+        "open_order_count": open_order_count,
+        "unresolved_open_order_count": 0,
+        "recovery_required_count": 0,
+        "submit_unknown_count": 0,
+        "accounting_projection_ok": True,
+        "active_fee_accounting_blocker": False,
+        "residual_proof_min_qty": 0.0001,
+        "residual_proof_min_notional_krw": 5000.0,
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "case_id",
+        "persisted_target",
+        "broker_qty",
+        "open_order_count",
+        "expected_forwarded_side",
+        "expected_qty",
+        "expected_block_reason",
+        "expected_dust_classification",
+    ),
+    [
+        (
+            "restart_target_zero_executable_leftover",
+            _target_state(exposure_krw=0.0),
+            0.0004998,
+            0,
+            "SELL",
+            0.0004998,
+            "none",
+            "executable_delta",
+        ),
+        (
+            "restart_target_zero_true_dust",
+            _target_state(exposure_krw=0.0),
+            0.00000004,
+            0,
+            None,
+            0.0,
+            "delta_below_exchange_min",
+            "true_dust",
+        ),
+        (
+            "restart_hold_buys_only_missing_delta",
+            _target_state(exposure_krw=100_000.0),
+            0.0004,
+            0,
+            "BUY",
+            0.0006,
+            "none",
+            "executable_delta",
+        ),
+        (
+            "hold_without_persisted_target_fails_closed",
+            None,
+            0.0,
+            0,
+            None,
+            0.0,
+            "missing_persistent_target_state",
+            "hold_target_unknown",
+        ),
+        (
+            "unsafe_readiness_blocks_target_delta_submit",
+            _target_state(exposure_krw=0.0),
+            0.0004998,
+            1,
+            None,
+            0.0,
+            "open_order_count_nonzero",
+            "unknown",
+        ),
+    ],
+)
+def test_run_loop_target_delta_persisted_target_state_reaches_live_execution(
+    monkeypatch,
+    case_id,
+    persisted_target,
+    broker_qty,
+    open_order_count,
+    expected_forwarded_side,
+    expected_qty,
+    expected_block_reason,
+    expected_dust_classification,
+) -> None:
+    loop_conn = _prepare_run_loop(
+        monkeypatch,
+        asset_qty=broker_qty,
+        target_state=persisted_target,
+    )
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "telemetry")
+    object.__setattr__(settings, "TARGET_EXPOSURE_KRW", None)
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.evaluate_startup_safety_gate", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda _conn, _short, _long, **_kwargs: {
+            "ts": 9000,
+            "last_close": 100_000_000.0,
+            "curr_s": 1.0,
+            "curr_l": 1.0,
+            "signal": "HOLD",
+            "raw_signal": "HOLD",
+            "reason": case_id,
+        },
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_runtime_readiness_snapshot",
+        lambda _conn: SimpleNamespace(
+            as_dict=lambda: _target_delta_readiness(
+                broker_qty=broker_qty,
+                open_order_count=open_order_count,
+            )
+        ),
+    )
+
+    recorded_contexts: list[dict[str, object]] = []
+    executor_calls: list[dict[str, object]] = []
+
+    def _record_strategy_decision(_conn, **kwargs):
+        recorded_contexts.append(dict(kwargs["context"]))
+        return 42
+
+    def _capture_live_execution(_broker, side, ts, market_price, **kwargs):
+        executor_calls.append(
+            {
+                "side": side,
+                "ts": ts,
+                "market_price": market_price,
+                "execution_submit_plan": kwargs.get("execution_submit_plan"),
+            }
+        )
+        return None
+
+    monkeypatch.setattr("bithumb_bot.engine.record_strategy_decision", _record_strategy_decision)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", _capture_live_execution)
+
+    run_loop(5, 20)
+
+    assert len(recorded_contexts) == 1
+    context = recorded_contexts[0]
+    execution_decision = context["execution_decision"]
+    assert isinstance(execution_decision, dict)
+    target_plan = execution_decision["target_submit_plan"]
+    assert isinstance(target_plan, dict)
+    assert target_plan["block_reason"] == expected_block_reason
+    assert target_plan["target_dust_classification"] == expected_dust_classification
+
+    if expected_forwarded_side is None:
+        assert executor_calls == []
+        assert target_plan["submit_expected"] is False
+    else:
+        assert len(executor_calls) == 1
+        forwarded = executor_calls[0]["execution_submit_plan"]
+        assert isinstance(forwarded, dict)
+        assert executor_calls[0]["side"] == expected_forwarded_side
+        assert forwarded["source"] == "target_delta"
+        assert forwarded["authority"] == "target_position_delta"
+        assert forwarded["side"] == expected_forwarded_side
+        assert forwarded["qty"] == pytest.approx(expected_qty)
+        assert forwarded["submit_expected"] is True
+        assert forwarded["block_reason"] == "none"
+
+    if expected_block_reason == "none":
+        assert loop_conn.target_state is not None
+        assert loop_conn.target_state.last_signal == "HOLD"
+        assert loop_conn.target_state.last_decision_id == 42
 
 
 def test_default_live_service_wrapper_preserves_residual_execution_submit_plan(monkeypatch) -> None:
