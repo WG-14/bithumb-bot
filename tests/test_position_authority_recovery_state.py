@@ -17,6 +17,7 @@ from bithumb_bot.db_core import (
     record_position_authority_projection_publication,
     record_position_authority_repair,
     set_portfolio_breakdown,
+    summarize_fill_accounting_incident_projection,
 )
 from bithumb_bot.engine import (
     evaluate_restart_readiness,
@@ -3311,13 +3312,135 @@ def test_repair_plan_emits_safe_fee_pending_repair_from_deterministic_allocation
         object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", original_fee_rate)
 
 
+def test_fee_pending_repair_row_resolves_matching_fee_pending_observation(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_deterministic_fee_allocation_incident(conn, duplicate_repair=True)
+        summary = summarize_fill_accounting_incident_projection(conn)
+        replay = compute_accounting_replay(conn)
+    finally:
+        conn.close()
+
+    pending_verdict = next(
+        item for item in summary["verdicts"] if item["fill_id"] == "C0101000000984365609"
+    )
+    assert pending_verdict["repair_present"] is True
+    assert pending_verdict["canonical_incident_state"] == "repaired"
+    assert pending_verdict["incident_scope"] == "historical_context"
+    assert pending_verdict["active_issue"] is False
+    assert summary["active_issue_count"] == 0
+    assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 0
+    assert replay["fill_accounting_active_issue_count"] == 0
+    assert replay["unresolved_fee_state"] is False
+
+
+def test_fee_pending_repair_apply_records_or_projects_accounting_complete_evidence(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _record_fee_pending_buy(conn, client_order_id="apply_records_complete", fill_id="apply-complete-fill")
+        result = apply_fee_pending_accounting_repair(
+            conn,
+            client_order_id="apply_records_complete",
+            fill_id="apply-complete-fill",
+            fee=4.23,
+            fee_provenance="operator_fixture",
+        )
+        conn.commit()
+        complete_observation = conn.execute(
+            """
+            SELECT accounting_status, source, fee, fee_provenance
+            FROM broker_fill_observations
+            WHERE client_order_id='apply_records_complete'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        summary = summarize_fill_accounting_incident_projection(conn)
+        replay = compute_accounting_replay(conn)
+    finally:
+        conn.close()
+
+    assert result["repair"]["created"] is True
+    assert complete_observation is not None
+    assert complete_observation["accounting_status"] == "accounting_complete"
+    assert complete_observation["source"] == "fee_pending_accounting_repair"
+    assert complete_observation["fee"] == pytest.approx(4.23)
+    assert complete_observation["fee_provenance"] == "operator_fixture"
+    assert summary["active_issue_count"] == 0
+    assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 0
+    assert replay["unresolved_fee_state"] is False
+
+
+def test_duplicate_fee_pending_repair_does_not_block_resolution_if_existing_repair_matches(
+    recovery_db,
+    capsys,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_deterministic_fee_allocation_incident(conn, duplicate_repair=True)
+        repair_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM fee_pending_accounting_repairs"
+        ).fetchone()["cnt"]
+        summary = summarize_fill_accounting_incident_projection(conn)
+    finally:
+        conn.close()
+
+    capsys.readouterr()
+    app_main(["repair-plan", "--json"])
+    plan = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    candidate = next(
+        item for item in plan["candidate_repairs"] if item["name"] == "fee-pending-accounting-repair"
+    )
+
+    assert repair_count == 1
+    assert summary["active_issue_count"] == 0
+    assert summary["repaired_count"] == 1
+    assert candidate["needed"] is False
+    assert candidate["active_issue"] is False
+    assert candidate["safe_to_apply"] is False
+    assert "duplicate_fee_pending_accounting_repair_exists" in candidate["why_not_safe"]
+
+
+def test_non_matching_repair_does_not_resolve_unrelated_fee_pending_observation(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_deterministic_fee_allocation_incident(conn)
+        record_fee_pending_accounting_repair(
+            conn,
+            event_ts=1_777_435_324_000,
+            client_order_id="live_1777435320000_sell_ae60a72b",
+            exchange_order_id="C0101000002956694365",
+            fill_id="C0101000000984365609",
+            fill_ts=1_777_435_323_999,
+            price=114_325_000.0,
+            qty=0.00004374,
+            fee=2.0,
+            source="operator_fee_pending_recovery",
+            reason="fee_pending_accounting_repair",
+            repair_basis={"fixture": "non_matching_fill_ts"},
+        )
+        summary = summarize_fill_accounting_incident_projection(conn)
+        replay = compute_accounting_replay(conn)
+    finally:
+        conn.close()
+
+    pending_verdict = next(
+        item for item in summary["verdicts"] if item["fill_id"] == "C0101000000984365609"
+    )
+    assert pending_verdict["repair_present"] is False
+    assert pending_verdict["canonical_incident_state"] == "unapplied_principal_pending"
+    assert pending_verdict["active_issue"] is True
+    assert summary["active_issue_count"] == 1
+    assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 1
+    assert replay["unresolved_fee_state"] is True
+
+
 @pytest.mark.parametrize(
     ("fixture_kwargs", "expected_reason"),
     [
         ({"operator_confirmation_required": True}, "deterministic_allocation_unavailable"),
         ({"complete_fill_set_available": False}, "complete_fill_set_missing"),
         ({"order_paid_fee": 28.50}, "proposed_fee_outside_fee_rate_tolerance"),
-        ({"duplicate_repair": True}, "duplicate_fee_pending_accounting_repair_exists"),
         ({"unresolved_order": True}, "unresolved_orders_present:open=1,submit_unknown=0,recovery_required=0"),
     ],
 )

@@ -2398,10 +2398,22 @@ def _matching_fee_pending_repairs(
             SELECT id, repair_key, event_ts, client_order_id, exchange_order_id,
                    fill_id, fill_ts, price, qty, fee, source, reason
             FROM fee_pending_accounting_repairs
-            WHERE client_order_id=? AND fill_id=?
+            WHERE client_order_id=?
+              AND fill_id=?
+              AND fill_ts=?
+              AND ABS(price-?) < 1e-12
+              AND ABS(qty-?) < 1e-12
+              AND fee > ?
             ORDER BY event_ts ASC, id ASC
             """,
-            (client_order_id_text, fill_id_text),
+            (
+                client_order_id_text,
+                fill_id_text,
+                int(fill_ts),
+                float(price),
+                float(qty),
+                FEE_ACCOUNTING_COMPLETE_EPS,
+            ),
         ).fetchall()
         if rows:
             return list(rows)
@@ -2415,9 +2427,16 @@ def _matching_fee_pending_repairs(
               AND fill_ts=?
               AND ABS(price-?) < 1e-12
               AND ABS(qty-?) < 1e-12
+              AND fee > ?
             ORDER BY event_ts ASC, id ASC
             """,
-            (client_order_id_text, int(fill_ts), float(price), float(qty)),
+            (
+                client_order_id_text,
+                int(fill_ts),
+                float(price),
+                float(qty),
+                FEE_ACCOUNTING_COMPLETE_EPS,
+            ),
         ).fetchall()
     )
 
@@ -2477,7 +2496,11 @@ def build_fill_accounting_incident_projection(conn: sqlite3.Connection) -> list[
             1 for row in rows if str(row["accounting_status"] or "") == "accounting_complete"
         )
 
-        if existing_fill is None and latest_accounting_status == "fee_pending":
+        if latest_accounting_status == "fee_pending" and repair_present:
+            canonical_state = "repaired"
+            incident_scope = "historical_context"
+            active_issue = False
+        elif existing_fill is None and latest_accounting_status == "fee_pending":
             canonical_state = "unapplied_principal_pending"
             incident_scope = "active_blocking"
             active_issue = True
@@ -2493,10 +2516,6 @@ def build_fill_accounting_incident_projection(conn: sqlite3.Connection) -> list[
             canonical_state = "already_accounted_observation_stale"
             incident_scope = "historical_context"
             active_issue = False
-        elif latest_accounting_status == "fee_pending" and repair_present:
-            canonical_state = "repaired" if final_fee_applied else "ambiguous"
-            incident_scope = "historical_context" if final_fee_applied else "active_blocking"
-            active_issue = not final_fee_applied
         elif latest_accounting_status == "accounting_complete" and repair_present:
             canonical_state = "repaired"
             incident_scope = "historical_context"
@@ -2552,6 +2571,8 @@ def build_fill_accounting_incident_projection(conn: sqlite3.Connection) -> list[
                         for row in rows
                         if str(row["accounting_status"] or "") == "accounting_complete"
                     ],
+                    "matching_repair_ids": [int(row["id"]) for row in repairs],
+                    "matching_repair_fees": [float(row["fee"]) for row in repairs],
                 },
             )
         )
