@@ -103,6 +103,12 @@ class TargetPositionDecision:
     dust_classification: str
     order_rule_min_qty: float | None
     order_rule_min_notional_krw: float | None
+    order_rule_qty_step: float | None = None
+    order_rule_authority: str = ""
+    order_rule_authority_source: str = ""
+    order_rule_authority_source_mode: str = ""
+    order_rule_min_qty_source: str = ""
+    order_rule_min_notional_krw_source: str = ""
     target_policy_action: str = ""
     target_origin: str = ""
     target_adoption_reason: str = ""
@@ -137,6 +143,12 @@ class TargetPositionDecision:
             "target_dust_classification": self.dust_classification,
             "target_order_rule_min_qty": self.order_rule_min_qty,
             "target_order_rule_min_notional_krw": self.order_rule_min_notional_krw,
+            "target_order_rule_qty_step": self.order_rule_qty_step,
+            "order_rule_authority": self.order_rule_authority,
+            "order_rule_authority_source": self.order_rule_authority_source,
+            "order_rule_authority_source_mode": self.order_rule_authority_source_mode,
+            "target_order_rule_min_qty_source": self.order_rule_min_qty_source,
+            "target_order_rule_min_notional_krw_source": self.order_rule_min_notional_krw_source,
             "target_policy_action": self.target_policy_action,
             "target_origin": self.target_origin,
             "target_adoption_reason": self.target_adoption_reason,
@@ -268,7 +280,6 @@ def resolve_startup_target_position_policy(
         min_notional = _as_float(
             payload.get("min_notional_krw", payload.get("residual_proof_min_notional_krw"))
         )
-
     def _blocked(reason: str) -> StartupTargetPositionPolicyDecision:
         return StartupTargetPositionPolicyDecision(
             policy_action=TARGET_POLICY_BLOCK_UNSAFE_STATE,
@@ -377,6 +388,12 @@ def build_target_position_decision(
         min_notional = _as_float(
             payload.get("min_notional_krw", payload.get("residual_proof_min_notional_krw"))
         )
+    qty_step = _as_float(rules.get("qty_step"))
+    authority = str(rules.get("order_rule_authority") or rules.get("order_rule_authority_source") or "")
+    authority_source = str(rules.get("order_rule_authority_source") or authority)
+    authority_source_mode = str(rules.get("order_rule_authority_source_mode") or "")
+    min_qty_source = str(rules.get("order_rule_min_qty_source") or "")
+    min_notional_source = str(rules.get("order_rule_min_notional_krw_source") or "")
 
     engine_mode = (
         TARGET_ENGINE_MODE_TARGET_DELTA
@@ -410,6 +427,12 @@ def build_target_position_decision(
         "dust_classification": "unknown",
         "order_rule_min_qty": min_qty,
         "order_rule_min_notional_krw": min_notional,
+        "order_rule_qty_step": qty_step,
+        "order_rule_authority": authority,
+        "order_rule_authority_source": authority_source,
+        "order_rule_authority_source_mode": authority_source_mode,
+        "order_rule_min_qty_source": min_qty_source,
+        "order_rule_min_notional_krw_source": min_notional_source,
         "target_policy_action": str(payload.get("target_policy_action") or ""),
         "target_origin": _origin_for_signal(signal, payload),
         "target_adoption_reason": str(payload.get("target_adoption_reason") or ""),

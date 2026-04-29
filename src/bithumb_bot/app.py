@@ -88,6 +88,7 @@ from .position_authority_repair import (
     build_position_authority_rebuild_preview,
 )
 from .runtime_readiness import compute_runtime_readiness_snapshot
+from .execution_order_rules import resolve_execution_order_rules
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import apply_manual_flat_accounting_repair, build_manual_flat_accounting_repair_preview
 from .external_position_repair import (
@@ -2206,15 +2207,11 @@ def cmd_target_delta_dry_run(short_n: int, long_n: int) -> None:
 
         readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
         previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+        execution_order_rules = resolve_execution_order_rules(readiness_payload, market=str(settings.PAIR))
         startup_policy = resolve_startup_target_position_policy(
             existing_target_state=previous_target_state,
             readiness_payload=readiness_payload,
-            order_rules={
-                "min_qty": readiness_payload.get("min_qty", readiness_payload.get("residual_proof_min_qty")),
-                "min_notional_krw": readiness_payload.get(
-                    "min_notional_krw", readiness_payload.get("residual_proof_min_notional_krw")
-                ),
-            },
+            order_rules=execution_order_rules.as_order_rules(),
             reference_price=signal_result.get("market_price", signal_result.get("last_close", signal_result.get("close"))),
             raw_signal=str(signal_result.get("raw_signal") or signal_result.get("base_signal") or signal_result.get("signal") or "HOLD"),
         )

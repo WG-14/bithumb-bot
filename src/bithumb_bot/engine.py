@@ -42,6 +42,7 @@ from .dust import (
     build_dust_display_context,
     build_position_state_model,
 )
+from .execution_order_rules import resolve_execution_order_rules
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from .observability import configure_runtime_logging, format_log_kv, safety_event
@@ -129,15 +130,11 @@ def _resolve_target_position_state_for_run_loop(
             "target_state": None,
         }
     previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+    execution_order_rules = resolve_execution_order_rules(readiness_payload, market=str(settings.PAIR))
     policy = resolve_startup_target_position_policy(
         existing_target_state=previous_target_state,
         readiness_payload=readiness_payload,
-        order_rules={
-            "min_qty": readiness_payload.get("min_qty", readiness_payload.get("residual_proof_min_qty")),
-            "min_notional_krw": readiness_payload.get(
-                "min_notional_krw", readiness_payload.get("residual_proof_min_notional_krw")
-            ),
-        },
+        order_rules=execution_order_rules.as_order_rules(),
         reference_price=reference_price,
         raw_signal=raw_signal,
     )

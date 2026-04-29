@@ -129,6 +129,103 @@ def test_record_strategy_decision_normalizes_hold_context_without_filter_block(t
     assert ctx["signal_strength_label"] == "neutral"
 
 
+def test_recent_decision_flow_surfaces_target_delta_order_rule_authority(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-target-rules.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma buy",
+            candle_ts=1,
+            market_price=113_428_000.0,
+            context={
+                "base_signal": "BUY",
+                "raw_signal": "BUY",
+                "final_signal": "BUY",
+                "final_action": "BLOCK_TARGET_DELTA",
+                "submit_expected": False,
+                "pre_submit_proof_status": "failed",
+                "execution_block_reason": "missing_order_rule_min_qty",
+                "target_delta_side": "NONE",
+                "target_would_submit": False,
+                "target_block_reason": "missing_order_rule_min_qty",
+                "target_order_rule_min_qty": None,
+                "target_order_rule_min_notional_krw": None,
+                "order_rule_authority": "missing",
+                "order_rule_authority_source": "missing",
+                "execution_decision": {
+                    "target_shadow_decision": {
+                        "target_delta_side": "NONE",
+                        "target_would_submit": False,
+                        "target_block_reason": "missing_order_rule_min_qty",
+                        "target_order_rule_min_qty": None,
+                        "target_order_rule_min_notional_krw": None,
+                        "order_rule_authority": "missing",
+                        "order_rule_authority_source": "missing",
+                    }
+                },
+            },
+        )
+        record_strategy_decision(
+            conn,
+            decision_ts=2,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma buy",
+            candle_ts=2,
+            market_price=113_428_000.0,
+            context={
+                "base_signal": "BUY",
+                "raw_signal": "BUY",
+                "final_signal": "BUY",
+                "final_action": "REBALANCE_TO_TARGET",
+                "submit_expected": True,
+                "pre_submit_proof_status": "passed",
+                "execution_block_reason": "none",
+                "target_delta_side": "BUY",
+                "target_would_submit": True,
+                "target_submit_qty": 0.000617,
+                "target_delta_notional_krw": 70_000.0,
+                "target_block_reason": "none",
+                "target_order_rule_min_qty": 0.0001,
+                "target_order_rule_min_notional_krw": 5000.0,
+                "order_rule_authority": "settings",
+                "order_rule_authority_source": "settings",
+                "execution_decision": {
+                    "target_shadow_decision": {
+                        "target_delta_side": "BUY",
+                        "target_would_submit": True,
+                        "target_submit_qty": 0.000617,
+                        "target_delta_notional_krw": 70_000.0,
+                        "target_block_reason": "none",
+                        "target_order_rule_min_qty": 0.0001,
+                        "target_order_rule_min_notional_krw": 5000.0,
+                        "order_rule_authority": "settings",
+                        "order_rule_authority_source": "settings",
+                    }
+                },
+            },
+        )
+        conn.commit()
+        recent = fetch_recent_decision_flow(conn, limit=2)
+    finally:
+        conn.close()
+
+    assert recent[0].target_would_submit is True
+    assert recent[0].target_order_rule_min_qty == pytest.approx(0.0001)
+    assert recent[0].target_order_rule_min_notional_krw == pytest.approx(5000.0)
+    assert recent[0].order_rule_authority_source == "settings"
+    assert recent[1].target_would_submit is False
+    assert recent[1].target_block_reason == "missing_order_rule_min_qty"
+    assert recent[1].target_order_rule_min_qty is None
+
+
 def test_decision_telemetry_cli_exposes_sell_failure_category_fields(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "decision-sell-failure-cli.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

@@ -757,6 +757,146 @@ def test_target_delta_buy_sizes_only_missing_delta() -> None:
     assert summary.target_submit_plan["notional_krw"] == pytest.approx(60_000.0)
 
 
+def test_target_delta_ec2_reproduction_uses_settings_rules_when_payload_lacks_min_qty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bithumb_bot.broker import order_rules
+
+    old_engine = settings.EXECUTION_ENGINE
+    old_target = settings.TARGET_EXPOSURE_KRW
+    old_max_order = settings.MAX_ORDER_KRW
+    old_min_qty = settings.LIVE_MIN_ORDER_QTY
+    old_qty_step = settings.LIVE_ORDER_QTY_STEP
+    old_min_notional = settings.MIN_ORDER_NOTIONAL_KRW
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 70_000.0)
+        object.__setattr__(settings, "MAX_ORDER_KRW", 70_000.0)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+        monkeypatch.setattr(
+            order_rules,
+            "get_effective_order_rules",
+            lambda _pair: (_ for _ in ()).throw(RuntimeError("exchange unavailable")),
+        )
+
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "BUY", "market_price": 113_428_000.0},
+            readiness_payload=_readiness(broker_qty=0.0),
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", old_target)
+        object.__setattr__(settings, "MAX_ORDER_KRW", old_max_order)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", old_min_qty)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", old_qty_step)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", old_min_notional)
+
+    target = summary.target_shadow_decision
+    assert target is not None
+    assert target["target_order_rule_min_qty"] == pytest.approx(0.0001)
+    assert target["target_order_rule_min_notional_krw"] == pytest.approx(5000.0)
+    assert target["target_delta_side"] == "BUY"
+    assert target["target_submit_qty"] == pytest.approx(70_000.0 / 113_428_000.0)
+    assert target["target_would_submit"] is True
+    assert target["target_block_reason"] == "none"
+    assert target["order_rule_authority_source"] == "settings"
+    assert summary.submit_expected is True
+    assert summary.block_reason == "none"
+    assert summary.target_submit_plan is not None
+    assert summary.target_submit_plan["submit_expected"] is True
+    assert summary.target_submit_plan["target_order_rule_min_qty"] == pytest.approx(0.0001)
+
+
+def test_target_delta_fails_closed_without_payload_effective_or_settings_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bithumb_bot.broker import order_rules
+
+    old_engine = settings.EXECUTION_ENGINE
+    old_target = settings.TARGET_EXPOSURE_KRW
+    old_min_qty = settings.LIVE_MIN_ORDER_QTY
+    old_qty_step = settings.LIVE_ORDER_QTY_STEP
+    old_min_notional = settings.MIN_ORDER_NOTIONAL_KRW
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 70_000.0)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+        monkeypatch.setattr(
+            order_rules,
+            "get_effective_order_rules",
+            lambda _pair: (_ for _ in ()).throw(RuntimeError("exchange unavailable")),
+        )
+
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "BUY", "market_price": 113_428_000.0},
+            readiness_payload=_readiness(broker_qty=0.0),
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", old_target)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", old_min_qty)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", old_qty_step)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", old_min_notional)
+
+    target = summary.target_shadow_decision
+    assert target is not None
+    assert target["target_order_rule_min_qty"] is None
+    assert target["target_would_submit"] is False
+    assert target["target_block_reason"] == "missing_order_rule_min_qty"
+    assert target["order_rule_authority_source"] == "missing"
+    assert summary.submit_expected is False
+    assert summary.block_reason == "missing_order_rule_min_qty"
+
+
+def test_target_delta_audit_prefers_payload_rule_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bithumb_bot.broker import order_rules
+
+    old_engine = settings.EXECUTION_ENGINE
+    old_target = settings.TARGET_EXPOSURE_KRW
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 70_000.0)
+        monkeypatch.setattr(
+            order_rules,
+            "get_effective_order_rules",
+            lambda _pair: (_ for _ in ()).throw(AssertionError("payload rules should win")),
+        )
+
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "BUY", "market_price": 100_000_000.0},
+            readiness_payload=_readiness(broker_qty=0.0)
+            | {
+                "min_qty": 0.0002,
+                "min_notional_krw": 10_000.0,
+                "qty_step": 0.0001,
+            },
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", old_target)
+
+    target = summary.target_shadow_decision
+    assert target is not None
+    assert target["target_order_rule_min_qty"] == pytest.approx(0.0002)
+    assert target["target_order_rule_min_notional_krw"] == pytest.approx(10_000.0)
+    assert target["target_order_rule_qty_step"] == pytest.approx(0.0001)
+    assert target["order_rule_authority_source"] == "payload"
+    assert target["target_order_rule_min_qty_source"] == "payload"
+
+
 def test_engine_run_loop_target_state_helper_preserves_restart_hold_target(tmp_path) -> None:
     old_engine = settings.EXECUTION_ENGINE
     old_pair = settings.PAIR

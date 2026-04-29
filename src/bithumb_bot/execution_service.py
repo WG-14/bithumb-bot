@@ -7,6 +7,7 @@ from . import runtime_state
 from .config import settings
 from .db_core import ensure_db
 from .decision_context import resolve_canonical_position_exposure_snapshot
+from .execution_order_rules import resolve_execution_order_rules
 from .oms import build_order_intent_key
 from .target_position import TargetPositionSettings, build_target_position_decision
 
@@ -403,6 +404,11 @@ def build_execution_decision_summary(
             "total_effective_exposure_qty",
             "total_effective_exposure_notional_krw",
             "residual_inventory_notional_krw",
+            "min_qty",
+            "qty_step",
+            "min_notional_krw",
+            "bid_min_total_krw",
+            "bid_types",
             "residual_proof_min_qty",
             "residual_proof_min_notional_krw",
             "residual_proof_locked_qty",
@@ -469,17 +475,13 @@ def build_execution_decision_summary(
     execution_engine = _execution_engine()
 
     if bool(getattr(settings, "TARGET_EXECUTION_SHADOW", False)) or execution_engine == "target_delta":
+        execution_order_rules = resolve_execution_order_rules(payload, market=str(settings.PAIR))
         target_decision = build_target_position_decision(
             raw_signal=raw,
             previous_target_exposure_krw=previous_target_exposure_krw,
             current_position_snapshot=None,
             readiness_payload=payload,
-            order_rules={
-                "min_qty": payload.get("min_qty", payload.get("residual_proof_min_qty")),
-                "min_notional_krw": payload.get(
-                    "min_notional_krw", payload.get("residual_proof_min_notional_krw")
-                ),
-            },
+            order_rules=execution_order_rules.as_order_rules(),
             reference_price=payload.get("market_price", payload.get("last_close", payload.get("close"))),
             settings=TargetPositionSettings(
                 execution_engine=execution_engine,
@@ -534,6 +536,14 @@ def build_execution_decision_summary(
                     "target_delta_side": target_decision.delta_side,
                     "target_dust_classification": target_decision.dust_classification,
                     "target_position_truth_state": target_decision.position_truth_state,
+                    "target_order_rule_min_qty": target_decision.order_rule_min_qty,
+                    "target_order_rule_min_notional_krw": target_decision.order_rule_min_notional_krw,
+                    "target_order_rule_qty_step": target_decision.order_rule_qty_step,
+                    "order_rule_authority": target_decision.order_rule_authority,
+                    "order_rule_authority_source": target_decision.order_rule_authority_source,
+                    "order_rule_authority_source_mode": target_decision.order_rule_authority_source_mode,
+                    "target_order_rule_min_qty_source": target_decision.order_rule_min_qty_source,
+                    "target_order_rule_min_notional_krw_source": target_decision.order_rule_min_notional_krw_source,
                     "target_origin": target_decision.target_origin,
                     "target_policy_action": target_decision.target_policy_action,
                     "target_adoption_reason": target_decision.target_adoption_reason,

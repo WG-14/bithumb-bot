@@ -1,652 +1,394 @@
-You are working in the `WG-14/bithumb-bot` repository.
+You are Codex working on the GitHub repository `WG-14/bithumb-bot`.
 
-This is not a trading-strategy patch. Do not change SMA entry/exit logic. Do not change target-delta submit sizing. Do not add another dust/residual workaround.
+Your task is not to apply a narrow symptom patch only. Treat the current EC2 incident as a starting hypothesis, verify it directly against the repository, then implement changes that move this repo toward a more robust, reproducible, observable, and operable automated trading experiment system.
 
-The current EC2 issue is now isolated to the recovery/repair system: after a successful target-delta SELL flattened broker and portfolio, the lot-native materialized projection in `open_position_lots` remained stale. Startup gate is correctly blocking because internal lot projection conflicts with broker/portfolio truth.
+## Incident context to verify, not assume
 
-Your task is to implement a safe, auditable repair path for this entire problem class:
+Observed on EC2:
 
-```text
-broker/portfolio are flat
-latest SELL fully closed the remaining asset
-open_position_lots still projects positive dust_tracking/open lot quantity
-startup gate blocks with POSITION_AUTHORITY_CORRECTION_REQUIRED or AUTHORITY_PROJECTION_NON_CONVERGED
-```
+* Runtime process was running from `/home/ec2-user/apps/bithumb-bot`.
+* Runtime commit matched `0b49f24f06388f3713450e256c2779c0758451b7`.
+* Relevant env existed:
 
-The fix must make the repository more operationally robust and reproducible. Do not paper over this single EC2 instance with manual SQL or a one-off exception.
+  * `EXECUTION_ENGINE=target_delta`
+  * `LIVE_MIN_ORDER_QTY=0.0001`
+  * `LIVE_ORDER_QTY_STEP=0.0001`
+  * `MIN_ORDER_NOTIONAL_KRW=5000`
+  * `TARGET_EXPOSURE_KRW=70000`
+  * `MAX_ORDER_KRW=70000`
+  * `MARKET=KRW-BTC`
+  * `PAIR=KRW-BTC`
+* DB table `order_rule_snapshots` had persisted rules:
 
-## Current EC2 evidence to use as a concrete regression case
+  * `min_qty=0.0001`
+  * `qty_step=0.0001`
+  * `min_notional_krw=5000.0`
+  * `bid_min_total_krw=5000.0`
+  * `bid_types=["limit","price"]`
+* Latest `strategy_decisions` repeatedly showed BUY signals, including `base_signal=BUY`, `raw_signal=BUY`, `final_signal=BUY`, but:
 
-The EC2 live DB currently shows:
+  * `final_action=BLOCK_TARGET_DELTA`
+  * `submit_expected=0`
+  * `execution_block_reason=missing_order_rule_min_qty`
+  * `target_block_reason=missing_order_rule_min_qty`
+  * `target_order_rule_min_qty=null`
+  * `target_order_rule_min_notional_krw=null`
+  * `target_delta_side=NONE`
+  * `target_would_submit=0`
+  * `target_submit_qty=null/0`
+* This happened despite the target notional being around 70,000 KRW, well above exchange min notional.
 
-```text
-latest order:
-  client_order_id=live_1777367760000_sell_ae50365f
-  status=FILLED
-  side=SELL
-  qty_filled=0.0004998
+Prior code inspection suggested this path:
 
-latest trade:
-  side=SELL
-  qty=0.0004998
-  asset_after=0.0
+* `src/bithumb_bot/execution_service.py` calls `build_target_position_decision(...)`.
+* In the target-delta path, it currently builds `order_rules` from `payload.get("min_qty")` / `payload.get("residual_proof_min_qty")` and `payload.get("min_notional_krw")` / `payload.get("residual_proof_min_notional_krw")`.
+* It does not appear to use the authoritative DB snapshot or runtime/env order-rule values in that call path.
+* `src/bithumb_bot/target_position.py` correctly fails closed with `missing_order_rule_min_qty` when `order_rules["min_qty"]` and payload fallbacks are missing.
+* Therefore the immediate failure mode may be: strategy BUY is valid, but target-delta execution proof is missing order-rule authority and blocks before submit.
 
-broker/portfolio:
-  broker_qty=0
-  portfolio_qty=0
+Do not assume this is the only root cause. Confirm or falsify it in the repo.
 
-open_position_lots:
-  id=353
-    position_state=dust_tracking
-    qty_open=0.00039982
-    entry_client_order_id=live_1777186500000_buy_aee54bab
-    entry_trade_id=32
-    executable_lot_count=0
-    dust_tracking_lot_count=1
-    internal_lot_size=0.0004
+## Required investigation
 
-  id=355
-    position_state=dust_tracking
-    qty_open=0.00009998
-    entry_client_order_id=live_1777248060000_buy_aee958b7
-    entry_trade_id=34
-    executable_lot_count=0
-    dust_tracking_lot_count=1
-    internal_lot_size=0.0004
+Inspect the repo directly. At minimum inspect:
 
-  sum(qty_open)=0.00049980
-```
+* `src/bithumb_bot/execution_service.py`
+* `src/bithumb_bot/target_position.py`
+* the run loop / engine code that builds `decision_context`, `readiness_payload`, and previous target state
+* order rule snapshot / live chance / config code paths
+* ops/recovery reporting code paths that display order-rule and target-delta status
+* tests related to target-delta execution, especially `tests/test_target_position_execution.py`
+* any existing DB or order-rule helper modules
 
-This stale sum equals the latest successful SELL qty. The actual portfolio is flat, but `open_position_lots` still claims stale dust-tracking exposure.
+Build a short internal model of the current execution flow:
 
-Current recovery output says:
+1. Strategy signal generation.
+2. Decision context construction.
+3. Readiness payload construction.
+4. Order rule acquisition.
+5. Target-delta decision construction.
+6. Execution submit plan construction.
+7. Live order submission.
+8. Decision audit / ops-report / recovery-report output.
 
-```text
-STARTUP_SAFETY_GATE_BLOCKED
-POSITION_AUTHORITY_CORRECTION_REQUIRED
-AUTHORITY_PROJECTION_NON_CONVERGED
-LOT_AUTHORITY_CONFLICT
-open_position_lots_projected_qty=0.000499800000
-broker_qty=0
-portfolio_qty=0
-safe_to_rebuild=0
-final_safe_to_rebuild=0
-recommended_command=none
-```
+Identify where exchange order rules become available, where they are lost, and whether diagnostics and execution use the same source.
 
-This is correct as a safety block, but incomplete as an operational repair system. The system detects the conflict but does not provide a safe apply path.
+## Root-cause hypotheses to preserve and test
 
-## Core hypothesis to verify
+Keep hypotheses as hypotheses until verified. For each, either verify, falsify, or mark inconclusive with evidence.
 
-Treat this as a hypothesis, not a fact:
+### Hypothesis A: target-delta execution does not receive authoritative order rules
 
-```text
-The target-delta SELL did the correct execution-side thing.
-The portfolio and broker truth became flat.
-The remaining problem is stale lot-native materialized projection.
-Existing repair-plan / rebuild-position-authority logic can handle some projection rebuilds, but not this specific flat-broker/flat-portfolio stale dust_tracking projection case.
-The current code detects the conflict but marks it unsafe because the existing full-projection/correction paths are too anchored to historical lot evidence and do not have a clean "verified flat closeout projection reset" path.
-```
+`build_execution_decision_summary()` likely passes order rules from loose payload keys only. If the live run loop does not place `min_qty` or `residual_proof_min_qty` at top level, target-delta blocks with `missing_order_rule_min_qty` even though env/DB/live order rules exist.
 
-Verify this in code before patching. If the hypothesis is wrong, explain the actual cause and patch accordingly.
+Verification:
 
-## Files to inspect first
+* Find all `build_target_position_decision(...)` call sites.
+* Inspect what is passed to `order_rules`.
+* Confirm whether run loop payloads are expected to contain `min_qty` / `residual_proof_min_qty`.
+* Add a regression test reproducing the EC2 condition: `EXECUTION_ENGINE=target_delta`, flat broker qty, BUY signal, target exposure 70,000 KRW, market price around 113,428,000, no `min_qty` in payload, settings/env contain min qty and min notional.
+* The current code should fail or demonstrate the defect before the fix.
 
-Inspect at least:
+Falsification condition:
 
-```text
-src/bithumb_bot/position_authority_repair.py
-src/bithumb_bot/repair_plan.py
-src/bithumb_bot/position_authority_state.py
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/lifecycle.py
-src/bithumb_bot/db_core.py
-src/bithumb_bot/app.py
-src/bithumb_bot/recovery.py
-tests/test_position_authority_recovery_state.py
-tests/test_operator_commands.py
-tests/test_failsafe.py
-tests/test_accounting_projection.py
-```
+* If authoritative rules are already injected into target-delta in all live paths, then the bug is in serialization, `_as_float`, stale state, or a different call path.
 
-Search for:
+### Hypothesis B: the repo lacks a single authoritative order-rule domain object
 
-```text
-full_projection_rebuild
-position_authority_repair
-record_position_authority_repair
-record_position_authority_projection_publication
-open_position_lots_projected_qty
-dust_tracking_lot_count
-AUTHORITY_PROJECTION_NON_CONVERGED
-POSITION_AUTHORITY_CORRECTION_REQUIRED
-portfolio_projection_qty_mismatch
-safe_to_rebuild
-final_safe_to_rebuild
-rebuild-position-authority
-repair-plan
-apply_portfolio_anchored_projection_repair_basis
-rebuild_lifecycle_projections_from_trades
-```
+Order-rule values appear in env/config, DB snapshots, live chance refresh, decision payloads, residual proof payloads, and diagnostics. The system may be relying on implicit dict keys instead of a typed execution rule authority.
 
-## Design objective
+Verification:
 
-Add a safe repair path for **verified flat-state stale lot projection**.
+* List order-rule sources and consumers.
+* Check whether any single function/object is responsible for merging, validating, annotating freshness, and delivering rules to execution engines.
+* Check whether ops-report and execution use the same object or divergent sources.
 
-This repair should activate only when the system has strong evidence that the real position is flat and the only remaining mismatch is stale `open_position_lots` projection.
+Falsification condition:
 
-The repair should not weaken startup gates. It should produce an auditable repair event and make the post-repair materialized projection converge to broker/portfolio truth.
+* If a single order-rule authority already exists but is not wired into target-delta, scope the fix to wiring plus tests.
 
-## Required safety preconditions
+### Hypothesis C: tests validate target-position math but not the live integration path
 
-The new repair path may be considered only if all are true:
+Existing tests may call `build_target_position_decision()` with explicit `_rules()` or add `residual_proof_min_qty` into readiness payload. That validates pure target math, but not the actual run-loop/execution-service path where rules may be absent from payload.
 
-```text
-1. broker_qty_known = true
-2. broker_qty == 0 within asset epsilon
-3. portfolio_qty == 0 within asset epsilon
-4. broker_portfolio_converged = true
-5. no unresolved open orders
-6. no remote open orders
-7. no PENDING_SUBMIT
-8. no SUBMIT_UNKNOWN
-9. no RECOVERY_REQUIRED orders
-10. accounting projection is consistent with portfolio, or any inconsistency is explicitly reported and blocks repair
-11. latest terminal order is SELL and FILLED, or there is otherwise strong terminal SELL evidence
-12. latest trade after that SELL has asset_after == 0
-13. open_position_lots projected qty > 0
-14. open_position_lots rows are only stale materialized projection rows, preferably dust_tracking-only for this initial implementation
-15. no executable broker exposure exists
-```
+Verification:
 
-For the concrete EC2 case, the first implementation may require:
+* Inspect target-position and execution-service tests.
+* Identify missing integration tests that would have caught EC2’s `target_order_rule_min_qty=null` condition.
+* Add those tests.
 
-```text
-open_position_lots rows with qty_open > 0 are all position_state='dust_tracking'
-```
+### Hypothesis D: operational reporting separates “tradeability allowed” from “actual submit proof failed”
 
-If there are open_exposure rows as well, either handle them only if the same flat proof is strong enough, or block with a clear reason. Do not silently broaden the repair.
+Ops reports can show `new_entry_allowed=1`, `why_not=none`, while latest decisions show `BLOCK_TARGET_DELTA` due to missing order rules. This makes operator diagnosis misleading.
 
-## Required repair behavior
+Verification:
 
-When the preconditions pass, the repair must:
+* Inspect ops-report/recovery-report output generation.
+* Check whether top-level reports surface:
 
-```text
-1. Create a position_authority_repair event.
-2. Include complete evidence in repair_basis:
-   - broker_qty
-   - portfolio_qty
-   - latest SELL order id
-   - latest SELL trade id
-   - latest SELL qty
-   - latest trade asset_after
-   - open_position_lots rows before repair
-   - projected_total_qty before repair
-   - startup gate / readiness blocker reason
-   - operator command and timestamp
-3. Neutralize stale open_position_lots projection.
-4. Record a position_authority_projection_publication or equivalent audit record if that is the existing pattern.
-5. Verify postconditions:
-   - projected_total_qty == 0
-   - portfolio_qty == 0
-   - broker_qty == 0
-   - projection_converged = true
-   - semantic contract still passes
-   - no new startup gate blocker remains from position authority
-6. Make recovery-report show that this blocker is cleared.
-```
+  * `target_delta_submit_allowed`
+  * `target_delta_block_reason`
+  * `target_order_rule_min_qty`
+  * `order_rule_authority_source`
+  * mismatch between snapshot rules and target-delta rules.
 
-Neutralization should use repository repair patterns. Prefer a repair function over direct command-level SQL.
+### Hypothesis E: fee/accounting issues are a separate recurrent failure class, not the active cause of this incident
 
-Acceptable approaches:
+Historical logs showed `LiveFillFeeValidationError`, `FillFeeStrictModeError`, `fee_status=order_level_candidate/missing`, and fee-pending repairs. Current diagnostics reportedly showed active fee issue counts at zero. Treat fee/accounting as a separate structural risk, not the direct current cause unless repo evidence contradicts this.
 
-```text
-- delete stale open_position_lots rows only inside a repair transaction with a position_authority_repair event and full before/after evidence
-- or mark/replace projection through an existing projection publication mechanism if that is the repository’s canonical pattern
-```
+Verification:
 
-Unacceptable approaches:
+* Keep the order-rule fix separate from fee/accounting fixes.
+* Do not conflate pre-submit target-delta proof failure with post-fill accounting failure.
+* If you touch reporting, ensure lifecycle phase is explicit: pre-submit block vs broker submit failure vs fill accounting block.
 
-```text
-- manual SQL instructions as the fix
-- hidden deletion without audit event
-- bypassing startup gate
-- treating this as harmless dust
-- changing target_delta behavior
-- changing strategy SELL/BUY logic
-```
+## Implementation priorities
 
-## Required implementation
+Prioritize design changes that prevent the whole class of bug over one-off symptom suppression.
 
-### 1. Add a flat-state stale projection detector
+### Priority 1: restore safe operation with a minimal but defensible fix
 
-Add a focused detector, likely in `position_authority_repair.py` or `position_authority_state.py`.
+Implement a fix so target-delta execution receives non-null order rules when they are available from a trusted source.
 
-Suggested function name:
+Acceptable minimum:
 
-```python
-build_flat_stale_lot_projection_repair_preview(...)
-```
+* In `execution_service.py`, do not rely only on `payload.get("min_qty")` / `payload.get("residual_proof_min_qty")`.
+* Add fallback from settings/config values such as:
 
-It should return a structured preview with at least:
+  * `settings.LIVE_MIN_ORDER_QTY`
+  * `settings.MIN_ORDER_NOTIONAL_KRW`
+  * `settings.LIVE_ORDER_QTY_STEP`
+* Preserve fail-closed behavior if required execution rules are still unavailable.
+* Do not silently submit with invalid or zero min rules.
 
-```text
-needed
-safe_to_apply
-final_safe_to_apply
-repair_mode=flat_stale_projection_repair
-reason
-blockers
-broker_qty
-portfolio_qty
-latest_sell_client_order_id
-latest_sell_exchange_order_id
-latest_sell_qty
-latest_trade_id
-latest_trade_asset_after
-stale_lot_row_count
-stale_lot_qty_total
-stale_lot_rows
-projected_total_qty_before
-projected_total_qty_after_preview
-expected_post_projection_converged
-recommended_command
-```
+Better:
 
-For the EC2 case, it should identify:
+* Introduce a small typed helper or function that resolves execution order rules from payload plus settings, with source annotation.
+* Use that helper in the target-delta call path.
+* Include the resolved values in target decision audit fields.
+
+Do not simply remove `missing_order_rule_min_qty` checks.
+
+### Priority 2: introduce an explicit execution order-rule abstraction
+
+If feasible within the change, introduce a typed model such as `ExecutionOrderRules` or `OrderRuleAuthority`. It should centralize at least:
+
+* `market`
+* `min_qty`
+* `qty_step`
+* `min_notional_krw`
+* optional `bid_min_total_krw`
+* supported bid/ask order types if available
+* source/source_mode
+* stale/degraded/fallback flags if available
+
+It must have validation for target-delta and live submission.
+
+Target direction:
+
+* Execution engines should not infer execution-critical order rules from arbitrary `decision_context` dicts.
+* `decision_context` should be treated as audit/observability, not as the authoritative execution input.
+* If a full refactor is too large, create a clearly named interim resolver, with tests and TODOs pointing toward full `OrderRuleAuthority`.
+
+### Priority 3: add regression tests that reproduce the EC2 failure
+
+Add or update tests so this cannot regress.
+
+Required tests:
+
+1. EC2 reproduction test:
+
+   * `EXECUTION_ENGINE=target_delta`
+   * BUY signal
+   * flat broker qty
+   * target exposure 70,000 KRW
+   * market price around 113,428,000
+   * readiness payload does not include `min_qty` or `residual_proof_min_qty`
+   * settings contain min qty and min notional
+   * expected: target-delta receives `target_order_rule_min_qty=0.0001`, `target_order_rule_min_notional_krw=5000`, `would_submit=True`, `target_delta_side=BUY`, no `missing_order_rule_min_qty`.
+
+2. Fail-closed test:
+
+   * No payload rules and no settings/default rules available.
+   * Expected: no submit, explicit block reason for missing order rule, no accidental order.
+
+3. Source/audit test:
+
+   * Target decision/audit output includes the rule values used and preferably the source (`payload`, `settings`, `snapshot`, etc.).
+
+4. Ops/reporting test if report code is changed:
+
+   * Report must surface the difference between general entry gate and actual target-delta submit proof.
+   * A case with `new_entry_allowed=1` but `target_delta_submit_allowed=0` must be visible and actionable.
+
+### Priority 4: improve observability
+
+Add or update reporting so the operator can immediately distinguish:
+
+* strategy did not signal BUY
+* strategy signaled BUY but entry gate blocked
+* target-delta proof blocked
+* order-rule authority missing/stale
+* broker submit failed
+* broker accepted but fill accounting blocked
+* active recovery/fee issue blocked
+
+At minimum, include in ops-report/recovery-report or latest strategy flow:
 
 ```text
-needed=1
-safe_to_apply=1
-recommended_command=uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes
+target_delta_submit_allowed=<0|1>
+target_delta_block_reason=<reason>
+target_order_rule_min_qty=<value|null>
+target_order_rule_min_notional_krw=<value|null>
+order_rule_authority_source=<source>
+order_rule_snapshot_min_qty=<value|null>
+order_rule_settings_min_qty=<value|null>
+entry_gate_allowed=<0|1>
+new_entry_allowed=<0|1>
 ```
 
-Use the repository’s actual command style. If `rebuild-position-authority` is not the right command, add or adapt the appropriate operator command.
-
-### 2. Add an apply path
-
-Add an apply function such as:
-
-```python
-apply_flat_stale_lot_projection_repair(...)
-```
-
-It should:
+If there is a mismatch such as snapshot/settings have min_qty but target-delta has null, emit a clear diagnostic like:
 
 ```text
-- run inside a transaction
-- re-check all safety preconditions immediately before mutation
-- capture stale rows before mutation
-- record position_authority_repair with full repair_basis
-- neutralize stale open_position_lots rows
-- optionally record position_authority_projection_publication
-- compute post-repair projection convergence
-- fail/rollback if postconditions are not satisfied
+diagnosis=order_rule_not_propagated_to_target_delta
 ```
 
-### 3. Integrate with repair-plan
+### Priority 5: keep fee/accounting as a separate follow-up area
 
-`uv run bithumb-bot repair-plan` should surface this as a candidate when applicable.
+Do not solve fee/accounting in the same patch unless required. But add comments or issue notes if you find the reporting conflates it with pre-submit blocks.
 
-Expected candidate output:
+Longer-term recommendation to include in the final report:
 
-```text
-name=flat-stale-lot-projection-repair
-needed=1
-active_issue=1
-safe_to_apply=1
-final_safe_to_apply=1
-preconditions=broker_qty=0, portfolio_qty=0, latest SELL filled, stale dust_tracking projection present
-touched_tables=open_position_lots|position_authority_repairs|position_authority_projection_publications
-expected_after=open_position_lots projection converges to broker/portfolio flat state
-recommended_command=uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes
-```
+* Separate principal quantity accounting from fee finalization.
+* Model fee status as a state machine: observed → candidate → estimated → authoritative → repaired.
+* Allow policy-based handling of `order_level_candidate`.
+* Surface fee pending as post-fill accounting, not as submit failure.
 
-If preconditions fail, show exact blockers.
+## Constraints
 
-### 4. Integrate with rebuild-position-authority
+* Do not weaken safety by allowing orders when required order rules are truly unavailable.
+* Do not paper over the bug by changing target exposure, disabling target-delta, or disabling fail-closed checks.
+* Do not introduce hidden magic constants without source attribution.
+* Prefer typed helpers/dataclasses over expanding unstructured dict conventions.
+* Keep changes scoped enough to review, but include tests and observability.
+* If the full `OrderRuleAuthority` refactor is too large, implement a small forward-compatible resolver now and document the next refactor.
 
-Add CLI flags or reuse existing repair mode:
+## Suggested files to inspect and likely modify
 
-```text
-uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes
-```
+Inspect:
 
-The command must support:
+* `src/bithumb_bot/execution_service.py`
+* `src/bithumb_bot/target_position.py`
+* `src/bithumb_bot/engine.py`
+* order rule / broker live / chance snapshot modules
+* reporting modules for ops-report and recovery-report
+* `tests/test_target_position_execution.py`
+* tests around ops-report/recovery-report, if present
 
-```text
-preview mode:
-  no mutation
-  print needed/safe_to_apply/postcondition preview
+Likely modify:
 
-apply mode:
-  require --apply --yes
-  backup recommendation or backup path in output
-  perform repair transaction
-  print before/after projection summary
-```
+* `src/bithumb_bot/execution_service.py`
+* a new or existing helper module for execution order rules, if appropriate
+* `tests/test_target_position_execution.py`
+* report code if adding operator-facing diagnostics
 
-Do not make this run implicitly during normal `run`.
+## Validation commands
 
-### 5. Recovery report and health behavior
-
-After a successful repair:
-
-```text
-recovery-report:
-  projection_converged=1
-  lot_projection_converged=1
-  POSITION_AUTHORITY_CORRECTION_REQUIRED gone
-  AUTHORITY_PROJECTION_NON_CONVERGED gone
-  resume_allowed=1, unless another unrelated blocker exists
-
-health:
-  no startup gate blocker from position authority
-```
-
-If unrelated blockers remain, report them separately. Do not mask them.
-
-## Required tests
-
-Add tests before or with implementation.
-
-### Test A: detector identifies EC2-style stale flat projection
-
-Create a fixture with:
-
-```text
-broker_qty=0
-portfolio.asset_qty=0
-latest order FILLED SELL qty=0.0004998
-latest trade SELL qty=0.0004998 asset_after=0
-open_position_lots:
-  dust_tracking row qty_open=0.00039982
-  dust_tracking row qty_open=0.00009998
-no open orders
-no submit_unknown
-no recovery_required
-```
-
-Expected:
-
-```text
-needed=true
-safe_to_apply=true
-repair_mode=flat_stale_projection_repair
-stale_lot_qty_total=0.0004998
-recommended_command present
-```
-
-### Test B: apply clears projection and records audit event
-
-Using the same fixture, apply the repair.
-
-Expected:
-
-```text
-open_position_lots projected_total_qty=0
-position_authority_repairs count increments
-repair_basis contains stale row ids 353/355 equivalent test ids
-repair_basis contains latest SELL evidence
-post projection_converged=true
-```
-
-### Test C: recovery-report clears blocker after repair
-
-Before repair:
-
-```text
-startup gate blocked by position authority projection mismatch
-```
-
-After repair:
-
-```text
-position authority blocker gone
-resume_allowed=true unless unrelated blocker exists
-```
-
-### Test D: unsafe if broker not flat
-
-```text
-broker_qty > 0
-portfolio_qty=0
-stale lot rows present
-```
-
-Expected:
-
-```text
-safe_to_apply=false
-blocker=broker_not_flat or broker_portfolio_not_converged
-no mutation
-```
-
-### Test E: unsafe if portfolio not flat
-
-```text
-broker_qty=0
-portfolio_qty>0
-```
-
-Expected:
-
-```text
-safe_to_apply=false
-no mutation
-```
-
-### Test F: unsafe if open orders exist
-
-```text
-NEW or PARTIAL order exists
-```
-
-Expected:
-
-```text
-safe_to_apply=false
-blocker=open_orders_present
-no mutation
-```
-
-### Test G: unsafe if latest SELL evidence missing
-
-```text
-broker/portfolio flat
-stale lot rows present
-but no terminal SELL trade with asset_after=0
-```
-
-Expected:
-
-```text
-safe_to_apply=false
-blocker=missing_terminal_flat_sell_evidence
-no mutation
-```
-
-### Test H: idempotency
-
-After successful repair, running preview/apply again should produce:
-
-```text
-needed=false
-safe_to_apply=false or no-op
-no duplicate destructive mutation
-```
-
-### Test I: command-level test
-
-Add/update operator command tests for:
-
-```text
-rebuild-position-authority --flat-stale-projection-repair
-rebuild-position-authority --flat-stale-projection-repair --apply --yes
-repair-plan candidate output
-```
-
-## Observability requirements
-
-Add logs / command output fields:
-
-```text
-repair_mode=flat_stale_projection_repair
-broker_qty
-portfolio_qty
-stale_lot_row_count
-stale_lot_qty_total
-latest_sell_client_order_id
-latest_sell_trade_id
-latest_sell_qty
-projected_total_qty_before
-projected_total_qty_after
-position_authority_repair_id
-projection_converged_after
-safe_to_apply
-final_safe_to_apply
-blockers
-```
-
-Repair event `repair_basis` must include enough evidence for offline audit.
-
-## Acceptance criteria
-
-This task is complete only if:
-
-```text
-1. EC2-style flat broker/portfolio + stale dust_tracking projection is detected.
-2. The repair is offered by repair-plan with a clear recommended command.
-3. The repair is not offered when broker or portfolio is not flat.
-4. The repair is not offered when open/unresolved orders exist.
-5. The repair requires terminal SELL flat evidence.
-6. Applying the repair records position_authority_repair evidence.
-7. Applying the repair neutralizes stale open_position_lots projection.
-8. Applying the repair verifies postcondition projected_total_qty=portfolio_qty=broker_qty=0.
-9. recovery-report clears the position authority blocker after repair.
-10. Existing target_delta, startup adoption, live submit, and recovery tests still pass.
-```
-
-## Non-goals
-
-Do not change SMA strategy.
-
-Do not change target-delta execution.
-
-Do not change startup adoption.
-
-Do not weaken startup gates.
-
-Do not manually delete rows without repair evidence.
-
-Do not silently ignore stale lot projection.
-
-Do not make the bot resume while projection is non-converged.
-
-Do not broaden this to arbitrary projection conflicts unless tests prove safety.
-
-## Suggested commands
-
-Run focused tests:
+Run targeted tests first:
 
 ```bash
-uv run pytest tests/test_position_authority_recovery_state.py -q
-uv run pytest tests/test_operator_commands.py -q
-uv run pytest tests/test_failsafe.py -q
+uv run python -m py_compile src/bithumb_bot/execution_service.py
 uv run pytest tests/test_target_position_execution.py -q
 ```
 
-Run repair-plan/operator-focused subset:
+If you modify reporting:
 
 ```bash
-uv run pytest tests/test_position_authority_recovery_state.py -q -k "flat or stale or projection or authority"
-uv run pytest tests/test_operator_commands.py -q -k "rebuild_position_authority or repair_plan"
+uv run pytest -q tests -k "ops or recovery or report or target_position"
 ```
 
-Then run full suite if feasible:
+Run broader tests if feasible:
 
 ```bash
 uv run pytest -q
 ```
 
-## Final report format
+## Expected behavioral outcome
 
-Report exactly in this structure:
+For a target-delta BUY decision with:
 
-```markdown
-# Flat Stale Lot Projection Repair Report
+* `TARGET_EXPOSURE_KRW=70000`
+* reference price around `113_428_000`
+* broker qty `0`
+* min qty `0.0001`
+* min notional `5000`
 
-## Summary
-- What was wrong:
-- What changed:
-- What did not change:
+The system should produce:
 
-## Root Cause Confirmed
-- Broker/portfolio truth:
-- Stale open_position_lots projection:
-- Why startup gate was correct:
-- Why existing repair-plan could not apply:
-
-## Design Implemented
-- Detector:
-- Apply path:
-- Repair event/audit evidence:
-- Postcondition checks:
-- CLI/repair-plan integration:
-
-## Behavior Proven
-### EC2-style flat stale projection
-- Input:
-- Expected:
-- Actual:
-
-### Unsafe broker not flat
-- Input:
-- Expected:
-- Actual:
-
-### Unsafe portfolio not flat
-- Input:
-- Expected:
-- Actual:
-
-### Unsafe open orders
-- Input:
-- Expected:
-- Actual:
-
-### Missing terminal SELL evidence
-- Input:
-- Expected:
-- Actual:
-
-### Idempotency
-- Input:
-- Expected:
-- Actual:
-
-## Tests
-- New/updated tests:
-- Commands run:
-- Results:
-
-## Operational Procedure
-- Preview command:
-- Apply command:
-- Post-repair verification commands:
-- Rollback/backup note:
-
-## Compatibility
-- target_delta:
-- startup adoption:
-- lot_native accounting:
-- recovery-report:
-- live submit:
-
-## Remaining Risks / Follow-ups
-- Known limitations:
-- Recommended cleanup:
+```text
+target_order_rule_min_qty=0.0001
+target_order_rule_min_notional_krw=5000
+target_delta_side=BUY
+target_submit_qty≈0.000617
+target_would_submit=1
+submit_expected=1
+execution_block_reason=none
 ```
 
-Remember: this is not a trading fix. It is an operational recovery-system fix. The bot must not resume while `open_position_lots` projects BTC that broker and portfolio no longer hold, but the operator also needs a safe, auditable repair command for exactly this verified-flat stale projection case.
+It should not produce:
+
+```text
+missing_order_rule_min_qty
+target_order_rule_min_qty=null
+target_would_submit=0
+```
+
+unless all authoritative order-rule sources are genuinely unavailable.
+
+## Final report format
+
+When done, report in this structure:
+
+1. **Summary**
+
+   * What changed and why.
+   * Whether the EC2 incident hypothesis was confirmed, falsified, or refined.
+
+2. **Root-cause hypotheses**
+
+   * List each hypothesis.
+   * Mark: confirmed / falsified / inconclusive.
+   * Include repo evidence for each.
+
+3. **Design changes**
+
+   * Explain how the fix prevents the class of issue, not just this symptom.
+   * Explain how fail-closed behavior is preserved.
+
+4. **Files changed**
+
+   * File-by-file summary.
+
+5. **Tests added/updated**
+
+   * Test names and what each proves.
+   * Include whether the EC2 reproduction case is covered.
+
+6. **Validation results**
+
+   * Commands run.
+   * Pass/fail results.
+   * Any tests not run and why.
+
+7. **Operational verification**
+
+   * Exact EC2/SQLite/ops-report commands to verify after deployment.
+   * Expected output snippets.
+
+8. **Follow-up recommendations**
+
+   * Larger `OrderRuleAuthority` / `ExecutionOrderRules` refactor if not completed.
+   * Replay-decision command proposal.
+   * Fee/accounting subsystem separation recommendations.
+   * Reporting improvements still needed, if any.
 

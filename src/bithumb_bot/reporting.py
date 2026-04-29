@@ -393,6 +393,11 @@ def _target_shadow_from_context(context: dict[str, object]) -> dict[str, object]
         "target_delta_notional_krw",
         "target_block_reason",
         "target_position_truth_state",
+        "target_order_rule_min_qty",
+        "target_order_rule_min_notional_krw",
+        "order_rule_authority",
+        "order_rule_authority_source",
+        "order_rule_authority_source_mode",
     ):
         if key not in source and key in context:
             source[key] = context[key]
@@ -862,6 +867,11 @@ class RecentDecisionFlowSummary:
     target_delta_notional_krw: float | None
     target_block_reason: str
     target_position_truth_state: str
+    target_order_rule_min_qty: float | None
+    target_order_rule_min_notional_krw: float | None
+    order_rule_authority: str
+    order_rule_authority_source: str
+    order_rule_authority_source_mode: str
     buy_flow_state: str
     entry_blocked: bool
     entry_allowed: bool
@@ -1879,6 +1889,25 @@ def fetch_recent_decision_flow(
                 ),
                 target_block_reason=str(target_shadow.get("target_block_reason") or "-"),
                 target_position_truth_state=str(target_shadow.get("target_position_truth_state") or "-"),
+                target_order_rule_min_qty=(
+                    None
+                    if target_shadow.get("target_order_rule_min_qty") is None
+                    else float(target_shadow.get("target_order_rule_min_qty") or 0.0)
+                ),
+                target_order_rule_min_notional_krw=(
+                    None
+                    if target_shadow.get("target_order_rule_min_notional_krw") is None
+                    else float(target_shadow.get("target_order_rule_min_notional_krw") or 0.0)
+                ),
+                order_rule_authority=str(target_shadow.get("order_rule_authority") or "-"),
+                order_rule_authority_source=str(
+                    target_shadow.get("order_rule_authority_source")
+                    or target_shadow.get("order_rule_authority")
+                    or "-"
+                ),
+                order_rule_authority_source_mode=str(
+                    target_shadow.get("order_rule_authority_source_mode") or "-"
+                ),
                 buy_flow_state=_derive_buy_flow_state(
                     raw_signal=str(row["raw_signal"]),
                     final_signal=str(row["final_signal"]),
@@ -4028,6 +4057,22 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "base_signal": row.base_signal,
                 "raw_signal": row.raw_signal,
                 "final_signal": row.final_signal,
+                "final_action": row.final_action,
+                "submit_expected": row.submit_expected,
+                "pre_submit_proof_status": row.pre_submit_proof_status,
+                "execution_block_reason": row.execution_block_reason,
+                "target_delta_submit_allowed": bool(row.target_would_submit),
+                "target_delta_block_reason": row.target_block_reason,
+                "target_delta_side": row.target_delta_side,
+                "target_would_submit": row.target_would_submit,
+                "target_submit_qty": row.target_submit_qty,
+                "target_delta_notional_krw": row.target_delta_notional_krw,
+                "target_block_reason": row.target_block_reason,
+                "target_position_truth_state": row.target_position_truth_state,
+                "target_order_rule_min_qty": row.target_order_rule_min_qty,
+                "target_order_rule_min_notional_krw": row.target_order_rule_min_notional_krw,
+                "order_rule_authority": row.order_rule_authority,
+                "order_rule_authority_source_mode": row.order_rule_authority_source_mode,
                 "buy_flow_state": row.buy_flow_state,
                 "entry_blocked": row.entry_blocked,
                 "entry_allowed": row.entry_allowed,
@@ -4488,6 +4533,11 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"target_submit_qty={_fmt_float(float(row.target_submit_qty or 0.0), 8)} "
                 f"target_delta_notional_krw={_fmt_float(float(row.target_delta_notional_krw or 0.0), 0)} "
                 f"target_block_reason={row.target_block_reason} "
+                f"target_delta_submit_allowed={1 if row.target_would_submit else 0} "
+                f"target_delta_block_reason={row.target_block_reason} "
+                f"target_order_rule_min_qty={_fmt_float(float(row.target_order_rule_min_qty or 0.0), 8)} "
+                f"target_order_rule_min_notional_krw={_fmt_float(float(row.target_order_rule_min_notional_krw or 0.0), 0)} "
+                f"order_rule_authority_source={row.order_rule_authority_source} "
                 f"target_position_truth_state={row.target_position_truth_state} "
                 f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
                 f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
