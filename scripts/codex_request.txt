@@ -1,64 +1,30 @@
-We now confirmed the remaining bug after commit 5a6279d.
+After fee_pending_accounting_repair id=11 is recorded and active fee incident is resolved,
+the repaired fee cash effect is still not reflected in portfolio cash.
 
-The fee-pending repair command inserted a valid row into fee_pending_accounting_repairs:
-
-  id=11
-  client_order_id=live_1777435320000_sell_ae60a72b
-  exchange_order_id=C0101000002956694365
-  fill_id=C0101000000984365609
-  fill_ts=1777435443000
-  price=114325000.0
-  qty=0.00004374
-  fee=2.0
-  fee_provenance=order_level_paid_fee_validated_allocated
-  repair_basis.observation_id=26
-
-But broker_fill_observations still has only:
-
-  id=26
-  fill_id=C0101000000984365609
-  fee=0.0
-  fee_status=assumed_zero_non_material
-  accounting_status=fee_pending
-
-  id=27
-  fill_id=C0101000000984365610
-  fee=25.43
-  fee_status=validated_order_level_paid_fee_allocated
-  accounting_status=accounting_complete
-
-So audit-ledger still reports:
-  broker_fill_latest_unresolved_fee_pending_count=1
-  fill_accounting_active_issue_count=1
-  unresolved_fee_state=1
-  live_ready=0
-
-Do not create another duplicate fee_pending_accounting_repair. The duplicate guard is correct.
-
-Fix the repair resolution path so an existing fee_pending_accounting_repair resolves the matching active fee_pending broker_fill_observation.
-
-Acceptable designs:
-1. The incident projection should treat matching fee_pending_accounting_repairs as resolution evidence when client_order_id/fill_id/fill_ts/price/qty match and fee is positive.
-2. Or fee-pending-accounting-repair --apply should also record a broker_fill_observation with accounting_status=accounting_complete and source=fee_pending_accounting_repair.
-
-Prefer the design that best fits the repo’s existing projection model, but it must be event-sourced, idempotent, and tested.
-
-Required postcondition for the existing live case:
-  broker_fill_latest_unresolved_fee_pending_count=0
-  fill_accounting_active_issue_count=0
+Current live DB:
+  portfolio.cash_available=398602.51777
+  broker.cash_available=398600.51777
+  delta=-2.0
+  trade 42 fee=25.43
+  fill 43 fee=25.43
+  fee_pending_accounting_repair id=11 fee=2.0
   unresolved_fee_state=0
-  cash_delta=0 or the fee-pending blocker no longer contributes to the cash split mismatch
-  live_ready=1 or startup gate no longer blocked by fee_pending_auto_recovering
+  fill_accounting_active_issue_count=0
+  startup_gate_blocked=0
+  but HALT_STATE_UNRESOLVED and BALANCE_SPLIT_MISMATCH remain.
 
-Add tests:
-  test_fee_pending_repair_row_resolves_matching_fee_pending_observation
-  test_fee_pending_repair_apply_records_or_projects_accounting_complete_evidence
-  test_duplicate_fee_pending_repair_does_not_block_resolution_if_existing_repair_matches
-  test_non_matching_repair_does_not_resolve_unrelated_fee_pending_observation
+Fix design:
+  fee_pending_accounting_repair must have a canonical cash effect, or repair-plan must emit a safe cash adjustment candidate for the repaired fee delta.
 
-Run:
-  uv run pytest tests/test_position_authority_recovery_state.py -q
-  uv run pytest tests/test_fee_observation.py -q
-  uv run pytest tests/test_live_fill_aggregation.py -q
-  uv run pytest tests/test_bithumb_private_api.py -q
-  uv run pytest -q
+Acceptable approaches:
+  1. Include fee_pending_accounting_repairs in authoritative cash replay so SELL repair fee decreases cash by fee amount and BUY repair fee decreases cash by fee amount as appropriate.
+  2. Or, when fee_pending repair resolves the incident but portfolio cash still differs from broker by exactly the repaired fee delta, emit a safe bounded repair candidate that adjusts portfolio cash through an audited event.
+  3. Do not directly mutate portfolio rows without event evidence.
+
+Required postcondition:
+  portfolio.cash_available=398600.51777
+  portfolio.cash_krw=398600.51777
+  broker/local cash delta=0
+  HALT_STATE_UNRESOLVED cleared or stale halt clear allowed
+  BALANCE_SPLIT_MISMATCH gone
+  live_ready=1 or can_resume=true

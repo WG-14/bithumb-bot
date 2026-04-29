@@ -898,6 +898,111 @@ def test_recovery_policy_prefers_position_management_resume_for_reliable_open_ex
     assert policy["recommended_command"] == "uv run python bot.py resume"
 
 
+def test_repair_plan_emits_fee_pending_cash_effect_adjustment_when_repair_delta_remains() -> None:
+    report = {
+        "mode": "live",
+        "cash_available": 398_600.51777,
+        "cash_locked": 0.0,
+        "portfolio_qty": 0.0,
+        "broker_qty": 0.0,
+        "broker_qty_known": True,
+        "broker_portfolio_converged": False,
+        "lot_projection_converged": True,
+        "accounting_projection_ok": False,
+        "runtime_readiness": {
+            "normalized_exposure": {"has_executable_exposure": False},
+            "resume_blockers": ["BALANCE_SPLIT_MISMATCH"],
+            "projection_convergence": {"projected_total_qty": 0.0, "reason": "converged"},
+        },
+        "fill_accounting_incident_projection": {
+            "active_issue_count": 0,
+            "repaired_count": 1,
+        },
+        "fee_pending_accounting_repair_summary": {
+            "repair_count": 1,
+            "last_event_ts": 1_777_104_360_900,
+            "last_repair_key": "fee-pending-repair-11",
+            "last_fee": 2.0,
+        },
+        "fee_gap_accounting_repair_preview": {
+            "needs_repair": False,
+            "active_issue": False,
+            "resume_blocking": False,
+            "portfolio_cash": 398_602.51777,
+            "cash_available": 398_602.51777,
+            "cash_locked": 0.0,
+        },
+        "manual_flat_accounting_repair_preview": {"needs_repair": False},
+        "external_position_accounting_repair_preview": {"needs_repair": False},
+        "position_authority_rebuild_preview": {"needs_rebuild": False},
+        "fee_rate_drift_diagnostics": {"recent_expected_fee_rate_mismatch_count": 0},
+    }
+
+    plan = build_repair_plan_preview_from_report(report)
+    candidate = next(
+        item
+        for item in plan["candidate_repairs"]
+        if item["name"] == "fee-pending-cash-effect-adjustment"
+    )
+
+    assert candidate["needed"] is True
+    assert candidate["safe_to_apply"] is True
+    assert candidate["cash_delta"] == pytest.approx(-2.0)
+    assert candidate["repaired_fee"] == pytest.approx(2.0)
+    assert "record-external-cash-adjustment" in candidate["recommended_command"]
+    assert "--delta-amount -2.00000000" in candidate["recommended_command"]
+    assert "--reason fee_pending_cash_effect_repair" in candidate["recommended_command"]
+    assert plan["recommended_action"] == "apply_fee-pending-cash-effect-adjustment"
+
+
+def test_repair_plan_blocks_fee_pending_cash_effect_adjustment_with_active_incident() -> None:
+    report = {
+        "mode": "live",
+        "cash_available": 398_600.51777,
+        "cash_locked": 0.0,
+        "broker_portfolio_converged": False,
+        "lot_projection_converged": True,
+        "accounting_projection_ok": False,
+        "runtime_readiness": {
+            "normalized_exposure": {"has_executable_exposure": False},
+            "projection_convergence": {"projected_total_qty": 0.0, "reason": "converged"},
+        },
+        "fill_accounting_incident_projection": {
+            "active_issue_count": 1,
+            "repaired_count": 1,
+        },
+        "fee_pending_accounting_repair_summary": {
+            "repair_count": 1,
+            "last_event_ts": 1_777_104_360_900,
+            "last_repair_key": "fee-pending-repair-11",
+            "last_fee": 2.0,
+        },
+        "fee_gap_accounting_repair_preview": {
+            "needs_repair": False,
+            "active_issue": False,
+            "resume_blocking": False,
+            "portfolio_cash": 398_602.51777,
+            "cash_available": 398_602.51777,
+            "cash_locked": 0.0,
+        },
+        "manual_flat_accounting_repair_preview": {"needs_repair": False},
+        "external_position_accounting_repair_preview": {"needs_repair": False},
+        "position_authority_rebuild_preview": {"needs_rebuild": False},
+    }
+
+    plan = build_repair_plan_preview_from_report(report)
+    candidate = next(
+        item
+        for item in plan["candidate_repairs"]
+        if item["name"] == "fee-pending-cash-effect-adjustment"
+    )
+
+    assert candidate["needed"] is False
+    assert candidate["safe_to_apply"] is False
+    assert candidate["recommended_command"] is None
+    assert "active_fee_pending_issue_present" in candidate["why_not_safe"]
+
+
 def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
     report = {
         "mode": "live",

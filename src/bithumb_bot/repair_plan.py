@@ -221,6 +221,166 @@ def _fee_pending_accounting_repair_candidate(
     }
 
 
+def _fee_pending_cash_effect_adjustment_candidate(
+    *,
+    report: dict[str, Any],
+    fill_projection: dict[str, Any],
+    mode: str,
+) -> dict[str, Any]:
+    accounting_projection = dict(report.get("accounting_projection") or {})
+    fee_gap_preview = dict(report.get("fee_gap_accounting_repair_preview") or {})
+    repair_summary = dict(report.get("fee_pending_accounting_repair_summary") or {})
+    runtime_readiness = dict(report.get("runtime_readiness") or {})
+    broker_cash_available = _float(report.get("cash_available"))
+    broker_cash_locked = _float(report.get("cash_locked"))
+    local_cash_available_source = (
+        accounting_projection.get("portfolio_cash_available")
+        if accounting_projection.get("portfolio_cash_available") is not None
+        else fee_gap_preview.get("cash_available")
+        if fee_gap_preview.get("cash_available") is not None
+        else fee_gap_preview.get("portfolio_cash")
+    )
+    local_cash_locked_source = (
+        accounting_projection.get("portfolio_cash_locked")
+        if accounting_projection.get("portfolio_cash_locked") is not None
+        else fee_gap_preview.get("cash_locked")
+    )
+    local_cash_available = _float(local_cash_available_source)
+    local_cash_locked = _float(local_cash_locked_source)
+    broker_cash_total = broker_cash_available + broker_cash_locked
+    local_cash_total_source = (
+        accounting_projection.get("portfolio_cash")
+        if accounting_projection.get("portfolio_cash") is not None
+        else fee_gap_preview.get("portfolio_cash")
+    )
+    local_cash_total = (
+        _float(local_cash_total_source)
+        if local_cash_total_source is not None
+        else local_cash_available + local_cash_locked
+    )
+    cash_delta = broker_cash_total - local_cash_total
+    repaired_fee = _float(repair_summary.get("last_fee"))
+    active_issue = bool(_int(fill_projection.get("active_issue_count")) > 0)
+    unresolved_fee_state = bool((accounting_projection.get("unresolved_fee_state")))
+    repaired_incident_count = _int(
+        accounting_projection.get(
+            "fill_accounting_repaired_incident_count",
+            fill_projection.get("repaired_count"),
+        )
+    )
+    repair_count = _int(repair_summary.get("repair_count"))
+    broker_local_cash_only_mismatch = bool(
+        abs(cash_delta) > 1e-8
+        and abs(broker_cash_locked - local_cash_locked) <= 1e-8
+    )
+    delta_matches_repaired_fee = bool(repaired_fee > 0.0 and abs(abs(cash_delta) - repaired_fee) <= 1e-8)
+    cash_effect_direction_ok = bool(cash_delta < 0.0)
+    needed = bool(
+        repair_count > 0
+        and repaired_incident_count > 0
+        and not active_issue
+        and not unresolved_fee_state
+        and broker_local_cash_only_mismatch
+        and delta_matches_repaired_fee
+        and cash_effect_direction_ok
+    )
+    blockers: list[str] = []
+    if repair_count <= 0:
+        blockers.append("fee_pending_accounting_repair_count=0")
+    if repaired_incident_count <= 0:
+        blockers.append("repaired_fee_pending_incident_count=0")
+    if active_issue:
+        blockers.append("active_fee_pending_issue_present")
+    if unresolved_fee_state:
+        blockers.append("unresolved_fee_state=1")
+    if not broker_local_cash_only_mismatch:
+        blockers.append("broker_local_cash_only_mismatch_not_detected")
+    if not delta_matches_repaired_fee:
+        blockers.append(
+            f"cash_delta_does_not_match_repaired_fee:delta={cash_delta:.8f},fee={repaired_fee:.8f}"
+        )
+    if not cash_effect_direction_ok:
+        blockers.append(f"cash_delta_not_fee_decrease:delta={cash_delta:.8f}")
+
+    last_event_ts = _int(repair_summary.get("last_event_ts"))
+    last_repair_key = str(repair_summary.get("last_repair_key") or "unknown")
+    adjustment_key = (
+        "fee_pending_cash_effect:"
+        f"{last_repair_key}:"
+        f"{cash_delta:.8f}:"
+        f"{broker_cash_total:.8f}:"
+        f"{local_cash_total:.8f}"
+    )
+    broker_snapshot_basis = {
+        "source": "fee_pending_cash_effect_repair_plan",
+        "fee_pending_accounting_repair_key": last_repair_key,
+        "fee_pending_accounting_repair_event_ts": last_event_ts,
+        "broker_cash_available": broker_cash_available,
+        "broker_cash_locked": broker_cash_locked,
+        "broker_cash_total": broker_cash_total,
+        "local_cash_available": local_cash_available,
+        "local_cash_locked": local_cash_locked,
+        "local_cash_total": local_cash_total,
+        "cash_delta": cash_delta,
+        "repaired_fee": repaired_fee,
+    }
+    correlation_metadata = {
+        "fee_pending_accounting_repair_count": repair_count,
+        "fill_accounting_repaired_incident_count": repaired_incident_count,
+        "fill_accounting_active_issue_count": _int(fill_projection.get("active_issue_count")),
+        "resume_blockers": list(runtime_readiness.get("resume_blockers") or []),
+    }
+    basis_arg = json.dumps(broker_snapshot_basis, sort_keys=True, separators=(",", ":"))
+    correlation_arg = json.dumps(correlation_metadata, sort_keys=True, separators=(",", ":"))
+    recommended_command = (
+        "uv run python bot.py record-external-cash-adjustment "
+        f"--event-ts {last_event_ts or '<event_ts>'} "
+        f"--delta-amount {cash_delta:.8f} "
+        "--source fee_pending_accounting_repair "
+        "--reason fee_pending_cash_effect_repair "
+        f"--broker-snapshot-basis '{basis_arg}' "
+        f"--correlation-metadata '{correlation_arg}' "
+        f"--adjustment-key '{adjustment_key}' "
+        "--yes"
+    )
+    return {
+        "name": "fee-pending-cash-effect-adjustment",
+        "needed": needed,
+        "active_issue": False,
+        "safe_to_apply": needed,
+        "final_safe_to_apply": needed,
+        "preconditions": (
+            "fee-pending incident is resolved and the only remaining cash delta equals the repaired fee"
+            if needed
+            else "; ".join(blockers or ["fee-pending cash-effect adjustment not applicable"])
+        ),
+        "touched_tables": [
+            "external_cash_adjustments",
+            "portfolio",
+            "fee_pending_accounting_repairs",
+        ],
+        "expected_after": "portfolio cash decreases by the repaired fee delta through an audited external cash adjustment event",
+        "idempotency_key": adjustment_key,
+        "rollback_or_backup": _backup_guidance(mode),
+        "why_safe": (
+            "bounded to a resolved fee-pending repair where broker/local cash delta exactly matches the repaired fee"
+            if needed
+            else "blocked until resolved repair evidence and exact broker/local fee-delta match are present"
+        ),
+        "why_not_safe": blockers,
+        "cash_delta": cash_delta,
+        "repaired_fee": repaired_fee,
+        "broker_cash_total": broker_cash_total,
+        "local_cash_total": local_cash_total,
+        "recommended_command": recommended_command,
+        "post_apply_verification_commands": [
+            "uv run python bot.py reconcile",
+            "uv run python bot.py health",
+            "uv run python bot.py recovery-report",
+        ],
+    }
+
+
 def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
     mode = str(report.get("mode") or "paper")
     fill_projection = dict(report.get("fill_accounting_incident_projection") or {})
@@ -232,6 +392,7 @@ def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any
 
     candidates = [
         _fee_pending_accounting_repair_candidate(report=report, fill_projection=fill_projection, mode=mode),
+        _fee_pending_cash_effect_adjustment_candidate(report=report, fill_projection=fill_projection, mode=mode),
         {
             "name": "fee-gap-accounting-repair",
             "needed": bool(_truthy(fee_gap_preview.get("needs_repair")) or _truthy(fee_gap_preview.get("active_issue"))),
