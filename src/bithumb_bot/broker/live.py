@@ -13,6 +13,7 @@ from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..decision_context import resolve_canonical_position_exposure_snapshot
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
+from ..fee_observation import fee_accounting_status
 from ..fee_authority import build_fee_authority_snapshot
 from ..dust import (
     DustState,
@@ -292,6 +293,14 @@ def _aggregate_fills_for_apply(
     invalid_fee_notional = 0.0
     aggregate_notional = 0.0
     max_invalid_fill_notional = 0.0
+    pending_component_fee_count = 0
+    pending_component_fee_ids: list[str] = []
+    first_pending_component = None
+    component_fee_statuses: list[str] = []
+    component_fee_sources: list[str] = []
+    component_fee_confidences: list[str] = []
+    component_fee_provenances: list[str] = []
+    component_fee_reasons: list[str] = []
     for fill in fills:
         fill_qty = float(fill.qty)
         fill_price = float(fill.price)
@@ -342,6 +351,33 @@ def _aggregate_fills_for_apply(
                     fee=fill_fee_raw,
                     fill_notional=fill_notional,
                 )
+            )
+        component_accounting_status = fee_accounting_status(
+            fee=fill_fee_raw,
+            fee_status=getattr(fill, "fee_status", "complete"),
+            price=fill_price,
+            qty=fill_qty,
+            material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+            fee_source=getattr(fill, "fee_source", None),
+            fee_confidence=getattr(fill, "fee_confidence", None),
+            provenance=getattr(fill, "fee_provenance", None),
+            reason=getattr(fill, "fee_validation_reason", None),
+            checks=getattr(fill, "fee_validation_checks", None),
+        )
+        if component_accounting_status != "accounting_complete":
+            pending_component_fee_count += 1
+            pending_component_fee_ids.append(str(fill.fill_id))
+            if first_pending_component is None:
+                first_pending_component = fill
+        else:
+            component_fee_statuses.append(str(getattr(fill, "fee_status", "complete") or "complete"))
+            component_fee_sources.append(str(getattr(fill, "fee_source", "trade_level_fee") or "trade_level_fee"))
+            component_fee_confidences.append(str(getattr(fill, "fee_confidence", "authoritative") or "authoritative"))
+            component_fee_provenances.append(
+                str(getattr(fill, "fee_provenance", "trade_level_fee_present") or "trade_level_fee_present")
+            )
+            component_fee_reasons.append(
+                str(getattr(fill, "fee_validation_reason", "accounting_complete") or "accounting_complete")
             )
 
         weighted_notional += fill_notional
@@ -432,6 +468,52 @@ def _aggregate_fills_for_apply(
     aggregate_price = weighted_notional / total_qty
     aggregate_root = str(exchange_order_id or client_order_id)
     aggregate_fill_id = f"{aggregate_root}:aggregate:{aggregate_fill_ts}"
+    fee_status = "complete"
+    fee_source = "trade_level_fee"
+    fee_confidence = "authoritative"
+    fee_provenance = "trade_level_fee_present"
+    fee_validation_reason = "accounting_complete"
+    fee_validation_checks = None
+    parse_warnings: tuple[str, ...] = ()
+    if pending_component_fee_count > 0:
+        pending_status = str(getattr(first_pending_component, "fee_status", "fee_pending") or "fee_pending")
+        fee_status = pending_status
+        fee_source = "mixed_component_fee_evidence"
+        fee_confidence = "ambiguous"
+        fee_provenance = "aggregate_contains_pending_component_fee"
+        fee_validation_reason = "component_fee_pending"
+        fee_validation_checks = {
+            "component_fee_pending": True,
+            "component_fee_pending_count": pending_component_fee_count,
+            "component_fee_invalid_count": invalid_fee_count,
+        }
+        parse_warnings = tuple(f"component_fee_pending:{fill_id}" for fill_id in pending_component_fee_ids)
+    elif component_fee_statuses:
+        unique_statuses = set(component_fee_statuses)
+        unique_sources = set(component_fee_sources)
+        unique_confidences = set(component_fee_confidences)
+        unique_provenances = set(component_fee_provenances)
+        unique_reasons = set(component_fee_reasons)
+        fee_status = next(iter(unique_statuses)) if len(unique_statuses) == 1 else "complete"
+        fee_source = (
+            next(iter(unique_sources)) if len(unique_sources) == 1 else "mixed_component_fee_evidence"
+        )
+        fee_confidence = (
+            next(iter(unique_confidences)) if len(unique_confidences) == 1 else "validated"
+        )
+        fee_provenance = (
+            next(iter(unique_provenances))
+            if len(unique_provenances) == 1
+            else "aggregate_contains_multiple_complete_fee_sources"
+        )
+        fee_validation_reason = (
+            next(iter(unique_reasons)) if len(unique_reasons) == 1 else "component_fees_accounting_complete"
+        )
+        fee_validation_checks = {
+            "component_fee_pending": False,
+            "component_fee_pending_count": 0,
+            "component_fee_invalid_count": invalid_fee_count,
+        }
     return [
         BrokerFill(
             client_order_id=client_order_id,
@@ -441,6 +523,13 @@ def _aggregate_fills_for_apply(
             qty=total_qty,
             fee=total_fee,
             exchange_order_id=exchange_order_id,
+            fee_status=fee_status,
+            fee_source=fee_source,
+            fee_confidence=fee_confidence,
+            fee_provenance=fee_provenance,
+            fee_validation_reason=fee_validation_reason,
+            fee_validation_checks=fee_validation_checks,
+            parse_warnings=parse_warnings,
         )
     ]
 

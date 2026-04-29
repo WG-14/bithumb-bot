@@ -3369,12 +3369,124 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         """
         SELECT event_ts, client_order_id, exchange_order_id, fill_id, side, price, qty,
                fee, fee_status, fee_source, fee_confidence, accounting_status, source,
-               fee_provenance, fee_validation_reason, fee_validation_checks, parse_warnings
+               fee_provenance, fee_validation_reason, fee_validation_checks, parse_warnings,
+               raw_payload
         FROM broker_fill_observations
         ORDER BY event_ts DESC, id DESC
         LIMIT 1
         """
     ).fetchone()
+    fee_evidence_diagnostics: dict[str, Any] = {
+        "primary_blocker": "none",
+        "affected_client_order_id": None,
+        "affected_exchange_order_id": None,
+        "affected_fill_ids": [],
+        "order_paid_fee": None,
+        "sum_observed_or_applied_fill_fee": None,
+        "fee_delta": None,
+        "non_authoritative_fill_ids": [],
+        "complete_fill_set_available": False,
+        "deterministic_allocation_available": False,
+        "operator_confirmation_required": False,
+        "recommended_safe_next_action": "none",
+    }
+    if last is not None:
+        last_client_order_id = str(last["client_order_id"])
+        last_exchange_order_id = (
+            str(last["exchange_order_id"]) if last["exchange_order_id"] is not None else None
+        )
+        related = conn.execute(
+            """
+            SELECT fill_id, fee, fee_status, accounting_status, fee_validation_checks, raw_payload
+            FROM broker_fill_observations
+            WHERE client_order_id=?
+              AND COALESCE(exchange_order_id, '')=COALESCE(?, '')
+            ORDER BY event_ts ASC, id ASC
+            """,
+            (last_client_order_id, last_exchange_order_id),
+        ).fetchall()
+        fill_ids = [
+            str(item["fill_id"])
+            for item in related
+            if item["fill_id"] is not None and str(item["fill_id"]).strip()
+        ]
+        non_authoritative_fill_ids = [
+            str(item["fill_id"])
+            for item in related
+            if item["fill_id"] is not None
+            and str(item["fill_id"]).strip()
+            and str(item["accounting_status"] or "") != "accounting_complete"
+        ]
+        observed_fee_sum = sum(float(item["fee"]) for item in related if item["fee"] is not None)
+        order_paid_fee: float | None = None
+        complete_fill_set_available = False
+        allocated_fee_sum_match = False
+        for item in related:
+            checks_raw = item["fee_validation_checks"]
+            if checks_raw:
+                try:
+                    checks = json.loads(str(checks_raw))
+                except json.JSONDecodeError:
+                    checks = {}
+                if isinstance(checks, dict):
+                    complete_fill_set_available = complete_fill_set_available or bool(
+                        checks.get("complete_fill_set")
+                    )
+                    allocated_fee_sum_match = allocated_fee_sum_match or bool(
+                        checks.get("allocated_fee_sum_match")
+                    )
+            raw_payload = item["raw_payload"]
+            if raw_payload and order_paid_fee is None:
+                try:
+                    payload = json.loads(str(raw_payload))
+                except json.JSONDecodeError:
+                    payload = {}
+                if isinstance(payload, dict):
+                    order_fee_fields = payload.get("order_fee_fields")
+                    paid_fee_raw = None
+                    if isinstance(order_fee_fields, dict):
+                        paid_fee_raw = order_fee_fields.get("paid_fee")
+                    if paid_fee_raw is None:
+                        paid_fee_raw = payload.get("paid_fee")
+                    try:
+                        order_paid_fee = float(paid_fee_raw) if paid_fee_raw not in (None, "") else None
+                    except (TypeError, ValueError):
+                        order_paid_fee = None
+        fee_delta = None
+        if order_paid_fee is not None:
+            fee_delta = float(order_paid_fee) - float(observed_fee_sum)
+        has_fee_pending = bool(non_authoritative_fill_ids)
+        deterministic_allocation_available = bool(
+            has_fee_pending
+            and order_paid_fee is not None
+            and complete_fill_set_available
+            and (allocated_fee_sum_match or abs(float(fee_delta or 0.0)) > FEE_ACCOUNTING_COMPLETE_EPS)
+        )
+        if has_fee_pending:
+            primary_blocker = "fee_evidence_non_authoritative"
+            if deterministic_allocation_available:
+                recommended_action = "rerun reconcile/recovery-report; deterministic order-level paid_fee allocation evidence is present"
+            elif order_paid_fee is not None:
+                recommended_action = "review retained order_paid_fee and fill evidence before manual repair"
+            else:
+                recommended_action = "obtain authoritative exchange fee evidence before repair or resume"
+        else:
+            primary_blocker = "none"
+            recommended_action = "none"
+        fee_evidence_diagnostics = {
+            "primary_blocker": primary_blocker,
+            "affected_client_order_id": last_client_order_id,
+            "affected_exchange_order_id": last_exchange_order_id,
+            "affected_fill_ids": fill_ids,
+            "order_paid_fee": order_paid_fee,
+            "sum_observed_or_applied_fill_fee": observed_fee_sum if related else None,
+            "fee_delta": fee_delta,
+            "non_authoritative_fill_ids": non_authoritative_fill_ids,
+            "complete_fill_set_available": bool(complete_fill_set_available),
+            "deterministic_allocation_available": deterministic_allocation_available,
+            "operator_confirmation_required": bool(has_fee_pending and not deterministic_allocation_available),
+            "recommended_safe_next_action": recommended_action,
+        }
     return {
         "observation_count": int(row["observation_count"] if row else 0),
         "fee_pending_count": int(row["fee_pending_count"] if row else 0),
@@ -3401,6 +3513,7 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         "last_fee_validation_reason": str(last["fee_validation_reason"]) if last is not None and last["fee_validation_reason"] is not None else None,
         "last_fee_validation_checks": str(last["fee_validation_checks"]) if last is not None and last["fee_validation_checks"] is not None else None,
         "last_parse_warnings": str(last["parse_warnings"]) if last is not None and last["parse_warnings"] is not None else None,
+        "fee_evidence_diagnostics": fee_evidence_diagnostics,
     }
 
 

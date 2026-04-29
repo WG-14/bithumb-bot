@@ -292,6 +292,41 @@ def test_validate_multi_fill_order_level_paid_fee_allocation_accepts_incident_sh
     assert allocation.checks["expected_fee_rate_match"] is True
 
 
+def test_order_level_paid_fee_sum_invariant_detects_fee_shortfall() -> None:
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+
+    allocation = validate_multi_fill_order_level_paid_fee_allocation(
+        paid_fee="27.43",
+        order_executed_volume=0.00059997,
+        order_executed_funds=68_579.88942,
+        client_order_id="live_1777435320000_sell_ae60a72b",
+        exchange_order_id="C0101000002956694365",
+        trades=[
+            MultiFillTradeEvidence(
+                fill_id="C0101000000984365609",
+                price=114_325_000.0,
+                qty=0.00004374,
+                funds=5_000.5755,
+            ),
+            MultiFillTradeEvidence(
+                fill_id="C0101000000984365610",
+                price=114_304_000.0,
+                qty=0.00055623,
+                funds=63_579.31392,
+            ),
+        ],
+    )
+
+    assert allocation.reason == "order_level_paid_fee_validated_allocated"
+    assert allocation.allocated_fees_by_fill_id["C0101000000984365609"] == pytest.approx(2.00)
+    assert allocation.allocated_fees_by_fill_id["C0101000000984365610"] == pytest.approx(25.43)
+    assert sum(allocation.allocated_fees_by_fill_id.values()) == pytest.approx(27.43)
+    assert allocation.checks["allocated_fee_sum_match"] is True
+    observed_shortfall = 27.43 - 25.43
+    assert observed_shortfall == pytest.approx(2.00)
+
+
 def test_validate_multi_fill_order_level_paid_fee_allocation_fails_closed_on_incomplete_fill_set() -> None:
     object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
     object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)

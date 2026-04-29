@@ -4560,6 +4560,17 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     assert metadata["fee_pending_fill_count"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
     assert metadata["fee_pending_operator_next_action"].startswith("pause additional orders")
+    report = _load_recovery_report()
+    fee_evidence = report["broker_fill_observation_summary"]["fee_evidence_diagnostics"]
+    assert fee_evidence["primary_blocker"] == "fee_evidence_non_authoritative"
+    assert fee_evidence["affected_client_order_id"] == "live_1776745440000_buy_ae9d0d6e"
+    assert fee_evidence["affected_exchange_order_id"] == "C0101000002939307963"
+    assert fee_evidence["affected_fill_ids"] == ["trade-no-fee"]
+    assert fee_evidence["order_paid_fee"] == pytest.approx(26.86)
+    assert fee_evidence["sum_observed_or_applied_fill_fee"] == pytest.approx(26.86)
+    assert fee_evidence["fee_delta"] == pytest.approx(0.0)
+    assert fee_evidence["operator_confirmation_required"] is True
+    assert report["fill_accounting_root_cause"]["fee_evidence_diagnostics"] == fee_evidence
 
 
 def test_reconcile_multi_fill_allocated_paid_fee_completes_accounting_without_fee_pending(tmp_path):

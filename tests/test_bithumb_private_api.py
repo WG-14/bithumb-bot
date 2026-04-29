@@ -4418,6 +4418,74 @@ def test_get_fills_order_level_fee_candidate_is_ambiguous_for_multiple_trade_row
     )
 
 
+def test_get_fills_allocates_order_paid_fee_when_small_fill_fee_is_assumed_zero_non_material(monkeypatch):
+    _configure_live()
+    original_fee_rate = settings.LIVE_FEE_RATE_ESTIMATE
+    original_threshold = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    broker = BithumbBroker()
+    payload = {
+        "uuid": "C0101000002956694365",
+        "client_order_id": "live_1777435320000_sell_ae60a72b",
+        "state": "done",
+        "side": "ask",
+        "price": "114304000",
+        "volume": "0.00059997",
+        "remaining_volume": "0",
+        "executed_volume": "0.00059997",
+        "executed_funds": "68579.88942",
+        "paid_fee": "27.43",
+        "created_at": "2026-04-29T13:04:00+09:00",
+        "updated_at": "2026-04-29T13:04:03+09:00",
+        "trades": [
+            {
+                "uuid": "C0101000000984365609",
+                "created_at": "2026-04-29T13:04:03+09:00",
+                "market": "KRW-BTC",
+                "side": "ask",
+                "price": "114325000",
+                "volume": "0.00004374",
+                "funds": "5000.5755",
+            },
+            {
+                "uuid": "C0101000000984365610",
+                "created_at": "2026-04-29T13:04:03+09:00",
+                "market": "KRW-BTC",
+                "side": "ask",
+                "price": "114304000",
+                "volume": "0.00055623",
+                "funds": "63579.31392",
+            },
+        ],
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    try:
+        fills = broker.get_fills(
+            client_order_id="live_1777435320000_sell_ae60a72b",
+            exchange_order_id="C0101000002956694365",
+        )
+    finally:
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", original_fee_rate)
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_threshold)
+
+    fills_by_id = {fill.fill_id: fill for fill in fills}
+    small = fills_by_id["C0101000000984365609"]
+    large = fills_by_id["C0101000000984365610"]
+    assert small.fee == pytest.approx(2.00)
+    assert small.fee_status == "validated_order_level_paid_fee_allocated"
+    assert small.fee_source == "order_level_paid_fee"
+    assert small.fee_confidence == "validated"
+    assert small.fee_validation_reason == "order_level_paid_fee_validated_allocated"
+    assert small.fee_validation_checks["allocated_fee_sum_match"] is True
+    assert large.fee == pytest.approx(25.43)
+    assert large.fee_status == "validated_order_level_paid_fee_allocated"
+    assert large.fee_source == "order_level_paid_fee"
+    assert large.fee_confidence == "validated"
+    assert sum(fill.fee or 0.0 for fill in fills) == pytest.approx(27.43)
+
+
 def test_get_fills_multi_fill_paid_fee_fails_closed_when_order_funds_do_not_match(monkeypatch):
     _configure_live()
     broker = BithumbBroker()

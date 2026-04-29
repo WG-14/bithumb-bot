@@ -6,6 +6,7 @@ import pytest
 
 from bithumb_bot.broker.base import BrokerFill
 from bithumb_bot.broker.live import FillFeeStrictModeError, _aggregate_fills_for_apply
+from bithumb_bot.broker.live_submission_execution import _fill_accounting_status
 from bithumb_bot.config import settings
 
 
@@ -46,6 +47,97 @@ def test_aggregate_fills_sums_qty_and_fee_and_keeps_weighted_price() -> None:
     assert agg.qty == pytest.approx(5.0)
     assert agg.fee == pytest.approx(3.0)
     assert agg.price == pytest.approx((100.0 * 2.0 + 110.0 * 3.0) / 5.0)
+
+
+def test_aggregate_fills_does_not_finalize_when_any_component_fee_is_pending() -> None:
+    fills = [
+        BrokerFill(
+            client_order_id="cid-pending",
+            fill_id="f-complete",
+            fill_ts=1000,
+            price=114304000.0,
+            qty=0.00055623,
+            fee=25.43,
+            exchange_order_id="ex-pending",
+            fee_status="validated_order_level_paid_fee_allocated",
+            fee_source="order_level_paid_fee",
+            fee_confidence="validated",
+            fee_provenance="order_level_paid_fee_validated_allocated",
+            fee_validation_reason="order_level_paid_fee_validated_allocated",
+        ),
+        BrokerFill(
+            client_order_id="cid-pending",
+            fill_id="f-pending",
+            fill_ts=1010,
+            price=114325000.0,
+            qty=0.00004374,
+            fee=0.0,
+            exchange_order_id="ex-pending",
+            fee_status="assumed_zero_non_material",
+            fee_source="missing",
+            fee_confidence="ambiguous",
+            fee_provenance="missing_fee_field",
+            fee_validation_reason="assumed_zero_non_material",
+        ),
+    ]
+
+    aggregated = _aggregate_fills_for_apply(
+        fills=fills,
+        client_order_id="cid-pending",
+        exchange_order_id="ex-pending",
+        side="SELL",
+        context="test",
+    )
+
+    assert len(aggregated) == 1
+    agg = aggregated[0]
+    assert agg.fee == pytest.approx(25.43)
+    assert agg.fee_status == "assumed_zero_non_material"
+    assert agg.fee_source == "mixed_component_fee_evidence"
+    assert agg.fee_confidence == "ambiguous"
+    assert agg.fee_provenance == "aggregate_contains_pending_component_fee"
+    assert agg.fee_validation_reason == "component_fee_pending"
+    assert agg.fee_validation_checks["component_fee_pending_count"] == 1
+    assert agg.parse_warnings == ("component_fee_pending:f-pending",)
+
+
+def test_live_application_preserves_fee_pending_status_across_aggregation() -> None:
+    aggregated = _aggregate_fills_for_apply(
+        fills=[
+            BrokerFill(
+                client_order_id="cid-live-pending",
+                fill_id="f-complete",
+                fill_ts=1000,
+                price=114304000.0,
+                qty=0.00055623,
+                fee=25.43,
+                exchange_order_id="ex-live-pending",
+                fee_status="validated_order_level_paid_fee_allocated",
+                fee_source="order_level_paid_fee",
+                fee_confidence="validated",
+            ),
+            BrokerFill(
+                client_order_id="cid-live-pending",
+                fill_id="f-pending",
+                fill_ts=1010,
+                price=114325000.0,
+                qty=0.00004374,
+                fee=0.0,
+                exchange_order_id="ex-live-pending",
+                fee_status="assumed_zero_non_material",
+                fee_source="missing",
+                fee_confidence="ambiguous",
+                fee_provenance="missing_fee_field",
+                fee_validation_reason="assumed_zero_non_material",
+            ),
+        ],
+        client_order_id="cid-live-pending",
+        exchange_order_id="ex-live-pending",
+        side="SELL",
+        context="test",
+    )
+
+    assert _fill_accounting_status(aggregated[0]) == "fee_pending"
 
 
 def test_aggregate_fills_warns_when_fee_missing_or_invalid(caplog: pytest.LogCaptureFixture) -> None:

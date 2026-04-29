@@ -2923,6 +2923,20 @@ def _load_recovery_report(
         "last_fee_status": None,
         "last_accounting_status": None,
         "last_source": None,
+        "fee_evidence_diagnostics": {
+            "primary_blocker": "none",
+            "affected_client_order_id": None,
+            "affected_exchange_order_id": None,
+            "affected_fill_ids": [],
+            "order_paid_fee": None,
+            "sum_observed_or_applied_fill_fee": None,
+            "fee_delta": None,
+            "non_authoritative_fill_ids": [],
+            "complete_fill_set_available": False,
+            "deterministic_allocation_available": False,
+            "operator_confirmation_required": False,
+            "recommended_safe_next_action": "none",
+        },
     }
     fill_accounting_incident_projection = {
         "projection_kind": "fill_accounting_incident_projection",
@@ -3127,6 +3141,9 @@ def _load_recovery_report(
     )
     lot_projection_converged = bool(lot_projection.get("converged"))
     fill_root_cause = "none"
+    fee_evidence_diagnostics = dict(
+        broker_fill_observation_summary.get("fee_evidence_diagnostics") or {}
+    )
     fill_root_summary = {
         "root": "none",
         "principal_applied": 0,
@@ -3151,6 +3168,7 @@ def _load_recovery_report(
         },
         "operator_action": "none",
         "recommended_action": "none",
+        "fee_evidence_diagnostics": fee_evidence_diagnostics,
         "flatten_as_primary_response": False,
         "derived_blockers": [],
         "root_chain": [],
@@ -3177,6 +3195,7 @@ def _load_recovery_report(
             "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "wait_for_auto_reconcile_or_review_fee_evidence",
             "recommended_action": "wait_for_auto_reconcile_or_forensic_fee_authority_diagnosis",
+            "fee_evidence_diagnostics": fee_evidence_diagnostics,
             "flatten_as_primary_response": False,
             "derived_blockers": derived_blockers,
             "root_chain": [fill_root_cause, *derived_blockers],
@@ -3197,6 +3216,7 @@ def _load_recovery_report(
             "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "review_fee_evidence",
             "recommended_action": "forensic_fee_authority_diagnosis",
+            "fee_evidence_diagnostics": fee_evidence_diagnostics,
             "flatten_as_primary_response": False,
             "derived_blockers": derived_blockers,
             "root_chain": [fill_root_cause, *derived_blockers],
@@ -3216,6 +3236,7 @@ def _load_recovery_report(
             "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "none_or_review_fee_evidence",
             "recommended_action": "forensic_fee_authority_diagnosis",
+            "fee_evidence_diagnostics": fee_evidence_diagnostics,
             "flatten_as_primary_response": False,
             "derived_blockers": [],
             "root_chain": [fill_root_cause],
@@ -3708,6 +3729,20 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"last_accounting_status={broker_fill_observation_summary.get('last_accounting_status') or 'none'} "
         f"last_source={broker_fill_observation_summary.get('last_source') or 'none'} "
         f"last_fee_validation_reason={broker_fill_observation_summary.get('last_fee_validation_reason') or 'none'}"
+    )
+    fee_evidence_diagnostics = broker_fill_observation_summary.get("fee_evidence_diagnostics") or {}
+    print(
+        "    "
+        f"primary_blocker={fee_evidence_diagnostics.get('primary_blocker') or 'none'} "
+        f"affected_client_order_id={fee_evidence_diagnostics.get('affected_client_order_id') or 'none'} "
+        f"affected_exchange_order_id={fee_evidence_diagnostics.get('affected_exchange_order_id') or 'none'} "
+        f"fill_ids={','.join(fee_evidence_diagnostics.get('affected_fill_ids') or []) or 'none'} "
+        f"order_paid_fee={fee_evidence_diagnostics.get('order_paid_fee') if fee_evidence_diagnostics.get('order_paid_fee') is not None else 'none'} "
+        f"sum_observed_or_applied_fill_fee={fee_evidence_diagnostics.get('sum_observed_or_applied_fill_fee') if fee_evidence_diagnostics.get('sum_observed_or_applied_fill_fee') is not None else 'none'} "
+        f"fee_delta={fee_evidence_diagnostics.get('fee_delta') if fee_evidence_diagnostics.get('fee_delta') is not None else 'none'} "
+        f"complete_fill_set_available={1 if bool(fee_evidence_diagnostics.get('complete_fill_set_available')) else 0} "
+        f"deterministic_allocation_available={1 if bool(fee_evidence_diagnostics.get('deterministic_allocation_available')) else 0} "
+        f"operator_confirmation_required={1 if bool(fee_evidence_diagnostics.get('operator_confirmation_required')) else 0}"
     )
     fee_rate_drift = report.get("fee_rate_drift_diagnostics") or {}
     observed_fee_bps_text = (

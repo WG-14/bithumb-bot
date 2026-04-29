@@ -1,517 +1,464 @@
-You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
+You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is to investigate and fix a live EC2 incident involving target-delta terminal SELL projection drift. Do not treat the currently suspected cause as unquestionable fact. Start from the evidence below, verify it in the repo, then implement a design-level fix with tests, observability, and safe recovery behavior. This must not be reduced to a manual DB cleanup or a one-off deletion of `open_position_lots.id=357`.
+Your task is to investigate, verify, and fix a recurring live accounting failure that appeared on EC2 after a Bithumb KRW-BTC SELL. Do not treat the current diagnosis as proven fact. Use it as a starting hypothesis and validate or falsify it directly against the repository code, tests, and available runtime evidence.
 
-## Incident context to verify, not assume
+The goal is not a narrow symptom patch. The goal is to evolve this repo toward a more robust, reproducible, and operable automated trading experiment system, especially around exchange fill evidence, fee authority, deterministic accounting, recovery, and observability.
 
-Live trading has been stopped and disabled on EC2. There is no active run process.
+## Incident summary to reproduce and keep in scope
 
-Observed current broker / portfolio truth:
-
-```text
-bithumb-bot.service = inactive (dead)
-pgrep bithumb-bot run = none
-
-portfolio.cash_krw = 398727.93742
-portfolio.asset_qty = 0.0
-portfolio.asset_available = 0.0
-portfolio.asset_locked = 0.0
-
-broker balance:
-cash_available ~= 398728
-asset_available = 0.00000000
-asset_locked = 0.00000000
-```
-
-Latest BUY/SELL roundtrip is correctly recorded in `trades` / `fills`:
+A live KRW-BTC SELL order with `client_order_id=live_1777435320000_sell_ae60a72b` and `exchange_order_id=C0101000002956694365` was split by Bithumb into two exchange fills:
 
 ```text
-BUY:
-  trade id = 37
-  client_order_id = live_1777428420000_buy_ae5d6ffb
-  qty = 0.00059997
-  fee = 27.31
-  asset_after = 0.00059997
+fill_id=C0101000000984365609
+qty=0.00004374
+price=114325000
+funds=5000.5755
+expected/app-observed fee≈2.00 KRW
 
-SELL:
-  trade id = 38
-  client_order_id = live_1777428840000_sell_ae17f61f
-  qty = 0.00059997
-  fee = 27.31
-  asset_after = 0.0
+fill_id=C0101000000984365610
+qty=0.00055623
+price=114304000
+funds=63579.31392
+expected/app-observed fee≈25.43 KRW
+
+order-level paid_fee=27.43
+executed_volume=0.00059997
+executed_funds≈68579.88942
 ```
 
-But `open_position_lots` still contains one current dust row from the BUY:
+Observed bad state in the live DB/logs:
 
 ```text
-id = 357
-entry_trade_id = 37
-entry_client_order_id = live_1777428420000_buy_ae5d6ffb
-entry_fill_id = C0101000000984353580
-qty_open = 0.00019997
-position_state = dust_tracking
-executable_lot_count = 0
-dust_tracking_lot_count = 1
-internal_lot_size = 0.0004
-lot_min_qty = 0.0001
-lot_qty_step = 0.0001
-lot_min_notional_krw = 5000.0
-lot_rule_source_mode = ledger
-position_semantic_basis = lot-native
+small fill:
+  fee=0.0
+  fee_status=assumed_zero_non_material
+  accounting_status=fee_pending
+  fee_source=missing
+  fee_confidence=ambiguous
+
+large fill:
+  fee=25.43
+  fee_status=validated_order_level_paid_fee_allocated
+  accounting_status=accounting_complete
+  fee_source=order_level_paid_fee
+
+canonical aggregate fill / trade:
+  qty=0.00059997
+  fee=25.43
+  fee_accounting_status=fee_finalized
+  observed_fee_status=complete
+  observed_fee_source=trade_level_fee
 ```
 
-Startup safety gate is blocked because the materialized lot projection says there is still BTC exposure while broker/portfolio are flat:
+This produced a `2.000000 KRW` cash delta and a startup gate blocker around fee/accounting debt. The suspected symptom is that the small fill’s 2.00 KRW fee was not applied even though order-level `paid_fee=27.43` was available.
+
+## Core problem statement to preserve
+
+Do not reduce this to “add the missing 2 KRW fee.” The structural concern is:
 
 ```text
-projected_total_qty=0.000199970000
-portfolio_qty=0.000000000000
-reason=portfolio_projection_qty_mismatch
-recovery_stage=AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
+The system appears to aggregate fee as a numeric value while losing fee authority, validation state, and provenance across the accounting boundary. A temporary or non-authoritative fee value such as 0.0 can therefore be treated as a real zero fee and merged into a canonical aggregate fill/trade.
 ```
 
-Relevant SELL submit evidence showed the target-delta SELL did include both executable open exposure and dust remainder:
+The fix should prevent the whole class of failures:
 
 ```text
-final_submitted_qty = 0.00059997
-sell_normalized_exposure_qty = 0.00059997
-observed_position_qty = 0.00059997
-raw_total_asset_qty = 0.00059997
-
-sell_open_exposure_qty = 0.0004
-sell_dust_tracking_qty = 0.00019997
-
-sell_qty_basis_source = target_position_delta
-sell_submit_qty_source = target_position_delta
-decision_reason_code = target_delta_rebalance
+partial fills
+order-level-only paid_fee
+missing trade-level fee
+late fee finalization
+ambiguous zero-fee assumptions
+aggregate projection drift
+manual repair loops
+startup gate blocked by accounting debt that was actually resolvable from retained evidence
 ```
 
-Current suspected cause:
+## Working hypotheses to validate or falsify
 
-* `target_delta` executed a terminal SELL for the full broker-verified position quantity.
-* `lot-native` lifecycle projection consumes only `open_exposure` lots during SELL lifecycle accounting.
-* `dust_tracking` lots are deliberately treated as operator evidence and are never matched in the ordinary SELL path.
-* Therefore the real account became flat, but the materialized `open_position_lots` projection retained stale dust.
+Keep these as hypotheses, not assumptions.
 
-The repo currently contains a comment in `src/bithumb_bot/lifecycle.py` stating that SELL lifecycle consumes only the sellable open_exposure path and that `dust_tracking` lots remain operator evidence and are never matched. Verify this in code before changing behavior.
+### Hypothesis A: `assumed_zero_non_material` bypasses order-level fee allocation
 
-## Primary objective
+Current suspected path:
 
-Fix the structural mismatch between target-delta terminal SELL semantics and lot-native lifecycle projection semantics.
-
-The correct fix is not “delete row 357.” The correct fix is to make the lifecycle/projection system understand a target-delta terminal flat SELL when sufficient evidence proves the SELL closed both executable open exposure and dust remainder.
-
-## Non-goals and safety constraints
-
-Do not:
-
-* Manually mutate the live DB as the primary solution.
-* Disable safety gates.
-* Force resume.
-* Make all SELLs consume `dust_tracking` rows unconditionally.
-* Treat all dust as tradable inventory.
-* Weaken operator-evidence protection for ordinary dust.
-* Hide non-convergence by ignoring `open_position_lots`.
-* Add a broad repair command that can erase dust without strong terminal-flat evidence.
-
-Preserve:
-
-* Fail-closed behavior when evidence is incomplete.
-* Existing operator-evidence semantics for ordinary `dust_tracking`.
-* Safety around unresolved orders, submit unknown, recovery-required orders, fee/accounting active issues, and broker/portfolio mismatch.
-* Reproducibility of the lifecycle projection from trades/fills/orders.
-
-## Required investigation
-
-Inspect the repo directly. At minimum inspect:
-
-* `src/bithumb_bot/lifecycle.py`
-* `src/bithumb_bot/position_authority_repair.py`
-* `src/bithumb_bot/position_authority_state.py`
-* `src/bithumb_bot/runtime_readiness.py`
-* `src/bithumb_bot/execution_service.py`
-* `src/bithumb_bot/broker/live.py`
-* `src/bithumb_bot/broker/live_submission_execution.py`
-* `src/bithumb_bot/reporting.py`
-* tests around lifecycle, accounting projection, target-delta, repair-plan, operator commands, and recovery state.
-
-Build and document a concrete flow model:
-
-1. BUY target-delta decision and submit plan.
-2. BUY fill accounting and lot split into executable lot + dust remainder.
-3. SELL target-delta decision and submit plan.
-4. SELL fill accounting.
-5. `apply_fill_lifecycle()` SELL handling.
-6. `open_position_lots` projection after SELL.
-7. startup gate / runtime readiness projection convergence check.
-8. repair-plan/recovery-report interpretation.
-
-Identify exactly where the submitted target-delta SELL quantity authority is lost or ignored by lifecycle projection.
-
-## Root-cause hypotheses to verify or falsify
-
-Keep these as hypotheses until verified. For each, explicitly mark confirmed / falsified / inconclusive in the final report.
-
-### Hypothesis A: target-delta terminal SELL quantity includes dust, but lifecycle SELL only consumes open_exposure
-
-Evidence to verify:
-
-* SELL submit evidence contains `sell_qty_basis_source=target_position_delta`, `final_submitted_qty=0.00059997`, `sell_open_exposure_qty=0.0004`, `sell_dust_tracking_qty=0.00019997`.
-* `trades` has SELL qty `0.00059997` and `asset_after=0.0`.
-* `open_position_lots` still has dust `0.00019997`.
-* `lifecycle.py` SELL path fetches only sellable open exposure lots and never consumes `dust_tracking`.
-
-Falsification condition:
-
-* If SELL lifecycle already attempts to consume dust_tracking in this terminal-flat case and the row survived due to a DB write failure, transaction rollback, or a different bug, identify that instead.
-
-### Hypothesis B: submit quantity authority and projection close quantity authority are different
-
-Evidence to verify:
-
-* Submit path uses `target_position_delta` and broker-verified total position.
-* Projection close path uses sellable executable lot count / open exposure lots only.
-* `submit_lot_count=1` and `sell_submit_lot_count=1` coexist with `final_submitted_qty=0.00059997`, implying one executable lot plus dust was submitted but projection treated one lot as close authority.
-
-Falsification condition:
-
-* If projection close quantity actually uses submitted qty but later reclassifies dust incorrectly, adjust the fix to that path.
-
-### Hypothesis C: `dust_tracking` conflates active inventory residue, operator evidence, historical evidence, and stale terminal-sell residue
-
-Evidence to verify:
-
-* `dust_tracking` is included in projection totals and startup gate calculations.
-* In ordinary cases it should not be consumed by SELL because it is operator evidence.
-* In this terminal target-delta case it no longer represents actual inventory because broker/portfolio/trades are flat.
-
-Falsification condition:
-
-* If `dust_tracking` is not supposed to represent current projection and startup gate is incorrectly treating it as holdings, fix the gate/projection summary rather than lifecycle.
-
-### Hypothesis D: repair-plan lacks a clear terminal-flat projection repair path even when broker/portfolio/trades prove flat
-
-Evidence to verify:
-
-* `repair-plan --json` returns candidate repairs with `broker_qty=0`, `portfolio_qty=0`, but `safe_to_apply=false`.
-* Top-level recommended command loops back to `uv run python bot.py repair-plan`.
-* Reporting does not clearly separate current broker/portfolio truth from materialized projection drift.
-
-Falsification condition:
-
-* If a safe terminal-flat repair path exists but the user missed the correct command, surface it and add better reporting/tests.
-
-## Design requirements
-
-### 1. Add an explicit terminal-flat SELL lifecycle path
-
-Implement a narrowly scoped path that can consume or close dust_tracking rows only when strong terminal-flat evidence exists.
-
-Acceptable evidence may include:
-
-* SELL trade has `asset_after == 0` within tolerance.
-* SELL trade qty is at least `open_exposure_qty + dust_tracking_qty - tolerance`.
-* SELL order / submit evidence identifies `target_delta_rebalance` or `sell_qty_basis_source=target_position_delta`.
-* Broker/portfolio quantity is zero or converged to zero when the repair/reporting path is used.
-* No unresolved orders, no submit_unknown, no recovery_required orders, no active fee/accounting issue.
-
-Do not clear dust_tracking for ordinary lot-native SELLs that lack terminal-flat evidence.
-
-### 2. Preserve ordinary dust operator-evidence semantics
-
-The existing rule that dust_tracking is not normally matched by SELL is valid for ordinary cases. The fix must be conditional.
-
-Add a negative test proving that a normal lot-native SELL or partial SELL without terminal-flat evidence does not consume dust_tracking.
-
-### 3. Introduce or prepare for typed quantity authority
-
-Prefer a typed helper or dataclass over more unstructured dict probing.
-
-A possible shape:
+1. `src/bithumb_bot/broker/bithumb_order_queries.py::get_fills()` detects multi-fill order-level `paid_fee` and builds `validate_multi_fill_order_level_paid_fee_allocation(...)`.
+2. Allocation result may be valid for both fills.
+3. However, per-fill allocation is applied only when something like this condition holds:
 
 ```python
-@dataclass(frozen=True)
-class ExecutionQuantityAuthority:
-    source: str  # e.g. "lot_native", "target_delta", "broker_verified_position"
-    submitted_qty: float
-    open_exposure_qty: float | None
-    dust_tracking_qty: float | None
-    terminal_asset_after: float | None
-    terminal_flat: bool
-    decision_reason_code: str | None
-    evidence_source: str
+if fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
+    ...
 ```
 
-If a full refactor is too large, implement a small forward-compatible resolver that can derive this authority from `orders`, `order_events.submit_evidence`, `trades`, and/or `fills`, and use it only for the terminal-flat path. Leave TODOs pointing to a fuller quantity-authority unification.
+4. The small fill has `fee=0.0` and `fee_status=assumed_zero_non_material`, so `fee is None` is false and the allocation result is not applied.
+5. The small fill remains `fee_pending`, even though the order-level `paid_fee=27.43` and complete fill set could have allocated `2.00` to it.
 
-### 4. Repair-plan / reporting must become operationally clear
-
-Improve repair-plan and/or recovery-report so operators can distinguish:
-
-* current broker qty
-* current portfolio qty
-* latest trade asset_after
-* materialized lot projection qty
-* dust rows considered stale after terminal SELL
-* whether terminal-flat stale-dust repair is safe
-* exact blockers if not safe
-* whether the command is inspect-only or mutating
-
-Avoid self-loop guidance such as recommending only `repair-plan` again without a concrete next action.
-
-Desired reporting fields:
+Validate by writing a failing regression test using the incident payload. Falsify if current `get_fills()` already returns:
 
 ```text
-current_broker_qty=0
-current_portfolio_qty=0
-latest_trade_asset_after=0
-materialized_lot_projection_qty=0.00019997
-terminal_flat_sell_detected=1
-stale_dust_rows_to_clear=[357]
-safe_to_apply_terminal_flat_projection_repair=true|false
-unsafe_reason=<specific blockers>
-recommended_command=<only if safe and intentionally mutating>
+small fill fee=2.00
+fee_status=validated_order_level_paid_fee_allocated
+accounting_status=accounting_complete
 ```
 
-### 5. Recovery must remain explicit and auditable
+### Hypothesis B: `_aggregate_fills_for_apply()` loses fee authority and finalizes mixed-quality evidence
 
-If the fix includes a repair action that mutates `open_position_lots`, it must:
+Suspected path:
 
-* require an explicit `--apply --yes` style command if run as an operator repair,
-* record an event in `position_authority_repairs` and/or `position_authority_projection_publications`,
-* include preconditions and evidence in the repair record,
-* have a postcondition that projection converges to broker/portfolio/trades,
-* be safe to preview without mutation.
+1. `src/bithumb_bot/broker/live_submission_execution.py` reads broker fills.
+2. If any fee is pending, it records diagnostic observations.
+3. It then passes fills to `live._aggregate_fills_for_apply()`.
+4. `_aggregate_fills_for_apply()` appears to sum numeric fees only.
+5. `0.0` is considered valid numeric fee.
+6. The aggregate `BrokerFill` does not preserve per-component fee authority/status/provenance.
+7. The aggregate fill can then be stored as canonical finalized accounting even though one component was pending/non-authoritative.
 
-If the lifecycle fix prevents future drift but does not repair existing row 357 automatically, clearly state the safe post-patch operator flow.
+Validate by finding the actual aggregation implementation and adding a test where one component is `accounting_complete` and another is `fee_pending` / `assumed_zero_non_material`. The aggregate must not become finalized/authoritative. Falsify only if the apply layer independently re-derives fee authority from original component fills before canonical posting.
+
+### Hypothesis C: Recovery is too repair-command-centric rather than deterministic replay-centric
+
+Observed audit history includes repeated fee pending and repair counts. This suggests the live ingestion path regularly fails to finalize fee evidence and relies on operator repair commands.
+
+Validate by checking tests, code paths, and reports around:
+
+```text
+broker_fill_observations
+fee_pending_accounting_repair
+reconcile_fee_pending
+reconcile_recent_activity_fee_pending
+repair-plan
+recovery-report
+restart-checklist
+```
+
+Look for repeated pattern:
+
+```text
+live_application_fee_pending -> reconcile_fee_pending -> fee_pending_accounting_repair
+```
+
+Do not solve this by adding another manual repair command. Prefer a deterministic replay or auto-finalization path when exchange evidence is complete and invariants pass.
+
+### Hypothesis D: Startup gate is safe but does not classify “auto-resolvable accounting debt” well enough
+
+The gate correctly blocks trading when accounting evidence is unresolved. The design problem is that it may not distinguish:
+
+```text
+needs operator confirmation
+vs
+can be resolved deterministically from retained order/fill/paid_fee evidence
+vs
+code bug / invariant violation
+```
+
+Validate by examining `recovery-report`, `restart-checklist`, `repair-plan`, startup gate code, and observability events. Improve diagnostics so a future blocked operator sees the exact invariant failure, source evidence, and whether deterministic replay is available.
+
+## Files and areas to inspect first
+
+Start with these, but search the repository for related code before editing:
+
+```text
+src/bithumb_bot/fee_observation.py
+src/bithumb_bot/broker/bithumb_order_queries.py
+src/bithumb_bot/broker/bithumb.py
+src/bithumb_bot/broker/live_submission_execution.py
+src/bithumb_bot/broker/live.py
+src/bithumb_bot/execution.py
+src/bithumb_bot/db_core.py
+tests/test_fee_observation.py
+tests/test_live_fill_aggregation.py
+tests/test_bithumb_private_api.py
+tests related to recovery-report, repair-plan, restart-checklist, reconciliation, and startup gate
+docs/OPERATIONS_STATE_MACHINE.md
+docs/OPERATOR_REPORTING.md
+```
+
+## Required design direction
+
+Prefer design changes that prevent the entire problem family.
+
+### 1. Treat fee evidence as stateful evidence, not just a float
+
+A fill fee must carry at least:
+
+```text
+fee value
+fee_status
+fee_source
+fee_confidence
+fee_provenance
+fee_validation_reason
+fee_validation_checks
+accounting_status / accounting decision
+```
+
+Do not allow a non-authoritative `0.0` to cross into canonical accounting as a real finalized zero fee.
+
+### 2. Apply order-level paid_fee allocation whenever current fill fee evidence is not accounting-complete
+
+The allocation path should not be gated only on `fee is None`.
+
+Expected policy:
+
+```python
+if multi_fill_order_level_allocation is not None:
+    allocated = allocation.evaluations_by_fill_id.get(fill_id)
+    current = classify_fee_evaluation(...)
+    if allocated is not None and current.accounting_status != "accounting_complete":
+        use allocated
+```
+
+This must include cases such as:
+
+```text
+assumed_zero_non_material
+missing
+empty
+zero_reported
+unparseable
+invalid
+order_level_candidate
+fee_pending
+```
+
+But do not blindly override truly authoritative trade-level fees. If trade-level fee is already accounting-complete and does not violate order-level invariants, preserve it.
+
+### 3. Redefine or constrain `assumed_zero_non_material`
+
+`assumed_zero_non_material` must not mean “authoritative real zero fee.”
+
+Safer options:
+
+```text
+fee=None, fee_status=assumed_zero_non_material, accounting_status=fee_pending
+```
+
+or, if `fee=0.0` remains for backward compatibility:
+
+```text
+fee=0.0 with explicit non_authoritative_assumption authority that aggregation/apply cannot finalize
+```
+
+Choose the least invasive approach that protects accounting boundaries and passes existing tests.
+
+### 4. Aggregation must preserve or respect fee authority
+
+If `_aggregate_fills_for_apply()` remains, it must not aggregate away fee authority. At minimum:
+
+```text
+If any component fill is fee_pending / not accounting_complete:
+  - do not produce an aggregate fill that appears fee_finalized/complete/authoritative
+  - either block strict aggregation and transition to recovery
+  - or return an aggregate pending-principal/pending-fee representation that downstream apply preserves
+```
+
+Do not let `25.43 + non-authoritative 0.0` become a finalized aggregate fee of `25.43`.
+
+Longer-term, prefer accounting from exchange fill-level postings and treat aggregate fills as reporting/projection only.
+
+### 5. Add invariants around order-level fee allocation
+
+When order-level `paid_fee` exists and complete fill set is available, enforce or report:
+
+```text
+sum(fill.qty) == order.executed_volume within tolerance
+sum(fill.funds) == order.executed_funds within tolerance
+sum(applied_fill_fee) == order.paid_fee within KRW fee rounding tolerance
+no canonical finalized fill/trade if fee evidence is incomplete
+principal must not be double-applied during recovery/replay
+```
+
+If invariant fails, emit a structured diagnostic and block trading safely.
 
 ## Required tests
 
-Add regression tests that fail before the fix and pass after.
+Add regression and invariant tests before or alongside fixes. Include the incident payload exactly enough to reproduce the failure.
 
 Minimum required tests:
 
-### Test 1: target-delta terminal SELL consumes dust remainder
-
-Reproduce:
-
 ```text
-BUY qty=0.00059997
-  -> lifecycle creates open_exposure 0.0004
-  -> lifecycle creates dust_tracking 0.00019997
-
-SELL qty=0.00059997
-  -> target-delta evidence
-  -> asset_after=0.0 / terminal flat evidence
+test_get_fills_allocates_order_paid_fee_when_small_fill_fee_is_assumed_zero_non_material
 ```
 
-Expected:
+Use a multi-fill `/v1/order` fixture equivalent to:
 
 ```text
-open_position_lots has no positive qty rows
-projection_converged=true
-projected_total_qty=0
-startup/readiness would not block on POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
+paid_fee="27.43"
+executed_volume="0.00059997"
+executed_funds="68579.88942"
+trades=[
+  {
+    uuid="C0101000000984365609",
+    created_at="2026-04-29T13:04:03+09:00",
+    market="KRW-BTC",
+    side="ask",
+    price="114325000",
+    volume="0.00004374",
+    funds="5000.5755"
+  },
+  {
+    uuid="C0101000000984365610",
+    created_at="2026-04-29T13:04:03+09:00",
+    market="KRW-BTC",
+    side="ask",
+    price="114304000",
+    volume="0.00055623",
+    funds="63579.31392"
+  }
+]
 ```
 
-### Test 2: ordinary SELL does not consume dust without terminal-flat target-delta evidence
-
-Reproduce a dust_tracking row plus a SELL that only closes open_exposure or lacks target-delta terminal-flat evidence.
-
-Expected:
+Expected result:
 
 ```text
-dust_tracking row remains
-ordinary operator evidence semantics preserved
+small fill:
+  fee=2.00
+  fee_status=validated_order_level_paid_fee_allocated
+  accounting_status=accounting_complete
+  fee_source=order_level_paid_fee
+  fee_confidence=validated
+
+large fill:
+  fee=25.43
+  fee_status=validated_order_level_paid_fee_allocated
+  accounting_status=accounting_complete
+  fee_source=order_level_paid_fee
+  fee_confidence=validated
+
+sum fees=27.43
 ```
 
-### Test 3: repair-plan reports terminal-flat stale dust clearly
-
-Given:
+Also add:
 
 ```text
-broker_qty=0
-portfolio_qty=0
-latest SELL asset_after=0
-materialized projection has stale dust row
+test_aggregate_fills_does_not_finalize_when_any_component_fee_is_pending
+test_live_application_preserves_fee_pending_status_across_aggregation
+test_order_level_paid_fee_sum_invariant_detects_fee_shortfall
 ```
 
-Expected reporting includes:
+If existing tests already cover some of this, extend them rather than duplicating.
 
-```text
-terminal_flat_sell_detected=1
-stale_dust_rows_to_clear=[...]
-safe_to_apply_terminal_flat_projection_repair=<true or false with explicit blockers>
-current_broker_qty=0
-current_portfolio_qty=0
-materialized_lot_projection_qty=<dust qty>
-```
-
-### Test 4: unsafe repair remains unsafe with blockers
-
-If there are unresolved orders, submit_unknown, recovery_required, broker/portfolio mismatch, or fee/accounting active issues, terminal-flat dust repair must not be safe.
-
-### Test 5: lifecycle replay remains deterministic
-
-If lifecycle replay from trades is used by repair/rebuild, replaying the BUY→terminal SELL sequence must not recreate stale dust.
-
-## Suggested files likely to modify
-
-Likely:
-
-* `src/bithumb_bot/lifecycle.py`
-* `src/bithumb_bot/position_authority_repair.py`
-* `src/bithumb_bot/position_authority_state.py`
-* `src/bithumb_bot/reporting.py`
-* tests around lifecycle / accounting projection / repair plan
-
-Possibly:
-
-* `src/bithumb_bot/execution_service.py`
-* `src/bithumb_bot/broker/live.py`
-* `src/bithumb_bot/broker/live_submission_execution.py`
-* `src/bithumb_bot/runtime_readiness.py`
-
-## Validation commands
-
-Run focused tests first:
+Run at least:
 
 ```bash
-uv run pytest tests/test_accounting_projection.py -q
-uv run pytest tests/test_position_authority_recovery_state.py -q
-uv run pytest tests/test_operator_commands.py -q
-uv run pytest tests/test_target_position_execution.py -q
+uv run pytest tests/test_fee_observation.py -q
+uv run pytest tests/test_live_fill_aggregation.py -q
+uv run pytest tests/test_bithumb_private_api.py -q
 ```
 
-If you add new lifecycle tests, run that file too.
-
-Run broader tests if feasible:
+Then run the broader relevant suite if feasible:
 
 ```bash
 uv run pytest -q
 ```
 
-Also run static import/compile checks:
+## Required operational/recovery improvements
 
-```bash
-uv run python -m py_compile \
-  src/bithumb_bot/lifecycle.py \
-  src/bithumb_bot/position_authority_repair.py \
-  src/bithumb_bot/position_authority_state.py \
-  src/bithumb_bot/reporting.py
+Do not only fix parser logic. Improve recovery and observability enough that the same family is diagnosable and reproducible next time.
+
+Add or improve structured reporting so `recovery-report`, `repair-plan`, or `restart-checklist` can show:
+
+```text
+primary blocker
+affected client_order_id
+exchange_order_id
+fill_ids
+order_paid_fee
+sum_observed_or_applied_fill_fee
+fee_delta
+which fill has missing/non-authoritative fee evidence
+whether complete fill set is available
+whether deterministic allocation/replay is possible
+whether operator confirmation is required
+recommended safe next action
 ```
 
-## EC2 operational verification commands after patch
+If a deterministic replay/finalization path already exists, wire this case into it. If it does not exist, add a clearly scoped design note or TODO with tests documenting why this case remains manual.
 
-Do not start live until the patch and tests pass.
+Do not automatically resume trading unless all live-ready invariants pass.
 
-On EC2, with live still stopped:
+## Scope control
 
-```bash
-systemctl status bithumb-bot --no-pager
-pgrep -af 'bithumb-bot run|python.*bithumb'
+Do not rewrite the whole accounting system in one change. Prioritize in this order:
+
+1. Reproduce the incident with a failing test.
+2. Fix multi-fill order-level paid_fee allocation application so non-complete fee evidence can be replaced by validated allocation.
+3. Prevent aggregation from finalizing mixed or pending fee evidence.
+4. Add fee sum/order paid_fee invariants and diagnostics.
+5. Document longer-term architecture changes needed to move canonical accounting from aggregate fills to fill-level ledger postings.
+
+Avoid unrelated strategy changes, exchange order submission changes, or UI changes.
+
+## Long-term design proposal to include in final report
+
+In your final report, include a concise design roadmap toward:
+
+```text
+OrderSnapshot
+  exchange_order_id
+  client_order_id
+  executed_volume
+  executed_funds
+  order_paid_fee
+
+FillExecution
+  fill_id
+  qty
+  price
+  funds
+
+FeeEvidence
+  source: trade_level | order_level_allocated | operator_confirmed | estimate
+  authority: authoritative | validated | inferred | missing
+  accounting_status
+
+LedgerPosting
+  principal_cash_delta
+  asset_delta
+  fee_cash_delta
+  source_evidence_id
 ```
 
-Check current truth:
+The intended direction:
 
-```bash
-cd /home/ec2-user/apps/bithumb-bot
-export MODE=live
-export DB=/home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite
-
-sqlite3 -line "$DB" "select * from portfolio order by rowid desc limit 20;"
-
-MODE=live uv run bithumb-bot broker-diagnose | \
-  egrep -i 'balance query|cash_available|asset_available|asset_locked|overall|PASS|FAIL'
+```text
+raw exchange snapshot + parser version + accounting version
+=> deterministic replay
+=> expected ledger
+=> current ledger diff
+=> auto-apply if invariants pass, otherwise require operator approval
 ```
 
-Check stale projection:
+Manual `fee_pending_accounting_repair` should become the last resort, not the normal path.
 
-```bash
-sqlite3 -header -column "$DB" "
-select
-  position_state,
-  count(*) as rows,
-  sum(qty_open) as qty_sum,
-  sum(executable_lot_count) as executable_lots,
-  sum(dust_tracking_lot_count) as dust_lots
-from open_position_lots
-where qty_open > 0
-group by position_state;
-"
-```
-
-Run repair-plan preview only:
-
-```bash
-MODE=live uv run bithumb-bot repair-plan --json > /tmp/repair-plan.json
-python3 - <<'PY'
-import json
-txt=open('/tmp/repair-plan.json').read()
-data=json.loads(txt[txt.find('{'):])
-for i, c in enumerate(data.get("candidate_repairs", [])):
-    print("\n### candidate", i)
-    for k in [
-        "repair_kind", "repair_mode", "needed", "safe_to_apply",
-        "final_safe_to_apply", "recommended_command", "reason",
-        "why_unsafe", "blockers", "current_broker_qty",
-        "current_portfolio_qty", "broker_qty", "portfolio_qty",
-        "projected_total_qty", "materialized_lot_projection_qty",
-        "terminal_flat_sell_detected", "stale_dust_rows_to_clear",
-        "latest_sell_client_order_id", "latest_trade_asset_after",
-    ]:
-        if k in c:
-            print(k, "=", c[k])
-PY
-```
-
-Only after the patched tool gives a clear safe path should any mutating repair be considered. Do not instruct automatic resume.
-
-## Final report format
+## Final response format
 
 When done, report in this exact structure:
 
-1. **Summary**
+```markdown
+## Summary
 
-   * What changed and why.
-   * Whether the target-delta terminal SELL drift hypothesis was confirmed, falsified, or refined.
+## What I verified
 
-2. **Root-cause hypotheses**
+## Hypotheses
+### Confirmed
+### Falsified
+### Still open
 
-   * For each hypothesis A-D: confirmed / falsified / inconclusive.
-   * Include repo evidence and test evidence.
+## Root cause
 
-3. **Design changes**
+## Design changes implemented
 
-   * Explain how the fix aligns target-delta quantity authority with lifecycle projection.
-   * Explain how ordinary dust operator-evidence behavior remains protected.
-   * Explain how fail-closed behavior is preserved.
+## Tests added or changed
 
-4. **Files changed**
+## Commands run and results
 
-   * File-by-file summary.
+## Recovery and observability impact
 
-5. **Tests added/updated**
+## Remaining risks
 
-   * Test names.
-   * What each test proves.
-   * Which test reproduces the EC2 incident.
+## Follow-up recommendations
+```
 
-6. **Validation results**
-
-   * Commands run.
-   * Pass/fail results.
-   * Any tests not run and why.
-
-7. **Operational verification**
-
-   * Exact EC2 commands to run after deployment.
-   * Expected output.
-   * Whether live should remain stopped or can be considered for cautious restart.
-
-8. **Remaining risks and follow-ups**
-
-   * QuantityAuthority full refactor if not completed.
-   * Dust state taxonomy improvements.
-   * Repair-plan/reporting improvements still needed.
-   * Any cases where manual repair may still be required.
+Be explicit about any hypothesis you could not fully prove. Do not overclaim. Do not present a symptom patch as a root-cause design fix unless the tests and invariants prove it prevents the broader class.
 

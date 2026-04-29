@@ -389,24 +389,41 @@ def get_fills(
                 fee_validation_reason = "accounting_complete" if fee_status == "complete" else fee_status
                 fee_validation_checks: dict[str, bool] | None = None
                 warnings = [fee_observation.warning] if fee_observation.warning else []
-                if fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
+                candidate_fee = None
+                candidate_warning = None
+                allocated_evaluation = None
+                if multi_fill_order_level_allocation is not None:
+                    allocated_evaluation = multi_fill_order_level_allocation.evaluations_by_fill_id.get(
+                        str(trade.get("uuid") or trade.get("id") or "")
+                    )
+                current_evaluation = classify_fee_evaluation(
+                    fee=fee,
+                    fee_status=fee_status,
+                    price=price,
+                    qty=qty,
+                    material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+                    fee_source=fee_source,
+                    fee_confidence=fee_confidence,
+                    provenance=fee_provenance,
+                    reason=fee_validation_reason,
+                    checks=fee_validation_checks,
+                )
+                if allocated_evaluation is not None and current_evaluation.accounting_status != "accounting_complete":
                     candidate_fee, candidate_warning = _order_level_fee_candidate(broker, row, trades=trades)
                     if candidate_warning:
                         warnings.append(candidate_warning)
-                    allocated_evaluation = None
-                    if multi_fill_order_level_allocation is not None:
-                        allocated_evaluation = multi_fill_order_level_allocation.evaluations_by_fill_id.get(
-                            str(trade.get("uuid") or trade.get("id") or "")
-                        )
-                    if allocated_evaluation is not None:
-                        fee = allocated_evaluation.fee
-                        fee_status = allocated_evaluation.fee_status
-                        fee_source = allocated_evaluation.fee_source
-                        fee_confidence = allocated_evaluation.fee_confidence
-                        fee_provenance = allocated_evaluation.provenance
-                        fee_validation_reason = allocated_evaluation.reason
-                        fee_validation_checks = allocated_evaluation.checks
-                    elif candidate_fee is not None:
+                    fee = allocated_evaluation.fee
+                    fee_status = allocated_evaluation.fee_status
+                    fee_source = allocated_evaluation.fee_source
+                    fee_confidence = allocated_evaluation.fee_confidence
+                    fee_provenance = allocated_evaluation.provenance
+                    fee_validation_reason = allocated_evaluation.reason
+                    fee_validation_checks = allocated_evaluation.checks
+                elif fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
+                    candidate_fee, candidate_warning = _order_level_fee_candidate(broker, row, trades=trades)
+                    if candidate_warning:
+                        warnings.append(candidate_warning)
+                    if candidate_fee is not None:
                         evaluation = _build_order_level_paid_fee_evaluation(
                             broker,
                             row=row,
