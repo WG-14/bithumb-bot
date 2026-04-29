@@ -49,6 +49,8 @@ FEE_ACCOUNTING_COMPLETE_EPS = 1e-12
 FILL_FEE_ACCOUNTING_STATUS_FINALIZED = "fee_finalized"
 FILL_FEE_ACCOUNTING_STATUS_PENDING = "principal_applied_fee_pending"
 FILL_FEE_ACCOUNTING_STATUS_BLOCKED = "fee_validation_blocked"
+FEE_PENDING_REPAIR_PROVENANCE_ORDER_LEVEL_ALLOCATED = "order_level_paid_fee_validated_allocated"
+FEE_PENDING_REPAIR_FEE_ROUNDING_TOLERANCE_KRW = 0.01
 
 
 @dataclass(frozen=True)
@@ -3380,14 +3382,25 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         "primary_blocker": "none",
         "affected_client_order_id": None,
         "affected_exchange_order_id": None,
+        "affected_fill_id": None,
         "affected_fill_ids": [],
         "order_paid_fee": None,
         "sum_observed_or_applied_fill_fee": None,
         "fee_delta": None,
+        "proposed_repair_fee": None,
+        "fee_provenance": None,
         "non_authoritative_fill_ids": [],
         "complete_fill_set_available": False,
         "deterministic_allocation_available": False,
         "operator_confirmation_required": False,
+        "safe_to_repair": False,
+        "why_safe": [],
+        "why_not_safe": [],
+        "idempotency_key": None,
+        "recommended_command": None,
+        "expected_after": None,
+        "rollback_or_backup": None,
+        "post_apply_verification_commands": [],
         "recommended_safe_next_action": "none",
     }
     if last is not None:
@@ -3397,7 +3410,9 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         )
         related = conn.execute(
             """
-            SELECT fill_id, fee, fee_status, accounting_status, fee_validation_checks, raw_payload
+            SELECT fill_id, fill_ts, side, price, qty, fee, fee_status, accounting_status,
+                   fee_source, fee_confidence, fee_provenance, fee_validation_reason,
+                   fee_validation_checks, raw_payload
             FROM broker_fill_observations
             WHERE client_order_id=?
               AND COALESCE(exchange_order_id, '')=COALESCE(?, '')
@@ -3417,7 +3432,9 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
             and str(item["fill_id"]).strip()
             and str(item["accounting_status"] or "") != "accounting_complete"
         ]
-        observed_fee_sum = sum(float(item["fee"]) for item in related if item["fee"] is not None)
+        observed_fee_sum = normalize_cash_amount(
+            sum(float(item["fee"]) for item in related if item["fee"] is not None)
+        )
         order_paid_fee: float | None = None
         complete_fill_set_available = False
         allocated_fee_sum_match = False
@@ -3454,7 +3471,7 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
                         order_paid_fee = None
         fee_delta = None
         if order_paid_fee is not None:
-            fee_delta = float(order_paid_fee) - float(observed_fee_sum)
+            fee_delta = normalize_cash_amount(float(order_paid_fee) - float(observed_fee_sum))
         has_fee_pending = bool(non_authoritative_fill_ids)
         deterministic_allocation_available = bool(
             has_fee_pending
@@ -3465,7 +3482,7 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         if has_fee_pending:
             primary_blocker = "fee_evidence_non_authoritative"
             if deterministic_allocation_available:
-                recommended_action = "rerun reconcile/recovery-report; deterministic order-level paid_fee allocation evidence is present"
+                recommended_action = "repair-plan can derive a deterministic fee-pending accounting repair candidate"
             elif order_paid_fee is not None:
                 recommended_action = "review retained order_paid_fee and fill evidence before manual repair"
             else:
@@ -3473,18 +3490,140 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         else:
             primary_blocker = "none"
             recommended_action = "none"
+        proposed_fee = normalize_cash_amount(fee_delta or 0.0) if fee_delta is not None else None
+        affected_fill_id = non_authoritative_fill_ids[0] if len(non_authoritative_fill_ids) == 1 else None
+        idempotency_key = (
+            f"fee_pending_accounting_repair:{last_client_order_id}:{affected_fill_id}:{proposed_fee:.2f}"
+            if affected_fill_id and proposed_fee is not None
+            else None
+        )
+        why_not_safe: list[str] = []
+        why_safe: list[str] = []
+        pending_row = None
+        if len(non_authoritative_fill_ids) != 1:
+            why_not_safe.append(f"pending_fill_count={len(non_authoritative_fill_ids)}")
+        elif affected_fill_id:
+            pending_row = next((item for item in related if str(item["fill_id"] or "") == affected_fill_id), None)
+            why_safe.append("exact_pending_fill_identified")
+        if not deterministic_allocation_available:
+            why_not_safe.append("deterministic_allocation_unavailable")
+        else:
+            why_safe.append("deterministic_order_level_paid_fee_allocation_available")
+        if not complete_fill_set_available:
+            why_not_safe.append("complete_fill_set_missing")
+        else:
+            why_safe.append("complete_fill_set_available")
+        if order_paid_fee is None:
+            why_not_safe.append("order_paid_fee_missing")
+        if proposed_fee is None or proposed_fee <= FEE_ACCOUNTING_COMPLETE_EPS:
+            why_not_safe.append("proposed_fee_not_positive")
+        if order_paid_fee is not None and proposed_fee is not None:
+            reconstructed = normalize_cash_amount(observed_fee_sum + proposed_fee)
+            if abs(reconstructed - normalize_cash_amount(order_paid_fee)) > FEE_PENDING_REPAIR_FEE_ROUNDING_TOLERANCE_KRW:
+                why_not_safe.append("fee_delta_mismatches_order_paid_fee")
+            else:
+                why_safe.append("proposed_fee_reconciles_to_order_paid_fee")
+        if pending_row is not None and proposed_fee is not None:
+            notional = float(pending_row["price"] or 0.0) * float(pending_row["qty"] or 0.0)
+            expected_fee = normalize_cash_amount(notional * float(settings.LIVE_FEE_RATE_ESTIMATE))
+            tolerance = max(FEE_PENDING_REPAIR_FEE_ROUNDING_TOLERANCE_KRW, expected_fee * 0.25)
+            if notional <= 0.0:
+                why_not_safe.append("pending_fill_notional_invalid")
+            elif abs(float(proposed_fee) - expected_fee) > tolerance:
+                why_not_safe.append("proposed_fee_outside_fee_rate_tolerance")
+            else:
+                why_safe.append("proposed_fee_within_fee_rate_tolerance")
+        duplicate_repair_count = 0
+        if affected_fill_id and proposed_fee is not None:
+            duplicate_row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM fee_pending_accounting_repairs
+                WHERE client_order_id=?
+                  AND fill_id=?
+                  AND ABS(fee-?) <= ?
+                """,
+                (
+                    last_client_order_id,
+                    affected_fill_id,
+                    float(proposed_fee),
+                    FEE_PENDING_REPAIR_FEE_ROUNDING_TOLERANCE_KRW,
+                ),
+            ).fetchone()
+            duplicate_repair_count = int(duplicate_row["cnt"] or 0) if duplicate_row else 0
+            if duplicate_repair_count:
+                why_not_safe.append("duplicate_fee_pending_accounting_repair_exists")
+            else:
+                why_safe.append("no_duplicate_fee_pending_accounting_repair")
+        order_blocker_row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'ACCOUNTING_PENDING', 'CANCEL_REQUESTED') THEN 1 ELSE 0 END), 0)
+                    AS unresolved_open_order_count,
+                COALESCE(SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END), 0) AS submit_unknown_count,
+                COALESCE(SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END), 0) AS recovery_required_count
+            FROM orders
+            """
+        ).fetchone()
+        unresolved_open_order_count = int(order_blocker_row["unresolved_open_order_count"] or 0) if order_blocker_row else 0
+        submit_unknown_count = int(order_blocker_row["submit_unknown_count"] or 0) if order_blocker_row else 0
+        recovery_required_count = int(order_blocker_row["recovery_required_count"] or 0) if order_blocker_row else 0
+        if unresolved_open_order_count or submit_unknown_count or recovery_required_count:
+            why_not_safe.append(
+                "unresolved_orders_present:"
+                f"open={unresolved_open_order_count},submit_unknown={submit_unknown_count},"
+                f"recovery_required={recovery_required_count}"
+            )
+        else:
+            why_safe.append("no_unresolved_orders")
+        safe_to_repair = bool(has_fee_pending and not why_not_safe)
+        recommended_command = None
+        if safe_to_repair and affected_fill_id and proposed_fee is not None:
+            recommended_command = (
+                "uv run python bot.py fee-pending-accounting-repair "
+                f"--client-order-id {last_client_order_id} "
+                f"--fill-id {affected_fill_id} "
+                f"--fee {proposed_fee:.2f} "
+                f"--fee-provenance {FEE_PENDING_REPAIR_PROVENANCE_ORDER_LEVEL_ALLOCATED} "
+                "--apply --yes"
+            )
         fee_evidence_diagnostics = {
             "primary_blocker": primary_blocker,
             "affected_client_order_id": last_client_order_id,
             "affected_exchange_order_id": last_exchange_order_id,
+            "affected_fill_id": affected_fill_id,
             "affected_fill_ids": fill_ids,
             "order_paid_fee": order_paid_fee,
             "sum_observed_or_applied_fill_fee": observed_fee_sum if related else None,
             "fee_delta": fee_delta,
+            "proposed_repair_fee": proposed_fee,
+            "fee_provenance": FEE_PENDING_REPAIR_PROVENANCE_ORDER_LEVEL_ALLOCATED if safe_to_repair else None,
             "non_authoritative_fill_ids": non_authoritative_fill_ids,
             "complete_fill_set_available": bool(complete_fill_set_available),
             "deterministic_allocation_available": deterministic_allocation_available,
             "operator_confirmation_required": bool(has_fee_pending and not deterministic_allocation_available),
+            "safe_to_repair": safe_to_repair,
+            "why_safe": list(dict.fromkeys(why_safe)),
+            "why_not_safe": list(dict.fromkeys(why_not_safe)),
+            "duplicate_repair_count": duplicate_repair_count,
+            "unresolved_open_order_count": unresolved_open_order_count,
+            "submit_unknown_count": submit_unknown_count,
+            "recovery_required_count": recovery_required_count,
+            "idempotency_key": idempotency_key,
+            "recommended_command": recommended_command,
+            "expected_after": (
+                "fee finalization recorded through fee_pending_accounting_repair; "
+                "broker fill unresolved fee-pending count should decrease"
+                if safe_to_repair
+                else None
+            ),
+            "rollback_or_backup": f"backup/{settings.MODE}/db/ via scripts/backup_sqlite.sh before apply",
+            "post_apply_verification_commands": [
+                "uv run python bot.py audit-ledger",
+                "uv run python bot.py recovery-report",
+                "uv run python bot.py restart-checklist",
+                "uv run python bot.py health",
+            ],
             "recommended_safe_next_action": recommended_action,
         }
     return {

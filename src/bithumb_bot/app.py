@@ -4067,6 +4067,34 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
             f"final_safe_to_apply={1 if bool(candidate.get('final_safe_to_apply')) else 0}"
         )
         print(f"      preconditions={candidate.get('preconditions') or 'none'}")
+        if candidate.get("name") == "fee-pending-accounting-repair":
+            print(
+                "      "
+                f"primary_blocker={candidate.get('primary_blocker') or 'none'} "
+                f"client_order_id={candidate.get('client_order_id') or 'none'} "
+                f"exchange_order_id={candidate.get('exchange_order_id') or 'none'} "
+                f"fill_id={candidate.get('fill_id') or 'none'} "
+                f"fill_ids={','.join(str(item) for item in (candidate.get('fill_ids') or [])) or 'none'}"
+            )
+            print(
+                "      "
+                f"order_paid_fee={candidate.get('order_paid_fee') if candidate.get('order_paid_fee') is not None else 'none'} "
+                "sum_observed_or_applied_fill_fee="
+                f"{candidate.get('sum_observed_or_applied_fill_fee') if candidate.get('sum_observed_or_applied_fill_fee') is not None else 'none'} "
+                f"fee_delta={candidate.get('fee_delta') if candidate.get('fee_delta') is not None else 'none'} "
+                f"fee={candidate.get('fee') if candidate.get('fee') is not None else 'none'} "
+                f"fee_provenance={candidate.get('fee_provenance') or 'none'}"
+            )
+            print(
+                "      "
+                "complete_fill_set_available="
+                f"{1 if bool(candidate.get('complete_fill_set_available')) else 0} "
+                "deterministic_allocation_available="
+                f"{1 if bool(candidate.get('deterministic_allocation_available')) else 0} "
+                "operator_confirmation_required="
+                f"{1 if bool(candidate.get('operator_confirmation_required')) else 0} "
+                f"why_not_safe={'|'.join(str(item) for item in (candidate.get('why_not_safe') or [])) or 'none'}"
+            )
         print(
             "      touched_tables="
             f"{'|'.join(str(item) for item in (candidate.get('touched_tables') or [])) or 'none'}"
@@ -4075,6 +4103,11 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         print(f"      idempotency_key={candidate.get('idempotency_key') or 'none'}")
         print(f"      rollback_or_backup={candidate.get('rollback_or_backup') or 'none'}")
         print(f"      why_safe={candidate.get('why_safe') or 'none'}")
+        if candidate.get("post_apply_verification_commands"):
+            print(
+                "      post_apply_verification_commands="
+                f"{'|'.join(str(item) for item in (candidate.get('post_apply_verification_commands') or []))}"
+            )
         print(f"      command_applicable={1 if bool(candidate.get('command_applicable')) else 0}")
         print(f"      not_recommended_reason={candidate.get('not_recommended_reason') or 'none'}")
         print(f"      recommended_command={candidate.get('recommended_command') or 'none'}")

@@ -1,14 +1,33 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+You are working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is to investigate, verify, and fix a recurring live accounting failure that appeared on EC2 after a Bithumb KRW-BTC SELL. Do not treat the current diagnosis as proven fact. Use it as a starting hypothesis and validate or falsify it directly against the repository code, tests, and available runtime evidence.
+Your task is to continue the EC2 live accounting incident work from the current repository state. Do not treat the current diagnosis as proven fact. Use it as a starting hypothesis, verify or falsify it directly in the repo, then implement the next design-level fix with tests, recovery safety, and observability.
 
-The goal is not a narrow symptom patch. The goal is to evolve this repo toward a more robust, reproducible, and operable automated trading experiment system, especially around exchange fill evidence, fee authority, deterministic accounting, recovery, and observability.
+The priority is not to suppress the symptom. The priority is to turn the repo into a more robust, reproducible, and operable automated trading experiment system where exchange evidence, fee authority, canonical accounting, recovery planning, and operator actions form one deterministic evidence-to-ledger pipeline.
 
-## Incident summary to reproduce and keep in scope
+## Current repository state to inspect first
 
-A live KRW-BTC SELL order with `client_order_id=live_1777435320000_sell_ae60a72b` and `exchange_order_id=C0101000002956694365` was split by Bithumb into two exchange fills:
+The current deployed/relevant commit is:
 
 ```text
+c6a13a3374700d3015e6aa1674b92e594779b1b1
+```
+
+This commit appears to have already addressed part of the original live ingestion bug:
+
+1. `src/bithumb_bot/broker/bithumb_order_queries.py::get_fills()` now builds multi-fill order-level `paid_fee` allocations and applies `allocated_evaluation` whenever the current fee evidence is not `accounting_complete`, instead of only when `fee is None`.
+
+2. `src/bithumb_bot/broker/live.py::_aggregate_fills_for_apply()` now appears to preserve pending/mixed component fee evidence in aggregate fills through fields such as `mixed_component_fee_evidence`, `aggregate_contains_pending_component_fee`, and `component_fee_pending`.
+
+Verify both points in code and tests. Do not assume they are fully correct.
+
+## Incident context to keep in scope
+
+A live KRW-BTC SELL order was split by Bithumb into two exchange fills:
+
+```text
+client_order_id=live_1777435320000_sell_ae60a72b
+exchange_order_id=C0101000002956694365
+
 fill_id=C0101000000984365609
 qty=0.00004374
 price=114325000
@@ -26,7 +45,7 @@ executed_volume=0.00059997
 executed_funds≈68579.88942
 ```
 
-Observed bad state in the live DB/logs:
+The original bad state in the live DB/logs was:
 
 ```text
 small fill:
@@ -50,295 +69,387 @@ canonical aggregate fill / trade:
   observed_fee_source=trade_level_fee
 ```
 
-This produced a `2.000000 KRW` cash delta and a startup gate blocker around fee/accounting debt. The suspected symptom is that the small fill’s 2.00 KRW fee was not applied even though order-level `paid_fee=27.43` was available.
+This produced:
+
+```text
+cash_delta=2.000000
+startup_gate_blocked=1
+fee_pending_auto_recovering=1
+recovery_stage=UNAPPLIED_PRINCIPAL_PENDING
+```
+
+The current post-patch EC2 recovery-report now appears to diagnose the incident clearly:
+
+```text
+primary_blocker=fee_evidence_non_authoritative
+affected_client_order_id=live_1777435320000_sell_ae60a72b
+affected_exchange_order_id=C0101000002956694365
+fill_ids=C0101000000984365609,C0101000000984365610
+order_paid_fee=27.43
+sum_observed_or_applied_fill_fee=25.43
+fee_delta=2.0
+complete_fill_set_available=1
+deterministic_allocation_available=1
+operator_confirmation_required=0
+```
+
+But the current EC2 `repair-plan` still says:
+
+```text
+fee-pending-accounting-repair needed=1 active_issue=1
+safe_to_apply=0
+final_safe_to_apply=0
+preconditions=identify the exact pending fill and provide client_order_id, fill_id, fee, and fee_provenance
+recommended_command=uv run python bot.py fee-pending-accounting-repair --client-order-id <id> --fill-id <fill_id> --fee <fee> --fee-provenance <source>
+```
+
+This is the current structural gap to investigate and fix.
 
 ## Core problem statement to preserve
 
-Do not reduce this to “add the missing 2 KRW fee.” The structural concern is:
+Do not reduce this task to “apply a 2 KRW repair.” The current highest-priority design problem is:
 
 ```text
-The system appears to aggregate fee as a numeric value while losing fee authority, validation state, and provenance across the accounting boundary. A temporary or non-authoritative fee value such as 0.0 can therefore be treated as a real zero fee and merged into a canonical aggregate fill/trade.
+The live ingestion parser and aggregation path now appear to preserve fee authority better,
+but the recovery layer still does not convert deterministic accounting evidence into a safe,
+idempotent, concrete repair-plan action.
+
+Recovery-report can diagnose:
+  deterministic_allocation_available=1
+  operator_confirmation_required=0
+  fee_delta=2.0
+
+But repair-plan cannot yet emit:
+  safe_to_apply=1
+  exact client_order_id
+  exact fill_id
+  exact fee
+  exact fee_provenance
+  exact recommended command
 ```
 
-The fix should prevent the whole class of failures:
+This means the system still depends on a human manually copying diagnostic values into a repair command. That is not deterministic recovery. It is manual repair with better diagnostics.
 
-```text
-partial fills
-order-level-only paid_fee
-missing trade-level fee
-late fee finalization
-ambiguous zero-fee assumptions
-aggregate projection drift
-manual repair loops
-startup gate blocked by accounting debt that was actually resolvable from retained evidence
-```
+The next design-level fix should make recovery-report evidence and repair-plan action share the same source of truth.
 
 ## Working hypotheses to validate or falsify
 
-Keep these as hypotheses, not assumptions.
+Keep these as hypotheses until verified in code and tests.
 
-### Hypothesis A: `assumed_zero_non_material` bypasses order-level fee allocation
+### Hypothesis A: The original ingestion bug is mostly fixed in current commit
 
-Current suspected path:
+Earlier, the small fill with `fee=0.0` and `fee_status=assumed_zero_non_material` likely bypassed order-level paid_fee allocation because the code only allocated when `fee is None`.
 
-1. `src/bithumb_bot/broker/bithumb_order_queries.py::get_fills()` detects multi-fill order-level `paid_fee` and builds `validate_multi_fill_order_level_paid_fee_allocation(...)`.
-2. Allocation result may be valid for both fills.
-3. However, per-fill allocation is applied only when something like this condition holds:
-
-```python
-if fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
-    ...
-```
-
-4. The small fill has `fee=0.0` and `fee_status=assumed_zero_non_material`, so `fee is None` is false and the allocation result is not applied.
-5. The small fill remains `fee_pending`, even though the order-level `paid_fee=27.43` and complete fill set could have allocated `2.00` to it.
-
-Validate by writing a failing regression test using the incident payload. Falsify if current `get_fills()` already returns:
+Current commit appears to fix this by:
 
 ```text
-small fill fee=2.00
-fee_status=validated_order_level_paid_fee_allocated
-accounting_status=accounting_complete
+building allocated_evaluation
+classifying current fee evidence
+using allocated_evaluation when current_evaluation.accounting_status != "accounting_complete"
 ```
 
-### Hypothesis B: `_aggregate_fills_for_apply()` loses fee authority and finalizes mixed-quality evidence
+Verify this against `src/bithumb_bot/broker/bithumb_order_queries.py`.
 
-Suspected path:
+Required verification:
 
-1. `src/bithumb_bot/broker/live_submission_execution.py` reads broker fills.
-2. If any fee is pending, it records diagnostic observations.
-3. It then passes fills to `live._aggregate_fills_for_apply()`.
-4. `_aggregate_fills_for_apply()` appears to sum numeric fees only.
-5. `0.0` is considered valid numeric fee.
-6. The aggregate `BrokerFill` does not preserve per-component fee authority/status/provenance.
-7. The aggregate fill can then be stored as canonical finalized accounting even though one component was pending/non-authoritative.
+```bash
+uv run pytest tests/test_bithumb_private_api.py -q
+uv run pytest tests/test_fee_observation.py -q
+```
 
-Validate by finding the actual aggregation implementation and adding a test where one component is `accounting_complete` and another is `fee_pending` / `assumed_zero_non_material`. The aggregate must not become finalized/authoritative. Falsify only if the apply layer independently re-derives fee authority from original component fills before canonical posting.
+There must be a regression test equivalent to:
 
-### Hypothesis C: Recovery is too repair-command-centric rather than deterministic replay-centric
+```text
+paid_fee=27.43
+fill A funds=5000.5755, no trade-level fee
+fill B funds=63579.31392, no trade-level fee
 
-Observed audit history includes repeated fee pending and repair counts. This suggests the live ingestion path regularly fails to finalize fee evidence and relies on operator repair commands.
+expected:
+  fill A fee=2.00, validated_order_level_paid_fee_allocated, accounting_complete
+  fill B fee=25.43, validated_order_level_paid_fee_allocated, accounting_complete
+  sum_fee=27.43
+```
 
-Validate by checking tests, code paths, and reports around:
+Falsify this hypothesis if the current code still emits `assumed_zero_non_material / fee_pending / fee=0.0` for the small fill.
+
+### Hypothesis B: Aggregate fill evidence preservation is improved but still structurally risky
+
+Current commit appears to update `_aggregate_fills_for_apply()` so aggregate fills preserve pending/mixed component fee evidence. Verify this in `src/bithumb_bot/broker/live.py`.
+
+Required test coverage:
+
+```text
+component A: accounting_complete fee=25.43
+component B: fee_pending / assumed_zero_non_material / fee=0.0
+
+expected:
+  aggregate must not be fee_finalized/authoritative
+  aggregate fee evidence must preserve the pending component
+  apply path must not silently canonicalize 25.43 as final total fee
+```
+
+Run:
+
+```bash
+uv run pytest tests/test_live_fill_aggregation.py -q
+```
+
+Falsify if aggregate accounting can still finalize mixed-quality fee evidence.
+
+Even if this hypothesis is confirmed as fixed for now, document the remaining architecture risk: aggregate fills still cross an accounting boundary, and long-term canonical accounting should move toward exchange fill-level ledger postings.
+
+### Hypothesis C: The current main blocker is now recovery-plan actionability, not parser allocation
+
+Current EC2 evidence shows recovery-report can identify deterministic evidence:
+
+```text
+deterministic_allocation_available=1
+complete_fill_set_available=1
+operator_confirmation_required=0
+fee_delta=2.0
+affected client_order_id/fill_ids known
+```
+
+But repair-plan still emits only placeholder instructions and marks the repair unsafe:
+
+```text
+safe_to_apply=0
+final_safe_to_apply=0
+preconditions=identify exact pending fill and provide client_order_id, fill_id, fee, fee_provenance
+```
+
+Validate by running, or by tests that simulate the same state:
+
+```bash
+MODE=live uv run bithumb-bot recovery-report
+MODE=live uv run bithumb-bot repair-plan
+MODE=live uv run bithumb-bot repair-plan --json
+```
+
+Falsify this hypothesis only if `repair-plan --json` already emits:
+
+```text
+safe_to_apply=1
+client_order_id=live_1777435320000_sell_ae60a72b
+fill_id=C0101000000984365609
+fee=2.00
+fee_provenance=order_level_paid_fee_validated_allocated
+recommended_command=uv run python bot.py fee-pending-accounting-repair ...
+```
+
+Current EC2 output suggests this hypothesis is confirmed.
+
+### Hypothesis D: Recovery is still too operator-repair-centric and not deterministic replay-centric
+
+Audit/recovery history includes repeated values such as:
+
+```text
+fee_pending_accounting_repair_count=10
+broker_fill_fee_pending_count=16
+position_authority_repair_count=14
+```
+
+This may mean the exchange often provides fee evidence late or only at order level, while the system repeatedly falls back to operator repair instead of deterministic replay/finalization.
+
+Validate with DB-oriented tests or, if working on EC2, read-only queries:
+
+```bash
+sqlite3 /home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite <<'SQL'
+.headers on
+.mode column
+
+SELECT source, fee_status, accounting_status, COUNT(*) AS n
+FROM broker_fill_observations
+GROUP BY source, fee_status, accounting_status
+ORDER BY n DESC;
+
+SELECT client_order_id, fill_id, fee_status, accounting_status, source, fee
+FROM broker_fill_observations
+WHERE accounting_status='fee_pending'
+ORDER BY event_ts DESC;
+SQL
+```
+
+In the repo, inspect:
 
 ```text
 broker_fill_observations
-fee_pending_accounting_repair
-reconcile_fee_pending
-reconcile_recent_activity_fee_pending
+fill_accounting_incidents
+fee_pending_accounting_repairs
 repair-plan
 recovery-report
+reconcile
+```
+
+Falsify if the repair count is only historical/manual noise and live path no longer creates unresolved fee debts under realistic fixtures.
+
+### Hypothesis E: Startup gate is safe, but blocked-state next action is incomplete
+
+The startup gate correctly blocks trading when fee/accounting debt exists. The problem is not the block. The problem is that the system does not yet convert “auto-resolvable accounting debt” into a concrete safe repair candidate.
+
+Validate through tests around:
+
+```text
 restart-checklist
+recovery-report
+repair-plan
+runtime readiness
+startup gate blockers
 ```
 
-Look for repeated pattern:
+The desired behavior is:
 
 ```text
-live_application_fee_pending -> reconcile_fee_pending -> fee_pending_accounting_repair
+startup gate remains blocked until repair is applied
+repair-plan identifies safe deterministic repair
+repair-plan --json emits exact command and expected postcondition
+after repair, readiness/audit/health can confirm live_ready/can_resume
 ```
 
-Do not solve this by adding another manual repair command. Prefer a deterministic replay or auto-finalization path when exchange evidence is complete and invariants pass.
+Falsify only if this already happens end-to-end.
 
-### Hypothesis D: Startup gate is safe but does not classify “auto-resolvable accounting debt” well enough
+## Primary implementation objective
 
-The gate correctly blocks trading when accounting evidence is unresolved. The design problem is that it may not distinguish:
+Implement the missing recovery-layer bridge:
 
 ```text
-needs operator confirmation
-vs
-can be resolved deterministically from retained order/fill/paid_fee evidence
-vs
-code bug / invariant violation
+recovery-report deterministic fee evidence
+=> shared AccountingIncidentEvidence / RepairCandidate model
+=> repair-plan safe_to_apply=1 when invariants pass
+=> exact idempotent fee-pending-accounting-repair command
+=> machine-readable JSON fields
+=> postcondition guidance
 ```
 
-Validate by examining `recovery-report`, `restart-checklist`, `repair-plan`, startup gate code, and observability events. Improve diagnostics so a future blocked operator sees the exact invariant failure, source evidence, and whether deterministic replay is available.
+Do not implement this as a string scrape from recovery-report output. Use shared functions or shared data models so recovery-report and repair-plan render the same underlying evidence.
 
-## Files and areas to inspect first
+## Required design behavior
 
-Start with these, but search the repository for related code before editing:
+When the system detects all of the following:
 
 ```text
-src/bithumb_bot/fee_observation.py
-src/bithumb_bot/broker/bithumb_order_queries.py
-src/bithumb_bot/broker/bithumb.py
-src/bithumb_bot/broker/live_submission_execution.py
-src/bithumb_bot/broker/live.py
-src/bithumb_bot/execution.py
-src/bithumb_bot/db_core.py
-tests/test_fee_observation.py
-tests/test_live_fill_aggregation.py
-tests/test_bithumb_private_api.py
-tests related to recovery-report, repair-plan, restart-checklist, reconciliation, and startup gate
-docs/OPERATIONS_STATE_MACHINE.md
-docs/OPERATOR_REPORTING.md
+primary blocker or incident type is fee_evidence_non_authoritative / active fee-pending accounting issue
+deterministic_allocation_available=1
+complete_fill_set_available=1
+operator_confirmation_required=0
+affected_client_order_id is known
+affected_exchange_order_id is known or not required
+pending fill_id is known
+order_paid_fee is known
+sum_observed_or_applied_fill_fee is known
+fee_delta is positive and within expected allocation/rounding rules
+no unresolved orders
+no submit_unknown
+no recovery_required orders
+no duplicate fee_pending_accounting_repair for same idempotency key
+broker asset side is compatible with the proposed repair
 ```
 
-## Required design direction
-
-Prefer design changes that prevent the entire problem family.
-
-### 1. Treat fee evidence as stateful evidence, not just a float
-
-A fill fee must carry at least:
+then `repair-plan` should produce a `fee-pending-accounting-repair` candidate like:
 
 ```text
-fee value
-fee_status
-fee_source
-fee_confidence
-fee_provenance
-fee_validation_reason
-fee_validation_checks
-accounting_status / accounting decision
+needed=1
+active_issue=1
+safe_to_apply=1
+final_safe_to_apply=1
+client_order_id=live_1777435320000_sell_ae60a72b
+exchange_order_id=C0101000002956694365
+fill_id=C0101000000984365609
+fee=2.00
+fee_provenance=order_level_paid_fee_validated_allocated
+idempotency_key=fee_pending_accounting_repair:live_1777435320000_sell_ae60a72b:C0101000000984365609:2.00
+recommended_command=uv run python bot.py fee-pending-accounting-repair --client-order-id live_1777435320000_sell_ae60a72b --fill-id C0101000000984365609 --fee 2.00 --fee-provenance order_level_paid_fee_validated_allocated --apply --yes
+why_safe=<specific invariant evidence>
+expected_after=<specific postcondition>
+rollback_or_backup=<specific backup guidance>
 ```
 
-Do not allow a non-authoritative `0.0` to cross into canonical accounting as a real finalized zero fee.
+`repair-plan --json` must include the same fields in machine-readable form. Do not only update the human text.
 
-### 2. Apply order-level paid_fee allocation whenever current fill fee evidence is not accounting-complete
+If any invariant fails, keep `safe_to_apply=0`, but print precise `why_not_safe` fields, not generic placeholder preconditions.
 
-The allocation path should not be gated only on `fee is None`.
+## Required safety invariants before marking safe_to_apply=1
 
-Expected policy:
-
-```python
-if multi_fill_order_level_allocation is not None:
-    allocated = allocation.evaluations_by_fill_id.get(fill_id)
-    current = classify_fee_evaluation(...)
-    if allocated is not None and current.accounting_status != "accounting_complete":
-        use allocated
-```
-
-This must include cases such as:
+At minimum, validate these before recommending an apply command:
 
 ```text
-assumed_zero_non_material
-missing
-empty
-zero_reported
-unparseable
-invalid
-order_level_candidate
-fee_pending
+1. affected pending fill still exists in broker_fill_observations or fill accounting incident projection
+2. affected fill accounting status is not already complete
+3. complete fill set is available
+4. order_paid_fee is available
+5. fee_delta equals order_paid_fee - sum_observed_or_applied_fill_fee within KRW fee rounding tolerance
+6. proposed fee is positive and reasonable under configured fee rate tolerance
+7. proposed fee plus already applied/observed fees equals order_paid_fee within tolerance
+8. no existing fee_pending_accounting_repair idempotency record for this exact client_order_id/fill_id/fee
+9. no unresolved open orders, submit_unknown, or recovery_required orders
+10. broker/portfolio asset exposure is compatible with applying only a fee/accounting repair, not a position mutation
+11. the repair command must use normal accounting/repair event paths, not direct row edits
 ```
 
-But do not blindly override truly authoritative trade-level fees. If trade-level fee is already accounting-complete and does not violate order-level invariants, preserve it.
-
-### 3. Redefine or constrain `assumed_zero_non_material`
-
-`assumed_zero_non_material` must not mean “authoritative real zero fee.”
-
-Safer options:
-
-```text
-fee=None, fee_status=assumed_zero_non_material, accounting_status=fee_pending
-```
-
-or, if `fee=0.0` remains for backward compatibility:
-
-```text
-fee=0.0 with explicit non_authoritative_assumption authority that aggregation/apply cannot finalize
-```
-
-Choose the least invasive approach that protects accounting boundaries and passes existing tests.
-
-### 4. Aggregation must preserve or respect fee authority
-
-If `_aggregate_fills_for_apply()` remains, it must not aggregate away fee authority. At minimum:
-
-```text
-If any component fill is fee_pending / not accounting_complete:
-  - do not produce an aggregate fill that appears fee_finalized/complete/authoritative
-  - either block strict aggregation and transition to recovery
-  - or return an aggregate pending-principal/pending-fee representation that downstream apply preserves
-```
-
-Do not let `25.43 + non-authoritative 0.0` become a finalized aggregate fee of `25.43`.
-
-Longer-term, prefer accounting from exchange fill-level postings and treat aggregate fills as reporting/projection only.
-
-### 5. Add invariants around order-level fee allocation
-
-When order-level `paid_fee` exists and complete fill set is available, enforce or report:
-
-```text
-sum(fill.qty) == order.executed_volume within tolerance
-sum(fill.funds) == order.executed_funds within tolerance
-sum(applied_fill_fee) == order.paid_fee within KRW fee rounding tolerance
-no canonical finalized fill/trade if fee evidence is incomplete
-principal must not be double-applied during recovery/replay
-```
-
-If invariant fails, emit a structured diagnostic and block trading safely.
+Do not weaken startup gates. Do not auto-resume trading.
 
 ## Required tests
 
-Add regression and invariant tests before or alongside fixes. Include the incident payload exactly enough to reproduce the failure.
+Add or update tests so they fail before this repair-plan bridge and pass after.
 
-Minimum required tests:
+At minimum add:
 
 ```text
-test_get_fills_allocates_order_paid_fee_when_small_fill_fee_is_assumed_zero_non_material
+test_repair_plan_emits_safe_fee_pending_repair_from_deterministic_allocation
 ```
 
-Use a multi-fill `/v1/order` fixture equivalent to:
+Use an incident fixture equivalent to:
 
 ```text
-paid_fee="27.43"
-executed_volume="0.00059997"
-executed_funds="68579.88942"
-trades=[
-  {
-    uuid="C0101000000984365609",
-    created_at="2026-04-29T13:04:03+09:00",
-    market="KRW-BTC",
-    side="ask",
-    price="114325000",
-    volume="0.00004374",
-    funds="5000.5755"
-  },
-  {
-    uuid="C0101000000984365610",
-    created_at="2026-04-29T13:04:03+09:00",
-    market="KRW-BTC",
-    side="ask",
-    price="114304000",
-    volume="0.00055623",
-    funds="63579.31392"
-  }
-]
-```
+client_order_id=live_1777435320000_sell_ae60a72b
+exchange_order_id=C0101000002956694365
 
-Expected result:
+order_paid_fee=27.43
+sum_observed_or_applied_fill_fee=25.43
+fee_delta=2.0
+complete_fill_set_available=1
+deterministic_allocation_available=1
+operator_confirmation_required=0
 
-```text
-small fill:
-  fee=2.00
-  fee_status=validated_order_level_paid_fee_allocated
-  accounting_status=accounting_complete
-  fee_source=order_level_paid_fee
-  fee_confidence=validated
+pending fill:
+  fill_id=C0101000000984365609
+  qty=0.00004374
+  funds=5000.5755
+  current fee=0.0 or missing/non-authoritative
+  current status=fee_pending / assumed_zero_non_material
 
-large fill:
+complete fill:
+  fill_id=C0101000000984365610
+  qty=0.00055623
+  funds=63579.31392
   fee=25.43
-  fee_status=validated_order_level_paid_fee_allocated
-  accounting_status=accounting_complete
-  fee_source=order_level_paid_fee
-  fee_confidence=validated
-
-sum fees=27.43
+  status=accounting_complete
 ```
 
-Also add:
+Expected repair-plan output:
 
 ```text
-test_aggregate_fills_does_not_finalize_when_any_component_fee_is_pending
-test_live_application_preserves_fee_pending_status_across_aggregation
-test_order_level_paid_fee_sum_invariant_detects_fee_shortfall
+fee-pending-accounting-repair needed=1
+safe_to_apply=1
+final_safe_to_apply=1
+client_order_id=live_1777435320000_sell_ae60a72b
+fill_id=C0101000000984365609
+fee=2.00
+fee_provenance=order_level_paid_fee_validated_allocated
+recommended_command contains exact fee-pending-accounting-repair command
 ```
 
-If existing tests already cover some of this, extend them rather than duplicating.
+Also add or verify negative tests:
 
-Run at least:
+```text
+test_repair_plan_does_not_emit_safe_repair_when_operator_confirmation_required
+test_repair_plan_does_not_emit_safe_repair_when_complete_fill_set_missing
+test_repair_plan_does_not_emit_safe_repair_when_fee_delta_mismatches_order_paid_fee
+test_repair_plan_does_not_emit_safe_repair_when_duplicate_repair_exists
+test_repair_plan_does_not_emit_safe_repair_when_unresolved_orders_exist
+```
+
+Keep existing tests for ingestion and aggregation passing:
 
 ```bash
 uv run pytest tests/test_fee_observation.py -q
@@ -346,52 +457,64 @@ uv run pytest tests/test_live_fill_aggregation.py -q
 uv run pytest tests/test_bithumb_private_api.py -q
 ```
 
-Then run the broader relevant suite if feasible:
+Run focused repair/recovery/reporting tests. Discover the relevant files and run them. Then run the broader suite if feasible:
 
 ```bash
 uv run pytest -q
 ```
 
-## Required operational/recovery improvements
+## Required observability/reporting improvements
 
-Do not only fix parser logic. Improve recovery and observability enough that the same family is diagnosable and reproducible next time.
-
-Add or improve structured reporting so `recovery-report`, `repair-plan`, or `restart-checklist` can show:
+Update `repair-plan`, `repair-plan --json`, and if needed `recovery-report` so operators see:
 
 ```text
 primary blocker
 affected client_order_id
-exchange_order_id
-fill_ids
+affected exchange_order_id
+affected fill_id
+all related fill_ids
 order_paid_fee
 sum_observed_or_applied_fill_fee
 fee_delta
-which fill has missing/non-authoritative fee evidence
-whether complete fill set is available
-whether deterministic allocation/replay is possible
-whether operator confirmation is required
-recommended safe next action
+proposed repair fee
+fee_provenance
+complete_fill_set_available
+deterministic_allocation_available
+operator_confirmation_required
+safe_to_apply
+why_safe
+why_not_safe
+idempotency_key
+recommended_command
+expected_after
+backup/rollback guidance
+post-apply verification commands
 ```
 
-If a deterministic replay/finalization path already exists, wire this case into it. If it does not exist, add a clearly scoped design note or TODO with tests documenting why this case remains manual.
+The human-readable repair plan should not self-loop with:
 
-Do not automatically resume trading unless all live-ready invariants pass.
+```text
+recommended_command=uv run python bot.py repair-plan
+```
+
+when a deterministic repair command is available.
 
 ## Scope control
 
-Do not rewrite the whole accounting system in one change. Prioritize in this order:
+Do not rewrite the entire accounting system in this patch. Prioritize:
 
-1. Reproduce the incident with a failing test.
-2. Fix multi-fill order-level paid_fee allocation application so non-complete fee evidence can be replaced by validated allocation.
-3. Prevent aggregation from finalizing mixed or pending fee evidence.
-4. Add fee sum/order paid_fee invariants and diagnostics.
-5. Document longer-term architecture changes needed to move canonical accounting from aggregate fills to fill-level ledger postings.
+1. Verify the current ingestion and aggregation fixes are really present and tested.
+2. Build a shared evidence/candidate model, or reuse an existing one, so recovery-report and repair-plan share deterministic fee incident evidence.
+3. Make repair-plan emit a safe concrete fee-pending-accounting-repair candidate when deterministic allocation evidence satisfies invariants.
+4. Add JSON output fields.
+5. Add positive and negative tests.
+6. Document the remaining longer-term architecture direction.
 
-Avoid unrelated strategy changes, exchange order submission changes, or UI changes.
+Avoid unrelated changes to strategy logic, signal generation, order submission, exchange signing, market data, or UI.
 
-## Long-term design proposal to include in final report
+## Long-term design note to include in docs or final report
 
-In your final report, include a concise design roadmap toward:
+Include a concise roadmap toward this architecture:
 
 ```text
 OrderSnapshot
@@ -408,32 +531,98 @@ FillExecution
   funds
 
 FeeEvidence
+  fill_id
   source: trade_level | order_level_allocated | operator_confirmed | estimate
   authority: authoritative | validated | inferred | missing
   accounting_status
+  provenance
+  validation_checks
 
 LedgerPosting
+  source_fill_id
   principal_cash_delta
   asset_delta
   fee_cash_delta
-  source_evidence_id
+  evidence_id
 ```
 
-The intended direction:
+Long-term principle:
 
 ```text
-raw exchange snapshot + parser version + accounting version
-=> deterministic replay
-=> expected ledger
-=> current ledger diff
-=> auto-apply if invariants pass, otherwise require operator approval
+canonical ledger = sum of fill-level postings
+aggregate fill = reporting/projection/view only
 ```
 
-Manual `fee_pending_accounting_repair` should become the last resort, not the normal path.
+Target replay flow:
+
+```text
+raw exchange snapshot
++ parser version
++ accounting version
++ existing ledger postings
+=> replay expected postings
+=> diff against current DB
+=> classify:
+   auto-apply safe
+   operator confirmation required
+   unsafe / code bug
+```
+
+Manual `fee_pending_accounting_repair` should remain an explicit, audited, idempotent event path, but repair-plan should fill in the exact command when evidence is deterministic. Manual value selection should be the exception, not the normal recovery workflow.
+
+## EC2 validation guidance after patch
+
+Do not enable or start live trading as part of the code patch.
+
+After patch and tests, the operator should be able to run:
+
+```bash
+cd ~/apps/bithumb-bot
+set -a
+source /home/ec2-user/bithumb-runtime/env/live.verify.env
+set +a
+export ENV_ROOT=/home/ec2-user/bithumb-runtime/env
+export MODE=live
+
+MODE=live uv run bithumb-bot repair-plan
+MODE=live uv run bithumb-bot repair-plan --json
+```
+
+Expected for the current incident:
+
+```text
+fee-pending-accounting-repair needed=1
+safe_to_apply=1
+client_order_id=live_1777435320000_sell_ae60a72b
+fill_id=C0101000000984365609
+fee=2.00
+fee_provenance=order_level_paid_fee_validated_allocated
+recommended_command=uv run python bot.py fee-pending-accounting-repair ...
+```
+
+After operator-applied repair, validation should be:
+
+```bash
+MODE=live uv run bithumb-bot audit-ledger
+MODE=live uv run bithumb-bot recovery-report
+MODE=live uv run bithumb-bot restart-checklist
+MODE=live uv run bithumb-bot health
+```
+
+Expected postcondition:
+
+```text
+unresolved_fee_state=0
+fill_accounting_active_issue_count=0
+broker_fill_latest_unresolved_fee_pending_count=0
+cash_delta=0 or balance mismatch cleared
+startup_gate_blocked=0
+live_ready=1 or can_resume=true
+```
 
 ## Final response format
 
-When done, report in this exact structure:
+When finished, report exactly in this structure:
 
 ```markdown
 ## Summary
@@ -449,6 +638,8 @@ When done, report in this exact structure:
 
 ## Design changes implemented
 
+## Repair-plan behavior before vs after
+
 ## Tests added or changed
 
 ## Commands run and results
@@ -460,5 +651,4 @@ When done, report in this exact structure:
 ## Follow-up recommendations
 ```
 
-Be explicit about any hypothesis you could not fully prove. Do not overclaim. Do not present a symptom patch as a root-cause design fix unless the tests and invariants prove it prevents the broader class.
-
+Be explicit about anything not proven. Do not claim the broader accounting architecture is solved if this patch only bridges deterministic fee evidence into repair-plan. Do not present a manually supplied 2 KRW repair as a design fix. The design fix is that the system can derive, validate, present, and safely apply that repair deterministically through its normal audited repair path.

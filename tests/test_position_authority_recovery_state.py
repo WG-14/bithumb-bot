@@ -13,6 +13,7 @@ from bithumb_bot.db_core import (
     record_broker_fill_observation,
     record_external_cash_adjustment,
     record_external_position_adjustment,
+    record_fee_pending_accounting_repair,
     record_position_authority_projection_publication,
     record_position_authority_repair,
     set_portfolio_breakdown,
@@ -136,6 +137,111 @@ def _record_fee_pending_buy(conn, *, client_order_id: str = "incident_buy", fill
         source="test_reconcile_fee_pending",
         raw_payload={"fixture": "incident"},
     )
+
+
+def _materialize_deterministic_fee_allocation_incident(
+    conn,
+    *,
+    operator_confirmation_required: bool = False,
+    complete_fill_set_available: bool = True,
+    order_paid_fee: float = 27.43,
+    duplicate_repair: bool = False,
+    unresolved_order: bool = False,
+) -> None:
+    client_order_id = "live_1777435320000_sell_ae60a72b"
+    exchange_order_id = "C0101000002956694365"
+    pending_fill_id = "C0101000000984365609"
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        side="SELL",
+        qty_req=0.00059997,
+        price=114_304_000.0,
+        ts_ms=1_777_435_320_000,
+        status="FILLED",
+        internal_lot_size=LOT_SIZE,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    checks = None if operator_confirmation_required else {
+        "complete_fill_set": complete_fill_set_available,
+        "allocated_fee_sum_match": True,
+    }
+    raw_payload = {
+        "paid_fee": order_paid_fee,
+        "order_fee_fields": {"paid_fee": order_paid_fee},
+    }
+    record_broker_fill_observation(
+        conn,
+        event_ts=1_777_435_323_000,
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        fill_id=pending_fill_id,
+        fill_ts=1_777_435_323_001,
+        side="SELL",
+        price=114_325_000.0,
+        qty=0.00004374,
+        fee=0.0,
+        fee_status="assumed_zero_non_material",
+        fee_source="missing",
+        fee_confidence="ambiguous",
+        accounting_status="fee_pending",
+        source="test_deterministic_allocation",
+        fee_provenance="missing_fee_field",
+        fee_validation_reason="assumed_zero_non_material",
+        fee_validation_checks=checks,
+        raw_payload=raw_payload,
+    )
+    record_broker_fill_observation(
+        conn,
+        event_ts=1_777_435_323_001,
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        fill_id="C0101000000984365610",
+        fill_ts=1_777_435_323_002,
+        side="SELL",
+        price=114_304_000.0,
+        qty=0.00055623,
+        fee=25.43,
+        fee_status="validated_order_level_paid_fee_allocated",
+        fee_source="order_level_paid_fee",
+        fee_confidence="validated",
+        accounting_status="accounting_complete",
+        source="test_deterministic_allocation",
+        fee_provenance="order_level_paid_fee_validated_allocated",
+        fee_validation_reason="order_level_paid_fee_validated_allocated",
+        fee_validation_checks=checks,
+        raw_payload=raw_payload,
+    )
+    if duplicate_repair:
+        record_fee_pending_accounting_repair(
+            conn,
+            event_ts=1_777_435_324_000,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            fill_id=pending_fill_id,
+            fill_ts=1_777_435_323_001,
+            price=114_325_000.0,
+            qty=0.00004374,
+            fee=2.0,
+            source="operator_fee_pending_recovery",
+            reason="fee_pending_accounting_repair",
+            repair_basis={"fixture": "duplicate"},
+        )
+    if unresolved_order:
+        record_order_if_missing(
+            conn,
+            client_order_id="unresolved_fee_repair_blocker",
+            side="BUY",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_777_435_325_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+    conn.commit()
 
 
 def _apply_fee_pending_buy(conn, *, client_order_id: str = "incident_buy", fill_id: str = "fill-23") -> None:
@@ -3141,6 +3247,108 @@ def test_residual_only_repair_plan_inactive_candidates_do_not_carry_recommended_
     assert rebuild_candidate["needed"] is False
     assert rebuild_candidate["recommended_command"] is None
     assert rebuild_candidate["command_applicable"] is False
+
+
+def test_repair_plan_emits_safe_fee_pending_repair_from_deterministic_allocation(
+    recovery_db,
+    capsys,
+):
+    original_fee_rate = settings.LIVE_FEE_RATE_ESTIMATE
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_deterministic_fee_allocation_incident(conn)
+    finally:
+        conn.close()
+    try:
+        report = _load_recovery_report()
+        diagnostics = report["broker_fill_observation_summary"]["fee_evidence_diagnostics"]
+        assert diagnostics["primary_blocker"] == "fee_evidence_non_authoritative"
+        assert diagnostics["deterministic_allocation_available"] is True
+        assert diagnostics["complete_fill_set_available"] is True
+        assert diagnostics["operator_confirmation_required"] is False
+        assert diagnostics["safe_to_repair"] is True
+
+        capsys.readouterr()
+        app_main(["repair-plan", "--json"])
+        plan = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        candidate = next(
+            item for item in plan["candidate_repairs"] if item["name"] == "fee-pending-accounting-repair"
+        )
+
+        assert candidate["needed"] is True
+        assert candidate["active_issue"] is True
+        assert candidate["safe_to_apply"] is True
+        assert candidate["final_safe_to_apply"] is True
+        assert candidate["client_order_id"] == "live_1777435320000_sell_ae60a72b"
+        assert candidate["exchange_order_id"] == "C0101000002956694365"
+        assert candidate["fill_id"] == "C0101000000984365609"
+        assert candidate["fee"] == pytest.approx(2.0)
+        assert candidate["fee_provenance"] == "order_level_paid_fee_validated_allocated"
+        assert candidate["order_paid_fee"] == pytest.approx(27.43)
+        assert candidate["sum_observed_or_applied_fill_fee"] == pytest.approx(25.43)
+        assert candidate["fee_delta"] == pytest.approx(2.0)
+        assert candidate["idempotency_key"] == (
+            "fee_pending_accounting_repair:live_1777435320000_sell_ae60a72b:C0101000000984365609:2.00"
+        )
+        assert candidate["recommended_command"] == (
+            "uv run python bot.py fee-pending-accounting-repair "
+            "--client-order-id live_1777435320000_sell_ae60a72b "
+            "--fill-id C0101000000984365609 "
+            "--fee 2.00 "
+            "--fee-provenance order_level_paid_fee_validated_allocated "
+            "--apply --yes"
+        )
+
+        app_main(["repair-plan"])
+        human = capsys.readouterr().out
+        assert "safe_to_apply=1" in human
+        assert "client_order_id=live_1777435320000_sell_ae60a72b" in human
+        assert "fill_id=C0101000000984365609" in human
+        assert "--fee 2.00" in human
+        assert "recommended_command=uv run python bot.py repair-plan" not in human
+    finally:
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", original_fee_rate)
+
+
+@pytest.mark.parametrize(
+    ("fixture_kwargs", "expected_reason"),
+    [
+        ({"operator_confirmation_required": True}, "deterministic_allocation_unavailable"),
+        ({"complete_fill_set_available": False}, "complete_fill_set_missing"),
+        ({"order_paid_fee": 28.50}, "proposed_fee_outside_fee_rate_tolerance"),
+        ({"duplicate_repair": True}, "duplicate_fee_pending_accounting_repair_exists"),
+        ({"unresolved_order": True}, "unresolved_orders_present:open=1,submit_unknown=0,recovery_required=0"),
+    ],
+)
+def test_repair_plan_does_not_emit_safe_fee_pending_repair_when_invariants_fail(
+    recovery_db,
+    capsys,
+    fixture_kwargs,
+    expected_reason,
+):
+    original_fee_rate = settings.LIVE_FEE_RATE_ESTIMATE
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_deterministic_fee_allocation_incident(conn, **fixture_kwargs)
+    finally:
+        conn.close()
+    try:
+        capsys.readouterr()
+        app_main(["repair-plan", "--json"])
+        plan = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        candidate = next(
+            item for item in plan["candidate_repairs"] if item["name"] == "fee-pending-accounting-repair"
+        )
+
+        assert candidate["needed"] is True
+        assert candidate["active_issue"] is True
+        assert candidate["safe_to_apply"] is False
+        assert candidate["final_safe_to_apply"] is False
+        assert expected_reason in candidate["why_not_safe"]
+    finally:
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", original_fee_rate)
 
 
 def test_flat_stale_lot_projection_detector_identifies_ec2_style_case(recovery_db):

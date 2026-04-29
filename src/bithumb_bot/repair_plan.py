@@ -148,6 +148,79 @@ def _backup_guidance(mode: str) -> str:
     return f"backup/{mode}/db/ via scripts/backup_sqlite.sh before apply"
 
 
+def _fee_pending_accounting_repair_candidate(
+    *,
+    report: dict[str, Any],
+    fill_projection: dict[str, Any],
+    mode: str,
+) -> dict[str, Any]:
+    diagnostics = dict(
+        (report.get("broker_fill_observation_summary") or {}).get("fee_evidence_diagnostics") or {}
+    )
+    needed = bool(
+        _int(fill_projection.get("active_fee_pending_count")) > 0
+        or _int(fill_projection.get("fee_validation_blocked_count")) > 0
+        or _int(fill_projection.get("unapplied_principal_pending_count")) > 0
+    )
+    active_issue = bool(_int(fill_projection.get("active_issue_count")) > 0)
+    safe_to_apply = bool(diagnostics.get("safe_to_repair"))
+    why_not_safe = list(diagnostics.get("why_not_safe") or [])
+    preconditions = (
+        "deterministic order-level paid_fee allocation evidence passed repair invariants"
+        if safe_to_apply
+        else (
+            "; ".join(str(item) for item in why_not_safe)
+            or "identify the exact pending fill and provide client_order_id, fill_id, fee, and fee_provenance"
+        )
+    )
+    return {
+        "name": "fee-pending-accounting-repair",
+        "needed": needed,
+        "active_issue": active_issue,
+        "safe_to_apply": safe_to_apply,
+        "final_safe_to_apply": safe_to_apply,
+        "primary_blocker": diagnostics.get("primary_blocker"),
+        "client_order_id": diagnostics.get("affected_client_order_id"),
+        "exchange_order_id": diagnostics.get("affected_exchange_order_id"),
+        "fill_id": diagnostics.get("affected_fill_id"),
+        "fill_ids": list(diagnostics.get("affected_fill_ids") or []),
+        "order_paid_fee": diagnostics.get("order_paid_fee"),
+        "sum_observed_or_applied_fill_fee": diagnostics.get("sum_observed_or_applied_fill_fee"),
+        "fee_delta": diagnostics.get("fee_delta"),
+        "fee": diagnostics.get("proposed_repair_fee"),
+        "fee_provenance": diagnostics.get("fee_provenance"),
+        "complete_fill_set_available": bool(diagnostics.get("complete_fill_set_available")),
+        "deterministic_allocation_available": bool(diagnostics.get("deterministic_allocation_available")),
+        "operator_confirmation_required": bool(diagnostics.get("operator_confirmation_required")),
+        "preconditions": preconditions,
+        "touched_tables": [
+            "broker_fill_observations",
+            "fills",
+            "trades",
+            "fee_pending_accounting_repairs",
+            "portfolio",
+        ],
+        "expected_after": (
+            diagnostics.get("expected_after")
+            or "fee finalization recorded through normal accounting path; fee_pending incident count decreases"
+        ),
+        "idempotency_key": (
+            diagnostics.get("idempotency_key")
+            or "fee_pending_accounting_repair:<client_order_id>:<fill_id>:<fee>"
+        ),
+        "rollback_or_backup": diagnostics.get("rollback_or_backup") or _backup_guidance(mode),
+        "why_safe": "; ".join(str(item) for item in (diagnostics.get("why_safe") or []))
+        if safe_to_apply
+        else "blocked until deterministic fee repair invariants pass",
+        "why_not_safe": why_not_safe,
+        "recommended_command": (
+            diagnostics.get("recommended_command")
+            or "uv run python bot.py fee-pending-accounting-repair --client-order-id <id> --fill-id <fill_id> --fee <fee> --fee-provenance <source>"
+        ),
+        "post_apply_verification_commands": list(diagnostics.get("post_apply_verification_commands") or []),
+    }
+
+
 def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
     mode = str(report.get("mode") or "paper")
     fill_projection = dict(report.get("fill_accounting_incident_projection") or {})
@@ -158,31 +231,7 @@ def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any
     flat_stale_preview = dict(position_preview.get("flat_stale_projection_repair_preview") or {})
 
     candidates = [
-        {
-            "name": "fee-pending-accounting-repair",
-            "needed": bool(
-                _int(fill_projection.get("active_fee_pending_count")) > 0
-                or _int(fill_projection.get("fee_validation_blocked_count")) > 0
-                or _int(fill_projection.get("unapplied_principal_pending_count")) > 0
-            ),
-            "active_issue": bool(_int(fill_projection.get("active_issue_count")) > 0),
-            "safe_to_apply": False,
-            "preconditions": (
-                "identify the exact pending fill and provide client_order_id, fill_id, fee, and fee_provenance"
-            ),
-            "touched_tables": [
-                "broker_fill_observations",
-                "fills",
-                "trades",
-                "fee_pending_accounting_repairs",
-                "portfolio",
-            ],
-            "expected_after": "fee finalization recorded through normal accounting path; fee_pending incident count decreases",
-            "idempotency_key": "fee_pending_accounting_repair:<client_order_id>:<fill_id>:<fee>",
-            "rollback_or_backup": _backup_guidance(mode),
-            "why_safe": "requires explicit operator fee evidence and replays through canonical accounting instead of manual row edits",
-            "recommended_command": "uv run python bot.py fee-pending-accounting-repair --client-order-id <id> --fill-id <fill_id> --fee <fee> --fee-provenance <source>",
-        },
+        _fee_pending_accounting_repair_candidate(report=report, fill_projection=fill_projection, mode=mode),
         {
             "name": "fee-gap-accounting-repair",
             "needed": bool(_truthy(fee_gap_preview.get("needs_repair")) or _truthy(fee_gap_preview.get("active_issue"))),
@@ -355,6 +404,27 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         or tradeability_reason
         or projection_reason
     )
+    candidate_repairs = _candidate_repairs_from_report(report, policy)
+    safe_recommended_candidate = next(
+        (
+            item
+            for item in candidate_repairs
+            if bool(item.get("needed"))
+            and bool(item.get("safe_to_apply"))
+            and item.get("recommended_command")
+        ),
+        None,
+    )
+    recommended_command = (
+        str(safe_recommended_candidate["recommended_command"])
+        if safe_recommended_candidate is not None
+        else str(policy["recommended_command"])
+    )
+    recommended_action = (
+        f"apply_{safe_recommended_candidate['name']}"
+        if safe_recommended_candidate is not None
+        else str(policy["recommended_action"])
+    )
     payload = {
         "mode": str(report.get("mode") or "paper"),
         "primary_incident_class": str(policy["primary_incident_class"]),
@@ -366,8 +436,8 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "additional_orders_allowed": bool(policy["additional_orders_allowed"]),
         "flatten_primary_recommendation": bool(policy["flatten_primary_recommendation"]),
         "flatten_not_primary": bool(policy["flatten_not_primary"]),
-        "recommended_action": str(policy["recommended_action"]),
-        "recommended_command": str(policy["recommended_command"]),
+        "recommended_action": recommended_action,
+        "recommended_command": recommended_command,
         "incident_reasons": list(policy["incident_reasons"]),
         "canonical_portfolio_qty": _float(report.get("portfolio_qty")),
         "broker_qty": _float(report.get("broker_qty")),
@@ -425,7 +495,7 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "preview_command": position_preview.get("preview_command"),
         "why_safe": position_preview.get("why_safe"),
         "why_unsafe": list(position_preview.get("why_unsafe") or []),
-        "candidate_repairs": _candidate_repairs_from_report(report, policy),
+        "candidate_repairs": candidate_repairs,
     }
     plan_basis = {
         "mode": payload["mode"],
