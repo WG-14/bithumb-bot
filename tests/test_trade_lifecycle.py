@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 
 import pytest
 
@@ -27,8 +28,10 @@ from bithumb_bot.lifecycle import (
     LOT_SEMANTIC_VERSION_V1,
     apply_fill_lifecycle,
     mark_harmless_dust_positions,
+    rebuild_lifecycle_projections_from_trades,
     summarize_position_lots,
 )
+from bithumb_bot.position_authority_state import build_lot_projection_convergence
 
 
 def _record_order(conn, *, client_order_id: str, side: str, qty_req: float, ts_ms: int) -> None:
@@ -41,6 +44,51 @@ def _record_order(conn, *, client_order_id: str, side: str, qty_req: float, ts_m
         price=None,
         ts_ms=ts_ms,
         status="NEW",
+    )
+
+
+def _record_target_delta_submit_evidence(
+    conn,
+    *,
+    client_order_id: str,
+    ts_ms: int,
+    submitted_qty: float,
+    open_exposure_qty: float,
+    dust_tracking_qty: float,
+) -> None:
+    evidence = {
+        "source": "target_delta",
+        "authority": "target_position_delta",
+        "submit_qty_source": "target_position_delta",
+        "sell_qty_basis_source": "target_position_delta",
+        "decision_reason_code": "target_delta_rebalance",
+        "final_submitted_qty": submitted_qty,
+        "order_qty": submitted_qty,
+        "normalized_qty": submitted_qty,
+        "sell_open_exposure_qty": open_exposure_qty,
+        "sell_dust_tracking_qty": dust_tracking_qty,
+        "raw_total_asset_qty": submitted_qty,
+        "observed_position_qty": submitted_qty,
+    }
+    conn.execute(
+        """
+        INSERT INTO order_events(
+            client_order_id, event_type, event_ts, order_status, qty, side,
+            submit_evidence, final_submitted_qty, decision_reason_code, submission_reason_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            client_order_id,
+            "submit_attempt_recorded",
+            int(ts_ms),
+            "FILLED",
+            float(submitted_qty),
+            "SELL",
+            json.dumps(evidence, sort_keys=True),
+            float(submitted_qty),
+            "target_delta_rebalance",
+            "target_delta_rebalance",
+        ),
     )
 
 
@@ -1508,6 +1556,263 @@ def test_authority_boundary_sell_lifecycle_ignores_dust_tracking_even_if_it_is_a
     assert lifecycle_row[0]["entry_client_order_id"] == "entry_open"
     assert lifecycle_row[0]["exit_client_order_id"] == "exit_sell"
     assert float(lifecycle_row[0]["matched_qty"]) == pytest.approx(0.5)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_target_delta_terminal_sell_consumes_dust_remainder(tmp_path):
+    conn = ensure_db(str(tmp_path / "target_delta_terminal_flat_dust.sqlite"))
+    base_ts = 1_777_428_420_000
+    pair = str(settings.PAIR)
+    buy_qty = 0.00059997
+    executable_qty = 0.0004
+    dust_qty = 0.00019997
+    price = 91_040_000.0
+
+    record_order_if_missing(
+        conn,
+        client_order_id="live_1777428420000_buy_ae5d6ffb",
+        side="BUY",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="live_1777428420000_buy_ae5d6ffb",
+        side="BUY",
+        fill_id="C0101000000984353580",
+        fill_ts=base_ts,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+        strategy_name="target_delta",
+        entry_decision_id=37,
+    )
+    before_sell = summarize_position_lots(conn, pair=pair)
+    assert before_sell.raw_open_exposure_qty == pytest.approx(executable_qty)
+    assert before_sell.dust_tracking_qty == pytest.approx(dust_qty)
+
+    record_order_if_missing(
+        conn,
+        client_order_id="live_1777428840000_sell_ae17f61f",
+        side="SELL",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts + 420_000,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+        final_submitted_qty=buy_qty,
+        decision_reason_code="target_delta_rebalance",
+    )
+    _record_target_delta_submit_evidence(
+        conn,
+        client_order_id="live_1777428840000_sell_ae17f61f",
+        ts_ms=base_ts + 420_000,
+        submitted_qty=buy_qty,
+        open_exposure_qty=executable_qty,
+        dust_tracking_qty=dust_qty,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="live_1777428840000_sell_ae17f61f",
+        side="SELL",
+        fill_id="C0101000000984353581",
+        fill_ts=base_ts + 420_000,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+        strategy_name="target_delta",
+        exit_decision_id=38,
+        exit_reason="target_delta_rebalance",
+        exit_rule_name="target_delta",
+    )
+
+    after_sell = summarize_position_lots(conn, pair=pair)
+    convergence = build_lot_projection_convergence(conn, pair=pair)
+    positive_rows = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM open_position_lots WHERE pair=? AND qty_open > 1e-12",
+        (pair,),
+    ).fetchone()["cnt"]
+    conn.close()
+
+    assert positive_rows == 0
+    assert after_sell.raw_total_asset_qty == pytest.approx(0.0)
+    assert after_sell.dust_tracking_qty == pytest.approx(0.0)
+    assert convergence["converged"] is True
+    assert convergence["projected_total_qty"] == pytest.approx(0.0)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_ordinary_terminal_sell_without_target_delta_evidence_keeps_dust_tracking(tmp_path):
+    conn = ensure_db(str(tmp_path / "ordinary_terminal_sell_keeps_dust.sqlite"))
+    base_ts = 1_777_428_420_000
+    pair = str(settings.PAIR)
+    buy_qty = 0.00059997
+    price = 91_040_000.0
+
+    record_order_if_missing(
+        conn,
+        client_order_id="ordinary_buy",
+        side="BUY",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="ordinary_buy",
+        side="BUY",
+        fill_id="ordinary_buy_fill",
+        fill_ts=base_ts,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+    )
+    record_order_if_missing(
+        conn,
+        client_order_id="ordinary_sell",
+        side="SELL",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts + 420_000,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+        final_submitted_qty=buy_qty,
+        decision_reason_code="signal_exit",
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="ordinary_sell",
+        side="SELL",
+        fill_id="ordinary_sell_fill",
+        fill_ts=base_ts + 420_000,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+        exit_reason="signal_exit",
+    )
+
+    after_sell = summarize_position_lots(conn, pair=pair)
+    dust_row = conn.execute(
+        """
+        SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count
+        FROM open_position_lots
+        WHERE pair=? AND position_state=?
+        """,
+        (pair, DUST_TRACKING_LOT_STATE),
+    ).fetchone()
+    conn.close()
+
+    assert dust_row is not None
+    assert float(dust_row["qty_open"]) == pytest.approx(0.00019997)
+    assert int(dust_row["executable_lot_count"]) == 0
+    assert int(dust_row["dust_tracking_lot_count"]) == 1
+    assert after_sell.dust_tracking_qty == pytest.approx(0.00019997)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_lifecycle_replay_target_delta_terminal_sell_does_not_recreate_stale_dust(tmp_path):
+    conn = ensure_db(str(tmp_path / "target_delta_replay_terminal_flat.sqlite"))
+    base_ts = 1_777_428_420_000
+    pair = str(settings.PAIR)
+    buy_qty = 0.00059997
+    price = 91_040_000.0
+
+    record_order_if_missing(
+        conn,
+        client_order_id="replay_buy",
+        side="BUY",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="replay_buy",
+        side="BUY",
+        fill_id="replay_buy_fill",
+        fill_ts=base_ts,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+    )
+    record_order_if_missing(
+        conn,
+        client_order_id="replay_sell",
+        side="SELL",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts + 420_000,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+        final_submitted_qty=buy_qty,
+        decision_reason_code="target_delta_rebalance",
+    )
+    _record_target_delta_submit_evidence(
+        conn,
+        client_order_id="replay_sell",
+        ts_ms=base_ts + 420_000,
+        submitted_qty=buy_qty,
+        open_exposure_qty=0.0004,
+        dust_tracking_qty=0.00019997,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="replay_sell",
+        side="SELL",
+        fill_id="replay_sell_fill",
+        fill_ts=base_ts + 420_000,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+        exit_reason="target_delta_rebalance",
+    )
+
+    replay = rebuild_lifecycle_projections_from_trades(conn, pair=pair, allow_entry_decision_fallback=False)
+    convergence = build_lot_projection_convergence(conn, pair=pair)
+    conn.close()
+
+    assert replay.replayed_buy_count == 1
+    assert replay.replayed_sell_count == 1
+    assert replay.lot_snapshot_after.raw_total_asset_qty == pytest.approx(0.0)
+    assert replay.lot_snapshot_after.dust_tracking_qty == pytest.approx(0.0)
+    assert convergence["converged"] is True
 
 
 @pytest.mark.lot_native_regression_gate

@@ -21,6 +21,7 @@ from .lifecycle import (
     apply_fill_lifecycle,
     apply_portfolio_anchored_projection_repair_basis,
     rebuild_lifecycle_projections_from_trades,
+    resolve_execution_quantity_authority,
     summarize_position_lots,
 )
 from .lot_model import lot_count_to_qty
@@ -312,6 +313,11 @@ def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> 
     ]
     stale_total_qty = normalize_asset_qty(sum(float(row.get("qty_open") or 0.0) for row in stale_rows))
     latest_sell = _load_latest_terminal_sell_evidence(conn)
+    latest_sell_authority = resolve_execution_quantity_authority(
+        conn,
+        client_order_id=str(latest_sell.get("latest_sell_client_order_id") or ""),
+        trade_id=latest_sell.get("latest_trade_id"),
+    )
     gate_counts = _query_runtime_gate_counts(conn)
     remote_open_order_count = int(snapshot.reconcile_metadata.get("remote_open_order_found", 0) or 0)
     try:
@@ -321,6 +327,9 @@ def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> 
     except RuntimeError as exc:
         accounting_replay = {"error": str(exc)}
         accounting_projection_ok = False
+    active_fee_accounting_issue_count = int(
+        summarize_fill_accounting_incident_projection(conn).get("active_issue_count") or 0
+    )
 
     blockers: list[str] = []
     if not broker_qty_known:
@@ -344,6 +353,8 @@ def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> 
         blockers.append("recovery_required_orders_present")
     if not accounting_projection_ok:
         blockers.append("accounting_projection_mismatch")
+    if active_fee_accounting_issue_count > 0:
+        blockers.append(f"active_fee_accounting_issues={active_fee_accounting_issue_count}")
 
     latest_order = latest_sell.get("latest_terminal_order") or {}
     latest_trade = latest_sell.get("latest_trade") or {}
@@ -369,8 +380,26 @@ def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> 
         blockers.append("executable_lot_rows_present")
     if abs(stale_total_qty - projected_total_qty) > _EPS:
         blockers.append("stale_lot_total_projection_mismatch")
-    if terminal_sell_ok and abs(stale_total_qty - normalize_asset_qty(float(latest_trade.get("qty") or 0.0))) > _EPS:
-        blockers.append("stale_lot_qty_latest_sell_qty_mismatch")
+    authority_dust_qty = (
+        normalize_asset_qty(float(latest_sell_authority.dust_tracking_qty))
+        if latest_sell_authority.dust_tracking_qty is not None
+        else 0.0
+    )
+    authority_open_qty = (
+        normalize_asset_qty(float(latest_sell_authority.open_exposure_qty))
+        if latest_sell_authority.open_exposure_qty is not None
+        else 0.0
+    )
+    authority_expected_closed_qty = normalize_asset_qty(authority_open_qty + authority_dust_qty)
+    terminal_flat_sell_detected = bool(
+        terminal_sell_ok
+        and latest_sell_authority.is_target_delta_terminal_flat
+        and authority_dust_qty > _EPS
+        and abs(stale_total_qty - authority_dust_qty) <= _EPS
+        and normalize_asset_qty(float(latest_sell_authority.submitted_qty)) + _EPS >= authority_expected_closed_qty
+    )
+    if terminal_sell_ok and not terminal_flat_sell_detected:
+        blockers.append("terminal_flat_target_delta_dust_authority_missing")
 
     blockers = list(dict.fromkeys(blockers))
     needed = bool(projected_total_qty > _EPS and abs(portfolio_qty) <= _EPS and stale_rows)
@@ -390,6 +419,7 @@ def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> 
         "remote_open_order_count": remote_open_order_count,
         **gate_counts,
         "accounting_projection_ok": accounting_projection_ok,
+        "active_fee_accounting_issue_count": active_fee_accounting_issue_count,
         "accounting_replay": accounting_replay,
         "latest_sell_client_order_id": latest_sell.get("latest_sell_client_order_id"),
         "latest_sell_exchange_order_id": latest_sell.get("latest_sell_exchange_order_id"),
@@ -397,6 +427,16 @@ def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> 
         "latest_trade_id": latest_sell.get("latest_trade_id"),
         "latest_sell_trade_id": latest_sell.get("latest_trade_id"),
         "latest_trade_asset_after": latest_sell.get("latest_trade_asset_after"),
+        "terminal_flat_sell_detected": bool(terminal_flat_sell_detected),
+        "safe_to_apply_terminal_flat_projection_repair": bool(safe),
+        "current_broker_qty": broker_qty,
+        "current_portfolio_qty": portfolio_qty,
+        "materialized_lot_projection_qty": projected_total_qty,
+        "stale_dust_rows_to_clear": [int(row["id"]) for row in stale_rows],
+        "terminal_flat_quantity_authority": latest_sell_authority.as_dict(),
+        "terminal_flat_authority_open_exposure_qty": authority_open_qty,
+        "terminal_flat_authority_dust_tracking_qty": authority_dust_qty,
+        "terminal_flat_authority_expected_closed_qty": authority_expected_closed_qty,
         "latest_trade": latest_sell.get("latest_trade"),
         "latest_terminal_order": latest_sell.get("latest_terminal_order"),
         "stale_lot_row_count": len(stale_rows),
@@ -1050,6 +1090,14 @@ def build_position_authority_rebuild_preview(
             "recommended_command": flat_preview.get("recommended_command"),
             "position_authority_assessment": build_position_authority_assessment(conn, pair=settings.PAIR),
             "portfolio_qty": float(flat_preview.get("portfolio_qty") or 0.0),
+            "current_broker_qty": float(flat_preview.get("current_broker_qty") or 0.0),
+            "current_portfolio_qty": float(flat_preview.get("current_portfolio_qty") or 0.0),
+            "materialized_lot_projection_qty": float(flat_preview.get("materialized_lot_projection_qty") or 0.0),
+            "terminal_flat_sell_detected": bool(flat_preview.get("terminal_flat_sell_detected")),
+            "stale_dust_rows_to_clear": list(flat_preview.get("stale_dust_rows_to_clear") or []),
+            "safe_to_apply_terminal_flat_projection_repair": bool(
+                flat_preview.get("safe_to_apply_terminal_flat_projection_repair")
+            ),
             "accounted_buy_qty": 0.0,
             "accounted_sell_qty": float(flat_preview.get("latest_sell_qty") or 0.0),
             "accounted_net_qty": 0.0,

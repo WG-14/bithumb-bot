@@ -349,6 +349,22 @@ def _materialize_flat_stale_projection_fixture(
             ts_ms=1_777_367_760_000,
             fill_id="flat-stale-sell-fill",
         )
+        conn.execute(
+            """
+            UPDATE orders
+            SET decision_reason_code='target_delta_rebalance', final_submitted_qty=?
+            WHERE client_order_id='live_1777367760000_sell_ae50365f'
+            """,
+            (0.0004998,),
+        )
+        _insert_target_delta_terminal_flat_evidence(
+            conn,
+            client_order_id="live_1777367760000_sell_ae50365f",
+            ts_ms=1_777_367_760_000,
+            submitted_qty=0.0004998,
+            open_exposure_qty=0.0,
+            dust_tracking_qty=0.0004998,
+        )
     conn.execute("DELETE FROM open_position_lots WHERE pair=?", (settings.PAIR,))
     buy_rows = conn.execute(
         """
@@ -714,6 +730,149 @@ def _record_consistent_residue_reconcile_metadata(residual_qty: float) -> None:
         },
         now_epoch_sec=1_700_000_010.0,
     )
+
+
+def _record_formal_broker_flat_reconcile_metadata() -> None:
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_source": "test_balance_snapshot",
+            "balance_observed_ts_ms": 1_777_428_900_000,
+            "balance_asset_ts_ms": 1_777_428_900_000,
+            "balance_source_base_currency": "BTC",
+            "balance_source_quote_currency": "KRW",
+            "broker_asset_qty": 0.0,
+            "broker_asset_available": 0.0,
+            "broker_asset_locked": 0.0,
+            "broker_cash_available": 398_728.0,
+            "broker_cash_locked": 0.0,
+            "remote_open_order_found": 0,
+        },
+        now_epoch_sec=1_777_428_900.0,
+    )
+
+
+def _insert_target_delta_terminal_flat_evidence(
+    conn,
+    *,
+    client_order_id: str,
+    ts_ms: int,
+    submitted_qty: float,
+    open_exposure_qty: float,
+    dust_tracking_qty: float,
+) -> None:
+    evidence = {
+        "source": "target_delta",
+        "authority": "target_position_delta",
+        "submit_qty_source": "target_position_delta",
+        "sell_qty_basis_source": "target_position_delta",
+        "decision_reason_code": "target_delta_rebalance",
+        "final_submitted_qty": submitted_qty,
+        "order_qty": submitted_qty,
+        "normalized_qty": submitted_qty,
+        "sell_open_exposure_qty": open_exposure_qty,
+        "sell_dust_tracking_qty": dust_tracking_qty,
+        "raw_total_asset_qty": submitted_qty,
+        "observed_position_qty": submitted_qty,
+    }
+    conn.execute(
+        """
+        INSERT INTO order_events(
+            client_order_id, event_type, event_ts, order_status, qty, side,
+            submit_evidence, final_submitted_qty, decision_reason_code, submission_reason_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            client_order_id,
+            "submit_attempt_recorded",
+            int(ts_ms),
+            "FILLED",
+            float(submitted_qty),
+            "SELL",
+            json.dumps(evidence, sort_keys=True),
+            float(submitted_qty),
+            "target_delta_rebalance",
+            "target_delta_rebalance",
+        ),
+    )
+
+
+def _create_terminal_flat_stale_dust_incident(conn) -> None:
+    base_ts = 1_777_428_420_000
+    buy_qty = 0.00059997
+    price = 91_040_000.0
+    record_order_if_missing(
+        conn,
+        client_order_id="live_1777428420000_buy_ae5d6ffb",
+        side="BUY",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="live_1777428420000_buy_ae5d6ffb",
+        side="BUY",
+        fill_id="C0101000000984353580",
+        fill_ts=base_ts,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+    )
+    record_order_if_missing(
+        conn,
+        client_order_id="live_1777428840000_sell_ae17f61f",
+        side="SELL",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts + 420_000,
+        status="FILLED",
+        internal_lot_size=0.0004,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+        final_submitted_qty=buy_qty,
+        decision_reason_code="signal_exit",
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="live_1777428840000_sell_ae17f61f",
+        side="SELL",
+        fill_id="C0101000000984353581",
+        fill_ts=base_ts + 420_000,
+        price=price,
+        qty=buy_qty,
+        fee=27.31,
+        exit_reason="signal_exit",
+    )
+    conn.execute(
+        """
+        UPDATE orders
+        SET decision_reason_code='target_delta_rebalance', final_submitted_qty=?
+        WHERE client_order_id='live_1777428840000_sell_ae17f61f'
+        """,
+        (buy_qty,),
+    )
+    _insert_target_delta_terminal_flat_evidence(
+        conn,
+        client_order_id="live_1777428840000_sell_ae17f61f",
+        ts_ms=base_ts + 420_000,
+        submitted_qty=buy_qty,
+        open_exposure_qty=0.0004,
+        dust_tracking_qty=0.00019997,
+    )
+    conn.commit()
+    _record_formal_broker_flat_reconcile_metadata()
 
 
 def _apply_fee_pending_sell(conn, *, client_order_id: str = "incident_sell", fill_id: str = "sell-fill-9") -> None:
@@ -3003,6 +3162,41 @@ def test_flat_stale_lot_projection_detector_identifies_ec2_style_case(recovery_d
     )
 
 
+def test_repair_plan_reports_target_delta_terminal_flat_stale_dust_clearly(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_terminal_flat_stale_dust_incident(conn)
+        preview = build_flat_stale_lot_projection_repair_preview(conn)
+        rebuild_preview = build_position_authority_rebuild_preview(conn)
+    finally:
+        conn.close()
+
+    assert preview["needed"] is True
+    assert preview["safe_to_apply"] is True
+    assert preview["terminal_flat_sell_detected"] is True
+    assert preview["safe_to_apply_terminal_flat_projection_repair"] is True
+    assert preview["current_broker_qty"] == pytest.approx(0.0)
+    assert preview["current_portfolio_qty"] == pytest.approx(0.0)
+    assert preview["latest_trade_asset_after"] == pytest.approx(0.0)
+    assert preview["materialized_lot_projection_qty"] == pytest.approx(0.00019997)
+    assert preview["stale_dust_rows_to_clear"]
+    assert preview["terminal_flat_quantity_authority"]["source"] == "target_delta"
+    assert preview["terminal_flat_quantity_authority"]["submitted_qty"] == pytest.approx(0.00059997)
+    assert preview["terminal_flat_authority_open_exposure_qty"] == pytest.approx(0.0004)
+    assert preview["terminal_flat_authority_dust_tracking_qty"] == pytest.approx(0.00019997)
+
+    assert rebuild_preview["repair_mode"] == "flat_stale_projection_repair"
+    assert rebuild_preview["safe_to_apply"] is True
+    assert rebuild_preview["terminal_flat_sell_detected"] is True
+    assert rebuild_preview["stale_dust_rows_to_clear"] == preview["stale_dust_rows_to_clear"]
+    assert rebuild_preview["current_broker_qty"] == pytest.approx(0.0)
+    assert rebuild_preview["current_portfolio_qty"] == pytest.approx(0.0)
+    assert rebuild_preview["materialized_lot_projection_qty"] == pytest.approx(0.00019997)
+    assert rebuild_preview["recommended_command"] == (
+        "uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes"
+    )
+
+
 def test_flat_stale_lot_projection_apply_clears_projection_and_records_audit(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:
@@ -3101,6 +3295,8 @@ def test_flat_stale_lot_projection_unsafe_when_open_orders_exist(recovery_db):
         conn.close()
 
     assert preview["safe_to_apply"] is False
+    assert preview["terminal_flat_sell_detected"] is True
+    assert preview["safe_to_apply_terminal_flat_projection_repair"] is False
     assert "open_orders_present" in preview["blockers"]
 
 

@@ -239,6 +239,191 @@ class ProjectionReplayResult:
         }
 
 
+@dataclass(frozen=True)
+class ExecutionQuantityAuthority:
+    source: str
+    submitted_qty: float
+    open_exposure_qty: float | None
+    dust_tracking_qty: float | None
+    terminal_asset_after: float | None
+    terminal_flat: bool
+    decision_reason_code: str | None
+    evidence_source: str
+
+    @property
+    def is_target_delta_terminal_flat(self) -> bool:
+        return (
+            self.source == "target_delta"
+            and self.terminal_flat
+            and self.submitted_qty > 1e-12
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "submitted_qty": float(self.submitted_qty),
+            "open_exposure_qty": self.open_exposure_qty,
+            "dust_tracking_qty": self.dust_tracking_qty,
+            "terminal_asset_after": self.terminal_asset_after,
+            "terminal_flat": bool(self.terminal_flat),
+            "decision_reason_code": self.decision_reason_code,
+            "evidence_source": self.evidence_source,
+        }
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _first_float(*values: object) -> float | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return normalize_asset_qty(float(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _first_text(*values: object) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def resolve_execution_quantity_authority(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    trade_id: int | None = None,
+) -> ExecutionQuantityAuthority:
+    """Resolve narrow SELL quantity authority for terminal-flat projection closure.
+
+    This intentionally avoids replacing lot-native SELL authority. It only
+    recognizes target-delta terminal-flat evidence so lifecycle replay can close
+    dust projection rows that were included in a broker-verified target-delta
+    liquidation fill.
+    """
+
+    trade_row = None
+    if trade_id is not None:
+        trade_row = conn.execute(
+            """
+            SELECT id, side, qty, asset_after, client_order_id
+            FROM trades
+            WHERE id=?
+            LIMIT 1
+            """,
+            (int(trade_id),),
+        ).fetchone()
+    if trade_row is None:
+        trade_row = conn.execute(
+            """
+            SELECT id, side, qty, asset_after, client_order_id
+            FROM trades
+            WHERE client_order_id=?
+            ORDER BY ts DESC, id DESC
+            LIMIT 1
+            """,
+            (str(client_order_id),),
+        ).fetchone()
+
+    order_row = conn.execute(
+        """
+        SELECT
+            client_order_id, side, qty_req, qty_filled, final_submitted_qty,
+            decision_reason_code
+        FROM orders
+        WHERE client_order_id=?
+        LIMIT 1
+        """,
+        (str(client_order_id),),
+    ).fetchone()
+    event_row = conn.execute(
+        """
+        SELECT
+            submit_evidence, qty, final_submitted_qty, decision_reason_code,
+            submission_reason_code, event_type
+        FROM order_events
+        WHERE client_order_id=?
+          AND submit_evidence IS NOT NULL
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """,
+        (str(client_order_id),),
+    ).fetchone()
+    evidence = _json_object(_row_value(event_row, "submit_evidence", 0)) if event_row is not None else {}
+
+    decision_reason_code = _first_text(
+        evidence.get("decision_reason_code"),
+        evidence.get("decision_reason"),
+        _row_value(order_row, "decision_reason_code", 5),
+        _row_value(event_row, "decision_reason_code", 3),
+        _row_value(event_row, "submission_reason_code", 4),
+    )
+    submit_qty_source = _first_text(
+        evidence.get("sell_qty_basis_source"),
+        evidence.get("submit_qty_source"),
+        evidence.get("authority"),
+        evidence.get("source"),
+    )
+    source = "target_delta" if (
+        submit_qty_source == "target_position_delta"
+        or evidence.get("authority") == "target_position_delta"
+        or evidence.get("source") == "target_delta"
+        or decision_reason_code == "target_delta_rebalance"
+    ) else "lot_native"
+
+    submitted_qty = _first_float(
+        evidence.get("final_submitted_qty"),
+        evidence.get("order_qty"),
+        evidence.get("normalized_qty"),
+        evidence.get("observed_submit_payload_qty"),
+        evidence.get("submit_payload_qty"),
+        _row_value(order_row, "final_submitted_qty", 4),
+        _row_value(order_row, "qty_filled", 3),
+        _row_value(order_row, "qty_req", 2),
+        _row_value(event_row, "final_submitted_qty", 2),
+        _row_value(event_row, "qty", 1),
+        _row_value(trade_row, "qty", 2),
+    ) or 0.0
+    open_exposure_qty = _first_float(
+        evidence.get("sell_open_exposure_qty"),
+        evidence.get("open_exposure_qty"),
+    )
+    dust_tracking_qty = _first_float(
+        evidence.get("sell_dust_tracking_qty"),
+        evidence.get("dust_tracking_qty"),
+    )
+    terminal_asset_after = _first_float(_row_value(trade_row, "asset_after", 3))
+    trade_side = str(_row_value(trade_row, "side", 1) or "").upper()
+    terminal_flat = bool(trade_side == "SELL" and terminal_asset_after is not None and abs(terminal_asset_after) <= 1e-12)
+    evidence_source = "order_events.submit_evidence" if evidence else (
+        "orders+trades" if order_row is not None or trade_row is not None else "missing"
+    )
+    return ExecutionQuantityAuthority(
+        source=source,
+        submitted_qty=float(submitted_qty),
+        open_exposure_qty=open_exposure_qty,
+        dust_tracking_qty=dust_tracking_qty,
+        terminal_asset_after=terminal_asset_after,
+        terminal_flat=terminal_flat,
+        decision_reason_code=decision_reason_code,
+        evidence_source=evidence_source,
+    )
+
+
 def _lot_definition_from_rules(*, lot_rules: object) -> LotDefinitionSnapshot:
     return LotDefinitionSnapshot(
         semantic_version=LOT_SEMANTIC_VERSION_V1,
@@ -993,11 +1178,20 @@ def apply_fill_lifecycle(
     if side != "SELL":
         raise RuntimeError(f"unsupported lifecycle side: {side}")
 
-    # SELL lifecycle consumes only the sellable open_exposure path.
+    # SELL lifecycle normally consumes only the sellable open_exposure path.
     # This is post-fill accounting/matching only; SELL decision eligibility and
     # SELL sizing must already have been decided from
     # position_state.normalized_exposure.sellable_executable_lot_count.
-    # dust_tracking lots remain operator evidence and are never matched here.
+    # dust_tracking lots remain operator evidence and are not matched by
+    # ordinary lot-native SELLs. The only exception below is a target-delta
+    # terminal-flat SELL with explicit quantity evidence that the submitted fill
+    # closed both executable exposure and tracked dust.
+    lot_snapshot_before_sell = summarize_position_lots(conn, pair=str(pair))
+    quantity_authority = resolve_execution_quantity_authority(
+        conn,
+        client_order_id=str(client_order_id),
+        trade_id=int(trade_id),
+    )
     lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
     lot_definition = _read_authoritative_lot_definition_snapshot(conn, pair=str(pair))
     _persist_missing_lot_definition_snapshot(conn, pair=str(pair), lot_definition=lot_definition)
@@ -1201,6 +1395,13 @@ def apply_fill_lifecycle(
           AND COALESCE(executable_lot_count, 0) <= 0
         """,
         (str(pair), OPEN_EXPOSURE_LOT_STATE, eps),
+    )
+    _close_terminal_flat_dust_tracking_lots(
+        conn,
+        pair=str(pair),
+        authority=quantity_authority,
+        open_exposure_qty_before=float(lot_snapshot_before_sell.raw_open_exposure_qty),
+        dust_tracking_qty_before=float(lot_snapshot_before_sell.dust_tracking_qty),
     )
 
 
@@ -1973,3 +2174,51 @@ def _fetch_sellable_open_exposure_lots(
         """,
         (str(pair), OPEN_EXPOSURE_LOT_STATE),
     ).fetchall()
+
+
+def _close_terminal_flat_dust_tracking_lots(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    authority: ExecutionQuantityAuthority,
+    open_exposure_qty_before: float,
+    dust_tracking_qty_before: float,
+) -> int:
+    """Close dust projection rows only for proven target-delta terminal flat SELLs."""
+
+    if dust_tracking_qty_before <= 1e-12:
+        return 0
+    if not authority.is_target_delta_terminal_flat:
+        return 0
+
+    evidence_open_qty = (
+        float(authority.open_exposure_qty)
+        if authority.open_exposure_qty is not None
+        else float(open_exposure_qty_before)
+    )
+    evidence_dust_qty = (
+        float(authority.dust_tracking_qty)
+        if authority.dust_tracking_qty is not None
+        else float(dust_tracking_qty_before)
+    )
+    expected_closed_qty = normalize_asset_qty(evidence_open_qty + evidence_dust_qty)
+    actual_closed_qty = normalize_asset_qty(float(authority.submitted_qty))
+    if expected_closed_qty <= 1e-12:
+        return 0
+    if actual_closed_qty + 1e-12 < expected_closed_qty:
+        return 0
+    if abs(evidence_dust_qty - dust_tracking_qty_before) > 1e-12:
+        return 0
+
+    result = conn.execute(
+        """
+        DELETE FROM open_position_lots
+        WHERE pair=?
+          AND position_state=?
+          AND qty_open > 1e-12
+          AND COALESCE(executable_lot_count, 0) = 0
+          AND COALESCE(dust_tracking_lot_count, 0) > 0
+        """,
+        (str(pair), DUST_TRACKING_LOT_STATE),
+    )
+    return int(result.rowcount or 0)

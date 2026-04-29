@@ -1,311 +1,388 @@
-You are Codex working on the GitHub repository `WG-14/bithumb-bot`.
+You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is not to apply a narrow symptom patch only. Treat the current EC2 incident as a starting hypothesis, verify it directly against the repository, then implement changes that move this repo toward a more robust, reproducible, observable, and operable automated trading experiment system.
+Your task is to investigate and fix a live EC2 incident involving target-delta terminal SELL projection drift. Do not treat the currently suspected cause as unquestionable fact. Start from the evidence below, verify it in the repo, then implement a design-level fix with tests, observability, and safe recovery behavior. This must not be reduced to a manual DB cleanup or a one-off deletion of `open_position_lots.id=357`.
 
 ## Incident context to verify, not assume
 
-Observed on EC2:
+Live trading has been stopped and disabled on EC2. There is no active run process.
 
-* Runtime process was running from `/home/ec2-user/apps/bithumb-bot`.
-* Runtime commit matched `0b49f24f06388f3713450e256c2779c0758451b7`.
-* Relevant env existed:
+Observed current broker / portfolio truth:
 
-  * `EXECUTION_ENGINE=target_delta`
-  * `LIVE_MIN_ORDER_QTY=0.0001`
-  * `LIVE_ORDER_QTY_STEP=0.0001`
-  * `MIN_ORDER_NOTIONAL_KRW=5000`
-  * `TARGET_EXPOSURE_KRW=70000`
-  * `MAX_ORDER_KRW=70000`
-  * `MARKET=KRW-BTC`
-  * `PAIR=KRW-BTC`
-* DB table `order_rule_snapshots` had persisted rules:
+```text
+bithumb-bot.service = inactive (dead)
+pgrep bithumb-bot run = none
 
-  * `min_qty=0.0001`
-  * `qty_step=0.0001`
-  * `min_notional_krw=5000.0`
-  * `bid_min_total_krw=5000.0`
-  * `bid_types=["limit","price"]`
-* Latest `strategy_decisions` repeatedly showed BUY signals, including `base_signal=BUY`, `raw_signal=BUY`, `final_signal=BUY`, but:
+portfolio.cash_krw = 398727.93742
+portfolio.asset_qty = 0.0
+portfolio.asset_available = 0.0
+portfolio.asset_locked = 0.0
 
-  * `final_action=BLOCK_TARGET_DELTA`
-  * `submit_expected=0`
-  * `execution_block_reason=missing_order_rule_min_qty`
-  * `target_block_reason=missing_order_rule_min_qty`
-  * `target_order_rule_min_qty=null`
-  * `target_order_rule_min_notional_krw=null`
-  * `target_delta_side=NONE`
-  * `target_would_submit=0`
-  * `target_submit_qty=null/0`
-* This happened despite the target notional being around 70,000 KRW, well above exchange min notional.
+broker balance:
+cash_available ~= 398728
+asset_available = 0.00000000
+asset_locked = 0.00000000
+```
 
-Prior code inspection suggested this path:
+Latest BUY/SELL roundtrip is correctly recorded in `trades` / `fills`:
 
-* `src/bithumb_bot/execution_service.py` calls `build_target_position_decision(...)`.
-* In the target-delta path, it currently builds `order_rules` from `payload.get("min_qty")` / `payload.get("residual_proof_min_qty")` and `payload.get("min_notional_krw")` / `payload.get("residual_proof_min_notional_krw")`.
-* It does not appear to use the authoritative DB snapshot or runtime/env order-rule values in that call path.
-* `src/bithumb_bot/target_position.py` correctly fails closed with `missing_order_rule_min_qty` when `order_rules["min_qty"]` and payload fallbacks are missing.
-* Therefore the immediate failure mode may be: strategy BUY is valid, but target-delta execution proof is missing order-rule authority and blocks before submit.
+```text
+BUY:
+  trade id = 37
+  client_order_id = live_1777428420000_buy_ae5d6ffb
+  qty = 0.00059997
+  fee = 27.31
+  asset_after = 0.00059997
 
-Do not assume this is the only root cause. Confirm or falsify it in the repo.
+SELL:
+  trade id = 38
+  client_order_id = live_1777428840000_sell_ae17f61f
+  qty = 0.00059997
+  fee = 27.31
+  asset_after = 0.0
+```
+
+But `open_position_lots` still contains one current dust row from the BUY:
+
+```text
+id = 357
+entry_trade_id = 37
+entry_client_order_id = live_1777428420000_buy_ae5d6ffb
+entry_fill_id = C0101000000984353580
+qty_open = 0.00019997
+position_state = dust_tracking
+executable_lot_count = 0
+dust_tracking_lot_count = 1
+internal_lot_size = 0.0004
+lot_min_qty = 0.0001
+lot_qty_step = 0.0001
+lot_min_notional_krw = 5000.0
+lot_rule_source_mode = ledger
+position_semantic_basis = lot-native
+```
+
+Startup safety gate is blocked because the materialized lot projection says there is still BTC exposure while broker/portfolio are flat:
+
+```text
+projected_total_qty=0.000199970000
+portfolio_qty=0.000000000000
+reason=portfolio_projection_qty_mismatch
+recovery_stage=AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
+```
+
+Relevant SELL submit evidence showed the target-delta SELL did include both executable open exposure and dust remainder:
+
+```text
+final_submitted_qty = 0.00059997
+sell_normalized_exposure_qty = 0.00059997
+observed_position_qty = 0.00059997
+raw_total_asset_qty = 0.00059997
+
+sell_open_exposure_qty = 0.0004
+sell_dust_tracking_qty = 0.00019997
+
+sell_qty_basis_source = target_position_delta
+sell_submit_qty_source = target_position_delta
+decision_reason_code = target_delta_rebalance
+```
+
+Current suspected cause:
+
+* `target_delta` executed a terminal SELL for the full broker-verified position quantity.
+* `lot-native` lifecycle projection consumes only `open_exposure` lots during SELL lifecycle accounting.
+* `dust_tracking` lots are deliberately treated as operator evidence and are never matched in the ordinary SELL path.
+* Therefore the real account became flat, but the materialized `open_position_lots` projection retained stale dust.
+
+The repo currently contains a comment in `src/bithumb_bot/lifecycle.py` stating that SELL lifecycle consumes only the sellable open_exposure path and that `dust_tracking` lots remain operator evidence and are never matched. Verify this in code before changing behavior.
+
+## Primary objective
+
+Fix the structural mismatch between target-delta terminal SELL semantics and lot-native lifecycle projection semantics.
+
+The correct fix is not “delete row 357.” The correct fix is to make the lifecycle/projection system understand a target-delta terminal flat SELL when sufficient evidence proves the SELL closed both executable open exposure and dust remainder.
+
+## Non-goals and safety constraints
+
+Do not:
+
+* Manually mutate the live DB as the primary solution.
+* Disable safety gates.
+* Force resume.
+* Make all SELLs consume `dust_tracking` rows unconditionally.
+* Treat all dust as tradable inventory.
+* Weaken operator-evidence protection for ordinary dust.
+* Hide non-convergence by ignoring `open_position_lots`.
+* Add a broad repair command that can erase dust without strong terminal-flat evidence.
+
+Preserve:
+
+* Fail-closed behavior when evidence is incomplete.
+* Existing operator-evidence semantics for ordinary `dust_tracking`.
+* Safety around unresolved orders, submit unknown, recovery-required orders, fee/accounting active issues, and broker/portfolio mismatch.
+* Reproducibility of the lifecycle projection from trades/fills/orders.
 
 ## Required investigation
 
 Inspect the repo directly. At minimum inspect:
 
+* `src/bithumb_bot/lifecycle.py`
+* `src/bithumb_bot/position_authority_repair.py`
+* `src/bithumb_bot/position_authority_state.py`
+* `src/bithumb_bot/runtime_readiness.py`
 * `src/bithumb_bot/execution_service.py`
-* `src/bithumb_bot/target_position.py`
-* the run loop / engine code that builds `decision_context`, `readiness_payload`, and previous target state
-* order rule snapshot / live chance / config code paths
-* ops/recovery reporting code paths that display order-rule and target-delta status
-* tests related to target-delta execution, especially `tests/test_target_position_execution.py`
-* any existing DB or order-rule helper modules
+* `src/bithumb_bot/broker/live.py`
+* `src/bithumb_bot/broker/live_submission_execution.py`
+* `src/bithumb_bot/reporting.py`
+* tests around lifecycle, accounting projection, target-delta, repair-plan, operator commands, and recovery state.
 
-Build a short internal model of the current execution flow:
+Build and document a concrete flow model:
 
-1. Strategy signal generation.
-2. Decision context construction.
-3. Readiness payload construction.
-4. Order rule acquisition.
-5. Target-delta decision construction.
-6. Execution submit plan construction.
-7. Live order submission.
-8. Decision audit / ops-report / recovery-report output.
+1. BUY target-delta decision and submit plan.
+2. BUY fill accounting and lot split into executable lot + dust remainder.
+3. SELL target-delta decision and submit plan.
+4. SELL fill accounting.
+5. `apply_fill_lifecycle()` SELL handling.
+6. `open_position_lots` projection after SELL.
+7. startup gate / runtime readiness projection convergence check.
+8. repair-plan/recovery-report interpretation.
 
-Identify where exchange order rules become available, where they are lost, and whether diagnostics and execution use the same source.
+Identify exactly where the submitted target-delta SELL quantity authority is lost or ignored by lifecycle projection.
 
-## Root-cause hypotheses to preserve and test
+## Root-cause hypotheses to verify or falsify
 
-Keep hypotheses as hypotheses until verified. For each, either verify, falsify, or mark inconclusive with evidence.
+Keep these as hypotheses until verified. For each, explicitly mark confirmed / falsified / inconclusive in the final report.
 
-### Hypothesis A: target-delta execution does not receive authoritative order rules
+### Hypothesis A: target-delta terminal SELL quantity includes dust, but lifecycle SELL only consumes open_exposure
 
-`build_execution_decision_summary()` likely passes order rules from loose payload keys only. If the live run loop does not place `min_qty` or `residual_proof_min_qty` at top level, target-delta blocks with `missing_order_rule_min_qty` even though env/DB/live order rules exist.
+Evidence to verify:
 
-Verification:
-
-* Find all `build_target_position_decision(...)` call sites.
-* Inspect what is passed to `order_rules`.
-* Confirm whether run loop payloads are expected to contain `min_qty` / `residual_proof_min_qty`.
-* Add a regression test reproducing the EC2 condition: `EXECUTION_ENGINE=target_delta`, flat broker qty, BUY signal, target exposure 70,000 KRW, market price around 113,428,000, no `min_qty` in payload, settings/env contain min qty and min notional.
-* The current code should fail or demonstrate the defect before the fix.
+* SELL submit evidence contains `sell_qty_basis_source=target_position_delta`, `final_submitted_qty=0.00059997`, `sell_open_exposure_qty=0.0004`, `sell_dust_tracking_qty=0.00019997`.
+* `trades` has SELL qty `0.00059997` and `asset_after=0.0`.
+* `open_position_lots` still has dust `0.00019997`.
+* `lifecycle.py` SELL path fetches only sellable open exposure lots and never consumes `dust_tracking`.
 
 Falsification condition:
 
-* If authoritative rules are already injected into target-delta in all live paths, then the bug is in serialization, `_as_float`, stale state, or a different call path.
+* If SELL lifecycle already attempts to consume dust_tracking in this terminal-flat case and the row survived due to a DB write failure, transaction rollback, or a different bug, identify that instead.
 
-### Hypothesis B: the repo lacks a single authoritative order-rule domain object
+### Hypothesis B: submit quantity authority and projection close quantity authority are different
 
-Order-rule values appear in env/config, DB snapshots, live chance refresh, decision payloads, residual proof payloads, and diagnostics. The system may be relying on implicit dict keys instead of a typed execution rule authority.
+Evidence to verify:
 
-Verification:
-
-* List order-rule sources and consumers.
-* Check whether any single function/object is responsible for merging, validating, annotating freshness, and delivering rules to execution engines.
-* Check whether ops-report and execution use the same object or divergent sources.
+* Submit path uses `target_position_delta` and broker-verified total position.
+* Projection close path uses sellable executable lot count / open exposure lots only.
+* `submit_lot_count=1` and `sell_submit_lot_count=1` coexist with `final_submitted_qty=0.00059997`, implying one executable lot plus dust was submitted but projection treated one lot as close authority.
 
 Falsification condition:
 
-* If a single order-rule authority already exists but is not wired into target-delta, scope the fix to wiring plus tests.
+* If projection close quantity actually uses submitted qty but later reclassifies dust incorrectly, adjust the fix to that path.
 
-### Hypothesis C: tests validate target-position math but not the live integration path
+### Hypothesis C: `dust_tracking` conflates active inventory residue, operator evidence, historical evidence, and stale terminal-sell residue
 
-Existing tests may call `build_target_position_decision()` with explicit `_rules()` or add `residual_proof_min_qty` into readiness payload. That validates pure target math, but not the actual run-loop/execution-service path where rules may be absent from payload.
+Evidence to verify:
 
-Verification:
+* `dust_tracking` is included in projection totals and startup gate calculations.
+* In ordinary cases it should not be consumed by SELL because it is operator evidence.
+* In this terminal target-delta case it no longer represents actual inventory because broker/portfolio/trades are flat.
 
-* Inspect target-position and execution-service tests.
-* Identify missing integration tests that would have caught EC2’s `target_order_rule_min_qty=null` condition.
-* Add those tests.
+Falsification condition:
 
-### Hypothesis D: operational reporting separates “tradeability allowed” from “actual submit proof failed”
+* If `dust_tracking` is not supposed to represent current projection and startup gate is incorrectly treating it as holdings, fix the gate/projection summary rather than lifecycle.
 
-Ops reports can show `new_entry_allowed=1`, `why_not=none`, while latest decisions show `BLOCK_TARGET_DELTA` due to missing order rules. This makes operator diagnosis misleading.
+### Hypothesis D: repair-plan lacks a clear terminal-flat projection repair path even when broker/portfolio/trades prove flat
 
-Verification:
+Evidence to verify:
 
-* Inspect ops-report/recovery-report output generation.
-* Check whether top-level reports surface:
+* `repair-plan --json` returns candidate repairs with `broker_qty=0`, `portfolio_qty=0`, but `safe_to_apply=false`.
+* Top-level recommended command loops back to `uv run python bot.py repair-plan`.
+* Reporting does not clearly separate current broker/portfolio truth from materialized projection drift.
 
-  * `target_delta_submit_allowed`
-  * `target_delta_block_reason`
-  * `target_order_rule_min_qty`
-  * `order_rule_authority_source`
-  * mismatch between snapshot rules and target-delta rules.
+Falsification condition:
 
-### Hypothesis E: fee/accounting issues are a separate recurrent failure class, not the active cause of this incident
+* If a safe terminal-flat repair path exists but the user missed the correct command, surface it and add better reporting/tests.
 
-Historical logs showed `LiveFillFeeValidationError`, `FillFeeStrictModeError`, `fee_status=order_level_candidate/missing`, and fee-pending repairs. Current diagnostics reportedly showed active fee issue counts at zero. Treat fee/accounting as a separate structural risk, not the direct current cause unless repo evidence contradicts this.
+## Design requirements
 
-Verification:
+### 1. Add an explicit terminal-flat SELL lifecycle path
 
-* Keep the order-rule fix separate from fee/accounting fixes.
-* Do not conflate pre-submit target-delta proof failure with post-fill accounting failure.
-* If you touch reporting, ensure lifecycle phase is explicit: pre-submit block vs broker submit failure vs fill accounting block.
+Implement a narrowly scoped path that can consume or close dust_tracking rows only when strong terminal-flat evidence exists.
 
-## Implementation priorities
+Acceptable evidence may include:
 
-Prioritize design changes that prevent the whole class of bug over one-off symptom suppression.
+* SELL trade has `asset_after == 0` within tolerance.
+* SELL trade qty is at least `open_exposure_qty + dust_tracking_qty - tolerance`.
+* SELL order / submit evidence identifies `target_delta_rebalance` or `sell_qty_basis_source=target_position_delta`.
+* Broker/portfolio quantity is zero or converged to zero when the repair/reporting path is used.
+* No unresolved orders, no submit_unknown, no recovery_required orders, no active fee/accounting issue.
 
-### Priority 1: restore safe operation with a minimal but defensible fix
+Do not clear dust_tracking for ordinary lot-native SELLs that lack terminal-flat evidence.
 
-Implement a fix so target-delta execution receives non-null order rules when they are available from a trusted source.
+### 2. Preserve ordinary dust operator-evidence semantics
 
-Acceptable minimum:
+The existing rule that dust_tracking is not normally matched by SELL is valid for ordinary cases. The fix must be conditional.
 
-* In `execution_service.py`, do not rely only on `payload.get("min_qty")` / `payload.get("residual_proof_min_qty")`.
-* Add fallback from settings/config values such as:
+Add a negative test proving that a normal lot-native SELL or partial SELL without terminal-flat evidence does not consume dust_tracking.
 
-  * `settings.LIVE_MIN_ORDER_QTY`
-  * `settings.MIN_ORDER_NOTIONAL_KRW`
-  * `settings.LIVE_ORDER_QTY_STEP`
-* Preserve fail-closed behavior if required execution rules are still unavailable.
-* Do not silently submit with invalid or zero min rules.
+### 3. Introduce or prepare for typed quantity authority
 
-Better:
+Prefer a typed helper or dataclass over more unstructured dict probing.
 
-* Introduce a small typed helper or function that resolves execution order rules from payload plus settings, with source annotation.
-* Use that helper in the target-delta call path.
-* Include the resolved values in target decision audit fields.
+A possible shape:
 
-Do not simply remove `missing_order_rule_min_qty` checks.
-
-### Priority 2: introduce an explicit execution order-rule abstraction
-
-If feasible within the change, introduce a typed model such as `ExecutionOrderRules` or `OrderRuleAuthority`. It should centralize at least:
-
-* `market`
-* `min_qty`
-* `qty_step`
-* `min_notional_krw`
-* optional `bid_min_total_krw`
-* supported bid/ask order types if available
-* source/source_mode
-* stale/degraded/fallback flags if available
-
-It must have validation for target-delta and live submission.
-
-Target direction:
-
-* Execution engines should not infer execution-critical order rules from arbitrary `decision_context` dicts.
-* `decision_context` should be treated as audit/observability, not as the authoritative execution input.
-* If a full refactor is too large, create a clearly named interim resolver, with tests and TODOs pointing toward full `OrderRuleAuthority`.
-
-### Priority 3: add regression tests that reproduce the EC2 failure
-
-Add or update tests so this cannot regress.
-
-Required tests:
-
-1. EC2 reproduction test:
-
-   * `EXECUTION_ENGINE=target_delta`
-   * BUY signal
-   * flat broker qty
-   * target exposure 70,000 KRW
-   * market price around 113,428,000
-   * readiness payload does not include `min_qty` or `residual_proof_min_qty`
-   * settings contain min qty and min notional
-   * expected: target-delta receives `target_order_rule_min_qty=0.0001`, `target_order_rule_min_notional_krw=5000`, `would_submit=True`, `target_delta_side=BUY`, no `missing_order_rule_min_qty`.
-
-2. Fail-closed test:
-
-   * No payload rules and no settings/default rules available.
-   * Expected: no submit, explicit block reason for missing order rule, no accidental order.
-
-3. Source/audit test:
-
-   * Target decision/audit output includes the rule values used and preferably the source (`payload`, `settings`, `snapshot`, etc.).
-
-4. Ops/reporting test if report code is changed:
-
-   * Report must surface the difference between general entry gate and actual target-delta submit proof.
-   * A case with `new_entry_allowed=1` but `target_delta_submit_allowed=0` must be visible and actionable.
-
-### Priority 4: improve observability
-
-Add or update reporting so the operator can immediately distinguish:
-
-* strategy did not signal BUY
-* strategy signaled BUY but entry gate blocked
-* target-delta proof blocked
-* order-rule authority missing/stale
-* broker submit failed
-* broker accepted but fill accounting blocked
-* active recovery/fee issue blocked
-
-At minimum, include in ops-report/recovery-report or latest strategy flow:
-
-```text
-target_delta_submit_allowed=<0|1>
-target_delta_block_reason=<reason>
-target_order_rule_min_qty=<value|null>
-target_order_rule_min_notional_krw=<value|null>
-order_rule_authority_source=<source>
-order_rule_snapshot_min_qty=<value|null>
-order_rule_settings_min_qty=<value|null>
-entry_gate_allowed=<0|1>
-new_entry_allowed=<0|1>
+```python
+@dataclass(frozen=True)
+class ExecutionQuantityAuthority:
+    source: str  # e.g. "lot_native", "target_delta", "broker_verified_position"
+    submitted_qty: float
+    open_exposure_qty: float | None
+    dust_tracking_qty: float | None
+    terminal_asset_after: float | None
+    terminal_flat: bool
+    decision_reason_code: str | None
+    evidence_source: str
 ```
 
-If there is a mismatch such as snapshot/settings have min_qty but target-delta has null, emit a clear diagnostic like:
+If a full refactor is too large, implement a small forward-compatible resolver that can derive this authority from `orders`, `order_events.submit_evidence`, `trades`, and/or `fills`, and use it only for the terminal-flat path. Leave TODOs pointing to a fuller quantity-authority unification.
+
+### 4. Repair-plan / reporting must become operationally clear
+
+Improve repair-plan and/or recovery-report so operators can distinguish:
+
+* current broker qty
+* current portfolio qty
+* latest trade asset_after
+* materialized lot projection qty
+* dust rows considered stale after terminal SELL
+* whether terminal-flat stale-dust repair is safe
+* exact blockers if not safe
+* whether the command is inspect-only or mutating
+
+Avoid self-loop guidance such as recommending only `repair-plan` again without a concrete next action.
+
+Desired reporting fields:
 
 ```text
-diagnosis=order_rule_not_propagated_to_target_delta
+current_broker_qty=0
+current_portfolio_qty=0
+latest_trade_asset_after=0
+materialized_lot_projection_qty=0.00019997
+terminal_flat_sell_detected=1
+stale_dust_rows_to_clear=[357]
+safe_to_apply_terminal_flat_projection_repair=true|false
+unsafe_reason=<specific blockers>
+recommended_command=<only if safe and intentionally mutating>
 ```
 
-### Priority 5: keep fee/accounting as a separate follow-up area
+### 5. Recovery must remain explicit and auditable
 
-Do not solve fee/accounting in the same patch unless required. But add comments or issue notes if you find the reporting conflates it with pre-submit blocks.
+If the fix includes a repair action that mutates `open_position_lots`, it must:
 
-Longer-term recommendation to include in the final report:
+* require an explicit `--apply --yes` style command if run as an operator repair,
+* record an event in `position_authority_repairs` and/or `position_authority_projection_publications`,
+* include preconditions and evidence in the repair record,
+* have a postcondition that projection converges to broker/portfolio/trades,
+* be safe to preview without mutation.
 
-* Separate principal quantity accounting from fee finalization.
-* Model fee status as a state machine: observed → candidate → estimated → authoritative → repaired.
-* Allow policy-based handling of `order_level_candidate`.
-* Surface fee pending as post-fill accounting, not as submit failure.
+If the lifecycle fix prevents future drift but does not repair existing row 357 automatically, clearly state the safe post-patch operator flow.
 
-## Constraints
+## Required tests
 
-* Do not weaken safety by allowing orders when required order rules are truly unavailable.
-* Do not paper over the bug by changing target exposure, disabling target-delta, or disabling fail-closed checks.
-* Do not introduce hidden magic constants without source attribution.
-* Prefer typed helpers/dataclasses over expanding unstructured dict conventions.
-* Keep changes scoped enough to review, but include tests and observability.
-* If the full `OrderRuleAuthority` refactor is too large, implement a small forward-compatible resolver now and document the next refactor.
+Add regression tests that fail before the fix and pass after.
 
-## Suggested files to inspect and likely modify
+Minimum required tests:
 
-Inspect:
+### Test 1: target-delta terminal SELL consumes dust remainder
+
+Reproduce:
+
+```text
+BUY qty=0.00059997
+  -> lifecycle creates open_exposure 0.0004
+  -> lifecycle creates dust_tracking 0.00019997
+
+SELL qty=0.00059997
+  -> target-delta evidence
+  -> asset_after=0.0 / terminal flat evidence
+```
+
+Expected:
+
+```text
+open_position_lots has no positive qty rows
+projection_converged=true
+projected_total_qty=0
+startup/readiness would not block on POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
+```
+
+### Test 2: ordinary SELL does not consume dust without terminal-flat target-delta evidence
+
+Reproduce a dust_tracking row plus a SELL that only closes open_exposure or lacks target-delta terminal-flat evidence.
+
+Expected:
+
+```text
+dust_tracking row remains
+ordinary operator evidence semantics preserved
+```
+
+### Test 3: repair-plan reports terminal-flat stale dust clearly
+
+Given:
+
+```text
+broker_qty=0
+portfolio_qty=0
+latest SELL asset_after=0
+materialized projection has stale dust row
+```
+
+Expected reporting includes:
+
+```text
+terminal_flat_sell_detected=1
+stale_dust_rows_to_clear=[...]
+safe_to_apply_terminal_flat_projection_repair=<true or false with explicit blockers>
+current_broker_qty=0
+current_portfolio_qty=0
+materialized_lot_projection_qty=<dust qty>
+```
+
+### Test 4: unsafe repair remains unsafe with blockers
+
+If there are unresolved orders, submit_unknown, recovery_required, broker/portfolio mismatch, or fee/accounting active issues, terminal-flat dust repair must not be safe.
+
+### Test 5: lifecycle replay remains deterministic
+
+If lifecycle replay from trades is used by repair/rebuild, replaying the BUY→terminal SELL sequence must not recreate stale dust.
+
+## Suggested files likely to modify
+
+Likely:
+
+* `src/bithumb_bot/lifecycle.py`
+* `src/bithumb_bot/position_authority_repair.py`
+* `src/bithumb_bot/position_authority_state.py`
+* `src/bithumb_bot/reporting.py`
+* tests around lifecycle / accounting projection / repair plan
+
+Possibly:
 
 * `src/bithumb_bot/execution_service.py`
-* `src/bithumb_bot/target_position.py`
-* `src/bithumb_bot/engine.py`
-* order rule / broker live / chance snapshot modules
-* reporting modules for ops-report and recovery-report
-* `tests/test_target_position_execution.py`
-* tests around ops-report/recovery-report, if present
-
-Likely modify:
-
-* `src/bithumb_bot/execution_service.py`
-* a new or existing helper module for execution order rules, if appropriate
-* `tests/test_target_position_execution.py`
-* report code if adding operator-facing diagnostics
+* `src/bithumb_bot/broker/live.py`
+* `src/bithumb_bot/broker/live_submission_execution.py`
+* `src/bithumb_bot/runtime_readiness.py`
 
 ## Validation commands
 
-Run targeted tests first:
+Run focused tests first:
 
 ```bash
-uv run python -m py_compile src/bithumb_bot/execution_service.py
+uv run pytest tests/test_accounting_projection.py -q
+uv run pytest tests/test_position_authority_recovery_state.py -q
+uv run pytest tests/test_operator_commands.py -q
 uv run pytest tests/test_target_position_execution.py -q
 ```
 
-If you modify reporting:
-
-```bash
-uv run pytest -q tests -k "ops or recovery or report or target_position"
-```
+If you add new lifecycle tests, run that file too.
 
 Run broader tests if feasible:
 
@@ -313,56 +390,100 @@ Run broader tests if feasible:
 uv run pytest -q
 ```
 
-## Expected behavioral outcome
+Also run static import/compile checks:
 
-For a target-delta BUY decision with:
-
-* `TARGET_EXPOSURE_KRW=70000`
-* reference price around `113_428_000`
-* broker qty `0`
-* min qty `0.0001`
-* min notional `5000`
-
-The system should produce:
-
-```text
-target_order_rule_min_qty=0.0001
-target_order_rule_min_notional_krw=5000
-target_delta_side=BUY
-target_submit_qty≈0.000617
-target_would_submit=1
-submit_expected=1
-execution_block_reason=none
+```bash
+uv run python -m py_compile \
+  src/bithumb_bot/lifecycle.py \
+  src/bithumb_bot/position_authority_repair.py \
+  src/bithumb_bot/position_authority_state.py \
+  src/bithumb_bot/reporting.py
 ```
 
-It should not produce:
+## EC2 operational verification commands after patch
 
-```text
-missing_order_rule_min_qty
-target_order_rule_min_qty=null
-target_would_submit=0
+Do not start live until the patch and tests pass.
+
+On EC2, with live still stopped:
+
+```bash
+systemctl status bithumb-bot --no-pager
+pgrep -af 'bithumb-bot run|python.*bithumb'
 ```
 
-unless all authoritative order-rule sources are genuinely unavailable.
+Check current truth:
+
+```bash
+cd /home/ec2-user/apps/bithumb-bot
+export MODE=live
+export DB=/home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite
+
+sqlite3 -line "$DB" "select * from portfolio order by rowid desc limit 20;"
+
+MODE=live uv run bithumb-bot broker-diagnose | \
+  egrep -i 'balance query|cash_available|asset_available|asset_locked|overall|PASS|FAIL'
+```
+
+Check stale projection:
+
+```bash
+sqlite3 -header -column "$DB" "
+select
+  position_state,
+  count(*) as rows,
+  sum(qty_open) as qty_sum,
+  sum(executable_lot_count) as executable_lots,
+  sum(dust_tracking_lot_count) as dust_lots
+from open_position_lots
+where qty_open > 0
+group by position_state;
+"
+```
+
+Run repair-plan preview only:
+
+```bash
+MODE=live uv run bithumb-bot repair-plan --json > /tmp/repair-plan.json
+python3 - <<'PY'
+import json
+txt=open('/tmp/repair-plan.json').read()
+data=json.loads(txt[txt.find('{'):])
+for i, c in enumerate(data.get("candidate_repairs", [])):
+    print("\n### candidate", i)
+    for k in [
+        "repair_kind", "repair_mode", "needed", "safe_to_apply",
+        "final_safe_to_apply", "recommended_command", "reason",
+        "why_unsafe", "blockers", "current_broker_qty",
+        "current_portfolio_qty", "broker_qty", "portfolio_qty",
+        "projected_total_qty", "materialized_lot_projection_qty",
+        "terminal_flat_sell_detected", "stale_dust_rows_to_clear",
+        "latest_sell_client_order_id", "latest_trade_asset_after",
+    ]:
+        if k in c:
+            print(k, "=", c[k])
+PY
+```
+
+Only after the patched tool gives a clear safe path should any mutating repair be considered. Do not instruct automatic resume.
 
 ## Final report format
 
-When done, report in this structure:
+When done, report in this exact structure:
 
 1. **Summary**
 
    * What changed and why.
-   * Whether the EC2 incident hypothesis was confirmed, falsified, or refined.
+   * Whether the target-delta terminal SELL drift hypothesis was confirmed, falsified, or refined.
 
 2. **Root-cause hypotheses**
 
-   * List each hypothesis.
-   * Mark: confirmed / falsified / inconclusive.
-   * Include repo evidence for each.
+   * For each hypothesis A-D: confirmed / falsified / inconclusive.
+   * Include repo evidence and test evidence.
 
 3. **Design changes**
 
-   * Explain how the fix prevents the class of issue, not just this symptom.
+   * Explain how the fix aligns target-delta quantity authority with lifecycle projection.
+   * Explain how ordinary dust operator-evidence behavior remains protected.
    * Explain how fail-closed behavior is preserved.
 
 4. **Files changed**
@@ -371,8 +492,9 @@ When done, report in this structure:
 
 5. **Tests added/updated**
 
-   * Test names and what each proves.
-   * Include whether the EC2 reproduction case is covered.
+   * Test names.
+   * What each test proves.
+   * Which test reproduces the EC2 incident.
 
 6. **Validation results**
 
@@ -382,13 +504,14 @@ When done, report in this structure:
 
 7. **Operational verification**
 
-   * Exact EC2/SQLite/ops-report commands to verify after deployment.
-   * Expected output snippets.
+   * Exact EC2 commands to run after deployment.
+   * Expected output.
+   * Whether live should remain stopped or can be considered for cautious restart.
 
-8. **Follow-up recommendations**
+8. **Remaining risks and follow-ups**
 
-   * Larger `OrderRuleAuthority` / `ExecutionOrderRules` refactor if not completed.
-   * Replay-decision command proposal.
-   * Fee/accounting subsystem separation recommendations.
-   * Reporting improvements still needed, if any.
+   * QuantityAuthority full refactor if not completed.
+   * Dust state taxonomy improvements.
+   * Repair-plan/reporting improvements still needed.
+   * Any cases where manual repair may still be required.
 
