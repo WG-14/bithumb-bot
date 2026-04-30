@@ -25,6 +25,7 @@ _CANONICAL_COMPATIBILITY_TRUTH_SOURCES = {
 }
 _DECLARATION_RESIDUE_SUFFIXES = ("_source", "_truth_source", "_compatibility_residue")
 _DECLARATION_RESIDUE_KEYS = {"decision_compatibility_residue"}
+_DECLARATION_RESIDUE_KEY_ALLOWLIST = {"balance_source"}
 _CANONICAL_OPEN_EXPOSURE_QTY_SOURCE = "position_state.normalized_exposure.open_exposure_qty"
 _CANONICAL_SELL_LOT_AUTHORITY = "position_state.normalized_exposure.sellable_executable_lot_count"
 _CANONICAL_SELL_QTY_DERIVATION = "position_state.normalized_exposure.sellable_executable_qty"
@@ -123,6 +124,9 @@ def _strip_declaration_residue(value: Any) -> Any:
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
+            if key in _DECLARATION_RESIDUE_KEY_ALLOWLIST:
+                cleaned[key] = _strip_declaration_residue(item)
+                continue
             if isinstance(key, str) and (
                 key in _DECLARATION_RESIDUE_KEYS
                 or key.endswith(_DECLARATION_RESIDUE_SUFFIXES)

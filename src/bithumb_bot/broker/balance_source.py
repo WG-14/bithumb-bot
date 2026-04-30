@@ -18,6 +18,137 @@ class BalanceSnapshot:
     balance: BrokerBalance
 
 
+@dataclass(frozen=True)
+class LiveAccountEvidence:
+    source: str
+    observed_ts_ms: int
+    execution_mode: str
+    quote_currency: str
+    base_currency: str
+    quote_qty_known: bool
+    quote_available: float
+    quote_locked: float
+    base_qty_known: bool
+    base_available: float
+    base_locked: float
+    base_currency_missing_policy: str
+    preflight_outcome: str
+    flat_start_allowed: bool
+    flat_start_reason: str
+    evidence_policy: str
+    evidence_reason: str
+
+    @property
+    def broker_qty(self) -> float:
+        return float(self.base_available) + float(self.base_locked)
+
+    @property
+    def broker_cash_total(self) -> float:
+        return float(self.quote_available) + float(self.quote_locked)
+
+    def as_broker_position_evidence(self, *, balance_source_stale: bool = False) -> dict[str, object]:
+        return {
+            "broker_qty_known": bool(self.base_qty_known),
+            "broker_qty": float(self.broker_qty),
+            "broker_qty_value_source": self.evidence_policy,
+            "broker_qty_evidence_source": self.source,
+            "broker_qty_evidence_observed_ts_ms": int(self.observed_ts_ms),
+            "broker_qty_evidence_policy": self.evidence_policy,
+            "broker_qty_evidence_reason": self.evidence_reason,
+            "balance_source": self.source,
+            "balance_source_stale": bool(balance_source_stale),
+            "balance_source_preflight_outcome": self.preflight_outcome,
+            "balance_source_execution_mode": self.execution_mode,
+            "balance_observed_ts_ms": int(self.observed_ts_ms),
+            "base_currency": self.base_currency,
+            "quote_currency": self.quote_currency,
+            "base_currency_missing_policy": self.base_currency_missing_policy,
+            "asset_available": float(self.base_available),
+            "asset_locked": float(self.base_locked),
+            "cash_available": float(self.quote_available),
+            "cash_locked": float(self.quote_locked),
+        }
+
+    def as_decision_context_fields(self, *, local_qty: float | None = None, canonical_position_state: str = "") -> dict[str, object]:
+        fields = {
+            "balance_source": self.source,
+            "balance_observed_ts_ms": int(self.observed_ts_ms),
+            "balance_source_preflight_outcome": self.preflight_outcome,
+            "balance_source_execution_mode": self.execution_mode,
+            "quote_currency": self.quote_currency,
+            "base_currency": self.base_currency,
+            "base_currency_missing_policy": self.base_currency_missing_policy,
+            "broker_qty_known": bool(self.base_qty_known),
+            "broker_qty": float(self.broker_qty),
+            "broker_qty_evidence_policy": self.evidence_policy,
+            "broker_qty_evidence_reason": self.evidence_reason,
+            "broker_cash_known": bool(self.quote_qty_known),
+            "broker_cash_available": float(self.quote_available),
+            "broker_cash_locked": float(self.quote_locked),
+        }
+        if local_qty is not None:
+            fields["local_qty"] = float(local_qty)
+        if canonical_position_state:
+            fields["canonical_position_state"] = canonical_position_state
+        return fields
+
+
+def build_live_account_evidence(
+    *,
+    snapshot: BalanceSnapshot,
+    diagnostics: dict[str, object] | None,
+) -> LiveAccountEvidence:
+    diag = dict(diagnostics or {})
+    currencies = {str(item).strip().upper() for item in (diag.get("currencies") or []) if str(item).strip()}
+    base_currency = str(diag.get("base_currency") or "").strip().upper()
+    quote_currency = str(diag.get("quote_currency") or "").strip().upper()
+    preflight_outcome = str(diag.get("preflight_outcome") or "unknown")
+    execution_mode = str(diag.get("execution_mode") or "unknown")
+    base_missing_policy = str(diag.get("base_currency_missing_policy") or "unknown")
+    base_missing_known_zero = bool(
+        preflight_outcome == "pass_no_position_allowed"
+        and execution_mode == "live_dry_run_unarmed"
+        and base_missing_policy == "allow_zero_position_start_in_dry_run"
+        and base_currency
+        and base_currency not in currencies
+    )
+    success = preflight_outcome in {"pass", "pass_no_position_allowed"}
+    base_present = bool(base_currency and base_currency in currencies)
+    quote_present = bool(quote_currency and quote_currency in currencies)
+    if base_missing_known_zero:
+        evidence_policy = "missing_base_row_known_zero_for_live_dry_run"
+        evidence_reason = "valid_accounts_snapshot_missing_base_row_allowed_for_unarmed_live_dry_run"
+        base_qty_known = True
+    elif success and base_present:
+        evidence_policy = "accounts_base_row"
+        evidence_reason = "valid_accounts_snapshot_base_row_present"
+        base_qty_known = True
+    else:
+        evidence_policy = "unknown_or_unsafe_accounts_evidence"
+        evidence_reason = str(diag.get("reason") or "accounts_evidence_not_trusted")
+        base_qty_known = False
+    quote_qty_known = bool(success and quote_present)
+    return LiveAccountEvidence(
+        source=str(snapshot.source_id or diag.get("source") or "accounts_v1_rest_snapshot"),
+        observed_ts_ms=int(snapshot.observed_ts_ms or diag.get("last_observed_ts_ms") or 0),
+        execution_mode=execution_mode,
+        quote_currency=quote_currency,
+        base_currency=base_currency,
+        quote_qty_known=quote_qty_known,
+        quote_available=float(snapshot.balance.cash_available),
+        quote_locked=float(snapshot.balance.cash_locked),
+        base_qty_known=base_qty_known,
+        base_available=float(snapshot.balance.asset_available) if base_qty_known else 0.0,
+        base_locked=float(snapshot.balance.asset_locked) if base_qty_known else 0.0,
+        base_currency_missing_policy=base_missing_policy,
+        preflight_outcome=preflight_outcome,
+        flat_start_allowed=bool(diag.get("flat_start_allowed")),
+        flat_start_reason=str(diag.get("flat_start_reason") or ""),
+        evidence_policy=evidence_policy,
+        evidence_reason=evidence_reason,
+    )
+
+
 class BalanceSource(Protocol):
     def fetch_snapshot(self) -> BalanceSnapshot:
         ...

@@ -40,6 +40,9 @@ def _collect_residue_paths(value, path: str = "") -> list[str]:
         for key, item in value.items():
             key_text = str(key)
             next_path = f"{path}.{key_text}" if path else key_text
+            if key_text == "balance_source":
+                found.extend(_collect_residue_paths(item, next_path))
+                continue
             if (
                 key_text == "decision_compatibility_residue"
                 or key_text.endswith("_source")

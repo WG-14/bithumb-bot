@@ -77,6 +77,7 @@ from .broker.order_rules import (
 from .broker.bithumb import build_broker_with_auth_diagnostics
 from .broker import bithumb as bithumb_broker_module
 from .broker.base import BrokerBalance, BrokerOrder
+from .broker.balance_source import LiveAccountEvidence, build_live_account_evidence
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
@@ -919,6 +920,103 @@ def _apply_live_dry_run_no_submit_policy(
     return decision
 
 
+def _readiness_local_qty(readiness_payload: dict[str, object]) -> float | None:
+    normalized = readiness_payload.get("normalized_exposure")
+    if isinstance(normalized, dict):
+        value = normalized.get("raw_total_asset_qty")
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    value = readiness_payload.get("total_effective_exposure_qty")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _live_dry_run_missing_base_zero_policy_safe(readiness_payload: dict[str, object]) -> bool:
+    if int(readiness_payload.get("open_order_count") or 0) > 0:
+        return False
+    if int(readiness_payload.get("unresolved_open_order_count") or 0) > 0:
+        return False
+    if int(readiness_payload.get("recovery_required_count") or 0) > 0:
+        return False
+    if int(readiness_payload.get("submit_unknown_count") or 0) > 0:
+        return False
+    if "run_loop_allowed" in readiness_payload and not bool(readiness_payload.get("run_loop_allowed")):
+        return False
+    normalized = readiness_payload.get("normalized_exposure")
+    if isinstance(normalized, dict):
+        for key in ("raw_total_asset_qty", "open_exposure_qty", "dust_tracking_qty"):
+            try:
+                if abs(float(normalized.get(key) or 0.0)) > 1e-12:
+                    return False
+            except (TypeError, ValueError):
+                return False
+    local_qty = _readiness_local_qty(readiness_payload)
+    if local_qty is not None and abs(float(local_qty)) > 1e-12:
+        return False
+    return True
+
+
+def _fetch_live_dry_run_account_evidence() -> LiveAccountEvidence | None:
+    try:
+        broker = DEFAULT_BITHUMB_BROKER_CLASS()
+        snapshot = broker.get_balance_snapshot()
+        diagnostics = broker.get_accounts_validation_diagnostics()
+    except Exception:
+        return None
+    return build_live_account_evidence(snapshot=snapshot, diagnostics=diagnostics)
+
+
+def _merge_live_dry_run_account_evidence(
+    *,
+    readiness_payload: dict[str, object],
+    account_evidence: LiveAccountEvidence | None,
+) -> dict[str, object]:
+    if account_evidence is None:
+        return readiness_payload
+    merged = dict(readiness_payload)
+    evidence = account_evidence
+    if (
+        evidence.evidence_policy == "missing_base_row_known_zero_for_live_dry_run"
+        and not _live_dry_run_missing_base_zero_policy_safe(merged)
+    ):
+        evidence = LiveAccountEvidence(
+            source=evidence.source,
+            observed_ts_ms=evidence.observed_ts_ms,
+            execution_mode=evidence.execution_mode,
+            quote_currency=evidence.quote_currency,
+            base_currency=evidence.base_currency,
+            quote_qty_known=evidence.quote_qty_known,
+            quote_available=evidence.quote_available,
+            quote_locked=evidence.quote_locked,
+            base_qty_known=False,
+            base_available=0.0,
+            base_locked=0.0,
+            base_currency_missing_policy=evidence.base_currency_missing_policy,
+            preflight_outcome=evidence.preflight_outcome,
+            flat_start_allowed=evidence.flat_start_allowed,
+            flat_start_reason=evidence.flat_start_reason,
+            evidence_policy="missing_base_row_not_safe_for_known_zero",
+            evidence_reason="local_position_or_recovery_state_not_flat_for_live_dry_run_known_zero",
+        )
+    broker_position_evidence = dict(merged.get("broker_position_evidence") or {})
+    broker_position_evidence.update(evidence.as_broker_position_evidence())
+    merged["broker_position_evidence"] = broker_position_evidence
+    merged.update(
+        evidence.as_decision_context_fields(
+            local_qty=_readiness_local_qty(merged),
+            canonical_position_state=str(merged.get("canonical_state") or ""),
+        )
+    )
+    return merged
+
+
 def cmd_live_dry_run(short_n: int, long_n: int) -> None:
     log_live_execution_contract(
         settings,
@@ -960,6 +1058,11 @@ def cmd_live_dry_run(short_n: int, long_n: int) -> None:
         reason = str(context.pop("reason", ""))
         raw_signal = str(context.get("raw_signal") or context.get("base_signal") or signal).upper()
         readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
+        account_evidence = _fetch_live_dry_run_account_evidence()
+        readiness_payload = _merge_live_dry_run_account_evidence(
+            readiness_payload=readiness_payload,
+            account_evidence=account_evidence,
+        )
         target_resolution = _resolve_target_position_state_for_run_loop_compat(
             conn,
             readiness_payload=readiness_payload,
@@ -1020,6 +1123,26 @@ def cmd_live_dry_run(short_n: int, long_n: int) -> None:
         if isinstance(target_policy_metadata, dict):
             for target_key, target_value in target_policy_metadata.items():
                 context.setdefault(target_key, target_value)
+        for evidence_key in (
+            "balance_source",
+            "balance_observed_ts_ms",
+            "balance_source_preflight_outcome",
+            "balance_source_execution_mode",
+            "quote_currency",
+            "base_currency",
+            "base_currency_missing_policy",
+            "broker_qty_known",
+            "broker_qty",
+            "broker_qty_evidence_policy",
+            "broker_qty_evidence_reason",
+            "broker_cash_known",
+            "broker_cash_available",
+            "broker_cash_locked",
+            "local_qty",
+            "canonical_position_state",
+        ):
+            if evidence_key in readiness_payload:
+                context[evidence_key] = readiness_payload[evidence_key]
 
         decision_id = record_strategy_decision(
             conn,

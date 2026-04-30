@@ -1,467 +1,536 @@
 You are working in GitHub repository `WG-14/bithumb-bot`.
 
-Use the EC2 incident analysis as context, but do not assume every prior conclusion is correct. Treat the following as falsifiable hypotheses to verify against the current repository code and tests. The goal is not to bypass the live guard. The goal is to make the repository a more robust, reproducible, and operable automated-trading experiment system. 
+This is a production-safety and experiment-system hardening task. Do not treat this as a simple `broker_qty_unknown = 0` symptom patch. The goal is to make `live-dry-run` a reliable live-environment decision experiment mode by adding a correct evidence pipeline from `/v1/accounts` into runtime readiness / canonical position / target-delta decision context, while preserving all no-submit and real-order safety guarantees.
 
-Current EC2 observation:
+Use the current EC2 evidence as context, but keep the root causes falsifiable.
 
-```text
-MAX_DAILY_ORDER_COUNT=3
-EXECUTION_ENGINE=target_delta
-TARGET_EXPOSURE_KRW=30000
-LIVE_DRY_RUN=true
-LIVE_REAL_ORDER_ARMED=false
-KILL_SWITCH=false
-```
+## Current EC2 observations
 
-The env was correctly updated, but:
+`live-dry-run` was run successfully after commit `889538d224c113c5053d553b372be017bb936247`.
 
-```bash
-uv run bithumb-bot run --short 7 --long 30
-```
-
-fails with:
+After 20 live-dry-run iterations:
 
 ```text
-LIVE_DRY_RUN=false is required for MODE=live run
-LIVE_REAL_ORDER_ARMED=true is required for MODE=live run
-unarmed live execution cannot start the trading loop
+strategy_decisions  6826
+orders              182
+fills               145
+trades              144
 ```
 
-This confirms that the current `MODE=live run` path is real-order armed only. Do not “fix” this by weakening the real-order guard. Preserve the real-order guard. Add an explicit, safe live dry-run execution path.
+So the command correctly created new decision rows while creating no new orders, fills, or trades. No-submit safety worked.
 
-Also observed:
+However, the latest `strategy_decisions` rows show:
 
 ```text
-strategy_performance_gate_blocked=1
-reason_code=STRATEGY_PERFORMANCE_BLOCKED:STRATEGY_EXPECTANCY_NEGATIVE
-sample_count=60
-expectancy_per_trade=-38.60
-net_pnl=-2315.89
-profit_factor=0.4922
+execution_mode=live_dry_run_loop
+execution_block_reason=broker_qty_unknown
+target_delta_side=NONE
+broker_qty_known=NULL/empty
+broker_qty=NULL/empty
+balance_source=NULL/empty
+balance_preflight=NULL/empty
 ```
 
-Therefore, do not recommend or enable real-order arming as part of this task.
+The EC2 query used:
+
+```sql
+SELECT
+  id AS decision_id,
+  datetime(decision_ts / 1000, 'unixepoch', '+9 hours') AS kst,
+  signal,
+  reason,
+  json_extract(context_json, '$.final_signal') AS final_signal,
+  json_extract(context_json, '$.execution_mode') AS execution_mode,
+  json_extract(context_json, '$.execution_block_reason') AS execution_block_reason,
+  json_extract(context_json, '$.balance_source') AS balance_source,
+  json_extract(context_json, '$.balance_source_preflight_outcome') AS balance_preflight,
+  json_extract(context_json, '$.broker_qty_known') AS broker_qty_known,
+  json_extract(context_json, '$.broker_qty') AS broker_qty,
+  json_extract(context_json, '$.target_delta_side') AS target_delta_side,
+  json_extract(context_json, '$.target_submit_plan.submit_allowed') AS target_submit_allowed
+FROM strategy_decisions
+ORDER BY id DESC
+LIMIT 30;
+```
+
+The output confirmed that decisions `6806` through `6826` were `live_dry_run_loop` decisions blocked by `broker_qty_unknown`.
+
+Also observed in live-dry-run logs:
+
+```text
+/v1/accounts preflight passed with zero-position allowance:
+reason=required currency missing
+reason_code=ACCOUNTS_BASE_ROW_MISSING_ALLOWED
+execution_mode=live_dry_run_unarmed
+quote_currency=KRW
+base_currency=BTC
+base_currency_missing_policy=allow_zero_position_start_in_dry_run
+```
+
+So `/v1/accounts` is called and the base BTC row missing case is explicitly allowed for live-dry-run zero-position start. But that evidence is not reaching `strategy_decisions.context_json` or target-delta.
 
 ## Core problem
 
-The repository currently separates `paper` and `live`, but it does not cleanly separate these execution intents:
+The latest repository already has a useful `live-dry-run` command and no-submit safety surface. Do not redo that work.
+
+The current gap is:
 
 ```text
-diagnostic-only
-live-simulated-run
-live-real-order
-recovery-only
+live-dry-run command
+→ live order-rule / market / accounts preflight runs
+→ accounts preflight allows missing BTC row as dry-run flat start
+→ target-delta decision does not receive broker position evidence
+→ target-delta blocks with broker_qty_unknown
+→ live-dry-run cannot validate target-delta plan or performance-gate behavior
 ```
 
-Current behavior appears to be:
-
-```text
-paper:
-  strategy and DB experimentation possible
-  but live order rules / live readiness / target-delta live semantics are not exercised
-
-live + dry-run:
-  health / ops / reporting diagnostics possible
-  but run loop is blocked
-
-live + real-order armed:
-  run loop possible
-  but real order risk exists
-```
-
-The missing layer is:
-
-```text
-live-simulated-run:
-  use live market, live order rules, live readiness, target-delta, performance gate, and decision persistence
-  but hard-disable all broker order submission
-```
+This is an evidence propagation problem, not an order submission problem.
 
 ## Hypotheses to verify
 
-### Hypothesis 1: `run` is currently real-order only by design
+### Hypothesis 1: `/v1/accounts` preflight result is not propagated into decision context
 
-Evidence to check:
+Evidence to verify in code:
 
 ```text
-src/bithumb_bot/app.py
 src/bithumb_bot/config.py
-validate_live_run_startup_contract()
-LIVE_COMMAND_GUARDS
-cmd_run()
+  validate_accounts_preflight()
+  _fetch_accounts_payload_for_preflight()
+  _flat_start_safety_for_accounts_preflight()
+
+src/bithumb_bot/app.py
+  cmd_live_dry_run()
+  _apply_live_dry_run_no_submit_policy()
+  record_strategy_decision()
+
+src/bithumb_bot/execution_service.py
+  build_execution_decision_summary()
+
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/position_state_snapshot.py
+src/bithumb_bot/target_position.py
 ```
 
 Expected current behavior:
 
 ```text
-MODE=live
-LIVE_DRY_RUN=true
-LIVE_REAL_ORDER_ARMED=false
-uv run bithumb-bot run --short 7 --long 30
+accounts preflight logs pass_no_position_allowed / ACCOUNTS_BASE_ROW_MISSING_ALLOWED,
+but strategy_decisions.context_json lacks:
+  balance_source
+  balance_source_preflight_outcome
+  broker_qty_known
+  broker_qty
 ```
-
-must fail with the real-order startup contract.
-
-If this is confirmed, do not remove the guard. Instead, create a separate dry-run loop path.
 
 Refutation condition:
 
 ```text
-An existing command or flag already supports live dry-run run-loop execution without broker submit.
+There is already a structured account evidence object that is created from /v1/accounts and passed into runtime readiness / target-delta / decision context, but another bug prevents it from surfacing.
 ```
 
-If such a path exists, document it, add regression tests, and avoid duplicating it.
+If refuted, fix the actual broken propagation point and add tests for it.
 
-### Hypothesis 2: `BITHUMB_ENV_FILE` loading is CLI-only, causing operator confusion
+### Hypothesis 2: missing base currency row is treated differently by accounts preflight and target-delta
 
-Observed behavior:
-
-```bash
-BITHUMB_ENV_FILE=/home/ec2-user/bithumb-runtime/env/live.verify.env \
-uv run bithumb-bot health
-```
-
-shows env loaded correctly.
-
-But:
-
-```bash
-BITHUMB_ENV_FILE=/home/ec2-user/bithumb-runtime/env/live.verify.env \
-uv run python - <<'PY'
-from bithumb_bot.config import settings
-print(settings.MAX_DAILY_ORDER_COUNT)
-print(settings.KILL_SWITCH)
-PY
-```
-
-does not necessarily load the env file before `settings` is constructed.
-
-Verify:
+Accounts preflight appears to treat:
 
 ```text
-src/bithumb_bot/bootstrap.py
-run_cli()
-bootstrap_argv()
-load_explicit_env_file()
-config.settings initialization
-console script entrypoint
-```
-
-Expected result:
-
-```text
-BITHUMB_ENV_FILE works through the `bithumb-bot` CLI bootstrap path.
-Direct Python imports do not automatically bootstrap env loading.
-```
-
-Do not make this worse. Prefer adding official CLI config-inspection commands over relying on direct Python import snippets.
-
-### Hypothesis 3: performance gate works diagnostically but cannot be exercised through new live dry-run decisions
-
-Health reports the performance gate is blocked, but because live dry-run run-loop is not allowed, there is no official way to generate fresh `strategy_decisions` under live readiness / target-delta / performance-gate conditions without real-order arming.
-
-Verify:
-
-```text
-Can a new strategy decision be generated under:
+BTC row missing
 MODE=live
 LIVE_DRY_RUN=true
 LIVE_REAL_ORDER_ARMED=false
-EXECUTION_ENGINE=target_delta
-without broker order submission?
+flat-start allowed
 ```
 
-Expected current behavior:
+as safe zero-position evidence.
+
+Target-delta appears to treat the same condition as:
 
 ```text
-No official run-loop path exists.
+broker_qty_unknown
 ```
 
-Required end state:
+Required semantic contract:
 
 ```text
-A live dry-run loop can create new decision rows and decision telemetry while guaranteeing no orders/fills are submitted.
+If and only if:
+  execution_mode=live_dry_run_unarmed
+  /v1/accounts response is valid
+  quote currency row is parseable
+  base currency row is missing
+  base_currency_missing_policy=allow_zero_position_start_in_dry_run
+  local position is flat
+  unresolved/open/recovery-required orders are absent
+
+Then:
+  broker_qty_known=1
+  broker_qty=0.0
+  broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
 ```
+
+This must not apply unsafely to real-order paths.
+
+Refutation condition:
+
+```text
+target-delta already distinguishes known-zero from unknown, but live-dry-run is not passing the right evidence shape.
+```
+
+### Hypothesis 3: live-dry-run has no standardized account/balance evidence provenance in decision context
+
+The decision context should show what evidence the decision used. Current latest rows do not show this.
+
+Required fields, at minimum:
+
+```text
+balance_source
+balance_observed_ts_ms
+balance_source_preflight_outcome
+balance_source_execution_mode
+quote_currency
+base_currency
+base_currency_missing_policy
+broker_qty_known
+broker_qty
+broker_qty_evidence_policy
+broker_qty_evidence_reason
+broker_cash_known
+broker_cash_available
+broker_cash_locked
+local_qty
+canonical_position_state
+```
+
+Refutation condition:
+
+```text
+These fields already exist in a nested path under context_json, but decision-telemetry / SQL query / reports are not surfacing them.
+```
+
+If refuted, fix reporting/telemetry surfacing instead of duplicating fields.
+
+### Hypothesis 4: health / ops-report and decision-flow use different evidence models
+
+EC2 showed:
+
+```text
+ops-report / health:
+  canonical_state=FLAT
+  residual_class=NONE
+  dust_state=no_dust
+  total_holdings_qty=0
+
+decision-flow:
+  execution_block_reason=broker_qty_unknown
+```
+
+Verify whether these surfaces use different sources of truth.
+
+Refutation condition:
+
+```text
+health/ops-report are purely local/canonical state and not intended to imply broker_qty_known.
+```
+
+Even if refuted, the final design must make the distinction clear in reports so operators do not confuse local flat state with broker-evidenced flat state.
 
 ## Required design direction
 
-Do not weaken `run` as a real-order command.
+Do not patch this by blindly defaulting missing broker qty to zero.
 
-Add an explicit live dry-run execution surface. Prefer a separate command:
-
-```bash
-uv run bithumb-bot live-dry-run --short 7 --long 30
-```
-
-Alternative acceptable design only if cleaner in the current CLI:
-
-```bash
-uv run bithumb-bot run-live-dry --short 7 --long 30
-```
-
-Avoid making `run` behavior ambiguous. If you add a flag instead, it must be explicit and impossible to confuse with real-order arming, for example:
-
-```bash
-uv run bithumb-bot run --live-dry-run --short 7 --long 30
-```
-
-but a separate command is preferred.
-
-## Required behavior for `live-dry-run`
-
-The command must only run when:
+Implement or strengthen a formal evidence pipeline:
 
 ```text
-MODE=live
-LIVE_DRY_RUN=true
-LIVE_REAL_ORDER_ARMED=false
+/v1/accounts payload
+→ parsed account/balance evidence
+→ live-dry-run broker position evidence
+→ runtime readiness / canonical position input
+→ target-delta decision input
+→ strategy_decisions.context_json
+→ decision-telemetry / ops-report
 ```
 
-It must fail closed if:
+The code must preserve fail-closed behavior when evidence is not trustworthy.
+
+## Concrete implementation requirements
+
+### 1. Create a structured account evidence object
+
+Add a small dataclass or equivalent structure, for example:
+
+```python
+@dataclass(frozen=True)
+class LiveAccountEvidence:
+    source: str
+    observed_ts_ms: int
+    execution_mode: str
+    quote_currency: str
+    base_currency: str
+    quote_qty_known: bool
+    quote_available: float
+    quote_locked: float
+    base_qty_known: bool
+    base_available: float
+    base_locked: float
+    base_currency_missing_policy: str
+    preflight_outcome: str
+    flat_start_allowed: bool
+    flat_start_reason: str
+    evidence_policy: str
+    evidence_reason: str
+```
+
+Use existing account parsing code where possible. Do not duplicate fragile parsing logic if `broker.accounts_v1` already has it.
+
+For a valid live-dry-run accounts response with KRW row present and BTC row missing:
 
 ```text
+base_qty_known=true
+base_available=0.0
+base_locked=0.0
+base_currency_missing_policy=allow_zero_position_start_in_dry_run
+preflight_outcome=pass_no_position_allowed
+evidence_policy=missing_base_row_known_zero_for_live_dry_run
+```
+
+For transport/auth/schema failures:
+
+```text
+base_qty_known=false
+preflight_outcome=fail_*
+```
+
+For real-order unsafe missing base row:
+
+```text
+base_qty_known=false
+preflight_outcome=blocked_or_unknown
+```
+
+### 2. Do not mutate real broker state or portfolio from live-dry-run evidence
+
+`live-dry-run` evidence is input to a simulated decision. It must not create orders, fills, trades, or portfolio mutations.
+
+Allowed:
+
+```text
+strategy_decisions row
+decision context
+diagnostic runtime metadata if already intended for diagnostics
+```
+
+Not allowed:
+
+```text
+orders rows with PENDING_SUBMIT / NEW / FILLED
+fills rows
+trades rows
+portfolio mutation as if execution occurred
+exchange order submission
+```
+
+### 3. Feed evidence into target-delta decision
+
+Modify the live-dry-run flow so target-delta receives known broker qty evidence.
+
+Patch design can be either:
+
+```text
+A. Pass LiveAccountEvidence directly into build_execution_decision_summary / target-delta decision builder.
+```
+
+or:
+
+```text
+B. Convert LiveAccountEvidence into the existing canonical position / readiness structure before calling build_execution_decision_summary.
+```
+
+Prefer the least invasive design that preserves a single evidence contract.
+
+Required result after patch:
+
+```text
+live-dry-run latest decision context has:
+  broker_qty_known=1
+  broker_qty=0.0
+  balance_source=accounts_v1_rest_snapshot or equivalent
+  balance_source_preflight_outcome=pass_no_position_allowed
+  base_currency_missing_policy=allow_zero_position_start_in_dry_run
+```
+
+and no longer blocks with `broker_qty_unknown` under valid known-zero conditions.
+
+### 4. Keep target-delta fail-closed for unsafe cases
+
+Do not allow known-zero inference when:
+
+```text
+MODE is not live-dry-run
 LIVE_REAL_ORDER_ARMED=true
 LIVE_DRY_RUN=false
-MODE is not live
-DB_PATH is unsafe or missing
-live runtime paths are inside the repository
-startup/recovery safety gate is blocking
+accounts request fails
+accounts response is unparseable
+quote row missing when required
+local position is nonzero
+unresolved/open/recovery-required orders exist
+runtime readiness blocks resume
 ```
 
-It must perform enough live-environment checks to be useful:
+In these cases, target-delta must continue to block with explicit evidence reason.
+
+### 5. Update decision context and telemetry
+
+`strategy_decisions.context_json` must include enough provenance to answer:
 
 ```text
-market validation
-order-rule snapshot / chance contract check
-accounts preflight using dry-run/unarmed base-missing policy
-runtime readiness snapshot
-target_position_state resolution
-strategy decision generation
-target-delta submit plan generation
-strategy performance gate evaluation
-decision persistence
-decision telemetry visibility
+What account evidence was used?
+Was broker qty known?
+Why was missing base row treated as known zero?
+Was this live-dry-run only?
+Would this have submitted if submit were allowed?
+Why was submit blocked?
 ```
 
-It must never submit live orders:
-
-```text
-No broker order submit
-No order record that implies real submission
-No fill application
-No exchange order creation
-No accidental submit through target_delta
-No accidental submit through residual closeout
-No accidental submit through strategy_position
-```
-
-If the code path needs an execution service, create an explicit no-submit execution service for this command rather than relying on `LIVE_DRY_RUN=true` deep inside broker code.
-
-## Persistence requirements
-
-`live-dry-run` should create enough records to validate decision flow:
-
-```text
-strategy_decisions row must be recorded
-decision_context must include live_dry_run_loop=1 or equivalent
-target_delta plan fields must be present when execution engine is target_delta
-performance gate fields must be present
-submit_expected must be false
-final_action must clearly indicate diagnostic/no-submit or performance-gated block
-```
-
-Do not create misleading real-order lifecycle artifacts:
-
-```text
-Do not create orders rows with PENDING_SUBMIT / NEW / FILLED
-Do not create fills
-Do not create trades
-Do not mutate portfolio as if an order executed
-```
-
-If an existing paper/live dry-run path already creates order-like diagnostics, keep it clearly marked as diagnostic and ensure ops reports cannot confuse it with actual order submission.
-
-## Observability requirements
-
-The new command must make the mode obvious in logs and reports.
-
-Add fields such as:
+Minimum required context fields:
 
 ```text
 execution_mode=live_dry_run_loop
-live_dry_run_loop=1
 real_order_submit_allowed=0
 broker_submit_disabled=1
-submit_expected=0
-performance_gate_blocked=...
-performance_gate_reason_code=...
-target_delta_side=...
-target_desired_qty=...
-target_final_submitted_qty=...
-target_rejected_remainder=...
-target_dust_policy=...
-target_invariant_status=...
-recommended_next_action=...
+
+balance_source
+balance_observed_ts_ms
+balance_source_preflight_outcome
+balance_source_execution_mode
+quote_currency
+base_currency
+base_currency_missing_policy
+
+broker_qty_known
+broker_qty
+broker_qty_evidence_policy
+broker_qty_evidence_reason
+broker_cash_known
+broker_cash_available
+broker_cash_locked
+
+target_delta_side
+target_would_submit
+target_submit_qty
+target_delta_notional_krw
+target_block_reason
+target_submit_plan.submit_allowed
+target_submit_plan.invariant_status
+target_submit_plan.dust_policy
 ```
 
-`decision-telemetry` should be able to show that a recent decision came from the live dry-run loop.
-
-`ops-report` or `health` should include enough information to distinguish:
+Update `decision-telemetry` to surface the most important fields, especially:
 
 ```text
-diagnostic-only health check
-live dry-run loop
-live real-order run
-recovery-only operation
+balance_source
+balance_preflight
+broker_qty_known
+broker_qty
+broker_qty_evidence_policy
+target_delta_side
+target_would_submit
+target_submit_allowed
+execution_block_reason
+execution_mode
 ```
 
-## Config inspection requirement
+### 6. Make reporting distinguish local-flat vs broker-evidenced-flat
 
-Add an official CLI command to remove ambiguity from direct Python imports:
-
-```bash
-uv run bithumb-bot config-dump --masked
-```
-
-Optionally also:
-
-```bash
-uv run bithumb-bot config-check
-```
-
-Minimum `config-dump --masked` output:
+If health/ops-report currently says `FLAT/no_dust` using local/canonical state, keep that if correct. But add or surface a distinct broker evidence line such as:
 
 ```text
-env_loaded
-env_file
-env_source_key
-env_override
-MODE
-DB_PATH
-RUN_ROOT
-DATA_ROOT
-LOG_ROOT
-LIVE_DRY_RUN
-LIVE_REAL_ORDER_ARMED
-KILL_SWITCH
-MAX_DAILY_ORDER_COUNT
-EXECUTION_ENGINE
-TARGET_EXPOSURE_KRW
-STRATEGY_NAME
-PAIR
-INTERVAL
-LIVE_PERFORMANCE_GATE_ENABLED
-LIVE_PERFORMANCE_GATE_MIN_SAMPLE
-LIVE_PERFORMANCE_GATE_MIN_EXPECTANCY_KRW
-LIVE_PERFORMANCE_GATE_MIN_NET_PNL_KRW
-LIVE_PERFORMANCE_GATE_MIN_PROFIT_FACTOR
-LIVE_PERFORMANCE_GATE_MAX_FEE_DRAG_RATIO
+broker_position_evidence=known_zero
+broker_qty=0.00000000
+broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
+balance_source=accounts_v1_rest_snapshot
 ```
 
-Mask secrets:
+If evidence is local-only, say so clearly:
 
 ```text
-BITHUMB_API_KEY
-BITHUMB_API_SECRET
-SLACK_WEBHOOK_URL
-any token/password/private key fields
+broker_position_evidence=unknown
+local_position_state=flat
 ```
 
-Do not require operators to run:
+This prevents the current confusion where ops-report looks flat but decision-flow says broker unknown.
 
-```bash
-uv run python - <<'PY'
-from bithumb_bot.config import settings
-...
-PY
-```
-
-for normal config validation. That path bypasses CLI bootstrap and is misleading.
-
-## Guard policy refactor
-
-Keep the current `run` real-order guard strict.
-
-Introduce explicit command policy categories, for example:
-
-```text
-diagnostic:
-  health, ops-report, strategy-report, decision-telemetry, config-dump
-
-live_dry_run_loop:
-  live-dry-run
-
-live_real_startup:
-  run
-
-preflight_safety:
-  cancel-open-orders, flatten-position, target-closeout, panic-stop, recover-order
-```
-
-Make failure messages operator-actionable.
-
-Current message:
-
-```text
-LIVE_DRY_RUN=false is required for MODE=live run
-LIVE_REAL_ORDER_ARMED=true is required for MODE=live run
-```
-
-Improve to something like:
-
-```text
-MODE=live `run` is real-order only.
-Current config is live dry-run/unarmed.
-Use `bithumb-bot live-dry-run --short ... --long ...` to validate live decision flow without submitting orders.
-Only use `run` after real-order arming, performance gate approval, and startup safety checks.
-```
-
-## Safety invariants
-
-Do not weaken these:
-
-```text
-Real-order `run` still requires LIVE_DRY_RUN=false.
-Real-order `run` still requires LIVE_REAL_ORDER_ARMED=true.
-Performance gate still blocks negative-expectancy BUY exposure.
-Recovery / cancel / flatten / target-closeout / panic-stop remain available.
-Live DB path must stay outside the repository.
-Live runtime artifacts must stay outside the repository.
-Startup/recovery gates remain fail-closed.
-```
-
-`live-dry-run` must not become a hidden real-order path.
-
-## Tests to add
+## Tests to add or update
 
 Add focused tests. Minimum coverage:
 
 ```text
-test_live_run_still_rejects_dry_run_unarmed
-test_live_dry_run_command_requires_live_dry_run_true
-test_live_dry_run_command_rejects_real_order_armed
-test_live_dry_run_records_strategy_decision
-test_live_dry_run_never_calls_broker_submit
-test_live_dry_run_target_delta_plan_visible
-test_live_dry_run_performance_gate_visible_and_submit_expected_false
-test_config_dump_uses_cli_bootstrap_env_file
-test_config_dump_masks_secrets
-test_direct_python_import_is_not_the_supported_config_check_path_or_documented_if_applicable
+test_live_dry_run_missing_base_row_becomes_known_zero_broker_qty
+test_live_dry_run_context_records_account_evidence
+test_live_dry_run_target_delta_no_longer_blocks_broker_qty_unknown_when_flat_zero_known
+test_live_dry_run_with_present_zero_base_row_records_known_zero
+test_live_dry_run_with_present_nonzero_base_row_records_known_qty
+test_live_dry_run_accounts_transport_failure_remains_broker_qty_unknown_or_blocks
+test_live_dry_run_still_never_creates_orders_fills_trades
+test_real_order_does_not_treat_missing_base_row_as_known_zero_when_unsafe
+test_missing_base_row_with_local_position_does_not_become_known_zero
+test_decision_telemetry_surfaces_broker_evidence_fields
 ```
 
-Use monkeypatch/fake broker where needed. Do not hit real Bithumb in unit tests.
+Use fake `/v1/accounts` payloads. Do not hit real Bithumb in tests.
 
-For no-submit invariants, assert explicitly that:
+Test fixture cases:
+
+### Case A: KRW row present, BTC row missing, live-dry-run unarmed
+
+Expected:
 
 ```text
-broker.submit_order was not called
-orders table did not get a real PENDING_SUBMIT/NEW/FILLED row
-fills table unchanged
-trades table unchanged
-strategy_decisions row created
+broker_qty_known=1
+broker_qty=0
+base_currency_missing_policy=allow_zero_position_start_in_dry_run
+broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
+execution_block_reason != broker_qty_unknown
+orders/fills/trades unchanged
 ```
 
-If the existing architecture makes a full integration test too large, write smaller tests around the command guard and execution service boundaries, and document the remaining integration gap in the final report.
+### Case B: KRW row present, BTC row present with 0
+
+Expected:
+
+```text
+broker_qty_known=1
+broker_qty=0
+broker_qty_evidence_policy=accounts_base_row
+```
+
+### Case C: KRW row present, BTC row present with nonzero qty
+
+Expected:
+
+```text
+broker_qty_known=1
+broker_qty=<qty>
+broker_qty_evidence_policy=accounts_base_row
+```
+
+### Case D: accounts transport/auth failure
+
+Expected:
+
+```text
+broker_qty_known=0
+execution_block_reason=broker_qty_unknown or explicit accounts failure block
+no submit
+```
+
+### Case E: real-order mode, BTC row missing
+
+Expected:
+
+```text
+missing base row is not automatically known-zero unless existing real-order flat-start safety policy explicitly allows it.
+Do not broaden real-order behavior accidentally.
+```
 
 ## Regression tests to run
 
@@ -480,62 +549,123 @@ Also run:
 uv run pytest -q -m fast_regression
 ```
 
-If any group is unavailable or too slow, state exactly what was not run and why.
+If any suite is unavailable or too slow, report exactly what was not run and why.
 
-## Manual EC2 acceptance scenario
+## Manual EC2 acceptance scenario after patch
 
-After patch, this should work without real-order arming:
+Run:
 
 ```bash
 cd ~/apps/bithumb-bot
 export BITHUMB_ENV_FILE=/home/ec2-user/bithumb-runtime/env/live.verify.env
 
-grep -E '^(MODE|LIVE_DRY_RUN|LIVE_REAL_ORDER_ARMED|KILL_SWITCH|MAX_DAILY_ORDER_COUNT|EXECUTION_ENGINE|TARGET_EXPOSURE_KRW)=' /home/ec2-user/bithumb-runtime/env/live.verify.env
+DB=/home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite
 
-uv run bithumb-bot config-dump --masked
+sqlite3 -header -column "$DB" "
+SELECT 'strategy_decisions' AS table_name, COUNT(*) AS n FROM strategy_decisions
+UNION ALL
+SELECT 'orders', COUNT(*) FROM orders
+UNION ALL
+SELECT 'fills', COUNT(*) FROM fills
+UNION ALL
+SELECT 'trades', COUNT(*) FROM trades;
+"
+
 uv run bithumb-bot live-dry-run --short 7 --long 30
-uv run bithumb-bot decision-telemetry --limit 20
-uv run bithumb-bot ops-report --limit 20
+
+sqlite3 -header -column "$DB" "
+SELECT 'strategy_decisions' AS table_name, COUNT(*) AS n FROM strategy_decisions
+UNION ALL
+SELECT 'orders', COUNT(*) FROM orders
+UNION ALL
+SELECT 'fills', COUNT(*) FROM fills
+UNION ALL
+SELECT 'trades', COUNT(*) FROM trades;
+"
+
+sqlite3 -header -column "$DB" "
+SELECT
+  id AS decision_id,
+  datetime(decision_ts / 1000, 'unixepoch', '+9 hours') AS kst,
+  signal,
+  reason,
+  json_extract(context_json, '$.execution_mode') AS execution_mode,
+  json_extract(context_json, '$.execution_block_reason') AS execution_block_reason,
+  json_extract(context_json, '$.balance_source') AS balance_source,
+  json_extract(context_json, '$.balance_source_preflight_outcome') AS balance_preflight,
+  json_extract(context_json, '$.broker_qty_known') AS broker_qty_known,
+  json_extract(context_json, '$.broker_qty') AS broker_qty,
+  json_extract(context_json, '$.broker_qty_evidence_policy') AS broker_qty_evidence_policy,
+  json_extract(context_json, '$.target_delta_side') AS target_delta_side,
+  json_extract(context_json, '$.target_submit_plan.submit_allowed') AS target_submit_allowed
+FROM strategy_decisions
+ORDER BY id DESC
+LIMIT 5;
+"
+
+uv run bithumb-bot decision-telemetry --limit 30
+uv run bithumb-bot ops-report --limit 30
 ```
 
 Expected:
 
 ```text
-LIVE_DRY_RUN=true
-LIVE_REAL_ORDER_ARMED=false
-live-dry-run starts
-new decision_id appears
-live_dry_run_loop=1 visible
-submit_expected=0
+strategy_decisions increases by 1
+orders unchanged
+fills unchanged
+trades unchanged
+
+latest decision:
+  execution_mode=live_dry_run_loop
+  broker_qty_known=1
+  broker_qty=0.0
+  balance_source=accounts_v1_rest_snapshot or equivalent
+  balance_preflight=pass_no_position_allowed or equivalent
+  broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run or accounts_base_row
+  execution_block_reason is not broker_qty_unknown under valid known-zero conditions
+  submit_expected=0
+```
+
+If target exposure is 30000 KRW and current broker exposure is known zero, target-delta may produce a BUY candidate. That is acceptable only if:
+
+```text
 real_order_submit_allowed=0
-no orders/fills/trades created
-performance gate visible if blocked
-target-delta plan visible if applicable
+broker_submit_disabled=1
+submit_expected=0
+orders/fills/trades unchanged
+performance gate is visible if it blocks
 ```
 
-This must still fail:
+## Safety invariants
 
-```bash
-LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false uv run bithumb-bot run --short 7 --long 30
+Do not weaken:
+
+```text
+live-dry-run no-submit invariant
+real-order `run` arming requirements
+performance gate
+startup/recovery gates
+DB path outside repository
+runtime artifacts outside repository
+recovery/cancel/flatten/target-closeout availability
 ```
 
-Expected failure should tell the operator to use `live-dry-run`.
+Do not make missing BTC row globally equal zero. It is known-zero only under explicitly safe evidence policy.
 
 ## Non-goals
 
 Do not implement:
 
 ```text
-new alpha strategy
+new trading strategy
 optimizer
 dashboard
-new exchange integration
 full backtesting platform
-real-order promotion system in this patch
-systemd unit generation unless trivial
+real-order promotion system
+systemd/tmux automation
 ```
 
-Mention these as follow-up work only.
+Those are follow-up work.
 
 ## Final report format
 
@@ -555,13 +685,17 @@ Hypotheses checked
 - Hypothesis 3: confirmed / refuted / partially confirmed
   Evidence:
   Code/tests:
+- Hypothesis 4: confirmed / refuted / partially confirmed
+  Evidence:
+  Code/tests:
 
 Design changes
-- Live dry-run loop:
-- Real-order run guard preservation:
-- Config inspection:
-- Observability:
-- Recovery / safety preservation:
+- Account evidence object:
+- Evidence propagation:
+- Target-delta behavior:
+- Decision context / telemetry:
+- Health / ops-report:
+- Safety preservation:
 
 Files changed
 - path: purpose
@@ -569,19 +703,19 @@ Files changed
 Tests run
 - command: result
 
-Manual validation instructions
-- Commands to run on EC2.
-- Expected output.
-- What must still fail closed.
+Manual EC2 validation
+- Commands to run:
+- Expected output:
+- What must remain unchanged:
 
 Operational impact
 - What will happen differently on EC2.
+- What remains fail-closed.
 - What remains operator-configurable.
-- What is now fail-closed.
 
 Follow-up work
 - Only list items not completed in this patch.
 ```
 
-Be direct. Do not dilute the priority: the repository needs an explicit live-simulated-run layer. Real-order `run` must remain strict, but operators must be able to validate live decision flow, target-delta behavior, and performance-gate behavior without arming real orders.
+Be direct. The priority is not to make `broker_qty_unknown` disappear cosmetically. The priority is to create a trustworthy account-evidence pipeline so `live-dry-run` can validate target-delta and performance-gate behavior without ever submitting live orders.
 

@@ -461,7 +461,8 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
     assert "BUY,HOLD,BUY,HOLD,BUY_BLOCKED,1,0,position held: no exit rule triggered" in out
     assert "harmless_dust" in out
     assert "0.00009629" in out
-    assert "_source" not in out
+    assert "_truth_source" not in out
+    assert "position_state_source" not in out
     assert "_truth_source" not in out
 
 

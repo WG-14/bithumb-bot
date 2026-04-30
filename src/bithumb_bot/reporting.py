@@ -318,6 +318,11 @@ class DecisionTelemetrySummary:
     submit_expected: bool
     pre_submit_proof_status: str
     execution_block_reason: str
+    balance_source: str
+    balance_preflight: str
+    broker_qty_known: bool
+    broker_qty: float | None
+    broker_qty_evidence_policy: str
     target_exposure_krw: float | None
     current_effective_exposure_krw: float | None
     tracked_residual_exposure_krw: float | None
@@ -876,6 +881,11 @@ class RecentDecisionFlowSummary:
     submit_expected: bool
     pre_submit_proof_status: str
     execution_block_reason: str
+    balance_source: str
+    balance_preflight: str
+    broker_qty_known: bool
+    broker_qty: float | None
+    broker_qty_evidence_policy: str
     target_exposure_krw: float | None
     current_effective_exposure_krw: float | None
     tracked_residual_exposure_krw: float | None
@@ -1594,6 +1604,35 @@ def fetch_recent_decision_flow(
                 NULLIF(json_extract(context_json, '$.execution_decision.block_reason'), ''),
                 'none'
             ) AS execution_block_reason,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.balance_source'), ''),
+                NULLIF(json_extract(context_json, '$.execution_decision.balance_source'), ''),
+                NULLIF(json_extract(context_json, '$.broker_position_evidence.balance_source'), ''),
+                '-'
+            ) AS balance_source,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.balance_source_preflight_outcome'), ''),
+                NULLIF(json_extract(context_json, '$.execution_decision.balance_source_preflight_outcome'), ''),
+                NULLIF(json_extract(context_json, '$.broker_position_evidence.balance_source_preflight_outcome'), ''),
+                '-'
+            ) AS balance_preflight,
+            COALESCE(
+                CAST(json_extract(context_json, '$.broker_qty_known') AS INTEGER),
+                CAST(json_extract(context_json, '$.execution_decision.broker_qty_known') AS INTEGER),
+                CAST(json_extract(context_json, '$.broker_position_evidence.broker_qty_known') AS INTEGER),
+                0
+            ) AS broker_qty_known,
+            COALESCE(
+                json_extract(context_json, '$.broker_qty'),
+                json_extract(context_json, '$.execution_decision.broker_qty'),
+                json_extract(context_json, '$.broker_position_evidence.broker_qty')
+            ) AS broker_qty,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.broker_qty_evidence_policy'), ''),
+                NULLIF(json_extract(context_json, '$.execution_decision.broker_qty_evidence_policy'), ''),
+                NULLIF(json_extract(context_json, '$.broker_position_evidence.broker_qty_evidence_policy'), ''),
+                '-'
+            ) AS broker_qty_evidence_policy,
             json_extract(context_json, '$.execution_decision.target_exposure_krw') AS target_exposure_krw,
             json_extract(context_json, '$.execution_decision.current_effective_exposure_krw') AS current_effective_exposure_krw,
             json_extract(context_json, '$.execution_decision.tracked_residual_exposure_krw') AS tracked_residual_exposure_krw,
@@ -1883,6 +1922,11 @@ def fetch_recent_decision_flow(
                 submit_expected=bool(row["submit_expected"]),
                 pre_submit_proof_status=str(row["pre_submit_proof_status"]),
                 execution_block_reason=str(row["execution_block_reason"]),
+                balance_source=str(row["balance_source"]),
+                balance_preflight=str(row["balance_preflight"]),
+                broker_qty_known=bool(row["broker_qty_known"]),
+                broker_qty=(None if row["broker_qty"] is None else float(row["broker_qty"])),
+                broker_qty_evidence_policy=str(row["broker_qty_evidence_policy"]),
                 target_exposure_krw=(
                     None if row["target_exposure_krw"] is None else float(row["target_exposure_krw"])
                 ),
@@ -2103,6 +2147,9 @@ def fetch_decision_telemetry_summary(
         execution_decision = (
             context.get("execution_decision") if isinstance(context.get("execution_decision"), dict) else {}
         )
+        broker_position_evidence = (
+            context.get("broker_position_evidence") if isinstance(context.get("broker_position_evidence"), dict) else {}
+        )
         target_shadow = _target_shadow_from_context(context)
         target_exposure_krw = execution_decision.get("target_exposure_krw")
         current_effective_exposure_krw = execution_decision.get("current_effective_exposure_krw")
@@ -2116,6 +2163,38 @@ def fetch_decision_telemetry_summary(
         residual_buy_sizing_mode = str(
             context.get("residual_buy_sizing_mode")
             or execution_decision.get("residual_buy_sizing_mode")
+            or "-"
+        )
+        balance_source = str(
+            context.get("balance_source")
+            or execution_decision.get("balance_source")
+            or broker_position_evidence.get("balance_source")
+            or "-"
+        )
+        balance_preflight = str(
+            context.get("balance_source_preflight_outcome")
+            or execution_decision.get("balance_source_preflight_outcome")
+            or broker_position_evidence.get("balance_source_preflight_outcome")
+            or "-"
+        )
+        broker_qty_known = bool(
+            context.get("broker_qty_known")
+            if "broker_qty_known" in context
+            else execution_decision.get("broker_qty_known")
+            if "broker_qty_known" in execution_decision
+            else broker_position_evidence.get("broker_qty_known", False)
+        )
+        broker_qty = (
+            context.get("broker_qty")
+            if "broker_qty" in context
+            else execution_decision.get("broker_qty")
+            if "broker_qty" in execution_decision
+            else broker_position_evidence.get("broker_qty")
+        )
+        broker_qty_evidence_policy = str(
+            context.get("broker_qty_evidence_policy")
+            or execution_decision.get("broker_qty_evidence_policy")
+            or broker_position_evidence.get("broker_qty_evidence_policy")
             or "-"
         )
 
@@ -2165,6 +2244,11 @@ def fetch_decision_telemetry_summary(
             target_shadow.get("target_block_reason"),
             target_shadow.get("target_position_truth_state"),
             str(context.get("execution_mode") or "-"),
+            balance_source,
+            balance_preflight,
+            broker_qty_known,
+            broker_qty,
+            broker_qty_evidence_policy,
         )
         grouped[key] = grouped.get(key, 0) + 1
 
@@ -2178,6 +2262,11 @@ def fetch_decision_telemetry_summary(
                 submit_expected=bool(key[5]),
                 pre_submit_proof_status=str(key[6]),
                 execution_block_reason=str(key[7]),
+                balance_source=str(key[45]),
+                balance_preflight=str(key[46]),
+                broker_qty_known=bool(key[47]),
+                broker_qty=(None if key[48] is None else float(key[48])),
+                broker_qty_evidence_policy=str(key[49]),
                 target_exposure_krw=(None if key[32] is None else float(key[32])),
                 current_effective_exposure_krw=(None if key[33] is None else float(key[33])),
                 tracked_residual_exposure_krw=(None if key[34] is None else float(key[34])),
@@ -4109,6 +4198,11 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "submit_expected": row.submit_expected,
                 "pre_submit_proof_status": row.pre_submit_proof_status,
                 "execution_block_reason": row.execution_block_reason,
+                "balance_source": row.balance_source,
+                "balance_preflight": row.balance_preflight,
+                "broker_qty_known": row.broker_qty_known,
+                "broker_qty": row.broker_qty,
+                "broker_qty_evidence_policy": row.broker_qty_evidence_policy,
                 "target_delta_submit_allowed": bool(row.target_would_submit),
                 "target_delta_block_reason": row.target_block_reason,
                 "target_delta_side": row.target_delta_side,
@@ -4151,6 +4245,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         ],
         "recent_trades": [dict(row) for row in recent_trades],
         "order_rule_snapshot": order_rule_snapshot,
+        "broker_position_evidence": dict(readiness_snapshot.broker_position_evidence),
         "fee_diagnostics_snapshot": {
             "fill_count": fee_summary.fill_count,
             "fee_zero_count": fee_summary.fee_zero_count,
@@ -4409,6 +4504,18 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"accounts_flat_start_allowed={balance_source_diag.get('flat_start_allowed')} "
         f"accounts_flat_start_reason={balance_source_diag.get('flat_start_reason') or '-'}"
     )
+    broker_position_evidence = dict(readiness_snapshot.broker_position_evidence)
+    broker_evidence_state = "known" if broker_position_evidence.get("broker_qty_known") else "unknown"
+    if broker_position_evidence.get("broker_qty_known") and abs(float(broker_position_evidence.get("broker_qty") or 0.0)) <= 1e-12:
+        broker_evidence_state = "known_zero"
+    print(
+        "  "
+        f"broker_position_evidence={broker_evidence_state} "
+        f"broker_qty={float(broker_position_evidence.get('broker_qty') or 0.0):.8f} "
+        f"broker_qty_evidence_policy={broker_position_evidence.get('broker_qty_evidence_policy') or broker_position_evidence.get('broker_qty_value_source') or '-'} "
+        f"balance_source={broker_position_evidence.get('balance_source') or '-'} "
+        f"local_position_state={readiness_snapshot.canonical_state}"
+    )
     print(
         "  recent_external_cash_adjustment="
         f"{_format_external_cash_adjustment_summary(recent_external_cash_adjustment)}"
@@ -4574,6 +4681,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"base={row.base_signal} raw={row.raw_signal} final={row.final_signal} "
                 f"final_action={row.final_action} submit_expected={1 if row.submit_expected else 0} "
                 f"pre_submit_proof={row.pre_submit_proof_status} execution_block_reason={row.execution_block_reason} "
+                f"balance_source={row.balance_source} balance_preflight={row.balance_preflight} "
+                f"broker_qty_known={1 if row.broker_qty_known else 0} "
+                f"broker_qty={_fmt_float(float(row.broker_qty or 0.0), 8)} "
+                f"broker_qty_evidence_policy={row.broker_qty_evidence_policy} "
                 f"residual_live_sell_mode={row.residual_live_sell_mode} "
                 f"residual_buy_sizing_mode={row.residual_buy_sizing_mode} "
                 f"target_exposure_krw={_fmt_float(float(row.target_exposure_krw or 0.0), 0)} "
@@ -4777,6 +4888,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
         "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
         "final_action,submit_expected,pre_submit_proof_status,execution_block_reason,"
+        "balance_source,balance_preflight,broker_qty_known,broker_qty,broker_qty_evidence_policy,"
         "residual_live_sell_mode,residual_buy_sizing_mode,target_exposure_krw,"
         "current_effective_exposure_krw,tracked_residual_exposure_krw,buy_delta_krw,"
         "target_delta_side,target_would_submit,target_submit_qty,target_delta_notional_krw,"
@@ -4794,7 +4906,9 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{1 if row.entry_blocked else 0},{1 if row.entry_allowed else 0},{row.block_reason},"
             f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},"
             f"{row.final_action},{1 if row.submit_expected else 0},{row.pre_submit_proof_status},"
-            f"{row.execution_block_reason},{row.residual_live_sell_mode},{row.residual_buy_sizing_mode},"
+            f"{row.execution_block_reason},{row.balance_source},{row.balance_preflight},"
+            f"{1 if row.broker_qty_known else 0},{float(row.broker_qty or 0.0):.8f},"
+            f"{row.broker_qty_evidence_policy},{row.residual_live_sell_mode},{row.residual_buy_sizing_mode},"
             f"{float(row.target_exposure_krw or 0.0):.2f},{float(row.current_effective_exposure_krw or 0.0):.2f},"
             f"{float(row.tracked_residual_exposure_krw or 0.0):.2f},{float(row.buy_delta_krw or 0.0):.2f},"
             f"{row.target_delta_side},{1 if row.target_would_submit else 0},"
