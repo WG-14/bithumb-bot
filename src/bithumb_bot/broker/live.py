@@ -2389,6 +2389,69 @@ def _target_delta_submit_plan(
     }
 
 
+def _live_real_order_performance_gate_applies() -> bool:
+    return bool(
+        str(settings.MODE).strip().lower() == "live"
+        and bool(settings.LIVE_REAL_ORDER_ARMED)
+        and not bool(settings.LIVE_DRY_RUN)
+    )
+
+
+def _record_strategy_performance_gate_block(
+    *,
+    conn,
+    decision_observability: dict[str, object],
+    strategy_name: str | None,
+    authority_source: str,
+) -> bool:
+    performance_gate = evaluate_strategy_performance_gate(
+        conn,
+        strategy_name=str(strategy_name or settings.STRATEGY_NAME),
+        pair=str(settings.PAIR),
+    )
+    if performance_gate.allowed:
+        return False
+    gate_payload = performance_gate.as_dict()
+    gate_summary = dict(gate_payload.get("summary") or {})
+    decision_observability.update(
+        {
+            "strategy_performance_gate": gate_payload,
+            "strategy_performance_gate_blocked": True,
+            "strategy_performance_gate_reason_code": gate_payload.get("reason_code"),
+            "strategy_performance_gate_reason": gate_payload.get("reason"),
+            "strategy_performance_gate_sample_count": int(gate_summary.get("sample_count") or 0),
+            "strategy_performance_gate_expectancy_per_trade": float(
+                gate_summary.get("expectancy_per_trade") or 0.0
+            ),
+            "strategy_performance_gate_net_pnl": float(gate_summary.get("net_pnl") or 0.0),
+            "strategy_performance_gate_profit_factor": gate_summary.get("profit_factor"),
+            "strategy_performance_gate_recommended_next_action": gate_payload.get("recommended_next_action"),
+        }
+    )
+    RUN_LOG.warning(
+        format_log_kv(
+            "[ORDER_SKIP] strategy performance gate blocked entry",
+            reason_code=str(gate_payload.get("reason_code") or "-"),
+            reason=str(gate_payload.get("reason") or "-"),
+            strategy_name=str(strategy_name or settings.STRATEGY_NAME),
+            sample_count=int(gate_summary.get("sample_count") or 0),
+            expectancy_per_trade=float(gate_summary.get("expectancy_per_trade") or 0.0),
+            net_pnl=float(gate_summary.get("net_pnl") or 0.0),
+            fee_total=float(gate_summary.get("fee_total") or 0.0),
+            profit_factor=gate_summary.get("profit_factor"),
+            execution_engine=_execution_engine(),
+            authority_source=authority_source,
+            invariant_status="blocked_by_strategy_performance_gate",
+            recommended_next_action=str(gate_payload.get("recommended_next_action") or "-"),
+        )
+    )
+    notify(
+        "live entry blocked by strategy performance gate: "
+        f"{gate_payload.get('reason_code')} {gate_payload.get('reason')}"
+    )
+    return True
+
+
 def _determine_live_execution_intent(
     *,
     broker: Broker,
@@ -2480,6 +2543,14 @@ def _determine_live_execution_intent(
                 "sell_qty_basis_source_truth_source": "order_sizing.build_target_delta_execution_sizing",
             }
         )
+        if target_side == "BUY" and _live_real_order_performance_gate_applies():
+            if _record_strategy_performance_gate_block(
+                conn=conn,
+                decision_observability=decision_observability,
+                strategy_name=strategy_name,
+                authority_source="target_delta",
+            ):
+                return None
         return _LiveExecutionIntent(
             side=target_side,
             order_qty=target_qty,
@@ -2552,49 +2623,14 @@ def _determine_live_execution_intent(
 
     if signal == "BUY" and normalized_exposure.effective_flat:
         if (
-            str(settings.MODE).strip().lower() == "live"
-            and bool(settings.LIVE_REAL_ORDER_ARMED)
-            and not bool(settings.LIVE_DRY_RUN)
+            _live_real_order_performance_gate_applies()
         ):
-            performance_gate = evaluate_strategy_performance_gate(
-                conn,
-                strategy_name=str(strategy_name or settings.STRATEGY_NAME),
-                pair=str(settings.PAIR),
-            )
-            if not performance_gate.allowed:
-                gate_payload = performance_gate.as_dict()
-                gate_summary = dict(gate_payload.get("summary") or {})
-                decision_observability.update(
-                    {
-                        "strategy_performance_gate": gate_payload,
-                        "strategy_performance_gate_blocked": True,
-                        "strategy_performance_gate_reason_code": gate_payload.get("reason_code"),
-                        "strategy_performance_gate_recommended_next_action": gate_payload.get(
-                            "recommended_next_action"
-                        ),
-                    }
-                )
-                RUN_LOG.warning(
-                    format_log_kv(
-                        "[ORDER_SKIP] strategy performance gate blocked entry",
-                        reason_code=str(gate_payload.get("reason_code") or "-"),
-                        reason=str(gate_payload.get("reason") or "-"),
-                        strategy_name=str(strategy_name or settings.STRATEGY_NAME),
-                        sample_count=int(gate_summary.get("sample_count") or 0),
-                        expectancy_per_trade=float(gate_summary.get("expectancy_per_trade") or 0.0),
-                        net_pnl=float(gate_summary.get("net_pnl") or 0.0),
-                        fee_total=float(gate_summary.get("fee_total") or 0.0),
-                        profit_factor=gate_summary.get("profit_factor"),
-                        execution_engine=_execution_engine(),
-                        authority_source="strategy_position",
-                        invariant_status="blocked_by_strategy_performance_gate",
-                        recommended_next_action=str(gate_payload.get("recommended_next_action") or "-"),
-                    )
-                )
-                notify(
-                    "live entry blocked by strategy performance gate: "
-                    f"{gate_payload.get('reason_code')} {gate_payload.get('reason')}"
-                )
+            if _record_strategy_performance_gate_block(
+                conn=conn,
+                decision_observability=decision_observability,
+                strategy_name=strategy_name,
+                authority_source="strategy_position",
+            ):
                 return None
         if not math.isfinite(float(market_price)) or float(market_price) <= 0:
             reason = f"invalid market/reference price: {market_price}"

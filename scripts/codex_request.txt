@@ -1,483 +1,334 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+You are working in GitHub repository `WG-14/bithumb-bot`.
 
-Treat this as a production-safety and experimental-trading-system hardening task, not as a small parameter-tuning task. Do not assume the prior diagnosis is fully correct. Use it as a set of falsifiable hypotheses and verify or refute each one against the repository code and tests.
+This is a focused follow-up patch after commit `2fc675a7e822b586f413a9c3db67740ef85ff728`.
 
-Context from the live EC2 incident:
-
-A live DB sample from `/home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite` showed:
+Do not redo the whole previous hardening patch. The latest repository already appears to include the main structural improvements:
 
 ```text
-trade_lifecycles:
-  lifecycle_count: 62
-  gross_pnl: +412.98 KRW
-  fee_total: 2,680.38 KRW
-  net_pnl: -2,267.39 KRW
-  expectancy_per_trade: -36.57 KRW
-  win_rate_pct: 12.9
-  worst_trade: -573.35 KRW
-  best_trade: +1,573.54 KRW
-
-strategy / exit breakdown:
-  operator_flatten / operator: +48.5 KRW
-  sma_with_filter / NULL exit_rule_name: -480.64 KRW
-  sma_with_filter / opposite_cross: -1,835.25 KRW
+- TargetDeltaExecutionSizingPlan
+- build_target_delta_execution_sizing()
+- target_submit_plan authority = canonical_target_delta_sizing
+- strategy_performance.py
+- LIVE_PERFORMANCE_GATE_* config settings
+- experiment_fingerprint.py
+- target-delta tests updated away from the old bypass behavior
 ```
 
-Recent lifecycle rows showed many `matched_qty=0.0004` trades where per-cycle fee was around 45 KRW, so small positive gross PnL was frequently erased by fees. The `opposite_cross` exit group was especially poor.
-
-Recent `orders` rows also showed `decision_reason_code='target_delta_rebalance'` with:
+The remaining risk is not that the previous patch failed entirely. The remaining risk is that two important edge cases may still allow operationally unsafe behavior:
 
 ```text
-qty_step = 0.0001
-
-BUY:
-  final_submitted_qty = 0.0006 or 0.0002
-  mostly step-aligned
-
-SELL:
-  final_submitted_qty = 0.00059997, 0.00059988, 0.00019999, etc.
-  not step-aligned in DB fields
+1. target_delta BUY rebalancing may bypass the strategy performance gate.
+2. target_delta SELL floor rounding may leave a below-step / below-min residual whose next-loop target-state semantics are not fully fixed by tests or observability.
 ```
 
-The exchange accepted and filled those orders, so do not jump directly to “exchange reject bug.” The more important concern is whether `target_delta` is bypassing the repository’s canonical lot / sizing / dust authority model and making accounting, lifecycle matching, and experiment analysis less reliable.
+Treat these as falsifiable hypotheses. Verify them against the current code before changing anything.
 
-Current high-level concern:
+## Scope
+
+This is a small but high-priority hardening task.
+
+Do not implement a new strategy, optimizer, dashboard, or full experiment-management framework. The patch should be limited to:
 
 ```text
-The repository has strong safety / recovery / observability surfaces, but strategy validation, experiment reproducibility, execution sizing, and live promotion gates are not yet connected into a closed loop.
-
-The desired direction is:
-strategy experiment
-→ fee-adjusted validation
-→ canonical execution sizing
-→ invariant-checked order plan
-→ dry-run / micro-live validation
-→ explicit live promotion gate
+- verifying and, if needed, fixing target_delta BUY performance-gate coverage
+- verifying and, if needed, fixing SELL floor-remainder state semantics / observability
+- adding focused tests
+- preserving recovery / flatten / closeout safety paths
 ```
 
-Your job is to turn this into concrete repository changes.
+## Files to inspect first
 
-Do not merely suppress the observed symptoms. Prefer design changes that prevent the entire class of failures.
-
-Work in this order.
-
-1. Inspect the current code paths
-
-Read and understand at least these files:
+Read the current versions of:
 
 ```text
-README.md
-src/bithumb_bot/config.py
-src/bithumb_bot/engine.py
-src/bithumb_bot/strategy/sma.py
-src/bithumb_bot/strategy/exit_rules.py
-src/bithumb_bot/target_position.py
-src/bithumb_bot/execution_service.py
 src/bithumb_bot/order_sizing.py
+src/bithumb_bot/execution_service.py
 src/bithumb_bot/broker/live.py
+src/bithumb_bot/engine.py
+src/bithumb_bot/strategy_performance.py
+src/bithumb_bot/target_position.py
 src/bithumb_bot/reporting.py
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/lifecycle.py
+src/bithumb_bot/dust.py
 tests/test_target_position_execution.py
+tests/test_decision_telemetry.py
+tests/test_analytics_context.py
 ```
 
-Pay special attention to these suspected seams:
+Confirm the latest commit behavior before editing.
+
+## Hypothesis 1: target_delta BUY can bypass the performance gate
+
+### Concern
+
+The previous patch added `evaluate_strategy_performance_gate()` and appears to call it in `broker/live.py` for live real-order BUY entry. However, target-delta submit plans may be handled in an early target-delta branch inside `_determine_live_execution_intent()`.
+
+If that branch returns before the normal BUY branch, then this case may bypass the performance gate:
 
 ```text
-target_position.build_target_position_decision()
-execution_service.build_execution_decision_summary()
-order_sizing.build_buy_execution_sizing()
-order_sizing.build_sell_execution_sizing()
-live execution submit plan creation
-strategy / lifecycle / experiment reporting
-live startup / preflight guards
+MODE=live
+LIVE_DRY_RUN=false
+LIVE_REAL_ORDER_ARMED=true
+EXECUTION_ENGINE=target_delta
+performance_gate.allowed == false
+target_submit_plan.side == BUY
+target_submit_plan.submit_expected == true
 ```
 
-2. Keep the root-cause hypotheses falsifiable
+This must not be allowed. A negative-expectancy strategy must not quietly create a BUY rebalance via target_delta just because it used a different execution path.
 
-Do not treat these as proven. Verify or refute them in code and tests.
+### Required behavior
 
-Hypothesis A: `sma_with_filter + opposite_cross` is fee-adjusted negative expectancy under the observed live sample.
-
-Evidence to check:
-
-* `trade_lifecycles.net_pnl`
-* fee drag vs gross PnL
-* exit-rule breakdown
-* whether strategy-report / experiment-report already exposes this clearly enough
-* whether any live guard blocks continued trading when recent expectancy is negative
-
-Expected outcome:
-
-* If the repo already has equivalent checks, wire them into live gating.
-* If it only reports them, add a fail-closed performance gate for live arming / new entries.
-* If there is no robust metric function, implement one.
-
-Hypothesis B: `target_delta` bypasses canonical sizing / lot authority.
-
-Evidence to check:
-
-* whether `target_position.py` reads `qty_step` but returns `submit_qty=abs_delta_qty` without exchange normalization
-* whether `target_delta` bypasses `order_sizing.py`
-* whether tests currently preserve the bypass as desired behavior
-* whether final `orders.final_submitted_qty`, `executable_lot_count`, `intended_lot_count`, `internal_lot_size`, and dust fields are inconsistent for target-delta orders
-
-Expected outcome:
-
-* `target_delta` should express desired delta, not final exchange order quantity.
-* Final order quantity must be produced by one canonical sizing / execution plan path.
-* If SELL must close exact broker quantity despite step mismatch, that must be explicitly modeled as an exchange-policy exception with observability fields, not accidentally hidden in target-delta.
-
-Hypothesis C: negative strategy performance does not block live promotion.
-
-Evidence to check:
-
-* Can `LIVE_REAL_ORDER_ARMED=true` pass startup / run preflight even when recent `trade_lifecycles` expectancy is negative?
-* Are `strategy-report` or `experiment-report` outputs connected to live guards?
-* Is there any approved experiment fingerprint required for live operation?
-
-Expected outcome:
-
-* Add a configurable but fail-closed live performance gate.
-* It should block new entries or live startup when sample size is sufficient and fee-adjusted expectancy / profit factor / fee drag are unacceptable.
-* It should not block position-management actions needed for safety.
-
-Hypothesis D: “strategy” is not enough as a reproducible experiment unit.
-
-Evidence to check:
-
-* Can an order be traced to code commit, env fingerprint, strategy params, execution engine, fee model, order rules, market / interval, and approval state?
-* Are `strategy_decisions`, `orders`, `fills`, `trade_lifecycles`, and `risk_evaluations` tied to a stable experiment identifier?
-
-Expected outcome:
-
-* If feasible in this pass, introduce an experiment fingerprint / id surface.
-* If too large for one patch, implement the smallest durable foundation: deterministic fingerprint generation, reporting output, and schema / TODO boundary with tests.
-
-3. Design target state
-
-Implement toward this architecture:
+When all of these are true:
 
 ```text
-Strategy signal
-→ TargetPolicy / desired exposure delta
-→ ExecutionIntent
-→ CanonicalSizing
-→ ExchangeNormalizedExecutionPlan
-→ PreSubmitInvariantCheck
-→ Submit / Suppress
-→ Fill application
-→ Lifecycle attribution
-→ Performance / promotion gate
+MODE=live
+LIVE_DRY_RUN=false
+LIVE_REAL_ORDER_ARMED=true
+target-delta final submit side == BUY
+strategy performance gate is enabled and not allowed
 ```
 
-Do not let `target_delta`, `lot_native`, `residual_close`, and `operator_flatten` each invent separate final quantity semantics. They can have different intent sources, but final order plans must pass through shared invariant checks.
+then the target-delta BUY submit must be blocked before broker submission.
 
-Required execution-plan invariants:
+The block must:
 
 ```text
-qty > 0
-notional >= min_notional_krw unless explicitly classified as a no-submit / dust case
-qty aligns with qty_step when the exchange / order type requires step alignment
-side-specific order type and payload schema are valid
-fee model used for sizing is recorded
-slippage / price-protection assumptions are recorded
-authority source is explicit:
-  strategy_position
-  target_delta
-  residual_inventory
-  operator_closeout
-dust / residual closeout is not confused with normal strategy SELL
-pre-submit proof status is observable
+- preserve target-delta diagnostics
+- keep SELL / flatten / target-closeout / panic-stop / reconcile / recovery paths available
+- emit an explicit reason code
+- be visible in order suppression / decision telemetry / ops-report or health where appropriate
 ```
 
-If an invariant is not enforceable because Bithumb allows a different market-sell convention, encode that as a named policy branch with tests and reporting fields. Do not leave it implicit.
-
-4. Concrete implementation priorities
-
-Priority 1: Canonicalize target-delta sizing
-
-Refactor `target_delta` so `build_target_position_decision()` produces desired target / delta information, not final submitted quantity authority.
-
-Then add or reuse a canonical `ExecutionPlan` / sizing layer that computes:
+Use existing reason-code patterns where possible, but the resulting operator-facing reason must clearly indicate strategy performance gating, e.g.:
 
 ```text
-desired_qty
-exchange_constrained_qty
-final_submitted_qty
-final_submitted_notional
-intended_lot_count
-executable_lot_count
-internal_lot_size
+STRATEGY_PERFORMANCE_BLOCKED
+STRATEGY_EXPECTANCY_NEGATIVE
+STRATEGY_SAMPLE_INSUFFICIENT
+STRATEGY_NET_PNL_NEGATIVE
+STRATEGY_PROFIT_FACTOR_LOW
+STRATEGY_FEE_DRAG_EXCESSIVE
+```
+
+### Tests to add
+
+Add focused tests covering at least:
+
+```text
+test_target_delta_buy_rebalance_blocked_by_strategy_performance_gate_when_live_armed
+test_target_delta_hold_rebalance_buy_blocked_by_strategy_performance_gate_when_live_armed
+test_strategy_performance_gate_does_not_block_target_delta_sell
+test_strategy_performance_gate_does_not_block_recovery_or_flatten_commands_if_applicable
+```
+
+The tests should simulate enough lifecycle rows or monkeypatch the performance gate so the block is deterministic.
+
+Do not only assert that the gate function returns blocked. Assert that the target-delta BUY submit path itself becomes non-submitting.
+
+Expected assertions should include:
+
+```text
+submit_expected == false
+final_action is a block action, not REBALANCE_TO_TARGET
+block_reason includes strategy performance gate reason
+target_submit_plan remains present for observability
+target_submit_plan.side == BUY
+target_sizing / invariant_status are still visible if they were computed
+```
+
+Also include a positive control:
+
+```text
+target_delta SELL remains allowed when performance gate is blocked
+```
+
+because poor strategy performance must not prevent risk-reducing exits.
+
+## Hypothesis 2: SELL floor remainder can create ambiguous target-state semantics
+
+### Current known behavior
+
+The updated tests appear to confirm this kind of behavior:
+
+```text
+desired SELL qty: 0.0004998
+qty_step: 0.0001
+final submitted qty: 0.0004
+rejected remainder: about 0.0000998
+dust_policy: exchange_step_remainder_tracked
+invariant_status: passed
+```
+
+This is a reasonable sizing policy. The remaining issue is what happens after the fill.
+
+If target_delta wants target exposure 0, but the actual broker/local state still has a below-step or below-min residual, the next loop must not repeatedly attempt closeout or present inconsistent “flat” state without evidence.
+
+### Required behavior
+
+After target-delta SELL floors a requested closeout and leaves a remainder:
+
+```text
+- the rejected remainder must be observable
+- the remainder must be classified as tracked dust / true dust / below-min residual according to existing dust and runtime-readiness semantics
+- the next HOLD cycle with target_exposure_krw=0 must not submit another SELL if the remaining qty is below exchange minimum / below step / non-executable
+- ops-report / health / decision telemetry must make the reason clear enough for an operator
+```
+
+Do not hide the residual by pretending the system is literally flat if broker/local quantity remains nonzero. It is acceptable to treat it as effective-flat only if the dust model supports that and reports it clearly.
+
+### Tests to add
+
+Add focused tests covering at least:
+
+```text
+test_target_delta_sell_floor_remainder_updates_or_reports_dust_target_state
+test_target_delta_sell_floor_remainder_does_not_repeat_submit_when_remainder_below_min
+test_target_delta_sell_floor_remainder_appears_in_ops_report_or_decision_context_as_tracked_dust_or_true_dust
+```
+
+Use existing DB helpers and state models where possible. If full live fill simulation is too large for this patch, build the smallest realistic test around the decision / execution / readiness layer and document the remaining integration boundary.
+
+The tests must prove:
+
+```text
+- rejected_remainder is present and nonzero
+- dust_policy is explicit
+- next target_delta HOLD / SELL logic does not create an endless closeout loop for non-executable remainder
+- operator-facing context distinguishes:
+  literal flat
+  effective flat due to dust
+  tracked dust / true dust / non-executable residual
+```
+
+## Implementation guidance
+
+Prefer a design-level fix over local symptom suppression.
+
+If performance gate enforcement currently lives only in the normal BUY branch, factor it into a small helper that can be called from both:
+
+```text
+- normal BUY entry path
+- target_delta BUY rebalance path
+```
+
+The helper should answer:
+
+```text
+should_block_new_entry_or_buy_rebalance(...)
+```
+
+It should not block:
+
+```text
+SELL
+flatten-position
+target-closeout
+panic-stop
+cancel-open-orders
+reconcile
+recover-order
+resume safety evaluation
+```
+
+If target-delta remainder handling is currently only diagnostic, make sure the state transition or next-loop behavior is safe. If a full state model change is too broad, at least add explicit observability and no-repeat-submit guard coverage.
+
+## Observability requirements
+
+Any new block or residual handling must carry enough fields for ops debugging:
+
+```text
+strategy_performance_gate_blocked
+strategy_performance_gate_reason_code
+strategy_performance_gate_reason
+strategy_performance_gate_sample_count
+strategy_performance_gate_expectancy_per_trade
+strategy_performance_gate_net_pnl
+strategy_performance_gate_profit_factor
+execution_engine
+target_delta_side
+target_desired_qty
+target_final_submitted_qty
 rejected_remainder
 dust_policy
-block_reason
-submit_allowed
 invariant_status
-```
-
-Use `order_sizing.py` as the preferred home or integration point, because it already contains exchange constraint and lot sizing logic.
-
-Tests to add or update:
-
-```text
-target_delta BUY submit quantity is exchange-normalized
-target_delta SELL submit quantity is exchange-normalized or explicitly classified as allowed exact-balance market sell
-target_delta does not bypass canonical pre-submit invariant checks
-target_delta records authority source and sizing policy
-target_delta HOLD with missing target state fails closed
-target_delta SELL does not misclassify residual / dust as normal strategy exit
-target_delta keeps existing safe startup adoption behavior
-```
-
-Update existing tests that currently encode bypass behavior, especially any test equivalent to:
-
-```text
-test_target_delta_execution_bypasses_residual_sell_mode_and_lot_authority
-```
-
-Do not simply delete coverage. Replace it with tests for the new desired behavior.
-
-Priority 2: Add strategy performance gate
-
-Implement a performance summary function over `trade_lifecycles`, ideally reusable by `strategy-report`, `experiment-report`, and live guards.
-
-Minimum metrics:
-
-```text
-sample_count
-gross_pnl
-fee_total
-net_pnl
-expectancy_per_trade
-win_rate
-profit_factor
-fee_drag_ratio
-worst_trade
-best_trade
-breakdown by strategy_name
-breakdown by exit_rule_name
-```
-
-Add configurable env settings with safe defaults, for example:
-
-```text
-LIVE_PERFORMANCE_GATE_ENABLED=true for live real-order path
-LIVE_PERFORMANCE_GATE_MIN_SAMPLE=30
-LIVE_PERFORMANCE_GATE_MIN_EXPECTANCY_KRW=0
-LIVE_PERFORMANCE_GATE_MIN_NET_PNL_KRW=0
-LIVE_PERFORMANCE_GATE_MIN_PROFIT_FACTOR=1.0
-LIVE_PERFORMANCE_GATE_MAX_FEE_DRAG_RATIO=<reasonable default or disabled if hard to define>
-LIVE_PERFORMANCE_GATE_SCOPE=closed_lifecycles_recent
-```
-
-Behavior:
-
-```text
-If MODE=live and LIVE_REAL_ORDER_ARMED=true and LIVE_DRY_RUN=false:
-  block new entries when performance gate fails.
-  Prefer fail-closed for startup / run if the strategy is trying to enter new positions.
-  Do not block safety operations: cancel-open-orders, reconcile, flatten-position, target-closeout, panic-stop, recovery.
-  Emit explicit reason codes:
-    STRATEGY_PERFORMANCE_BLOCKED
-    STRATEGY_EXPECTANCY_NEGATIVE
-    STRATEGY_SAMPLE_INSUFFICIENT
-    STRATEGY_FEE_DRAG_EXCESSIVE
-```
-
-Make the gate visible in:
-
-```text
-health
-ops-report
-strategy-report or experiment-report
-runtime logs
-```
-
-Priority 3: Improve experiment reproducibility
-
-Add a deterministic experiment fingerprint surface.
-
-Minimum fingerprint inputs:
-
-```text
-code_commit_sha if available
-strategy_name
-SMA_SHORT
-SMA_LONG
-SMA filter params
-exit rules and exit params
-execution_engine
-target_exposure_krw
-fee estimate / fee authority source
-slippage settings
-market
-interval
-risk limits relevant to trading
-order sizing policy version
-```
-
-Persist or emit this fingerprint in as many of these as feasible:
-
-```text
-strategy_decisions.context_json
-orders
-fills or fill observations if appropriate
-trade_lifecycles
-risk_evaluations
-reports
-health / ops-report
-```
-
-If schema expansion is too large, at least:
-
-* generate the fingerprint in one module
-* include it in decision context
-* include it in reports
-* add tests proving stability and parameter sensitivity
-
-Priority 4: De-risk `opposite_cross`
-
-Do not remove `opposite_cross` blindly. Add a safer exit policy path and tests.
-
-Current evidence suggests `opposite_cross` produced most of the loss in the observed sample. Treat that as a hypothesis and make the system capable of detecting and blocking a poor exit rule.
-
-Preferred direction:
-
-```text
-opposite_cross should not be an unconditional immediate exit in noisy low-edge zones.
-Introduce or strengthen:
-  take_profit_after_fee
-  stop_loss
-  max_holding_time
-  trailing_stop if small enough
-  opposite_cross_confirmed
-```
-
-At minimum:
-
-* ensure `opposite_cross` respects fee-adjusted profit floor and small-loss tolerance
-* expose exit-rule performance in reports
-* allow performance gate to block a specific bad exit rule or strategy configuration
-
-5. Observability requirements
-
-Every new block / suppression must include operator-readable fields:
-
-```text
-reason_code
-reason
-strategy_name
-experiment_id or fingerprint
-sample_count
-expectancy_per_trade
-net_pnl
-fee_total
-profit_factor
-execution_engine
-authority_source
-final_submitted_qty
-qty_step
-min_notional_krw
-invariant_status
+authority
+submit_qty_source
 recommended_next_action
 ```
 
-`ops-report` should clearly say when trading is blocked because of strategy performance, separate from recovery / accounting / dust blockers.
+Use existing reporting surfaces rather than inventing a new report unless necessary.
 
-6. Recovery and safety requirements
+## Recovery and safety constraints
 
-Do not weaken existing live safety, recovery, reconcile, dust, fee repair, or run-lock behavior.
+Do not weaken any existing safety or recovery behavior.
 
-Preserve these principles:
+Preserve these invariants:
 
 ```text
-Recovery and flatten commands must remain available even if strategy performance gate fails.
-A performance gate should block new entries, not emergency exits.
-Existing startup safety gate behavior must remain fail-closed.
-No live command should depend on implicit .env loading.
-Live runtime artifacts must remain outside the repository.
+- A performance gate blocks new BUY exposure, not emergency exits.
+- Recovery, reconcile, cancel-open-orders, flatten-position, target-closeout, and panic-stop remain available.
+- Startup safety gates remain fail-closed.
+- Live runtime artifacts remain outside the repository.
+- Explicit env loading behavior must not be weakened.
+- Existing dust and position-authority semantics must not be collapsed into raw qty-only logic.
 ```
 
-7. Testing requirements
+## Tests to run
 
-Run and update relevant tests. At minimum:
+Run focused tests first:
 
 ```bash
 uv run pytest -q tests/test_target_position_execution.py
-uv run pytest -q tests/test_strategy_decision_persistence.py
 uv run pytest -q tests/test_decision_telemetry.py
 uv run pytest -q tests/test_analytics_context.py
 ```
 
-Also run the fast regression group if available:
+Also run any new test files you add.
+
+Then run the relevant broader suite:
 
 ```bash
 uv run pytest -q -m fast_regression
 ```
 
-Add focused tests for:
+If the broader suite is unavailable or too slow, state exactly what was not run and why.
+
+## Acceptance criteria
+
+The patch is acceptable only if all of these are true:
 
 ```text
-target-delta sizing normalization / explicit exception policy
-pre-submit invariant checks
-performance gate pass / fail / insufficient sample
-performance gate does not block recovery / flatten commands
-experiment fingerprint stability
-experiment fingerprint changes when strategy params change
-ops-report / health includes strategy performance blocker
+1. target_delta BUY cannot bypass strategy performance gate in live real-order mode.
+2. target_delta SELL remains available when performance gate is blocked.
+3. target_delta SELL floor remainder has explicit no-repeat / dust / residual semantics covered by tests.
+4. Existing canonical target-delta sizing behavior remains intact.
+5. Existing startup adoption and target-state persistence tests still pass.
+6. Operator-facing diagnostics clearly explain performance blocking and residual handling.
+7. Recovery / flatten / closeout paths are not blocked by negative strategy performance.
 ```
 
-If any broader test group is too slow or unavailable, report exactly what was run and why the rest was not run.
+## Final report format
 
-8. Scope control
-
-Do not attempt to build a full institutional backtesting platform in this patch.
-
-Acceptable scope for this pass:
-
-```text
-canonical execution plan / target-delta sizing hardening
-performance gate foundation
-experiment fingerprint foundation
-tests and reporting
-```
-
-Non-goals unless they are small and necessary:
-
-```text
-new alpha strategy research
-large-scale optimizer
-new exchange integration
-full historical data ingestion rewrite
-UI/dashboard work
-```
-
-9. Final report format
-
-When finished, report in this exact structure:
+When finished, report in exactly this structure:
 
 ```text
 Summary
 - What changed and why.
 
 Hypotheses checked
-- Hypothesis A: confirmed / refuted / partially confirmed
+- Hypothesis 1: confirmed / refuted / partially confirmed
   Evidence:
   Code/tests:
-- Hypothesis B: confirmed / refuted / partially confirmed
-  Evidence:
-  Code/tests:
-- Hypothesis C: confirmed / refuted / partially confirmed
-  Evidence:
-  Code/tests:
-- Hypothesis D: confirmed / refuted / partially confirmed
+- Hypothesis 2: confirmed / refuted / partially confirmed
   Evidence:
   Code/tests:
 
 Design changes
-- Execution plan / sizing:
-- Performance gate:
-- Experiment fingerprint:
-- Reporting / observability:
+- Performance gate coverage:
+- Target-delta remainder semantics:
+- Observability:
 - Recovery / safety preservation:
 
 Files changed
@@ -495,5 +346,5 @@ Follow-up work
 - Only list items not completed in this patch.
 ```
 
-Be direct. If a prior assumption is wrong, say so and adjust the patch accordingly. The end goal is not to make the last SMA strategy look better. The end goal is to make `WG-14/bithumb-bot` a more robust, reproducible, and operable automated-trading experiment system where negative-expectancy strategies and non-canonical execution paths cannot quietly advance into live trading.
+Be direct. If either hypothesis is already false in the current code, say so and only add regression tests if useful. Do not weaken the core priority: negative-expectancy strategies must not gain new BUY exposure through target_delta, and target-delta floor remainders must not create repeated closeout attempts or ambiguous flat/dust state.
 

@@ -387,7 +387,22 @@ def _target_shadow_from_context(context: dict[str, object]) -> dict[str, object]
         and isinstance(execution_decision.get("target_shadow_decision"), dict)
         else None
     )
+    target_plan = (
+        execution_decision.get("target_submit_plan")
+        if isinstance(execution_decision, dict)
+        and isinstance(execution_decision.get("target_submit_plan"), dict)
+        else None
+    )
     source = dict(nested or {})
+    if isinstance(target_plan, dict):
+        source.setdefault("target_would_submit", bool(target_plan.get("submit_expected")))
+        source.setdefault("target_submit_qty", target_plan.get("qty"))
+        source.setdefault("target_delta_side", target_plan.get("target_delta_side", target_plan.get("side")))
+        source.setdefault("target_delta_notional_krw", target_plan.get("delta_krw"))
+        source.setdefault("target_block_reason", target_plan.get("block_reason"))
+        source.setdefault("target_dust_policy", target_plan.get("dust_policy"))
+        source.setdefault("target_rejected_remainder", target_plan.get("rejected_remainder"))
+        source.setdefault("target_invariant_status", target_plan.get("invariant_status"))
     for key in (
         "target_delta_side",
         "target_would_submit",
@@ -395,6 +410,9 @@ def _target_shadow_from_context(context: dict[str, object]) -> dict[str, object]
         "target_delta_notional_krw",
         "target_block_reason",
         "target_position_truth_state",
+        "target_dust_policy",
+        "target_rejected_remainder",
+        "target_invariant_status",
         "target_order_rule_min_qty",
         "target_order_rule_min_notional_krw",
         "order_rule_authority",
@@ -869,6 +887,9 @@ class RecentDecisionFlowSummary:
     target_delta_notional_krw: float | None
     target_block_reason: str
     target_position_truth_state: str
+    target_dust_policy: str
+    target_rejected_remainder: float | None
+    target_invariant_status: str
     target_order_rule_min_qty: float | None
     target_order_rule_min_notional_krw: float | None
     order_rule_authority: str
@@ -1891,6 +1912,13 @@ def fetch_recent_decision_flow(
                 ),
                 target_block_reason=str(target_shadow.get("target_block_reason") or "-"),
                 target_position_truth_state=str(target_shadow.get("target_position_truth_state") or "-"),
+                target_dust_policy=str(target_shadow.get("target_dust_policy") or "-"),
+                target_rejected_remainder=(
+                    None
+                    if target_shadow.get("target_rejected_remainder") is None
+                    else float(target_shadow.get("target_rejected_remainder") or 0.0)
+                ),
+                target_invariant_status=str(target_shadow.get("target_invariant_status") or "-"),
                 target_order_rule_min_qty=(
                     None
                     if target_shadow.get("target_order_rule_min_qty") is None
@@ -4086,6 +4114,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "target_delta_notional_krw": row.target_delta_notional_krw,
                 "target_block_reason": row.target_block_reason,
                 "target_position_truth_state": row.target_position_truth_state,
+                "target_dust_policy": row.target_dust_policy,
+                "target_rejected_remainder": row.target_rejected_remainder,
+                "target_invariant_status": row.target_invariant_status,
                 "target_order_rule_min_qty": row.target_order_rule_min_qty,
                 "target_order_rule_min_notional_krw": row.target_order_rule_min_notional_krw,
                 "order_rule_authority": row.order_rule_authority,
@@ -4552,6 +4583,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"target_block_reason={row.target_block_reason} "
                 f"target_delta_submit_allowed={1 if row.target_would_submit else 0} "
                 f"target_delta_block_reason={row.target_block_reason} "
+                f"target_dust_policy={row.target_dust_policy} "
+                f"target_rejected_remainder={_fmt_float(float(row.target_rejected_remainder or 0.0), 8)} "
+                f"target_invariant_status={row.target_invariant_status} "
                 f"target_order_rule_min_qty={_fmt_float(float(row.target_order_rule_min_qty or 0.0), 8)} "
                 f"target_order_rule_min_notional_krw={_fmt_float(float(row.target_order_rule_min_notional_krw or 0.0), 0)} "
                 f"order_rule_authority_source={row.order_rule_authority_source} "

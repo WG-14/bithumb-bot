@@ -226,6 +226,116 @@ def test_recent_decision_flow_surfaces_target_delta_order_rule_authority(tmp_pat
     assert recent[1].target_order_rule_min_qty is None
 
 
+def test_target_delta_sell_floor_remainder_appears_in_ops_report_or_decision_context_as_tracked_dust_or_true_dust(
+    tmp_path, monkeypatch
+):
+    db_path = str(tmp_path / "decision-target-remainder.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=3,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="target delta sell remainder",
+            candle_ts=3,
+            market_price=115_000_000.0,
+            context={
+                "base_signal": "SELL",
+                "raw_signal": "SELL",
+                "final_signal": "HOLD",
+                "final_action": "REBALANCE_TO_TARGET",
+                "submit_expected": True,
+                "pre_submit_proof_status": "passed",
+                "execution_block_reason": "none",
+                "execution_decision": {
+                    "target_shadow_decision": {
+                        "target_delta_side": "SELL",
+                        "target_would_submit": True,
+                        "target_submit_qty": 0.0004998,
+                        "target_delta_notional_krw": -57477.0,
+                        "target_block_reason": "none",
+                        "target_position_truth_state": "converged",
+                    },
+                    "target_submit_plan": {
+                        "side": "SELL",
+                        "source": "target_delta",
+                        "authority": "canonical_target_delta_sizing",
+                        "final_action": "REBALANCE_TO_TARGET",
+                        "qty": 0.0004,
+                        "delta_krw": -57477.0,
+                        "submit_expected": True,
+                        "block_reason": "none",
+                        "target_delta_side": "SELL",
+                        "target_desired_qty": 0.0004998,
+                        "target_final_submitted_qty": 0.0004,
+                        "rejected_remainder": 0.0000998,
+                        "dust_policy": "exchange_step_remainder_tracked",
+                        "invariant_status": "passed",
+                    },
+                },
+            },
+        )
+        record_strategy_decision(
+            conn,
+            decision_ts=4,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="target true dust hold",
+            candle_ts=4,
+            market_price=115_000_000.0,
+            context={
+                "base_signal": "HOLD",
+                "raw_signal": "HOLD",
+                "final_signal": "HOLD",
+                "final_action": "HOLD_TARGET_TRUE_DUST",
+                "submit_expected": False,
+                "pre_submit_proof_status": "failed",
+                "execution_block_reason": "delta_below_exchange_min",
+                "execution_decision": {
+                    "target_shadow_decision": {
+                        "target_delta_side": "NONE",
+                        "target_would_submit": False,
+                        "target_submit_qty": 0.0,
+                        "target_delta_notional_krw": -11477.0,
+                        "target_block_reason": "delta_below_exchange_min",
+                        "target_position_truth_state": "converged",
+                    },
+                    "target_submit_plan": {
+                        "side": "NONE",
+                        "source": "target_delta",
+                        "authority": "canonical_target_delta_sizing",
+                        "final_action": "HOLD_TARGET_TRUE_DUST",
+                        "qty": None,
+                        "submit_expected": False,
+                        "block_reason": "delta_below_exchange_min",
+                        "target_delta_side": "NONE",
+                        "dust_policy": "no_delta",
+                        "rejected_remainder": None,
+                        "invariant_status": "not_required",
+                    },
+                },
+            },
+        )
+        conn.commit()
+        recent = fetch_recent_decision_flow(conn, limit=2)
+    finally:
+        conn.close()
+
+    assert recent[1].target_delta_side == "SELL"
+    assert recent[1].target_dust_policy == "exchange_step_remainder_tracked"
+    assert recent[1].target_rejected_remainder == pytest.approx(0.0000998)
+    assert recent[1].target_invariant_status == "passed"
+    assert recent[0].target_delta_side == "NONE"
+    assert recent[0].target_would_submit is False
+    assert recent[0].target_block_reason == "delta_below_exchange_min"
+    assert recent[0].target_dust_policy == "no_delta"
+    assert recent[0].target_position_truth_state == "converged"
+
+
 def test_decision_telemetry_cli_exposes_sell_failure_category_fields(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "decision-sell-failure-cli.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

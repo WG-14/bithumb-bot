@@ -203,6 +203,54 @@ def _execution_engine() -> str:
     return engine if engine in {"lot_native", "target_delta"} else "lot_native"
 
 
+def _live_real_order_performance_gate_applies() -> bool:
+    return bool(
+        str(getattr(settings, "MODE", "") or "").strip().lower() == "live"
+        and bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False))
+        and not bool(getattr(settings, "LIVE_DRY_RUN", True))
+    )
+
+
+def _strategy_performance_gate_payload(raw_gate: object | None) -> dict[str, object] | None:
+    if raw_gate is None:
+        return None
+    if isinstance(raw_gate, dict):
+        return dict(raw_gate)
+    as_dict = getattr(raw_gate, "as_dict", None)
+    if callable(as_dict):
+        payload = as_dict()
+        return dict(payload) if isinstance(payload, dict) else None
+    return None
+
+
+def _strategy_performance_gate_fields(raw_gate: object | None) -> dict[str, object]:
+    payload = _strategy_performance_gate_payload(raw_gate)
+    if not payload:
+        return {}
+    summary = _dict_value(payload.get("summary"))
+    return {
+        "strategy_performance_gate": payload,
+        "strategy_performance_gate_blocked": bool(payload.get("blocked") or not bool(payload.get("allowed", True))),
+        "strategy_performance_gate_reason_code": payload.get("reason_code"),
+        "strategy_performance_gate_reason": payload.get("reason"),
+        "strategy_performance_gate_sample_count": int(summary.get("sample_count") or 0),
+        "strategy_performance_gate_expectancy_per_trade": float(summary.get("expectancy_per_trade") or 0.0),
+        "strategy_performance_gate_net_pnl": float(summary.get("net_pnl") or 0.0),
+        "strategy_performance_gate_profit_factor": summary.get("profit_factor"),
+        "strategy_performance_gate_recommended_next_action": payload.get("recommended_next_action"),
+        "recommended_next_action": payload.get("recommended_next_action"),
+    }
+
+
+def _target_delta_buy_blocked_by_performance_gate(raw_gate: object | None, *, side: str) -> bool:
+    if str(side or "").upper() != "BUY":
+        return False
+    if not _live_real_order_performance_gate_applies():
+        return False
+    payload = _strategy_performance_gate_payload(raw_gate)
+    return bool(payload and payload.get("enabled", True) and not bool(payload.get("allowed", True)))
+
+
 def _residual_intent_ts(payload: dict[str, object]) -> int:
     for key in ("ts", "candle_ts", "signal_ts", "decision_ts"):
         try:
@@ -384,6 +432,7 @@ def build_execution_decision_summary(
     final_signal: str | None = None,
     final_reason: str | None = None,
     previous_target_exposure_krw: float | None = None,
+    strategy_performance_gate: object | None = None,
 ) -> ExecutionDecisionSummary:
     payload: dict[str, object] = dict(decision_context or {})
     if isinstance(readiness_payload, dict):
@@ -525,6 +574,20 @@ def build_execution_decision_summary(
                 else str(target_sizing.block_reason)
             )
             submit_allowed = bool(target_decision.would_submit and target_sizing is not None and target_sizing.allowed)
+            performance_gate_blocks_buy = bool(
+                submit_allowed
+                and _target_delta_buy_blocked_by_performance_gate(
+                    strategy_performance_gate,
+                    side=str(target_decision.delta_side),
+                )
+            )
+            performance_gate_fields = _strategy_performance_gate_fields(strategy_performance_gate)
+            if performance_gate_blocks_buy:
+                submit_allowed = False
+                sizing_block_reason = str(
+                    performance_gate_fields.get("strategy_performance_gate_reason_code")
+                    or "STRATEGY_PERFORMANCE_BLOCKED"
+                )
             target_submit_plan = ExecutionSubmitPlan(
                 side=str(target_decision.delta_side),
                 source="target_delta",
@@ -533,9 +596,13 @@ def build_execution_decision_summary(
                     "REBALANCE_TO_TARGET"
                     if submit_allowed
                     else (
+                        "BLOCK_STRATEGY_PERFORMANCE_GATE"
+                        if performance_gate_blocks_buy
+                        else (
                         "HOLD_TARGET_TRUE_DUST"
                         if target_decision.block_reason == "delta_below_exchange_min"
                         else "BLOCK_TARGET_DELTA"
+                        )
                     )
                 ),
                 qty=(None if target_sizing is None else target_sizing.final_submitted_qty),
@@ -601,6 +668,8 @@ def build_execution_decision_summary(
                     "target_strategy_signal_source": target_decision.target_strategy_signal_source,
                 }
             )
+            if performance_gate_fields and str(target_decision.delta_side) == "BUY":
+                target_submit_plan.update(performance_gate_fields)
 
     if execution_engine == "target_delta":
         if target_submit_plan is not None:

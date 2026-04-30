@@ -3192,6 +3192,18 @@ def run_loop(short_n: int, long_n: int) -> None:
                 execution_decision: dict[str, object] = {}
                 try:
                     readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
+                    strategy_performance_gate = None
+                    if (
+                        _run_loop_uses_target_delta()
+                        and str(settings.MODE).strip().lower() == "live"
+                        and bool(settings.LIVE_REAL_ORDER_ARMED)
+                        and not bool(settings.LIVE_DRY_RUN)
+                    ):
+                        strategy_performance_gate = evaluate_strategy_performance_gate(
+                            conn,
+                            strategy_name=str(settings.STRATEGY_NAME),
+                            pair=str(settings.PAIR),
+                        )
                     raw_signal_for_target = str(
                         context.get("raw_signal") or context.get("base_signal") or signal
                     )
@@ -3221,6 +3233,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                         final_signal=signal,
                         final_reason=reason,
                         previous_target_exposure_krw=previous_target_exposure_krw,
+                        strategy_performance_gate=strategy_performance_gate,
                     ).as_dict()
                     context["execution_decision"] = execution_decision
                     context["final_action"] = execution_decision["final_action"]

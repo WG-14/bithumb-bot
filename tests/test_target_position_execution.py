@@ -90,6 +90,46 @@ def _target_delta_settings(*, target_exposure_krw: float | None = None) -> Targe
     )
 
 
+def _blocked_performance_gate() -> dict[str, object]:
+    return {
+        "enabled": True,
+        "allowed": False,
+        "blocked": True,
+        "reason_code": "STRATEGY_PERFORMANCE_BLOCKED:STRATEGY_EXPECTANCY_NEGATIVE",
+        "reason": "expectancy_per_trade=-100.000000 below min=0.000000",
+        "recommended_next_action": "review strategy-report and experiment-report; keep recovery/flatten commands available",
+        "summary": {
+            "sample_count": 30,
+            "gross_pnl": -3000.0,
+            "fee_total": 300.0,
+            "net_pnl": -3300.0,
+            "expectancy_per_trade": -110.0,
+            "profit_factor": 0.5,
+        },
+        "thresholds": {"min_sample": 30},
+    }
+
+
+def _set_live_armed_target_delta() -> dict[str, object]:
+    old = {
+        "MODE": settings.MODE,
+        "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "TARGET_EXPOSURE_KRW": settings.TARGET_EXPOSURE_KRW,
+    }
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    return old
+
+
+def _restore_settings(old: dict[str, object]) -> None:
+    for key, value in old.items():
+        object.__setattr__(settings, key, value)
+
+
 def test_target_shadow_sell_models_ec2_residual_as_executable_delta() -> None:
     decision = build_target_position_decision(
         raw_signal="SELL",
@@ -736,6 +776,63 @@ def test_target_delta_execution_uses_canonical_sizing_without_residual_policy() 
     )
 
 
+def test_target_delta_sell_floor_remainder_updates_or_reports_dust_target_state() -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "SELL", "market_price": 115_000_000.0},
+            readiness_payload=_readiness(broker_qty=0.0004998) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+                "qty_step": 0.0001,
+            },
+            raw_signal="SELL",
+            final_signal="HOLD",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+
+    assert summary.target_submit_plan is not None
+    assert summary.target_submit_plan["side"] == "SELL"
+    assert summary.target_submit_plan["qty"] == pytest.approx(0.0004)
+    assert summary.target_submit_plan["rejected_remainder"] == pytest.approx(0.0000998)
+    assert summary.target_submit_plan["dust_policy"] == "exchange_step_remainder_tracked"
+    assert summary.target_submit_plan["target_dust_classification"] == "executable_delta"
+    assert summary.target_submit_plan["invariant_status"] == "passed"
+
+
+def test_target_delta_sell_floor_remainder_does_not_repeat_submit_when_remainder_below_min() -> None:
+    old_engine = settings.EXECUTION_ENGINE
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "HOLD", "market_price": 115_000_000.0},
+            readiness_payload=_readiness(broker_qty=0.0000998) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+                "qty_step": 0.0001,
+            },
+            raw_signal="HOLD",
+            final_signal="HOLD",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+
+    assert summary.target_submit_plan is not None
+    assert summary.submit_expected is False
+    assert summary.final_action == "HOLD_TARGET_TRUE_DUST"
+    assert summary.target_submit_plan["side"] == "NONE"
+    assert summary.target_submit_plan["submit_expected"] is False
+    assert summary.target_submit_plan["block_reason"] == "delta_below_exchange_min"
+    assert summary.target_submit_plan["target_position_truth_state"] == "converged"
+    assert summary.target_submit_plan["target_dust_classification"] == "true_dust"
+    assert summary.target_shadow_decision["target_current_qty"] == pytest.approx(0.0000998)
+    assert summary.target_shadow_decision["target_qty"] == pytest.approx(0.0)
+
+
 def test_target_delta_buy_sizes_only_missing_delta() -> None:
     old_engine = settings.EXECUTION_ENGINE
     old_target = settings.TARGET_EXPOSURE_KRW
@@ -762,6 +859,117 @@ def test_target_delta_buy_sizes_only_missing_delta() -> None:
     assert summary.target_submit_plan["notional_krw"] == pytest.approx(60_000.0)
     assert summary.target_submit_plan["authority"] == "canonical_target_delta_sizing"
     assert summary.target_submit_plan["target_sizing"]["sizing_policy"] == "target_delta_exchange_floor_v1"
+
+
+def test_target_delta_buy_rebalance_blocked_by_strategy_performance_gate_when_live_armed() -> None:
+    old = _set_live_armed_target_delta()
+    try:
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 100_000.0)
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "BUY", "market_price": 100_000_000.0},
+            readiness_payload=_readiness(broker_qty=0.0004) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+            },
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=0.0,
+            strategy_performance_gate=_blocked_performance_gate(),
+        )
+    finally:
+        _restore_settings(old)
+
+    assert summary.target_submit_plan is not None
+    assert summary.submit_expected is False
+    assert summary.final_action == "BLOCK_STRATEGY_PERFORMANCE_GATE"
+    assert "STRATEGY_PERFORMANCE_BLOCKED" in summary.block_reason
+    assert summary.target_submit_plan["submit_expected"] is False
+    assert summary.target_submit_plan["final_action"] == "BLOCK_STRATEGY_PERFORMANCE_GATE"
+    assert summary.target_submit_plan["side"] == "BUY"
+    assert summary.target_submit_plan["target_delta_side"] == "BUY"
+    assert summary.target_submit_plan["qty"] == pytest.approx(0.0006)
+    assert summary.target_submit_plan["target_sizing"]["sizing_policy"] == "target_delta_exchange_floor_v1"
+    assert summary.target_submit_plan["invariant_status"] == "passed"
+    assert summary.target_submit_plan["strategy_performance_gate_blocked"] is True
+    assert "STRATEGY_EXPECTANCY_NEGATIVE" in str(
+        summary.target_submit_plan["strategy_performance_gate_reason_code"]
+    )
+
+
+def test_target_delta_hold_rebalance_buy_blocked_by_strategy_performance_gate_when_live_armed() -> None:
+    old = _set_live_armed_target_delta()
+    try:
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "HOLD", "market_price": 100_000_000.0},
+            readiness_payload=_readiness(broker_qty=0.0004) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+            },
+            raw_signal="HOLD",
+            final_signal="HOLD",
+            previous_target_exposure_krw=100_000.0,
+            strategy_performance_gate=_blocked_performance_gate(),
+        )
+    finally:
+        _restore_settings(old)
+
+    assert summary.target_submit_plan is not None
+    assert summary.target_submit_plan["side"] == "BUY"
+    assert summary.target_submit_plan["submit_expected"] is False
+    assert summary.final_action == "BLOCK_STRATEGY_PERFORMANCE_GATE"
+    assert "STRATEGY_PERFORMANCE_BLOCKED" in summary.block_reason
+    assert summary.target_submit_plan["target_sizing"] is not None
+    assert summary.target_submit_plan["strategy_performance_gate_sample_count"] == 30
+
+
+def test_strategy_performance_gate_does_not_block_target_delta_sell() -> None:
+    old = _set_live_armed_target_delta()
+    try:
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "SELL", "market_price": 115_000_000.0},
+            readiness_payload=_readiness(broker_qty=0.0004998) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+            },
+            raw_signal="SELL",
+            final_signal="HOLD",
+            previous_target_exposure_krw=0.0,
+            strategy_performance_gate=_blocked_performance_gate(),
+        )
+    finally:
+        _restore_settings(old)
+
+    assert summary.target_submit_plan is not None
+    assert summary.target_submit_plan["side"] == "SELL"
+    assert summary.target_submit_plan["submit_expected"] is True
+    assert summary.target_submit_plan["block_reason"] == "none"
+    assert summary.final_action == "REBALANCE_TO_TARGET"
+
+
+def test_strategy_performance_gate_does_not_block_recovery_or_flatten_commands_if_applicable() -> None:
+    old = _set_live_armed_target_delta()
+    try:
+        summary = build_execution_decision_summary(
+            decision_context={"raw_signal": "HOLD", "market_price": 100_000_000.0},
+            readiness_payload=_readiness(broker_qty=0.0005) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+                "target_closeout_requested": True,
+                "target_origin": TARGET_ORIGIN_OPERATOR_CLOSEOUT,
+            },
+            raw_signal="HOLD",
+            final_signal="HOLD",
+            previous_target_exposure_krw=0.0,
+            strategy_performance_gate=_blocked_performance_gate(),
+        )
+    finally:
+        _restore_settings(old)
+
+    assert summary.target_submit_plan is not None
+    assert summary.target_submit_plan["side"] == "SELL"
+    assert summary.target_submit_plan["target_closeout_requested"] is True
+    assert summary.target_submit_plan["submit_expected"] is True
+    assert summary.target_submit_plan["block_reason"] == "none"
 
 
 def test_target_delta_ec2_reproduction_uses_settings_rules_when_payload_lacks_min_qty(
