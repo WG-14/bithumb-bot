@@ -97,6 +97,10 @@ def test_record_strategy_decisions_for_trade_and_non_trade_cases(tmp_path):
     hold_context = json.loads(str(rows[1]["context_json"]))
     assert buy_context["features"]["curr_s"] == 103.0
     assert hold_context["position_open"] is True
+    assert buy_context["experiment_id"]
+    assert buy_context["experiment_fingerprint"] == buy_context["experiment_id"]
+    assert buy_context["experiment_fingerprint_version"] == "experiment_fingerprint_v1"
+    assert buy_context["experiment_fingerprint_inputs"]["strategy_name"] == "sma_cross"
 
 
 def test_record_strategy_decision_preserves_buy_to_hold_explanation_fields(tmp_path):

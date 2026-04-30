@@ -36,6 +36,7 @@ from .fee_gap_repair import build_fee_gap_accounting_repair_preview
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
 from .runtime_readiness import compute_runtime_readiness_snapshot
+from .strategy_performance import evaluate_strategy_performance_gate
 from .dust import (
     DustClassification,
     DustState,
@@ -1284,6 +1285,33 @@ def evaluate_startup_safety_gate() -> str | None:
         )
     if int(readiness_snapshot.fee_pending_count or 0) > 0:
         reasons.append(f"fee_pending_auto_recovering={int(readiness_snapshot.fee_pending_count)}")
+
+    if (
+        str(settings.MODE).strip().lower() == "live"
+        and bool(settings.LIVE_REAL_ORDER_ARMED)
+        and not bool(settings.LIVE_DRY_RUN)
+    ):
+        perf_conn = ensure_db()
+        try:
+            performance_gate = evaluate_strategy_performance_gate(
+                perf_conn,
+                strategy_name=str(settings.STRATEGY_NAME),
+                pair=str(settings.PAIR),
+            )
+        finally:
+            perf_conn.close()
+        if not performance_gate.allowed:
+            payload = performance_gate.as_dict()
+            summary = dict(payload.get("summary") or {})
+            reasons.append(
+                "strategy_performance_gate="
+                f"{payload.get('reason_code')}"
+                f"(sample_count={summary.get('sample_count')},"
+                f"expectancy_per_trade={summary.get('expectancy_per_trade')},"
+                f"net_pnl={summary.get('net_pnl')},"
+                f"fee_total={summary.get('fee_total')},"
+                f"profit_factor={summary.get('profit_factor')})"
+            )
 
     fee_gap_incident = readiness_snapshot.fee_gap_incident
     try:

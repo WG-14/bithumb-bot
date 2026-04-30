@@ -102,12 +102,14 @@ def main() -> int:
         "last_asset_ts_ms": None,
         "stale": None,
     }
+    auth_init_printed = False
     try:
         broker = BithumbBroker()
         auth_diag = broker.get_auth_runtime_diagnostics(
             caller="healthcheck",
             env_summary=active_env_summary,
         )
+        auth_init_printed = True
         print(
             "[HEALTHCHECK] AUTH_INIT "
             f"caller={auth_diag.get('caller') or '-'} "
@@ -149,6 +151,25 @@ def main() -> int:
         if isinstance(raw_diag, dict):
             balance_diag.update(raw_diag)
     except Exception as exc:
+        if not auth_init_printed:
+            print(
+                "[HEALTHCHECK] AUTH_INIT "
+                "caller=healthcheck "
+                f"mode={settings.MODE} "
+                "balance_source=- "
+                f"api_key_present={1 if settings.BITHUMB_API_KEY else 0} "
+                f"api_key_length={len(settings.BITHUMB_API_KEY or '')} "
+                f"api_secret_present={1 if settings.BITHUMB_API_SECRET else 0} "
+                f"api_secret_length={len(settings.BITHUMB_API_SECRET or '')} "
+                f"live_dry_run={1 if settings.LIVE_DRY_RUN else 0} "
+                f"live_real_order_armed={1 if settings.LIVE_REAL_ORDER_ARMED else 0} "
+                f"ws_myasset_enabled={1 if settings.BITHUMB_WS_MYASSET_ENABLED else 0}"
+            )
+            print(
+                "[HEALTHCHECK] AUTH_PREVIEW "
+                "endpoint=/v1/orders/chance method=GET auth_branch=unavailable "
+                "query_hash_included=1 query_hash_preview=- payload_keys=market fallback_branch_used=0"
+            )
         balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
         balance_diag["failure_category"] = "transport_failure"
     print(
@@ -218,7 +239,7 @@ def main() -> int:
         problems.append("balance source schema mismatch")
     elif source_failure_category == "auth_failure":
         problems.append("balance source auth failure")
-    elif source_failure_category == "transport_failure":
+    elif source_failure_category == "transport_failure" and str(settings.MODE).strip().lower() == "live":
         problems.append("balance source transport failure")
     elif source_failure_category == "stale_source":
         problems.append("balance source stale")

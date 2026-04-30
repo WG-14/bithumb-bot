@@ -1256,9 +1256,10 @@ def test_target_delta_live_service_uses_target_plan_without_residual_mode() -> N
     assert trade == {"source": "target_delta", "authority": "target_position_delta"}
     assert len(executor_calls) == 1
     assert executor_calls[0]["execution_submit_plan"]["source"] == "target_delta"
-    assert executor_calls[0]["execution_submit_plan"]["authority"] == "target_position_delta"
+    assert executor_calls[0]["execution_submit_plan"]["authority"] == "canonical_target_delta_sizing"
     assert executor_calls[0]["execution_submit_plan"]["side"] == "SELL"
-    assert executor_calls[0]["execution_submit_plan"]["qty"] == pytest.approx(0.0004998)
+    assert executor_calls[0]["execution_submit_plan"]["target_desired_qty"] == pytest.approx(0.0004998)
+    assert executor_calls[0]["execution_submit_plan"]["qty"] == pytest.approx(0.0004)
 
 
 @pytest.mark.parametrize(
@@ -1418,7 +1419,7 @@ def _target_delta_readiness(
             0.0004998,
             0,
             "SELL",
-            0.0004998,
+            0.0004,
             "none",
             "executable_delta",
         ),
@@ -1593,9 +1594,10 @@ def test_run_loop_target_delta_persisted_target_state_reaches_live_execution(
         assert isinstance(forwarded, dict)
         assert executor_calls[0]["side"] == expected_forwarded_side
         assert forwarded["source"] == "target_delta"
-        assert forwarded["authority"] == "target_position_delta"
+        assert forwarded["authority"] == "canonical_target_delta_sizing"
         assert forwarded["side"] == expected_forwarded_side
         assert forwarded["qty"] == pytest.approx(expected_qty)
+        assert forwarded["invariant_status"] == "passed"
         assert forwarded["submit_expected"] is True
         assert forwarded["block_reason"] == "none"
 
@@ -1716,7 +1718,8 @@ def test_run_loop_target_delta_adopted_target_strategy_sell_submits_delta_sell(m
     forwarded = executor_calls[0]["execution_submit_plan"]
     assert isinstance(forwarded, dict)
     assert forwarded["side"] == "SELL"
-    assert forwarded["qty"] == pytest.approx(0.0004998)
+    assert forwarded["target_desired_qty"] == pytest.approx(0.0004998)
+    assert forwarded["qty"] == pytest.approx(0.0004)
     assert forwarded["target_origin"] == "strategy_sell"
     assert loop_conn.target_state is not None
     assert loop_conn.target_state.target_origin == "strategy_sell"

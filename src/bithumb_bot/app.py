@@ -101,6 +101,7 @@ from .repair_plan import build_recovery_policy_from_report, build_repair_plan_pr
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .execution_service import build_execution_decision_summary
+from .strategy_performance import evaluate_strategy_performance_gate
 from .target_position import (
     TARGET_ORIGIN_OPERATOR_CLOSEOUT,
     resolve_startup_target_position_policy,
@@ -794,6 +795,11 @@ def cmd_health() -> None:
         fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
         fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
         fee_rate_drift = _fee_rate_drift_diagnostics(conn)
+        strategy_performance_gate = evaluate_strategy_performance_gate(
+            conn,
+            strategy_name=str(settings.STRATEGY_NAME),
+            pair=str(settings.PAIR),
+        ).as_dict()
     finally:
         conn.close()
     if row is not None:
@@ -1043,6 +1049,17 @@ def cmd_health() -> None:
         f"{', '.join(readiness_snapshot.blocker_categories) if readiness_snapshot.blocker_categories else 'none'}"
     )
     print(f"    canonical_next_action={readiness_snapshot.operator_next_action}")
+    perf_summary = dict(strategy_performance_gate.get("summary") or {})
+    print(
+        "    "
+        f"strategy_performance_gate_blocked={1 if bool(strategy_performance_gate.get('blocked')) else 0} "
+        f"reason_code={strategy_performance_gate.get('reason_code') or '-'} "
+        f"sample_count={perf_summary.get('sample_count', 0)} "
+        f"expectancy_per_trade={float(perf_summary.get('expectancy_per_trade') or 0.0):.2f} "
+        f"net_pnl={float(perf_summary.get('net_pnl') or 0.0):.2f} "
+        f"fee_total={float(perf_summary.get('fee_total') or 0.0):.2f} "
+        f"profit_factor={perf_summary.get('profit_factor')}"
+    )
     print(
         "    "
         f"startup_recovery_gate_blocked={1 if bool(health.get('startup_gate_reason')) else 0} "
@@ -2964,6 +2981,16 @@ def _load_recovery_report(
         "fee_pending_accounting_repair_count": 0,
         "material_notional_threshold_krw": float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
     }
+    strategy_performance_gate = {
+        "enabled": bool(settings.LIVE_PERFORMANCE_GATE_ENABLED),
+        "allowed": False,
+        "blocked": True,
+        "reason_code": "STRATEGY_PERFORMANCE_UNAVAILABLE",
+        "reason": "strategy performance gate not evaluated",
+        "recommended_next_action": "review database availability",
+        "summary": {},
+        "thresholds": {},
+    }
     accounting_projection = {
         "consistent": False,
         "replay_qty": 0.0,
@@ -3006,6 +3033,11 @@ def _load_recovery_report(
         broker_fill_observation_summary = get_broker_fill_observation_summary(conn)
         fill_accounting_incident_projection = summarize_fill_accounting_incident_projection(conn)
         fee_rate_drift_diagnostics = _fee_rate_drift_diagnostics(conn)
+        strategy_performance_gate = evaluate_strategy_performance_gate(
+            conn,
+            strategy_name=str(settings.STRATEGY_NAME),
+            pair=str(settings.PAIR),
+        ).as_dict()
         try:
             accounting_projection = compute_accounting_replay(conn)
             cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
@@ -3377,6 +3409,7 @@ def _load_recovery_report(
         "recovery_blocker_categories": runtime_readiness_snapshot.get("blocker_categories"),
         "broker_fill_observation_summary": broker_fill_observation_summary,
         "fee_rate_drift_diagnostics": fee_rate_drift_diagnostics,
+        "strategy_performance_gate": strategy_performance_gate,
         "fill_accounting_incident_projection": fill_accounting_incident_projection,
         "fill_accounting_root_cause": fill_root_summary,
         "trading_enabled": bool(state.trading_enabled),

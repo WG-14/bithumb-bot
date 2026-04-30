@@ -1736,12 +1736,12 @@ def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(
     assert intent.strategy_context == "target_delta"
     assert intent.use_qty_intent_key is True
     assert intent.idempotency_key == "target-delta-test-key"
-    assert intent.submit_qty_source == "target_position_delta"
-    assert intent.exit_sizing.qty_source == "target_position_delta"
+    assert intent.submit_qty_source == "canonical_target_delta_sizing"
+    assert intent.exit_sizing.qty_source == "canonical_target_delta_sizing"
     assert feasibility.side == "SELL"
     assert feasibility.order_qty == pytest.approx(0.0004998)
     assert feasibility.normalized_qty == pytest.approx(0.0004998)
-    assert feasibility.submit_qty_source == "target_position_delta"
+    assert feasibility.submit_qty_source == "canonical_target_delta_sizing"
     assert intent.canonical_sell is None
     assert intent.diagnostic_sell_qty is None
     decision_observability = captured["position_state"].decision_observability
@@ -1750,7 +1750,7 @@ def test_live_execute_signal_consumes_target_delta_plan_without_residual_policy(
     assert decision_observability["execution_submit_plan_authority"] == "target_position_delta"
     assert decision_observability["target_delta_side"] == "SELL"
     assert decision_observability["target_delta_idempotency_key"] == "target-delta-test-key"
-    assert decision_observability["submit_qty_source"] == "target_position_delta"
+    assert decision_observability["submit_qty_source"] == "canonical_target_delta_sizing"
 
 
 def test_target_delta_engine_rejects_residual_plan_without_lot_native_fallback(monkeypatch, tmp_path):
@@ -11764,6 +11764,7 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path, monkey
     object.__setattr__(settings, "BITHUMB_API_KEY", "test-key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "test-secret")
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "bootstrap_live_state.sqlite"))
+    object.__setattr__(settings, "LIVE_PERFORMANCE_GATE_ENABLED", False)
     runtime_state.enable_trading()
     monkeypatch.setattr(
         "bithumb_bot.order_sizing.get_effective_order_rules",

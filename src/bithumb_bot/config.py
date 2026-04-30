@@ -465,6 +465,24 @@ class Settings:
     STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO: float = float(
         os.getenv("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO", "0")
     )
+    LIVE_PERFORMANCE_GATE_ENABLED: bool = parse_bool_env("LIVE_PERFORMANCE_GATE_ENABLED", "true")
+    LIVE_PERFORMANCE_GATE_MIN_SAMPLE: int = int(os.getenv("LIVE_PERFORMANCE_GATE_MIN_SAMPLE", "30"))
+    LIVE_PERFORMANCE_GATE_RECENT_LIMIT: int = int(os.getenv("LIVE_PERFORMANCE_GATE_RECENT_LIMIT", "200"))
+    LIVE_PERFORMANCE_GATE_MIN_EXPECTANCY_KRW: float = parse_float_env(
+        "LIVE_PERFORMANCE_GATE_MIN_EXPECTANCY_KRW", "0"
+    )
+    LIVE_PERFORMANCE_GATE_MIN_NET_PNL_KRW: float = parse_float_env(
+        "LIVE_PERFORMANCE_GATE_MIN_NET_PNL_KRW", "0"
+    )
+    LIVE_PERFORMANCE_GATE_MIN_PROFIT_FACTOR: float = parse_float_env(
+        "LIVE_PERFORMANCE_GATE_MIN_PROFIT_FACTOR", "1.0"
+    )
+    LIVE_PERFORMANCE_GATE_MAX_FEE_DRAG_RATIO: str = os.getenv(
+        "LIVE_PERFORMANCE_GATE_MAX_FEE_DRAG_RATIO", ""
+    )
+    LIVE_PERFORMANCE_GATE_SCOPE: str = os.getenv(
+        "LIVE_PERFORMANCE_GATE_SCOPE", "closed_lifecycles_recent"
+    ).strip() or "closed_lifecycles_recent"
 
     # storage
     ENV_ROOT: str = str(PATH_MANAGER.config.env_root)

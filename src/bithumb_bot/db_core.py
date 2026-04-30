@@ -16,6 +16,7 @@ from .decision_context import (
     materialize_strategy_decision_context,
     normalize_strategy_decision_context,
 )
+from .experiment_fingerprint import experiment_context
 from .target_position import TargetPositionState
 
 
@@ -1928,6 +1929,10 @@ def record_strategy_decision(
         candle_ts=None if candle_ts is None else int(candle_ts),
         market_price=None if market_price is None else float(market_price),
     )
+    normalized_context = {
+        **normalized_context,
+        **experiment_context(strategy_name=str(strategy_name)),
+    }
     row = conn.execute(
         """
         INSERT INTO strategy_decisions(

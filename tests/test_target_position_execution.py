@@ -686,7 +686,7 @@ def test_execution_decision_includes_target_shadow_when_feature_flag_enabled() -
     assert target["target_submit_notional_krw"] == pytest.approx(42_523.0)
 
 
-def test_target_delta_execution_bypasses_residual_sell_mode_and_lot_authority() -> None:
+def test_target_delta_execution_uses_canonical_sizing_without_residual_policy() -> None:
     old_engine = settings.EXECUTION_ENGINE
     old_residual_mode = settings.RESIDUAL_LIVE_SELL_MODE
     try:
@@ -719,14 +719,19 @@ def test_target_delta_execution_bypasses_residual_sell_mode_and_lot_authority() 
     assert summary.buy_submit_plan is None
     assert summary.target_submit_plan is not None
     assert summary.target_submit_plan["source"] == "target_delta"
-    assert summary.target_submit_plan["authority"] == "target_position_delta"
+    assert summary.target_submit_plan["authority"] == "canonical_target_delta_sizing"
     assert summary.target_submit_plan["intent_type"] == "target_delta_rebalance"
     assert summary.target_submit_plan["strategy_context"] == "target_delta"
     assert summary.target_submit_plan["side"] == "SELL"
-    assert summary.target_submit_plan["qty"] == pytest.approx(0.0004998)
+    assert summary.target_submit_plan["target_desired_qty"] == pytest.approx(0.0004998)
+    assert summary.target_submit_plan["qty"] == pytest.approx(0.0004)
+    assert summary.target_submit_plan["target_final_submitted_qty"] == pytest.approx(0.0004)
+    assert summary.target_submit_plan["target_exchange_constrained_qty"] == pytest.approx(0.0004)
+    assert summary.target_submit_plan["invariant_status"] == "passed"
+    assert summary.target_submit_plan["dust_policy"] == "exchange_step_remainder_tracked"
     assert summary.target_submit_plan["submit_expected"] is True
     assert summary.target_submit_plan["block_reason"] == "none"
-    assert summary.target_submit_plan["qty"] == pytest.approx(
+    assert summary.target_submit_plan["target_desired_qty"] == pytest.approx(
         summary.target_shadow_decision["target_submit_qty"]
     )
 
@@ -755,6 +760,8 @@ def test_target_delta_buy_sizes_only_missing_delta() -> None:
     assert summary.target_submit_plan["side"] == "BUY"
     assert summary.target_submit_plan["qty"] == pytest.approx(0.0006)
     assert summary.target_submit_plan["notional_krw"] == pytest.approx(60_000.0)
+    assert summary.target_submit_plan["authority"] == "canonical_target_delta_sizing"
+    assert summary.target_submit_plan["target_sizing"]["sizing_policy"] == "target_delta_exchange_floor_v1"
 
 
 def test_target_delta_ec2_reproduction_uses_settings_rules_when_payload_lacks_min_qty(
@@ -810,6 +817,9 @@ def test_target_delta_ec2_reproduction_uses_settings_rules_when_payload_lacks_mi
     assert summary.target_submit_plan is not None
     assert summary.target_submit_plan["submit_expected"] is True
     assert summary.target_submit_plan["target_order_rule_min_qty"] == pytest.approx(0.0001)
+    assert summary.target_submit_plan["qty"] == pytest.approx(0.0006)
+    assert summary.target_submit_plan["target_desired_qty"] == pytest.approx(70_000.0 / 113_428_000.0)
+    assert summary.target_submit_plan["target_final_submitted_qty"] == pytest.approx(0.0006)
 
 
 def test_target_delta_fails_closed_without_payload_effective_or_settings_rules(
@@ -949,7 +959,8 @@ def test_engine_run_loop_target_state_helper_preserves_restart_hold_target(tmp_p
     assert previous_target == 0.0
     assert isinstance(target_plan, dict)
     assert target_plan["side"] == "SELL"
-    assert target_plan["qty"] == pytest.approx(0.0004998)
+    assert target_plan["target_desired_qty"] == pytest.approx(0.0004998)
+    assert target_plan["qty"] == pytest.approx(0.0004)
     assert target_plan["target_dust_classification"] == "executable_delta"
     assert persisted is True
     assert state is not None

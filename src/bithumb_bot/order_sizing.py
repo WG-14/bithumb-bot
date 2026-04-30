@@ -88,6 +88,58 @@ class ExecutionSizingPlan:
 
 
 @dataclass(frozen=True)
+class TargetDeltaExecutionSizingPlan:
+    side: str
+    allowed: bool
+    block_reason: str
+    decision_reason_code: str
+    desired_qty: float
+    exchange_constrained_qty: float
+    final_submitted_qty: float
+    final_submitted_notional_krw: float
+    intended_lot_count: int
+    executable_lot_count: int
+    internal_lot_size: float
+    rejected_remainder: float
+    dust_policy: str
+    invariant_status: str
+    authority_source: str
+    sizing_policy: str
+    min_qty: float
+    qty_step: float
+    min_notional_krw: float
+    fee_rate_used: float
+    slippage_bps: float
+    price_protection_basis: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "side": self.side,
+            "allowed": bool(self.allowed),
+            "block_reason": self.block_reason,
+            "decision_reason_code": self.decision_reason_code,
+            "desired_qty": self.desired_qty,
+            "exchange_constrained_qty": self.exchange_constrained_qty,
+            "final_submitted_qty": self.final_submitted_qty,
+            "final_submitted_notional_krw": self.final_submitted_notional_krw,
+            "intended_lot_count": self.intended_lot_count,
+            "executable_lot_count": self.executable_lot_count,
+            "internal_lot_size": self.internal_lot_size,
+            "rejected_remainder": self.rejected_remainder,
+            "dust_policy": self.dust_policy,
+            "invariant_status": self.invariant_status,
+            "authority_source": self.authority_source,
+            "sizing_policy": self.sizing_policy,
+            "min_qty": self.min_qty,
+            "qty_step": self.qty_step,
+            "min_notional_krw": self.min_notional_krw,
+            "fee_rate_used": self.fee_rate_used,
+            "slippage_bps": self.slippage_bps,
+            "price_protection_basis": self.price_protection_basis,
+        }
+
+
+@dataclass(frozen=True)
 class SellExecutionAuthority:
     """Canonical SELL authority surface for execution sizing.
 
@@ -564,4 +616,123 @@ def build_sell_execution_sizing(
         fee_authority_source="lot_definition" if fee_authority is None else fee_authority.fee_source,
         fee_authority_degraded=False if fee_authority is None else fee_authority.degraded,
         fee_rate_used=0.0 if fee_authority is None else float(fee_authority.taker_ask_fee_rate),
+    )
+
+
+def build_target_delta_execution_sizing(
+    *,
+    pair: str,
+    side: str,
+    desired_qty: float | None,
+    market_price: float,
+    min_qty: float | None,
+    qty_step: float | None,
+    min_notional_krw: float | None,
+    max_qty_decimals: int | None = None,
+    authority_source: str = "target_delta",
+) -> TargetDeltaExecutionSizingPlan:
+    normalized_side = str(side or "NONE").upper()
+    price = float(market_price)
+    raw_desired_qty = 0.0 if desired_qty is None else max(0.0, float(desired_qty))
+    resolved_min_qty = 0.0 if min_qty is None else max(0.0, float(min_qty))
+    resolved_qty_step = 0.0 if qty_step is None else max(0.0, float(qty_step))
+    resolved_min_notional = (
+        0.0 if min_notional_krw is None else max(0.0, float(min_notional_krw))
+    )
+    resolved_decimals = (
+        int(settings.LIVE_ORDER_MAX_QTY_DECIMALS)
+        if max_qty_decimals is None
+        else max(0, int(max_qty_decimals))
+    )
+
+    def _blocked(reason: str, *, constrained_qty: float = 0.0) -> TargetDeltaExecutionSizingPlan:
+        return TargetDeltaExecutionSizingPlan(
+            side=normalized_side,
+            allowed=False,
+            block_reason=reason,
+            decision_reason_code=reason,
+            desired_qty=float(raw_desired_qty),
+            exchange_constrained_qty=float(constrained_qty),
+            final_submitted_qty=0.0,
+            final_submitted_notional_krw=0.0,
+            intended_lot_count=0,
+            executable_lot_count=0,
+            internal_lot_size=float(resolved_qty_step or resolved_min_qty),
+            rejected_remainder=max(0.0, float(raw_desired_qty) - float(constrained_qty)),
+            dust_policy="no_submit",
+            invariant_status="failed",
+            authority_source=str(authority_source or "target_delta"),
+            sizing_policy="target_delta_exchange_floor_v1",
+            min_qty=float(resolved_min_qty),
+            qty_step=float(resolved_qty_step),
+            min_notional_krw=float(resolved_min_notional),
+            fee_rate_used=float(settings.LIVE_FEE_RATE_ESTIMATE),
+            slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+            price_protection_basis="live_price_protection_pretrade",
+        )
+
+    if normalized_side not in {"BUY", "SELL"}:
+        return _blocked("target_delta_no_submit_side")
+    if not math.isfinite(price) or price <= 0.0:
+        return _blocked("invalid_market_price")
+    if raw_desired_qty <= DUST_POSITION_EPS:
+        return _blocked("target_delta_non_positive_qty")
+    if resolved_min_qty <= 0.0:
+        return _blocked("missing_order_rule_min_qty")
+    if resolved_min_notional <= 0.0:
+        return _blocked("missing_order_rule_min_notional_krw")
+
+    effective_qty_step = _exchange_qty_step(
+        qty_step=float(resolved_qty_step),
+        min_qty=float(resolved_min_qty),
+        max_qty_decimals=int(resolved_decimals),
+    )
+    constrained_qty = _floor_qty_to_exchange_constraints(
+        qty=float(raw_desired_qty),
+        qty_step=float(effective_qty_step),
+        max_qty_decimals=int(resolved_decimals),
+    )
+    rejected_remainder = max(0.0, float(raw_desired_qty) - float(constrained_qty))
+    final_notional = float(constrained_qty) * float(price)
+    intended_lot_count = (
+        int(Decimal(str(raw_desired_qty)) / Decimal(str(effective_qty_step)))
+        if effective_qty_step > DUST_POSITION_EPS
+        else 0
+    )
+    executable_lot_count = (
+        int(Decimal(str(constrained_qty)) / Decimal(str(effective_qty_step)))
+        if effective_qty_step > DUST_POSITION_EPS
+        else 0
+    )
+
+    if constrained_qty <= DUST_POSITION_EPS:
+        return _blocked("target_delta_qty_rounded_to_zero_after_exchange_constraints")
+    if constrained_qty + DUST_POSITION_EPS < resolved_min_qty:
+        return _blocked("target_delta_min_qty_miss", constrained_qty=constrained_qty)
+    if final_notional + DUST_POSITION_EPS < resolved_min_notional:
+        return _blocked("target_delta_min_notional_miss", constrained_qty=constrained_qty)
+
+    return TargetDeltaExecutionSizingPlan(
+        side=normalized_side,
+        allowed=True,
+        block_reason="none",
+        decision_reason_code="none",
+        desired_qty=float(raw_desired_qty),
+        exchange_constrained_qty=float(constrained_qty),
+        final_submitted_qty=float(constrained_qty),
+        final_submitted_notional_krw=float(final_notional),
+        intended_lot_count=max(0, int(intended_lot_count)),
+        executable_lot_count=max(0, int(executable_lot_count)),
+        internal_lot_size=float(effective_qty_step),
+        rejected_remainder=float(rejected_remainder),
+        dust_policy=("exchange_step_remainder_tracked" if rejected_remainder > DUST_POSITION_EPS else "none"),
+        invariant_status="passed",
+        authority_source=str(authority_source or "target_delta"),
+        sizing_policy="target_delta_exchange_floor_v1",
+        min_qty=float(resolved_min_qty),
+        qty_step=float(effective_qty_step),
+        min_notional_krw=float(resolved_min_notional),
+        fee_rate_used=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+        price_protection_basis="live_price_protection_pretrade",
     )

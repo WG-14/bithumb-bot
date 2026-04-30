@@ -3465,9 +3465,9 @@ def test_target_delta_dry_run_prints_submit_plan_without_real_order_arming(
     assert payload["submit_expected"] is True
     assert payload["block_reason"] == "none"
     assert payload["execution_submit_plan_source"] == "target_delta"
-    assert payload["execution_submit_plan_authority"] == "target_position_delta"
+    assert payload["execution_submit_plan_authority"] == "canonical_target_delta_sizing"
     assert payload["target_submit_plan"]["source"] == "target_delta"
-    assert payload["target_submit_plan"]["authority"] == "target_position_delta"
+    assert payload["target_submit_plan"]["authority"] == "canonical_target_delta_sizing"
 
 
 def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
@@ -4744,6 +4744,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "fee_gap_accounting_repair_summary",
         "fee_pending_accounting_repair_summary",
         "fee_rate_drift_diagnostics",
+        "strategy_performance_gate",
             "fill_accounting_incident_projection",
         "fill_accounting_root_cause",
         "recovery_policy",

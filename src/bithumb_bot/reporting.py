@@ -53,6 +53,8 @@ from .utils_time import kst_str, parse_interval_sec
 from .run_lock import read_run_lock_status
 from .broker.bithumb import BithumbBroker
 from .runtime_readiness import compute_runtime_readiness_snapshot
+from .experiment_fingerprint import experiment_context
+from .strategy_performance import fetch_strategy_performance_summary
 
 
 @dataclass
@@ -3764,6 +3766,12 @@ def cmd_experiment_report(
             strategy_name=strategy_name,
             pair=pair,
         )
+        performance_summary = fetch_strategy_performance_summary(
+            conn,
+            strategy_name=strategy_name,
+            pair=pair,
+            recent_limit=max(1, int(sample_threshold)),
+        )
     finally:
         conn.close()
 
@@ -3771,6 +3779,7 @@ def cmd_experiment_report(
     payload = {
         "mode": settings.MODE,
         "market": settings.PAIR,
+        "experiment": experiment_context(strategy_name=strategy_name or settings.STRATEGY_NAME),
         "filters": {
             "strategy_name": strategy_name,
             "pair": pair,
@@ -3783,6 +3792,14 @@ def cmd_experiment_report(
             "note": "ops-report/health/recovery ?????됰Ŧ?????????? ??????????????????????????깅♥???expectancy ????留⑶뜮????????????????ル탛????耀붿빓??????????釉먮폁???????????????щⅨ????????????쇨덫櫻?"
         },
         "experiment_expectancy_metrics": {
+            "gross_pnl": performance_summary.gross_pnl,
+            "fee_total": performance_summary.fee_total,
+            "profit_factor": performance_summary.profit_factor,
+            "fee_drag_ratio": performance_summary.fee_drag_ratio,
+            "worst_trade": performance_summary.worst_trade,
+            "best_trade": performance_summary.best_trade,
+            "by_strategy_name": performance_summary.by_strategy_name,
+            "by_exit_rule_name": performance_summary.by_exit_rule_name,
             "realized_net_pnl": summary.realized_net_pnl,
             "trade_count": summary.trade_count,
             "win_rate": summary.win_rate,

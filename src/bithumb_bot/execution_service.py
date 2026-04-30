@@ -9,6 +9,7 @@ from .db_core import ensure_db
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .execution_order_rules import resolve_execution_order_rules
 from .oms import build_order_intent_key
+from .order_sizing import build_target_delta_execution_sizing
 from .target_position import TargetPositionSettings, build_target_position_decision
 
 if False:  # pragma: no cover
@@ -493,43 +494,87 @@ def build_execution_decision_summary(
         )
         target_shadow_decision = target_decision.as_dict()
         if execution_engine == "target_delta":
+            target_sizing = None
+            target_sizing_dict: dict[str, object] | None = None
+            if target_decision.delta_side in {"BUY", "SELL"}:
+                target_sizing = build_target_delta_execution_sizing(
+                    pair=str(settings.PAIR),
+                    side=str(target_decision.delta_side),
+                    desired_qty=target_decision.submit_qty,
+                    market_price=float(target_decision.reference_price or 0.0),
+                    min_qty=target_decision.order_rule_min_qty,
+                    qty_step=target_decision.order_rule_qty_step,
+                    min_notional_krw=target_decision.order_rule_min_notional_krw,
+                    max_qty_decimals=getattr(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 0),
+                    authority_source="target_delta.desired_delta",
+                )
+                target_sizing_dict = target_sizing.as_dict()
             target_idempotency_key = None
-            if target_decision.would_submit and target_decision.delta_side in {"BUY", "SELL"}:
+            if target_sizing is not None and target_sizing.allowed:
                 target_idempotency_key = build_order_intent_key(
                     symbol=str(settings.PAIR),
-                    side=str(target_decision.delta_side),
+                    side=str(target_sizing.side),
                     strategy_context="target_delta",
                     intent_ts=_residual_intent_ts(payload),
                     intent_type="target_delta_rebalance",
-                    qty=float(target_decision.submit_qty or 0.0),
+                    qty=float(target_sizing.final_submitted_qty),
                 )
+            sizing_block_reason = (
+                None
+                if target_sizing is None or target_sizing.allowed
+                else str(target_sizing.block_reason)
+            )
+            submit_allowed = bool(target_decision.would_submit and target_sizing is not None and target_sizing.allowed)
             target_submit_plan = ExecutionSubmitPlan(
                 side=str(target_decision.delta_side),
                 source="target_delta",
-                authority="target_position_delta",
+                authority="canonical_target_delta_sizing",
                 final_action=(
                     "REBALANCE_TO_TARGET"
-                    if target_decision.would_submit
+                    if submit_allowed
                     else (
                         "HOLD_TARGET_TRUE_DUST"
                         if target_decision.block_reason == "delta_below_exchange_min"
                         else "BLOCK_TARGET_DELTA"
                     )
                 ),
-                qty=target_decision.submit_qty,
-                notional_krw=target_decision.submit_notional_krw,
+                qty=(None if target_sizing is None else target_sizing.final_submitted_qty),
+                notional_krw=(
+                    None if target_sizing is None else target_sizing.final_submitted_notional_krw
+                ),
                 target_exposure_krw=target_decision.new_target_exposure_krw,
                 current_effective_exposure_krw=target_decision.current_exposure_krw,
                 delta_krw=target_decision.delta_notional_krw,
-                submit_expected=bool(target_decision.would_submit),
-                pre_submit_proof_status=("passed" if target_decision.would_submit else "failed"),
-                block_reason=str(target_decision.block_reason),
+                submit_expected=submit_allowed,
+                pre_submit_proof_status=("passed" if submit_allowed else "failed"),
+                block_reason=str(sizing_block_reason or target_decision.block_reason),
                 idempotency_key=target_idempotency_key,
             ).as_dict()
             target_submit_plan.update(
                 {
                     "intent_type": "target_delta_rebalance",
                     "strategy_context": "target_delta",
+                    "authority_source": "target_delta",
+                    "target_desired_qty": target_decision.submit_qty,
+                    "target_exchange_constrained_qty": (
+                        None if target_sizing is None else target_sizing.exchange_constrained_qty
+                    ),
+                    "target_final_submitted_qty": (
+                        None if target_sizing is None else target_sizing.final_submitted_qty
+                    ),
+                    "target_final_submitted_notional_krw": (
+                        None if target_sizing is None else target_sizing.final_submitted_notional_krw
+                    ),
+                    "target_sizing": target_sizing_dict,
+                    "invariant_status": (
+                        "not_required" if target_sizing is None else target_sizing.invariant_status
+                    ),
+                    "dust_policy": (
+                        "no_delta" if target_sizing is None else target_sizing.dust_policy
+                    ),
+                    "rejected_remainder": (
+                        None if target_sizing is None else target_sizing.rejected_remainder
+                    ),
                     "target_qty": target_decision.target_qty,
                     "target_previous_exposure_krw": target_decision.previous_target_exposure_krw,
                     "target_delta_qty": target_decision.delta_qty,
@@ -854,7 +899,10 @@ class LiveSignalExecutionService:
                 return None
             if str(target_plan.get("source")) != "target_delta":
                 return None
-            if str(target_plan.get("authority")) != "target_position_delta":
+            if str(target_plan.get("authority")) not in {
+                "canonical_target_delta_sizing",
+                "target_position_delta",
+            }:
                 return None
             if str(target_plan.get("block_reason") or "none") != "none":
                 return None

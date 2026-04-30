@@ -32,6 +32,7 @@ from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
 from ..public_api_orderbook import BestQuote
 from ..runtime_readiness import compute_runtime_readiness_snapshot
+from ..strategy_performance import evaluate_strategy_performance_gate
 from .base import BrokerRejectError
 from ..reason_codes import (
     AMBIGUOUS_SUBMIT,
@@ -2363,7 +2364,10 @@ def _target_delta_submit_plan(
         return None
     if str(execution_submit_plan.get("source") or "") != "target_delta":
         return None
-    if str(execution_submit_plan.get("authority") or "") != "target_position_delta":
+    if str(execution_submit_plan.get("authority") or "") not in {
+        "canonical_target_delta_sizing",
+        "target_position_delta",
+    }:
         return None
     target_side = str(execution_submit_plan.get("side") or "").upper()
     if target_side not in {"BUY", "SELL"}:
@@ -2413,16 +2417,22 @@ def _determine_live_execution_intent(
             block_reason="none",
             decision_reason_code="target_delta_rebalance",
             budget_krw=float(target_plan.get("notional_krw") or 0.0),
-            requested_qty=target_qty,
-            exchange_constrained_qty=target_qty,
+            requested_qty=float(target_plan.get("target_desired_qty") or target_qty),
+            exchange_constrained_qty=float(target_plan.get("target_exchange_constrained_qty") or target_qty),
             lifecycle_executable_qty=target_qty,
             executable_qty=target_qty,
-            rejected_qty_remainder=0.0,
+            rejected_qty_remainder=float(target_plan.get("rejected_remainder") or 0.0),
             unused_budget_krw=0.0,
-            internal_lot_size=0.0,
-            intended_lot_count=0,
-            executable_lot_count=0,
-            qty_source="target_position_delta",
+            internal_lot_size=float((target_plan.get("target_sizing") or {}).get("internal_lot_size") or 0.0)
+            if isinstance(target_plan.get("target_sizing"), dict)
+            else 0.0,
+            intended_lot_count=int((target_plan.get("target_sizing") or {}).get("intended_lot_count") or 0)
+            if isinstance(target_plan.get("target_sizing"), dict)
+            else 0,
+            executable_lot_count=int((target_plan.get("target_sizing") or {}).get("executable_lot_count") or 0)
+            if isinstance(target_plan.get("target_sizing"), dict)
+            else 0,
+            qty_source="canonical_target_delta_sizing",
             effective_min_trade_qty=float(position_state.effective_rules.min_qty),
             min_qty=float(position_state.effective_rules.min_qty),
             qty_step=float(position_state.effective_rules.qty_step),
@@ -2433,7 +2443,7 @@ def _determine_live_execution_intent(
             {
                 "execution_engine": "target_delta",
                 "execution_submit_plan_source": "target_delta",
-                "execution_submit_plan_authority": "target_position_delta",
+                "execution_submit_plan_authority": str(target_plan.get("authority") or "canonical_target_delta_sizing"),
                 "target_engine_mode": "target_delta",
                 "target_previous_exposure_krw": target_plan.get("target_previous_exposure_krw"),
                 "target_new_exposure_krw": target_plan.get("target_exposure_krw"),
@@ -2445,24 +2455,35 @@ def _determine_live_execution_intent(
                 "target_delta_intent_type": "target_delta_rebalance",
                 "target_delta_strategy_context": "target_delta",
                 "target_delta_idempotency_key": target_plan.get("idempotency_key"),
+                "target_desired_qty": target_plan.get("target_desired_qty"),
+                "target_exchange_constrained_qty": target_plan.get("target_exchange_constrained_qty"),
+                "target_final_submitted_qty": target_plan.get("target_final_submitted_qty"),
+                "target_sizing_policy": (
+                    target_plan.get("target_sizing", {}).get("sizing_policy")
+                    if isinstance(target_plan.get("target_sizing"), dict)
+                    else None
+                ),
+                "invariant_status": target_plan.get("invariant_status"),
+                "dust_policy": target_plan.get("dust_policy"),
+                "rejected_remainder": target_plan.get("rejected_remainder"),
                 "target_dust_classification": target_plan.get("target_dust_classification"),
                 "target_position_truth_state": target_plan.get("target_position_truth_state"),
                 "source": "target_delta",
-                "authority": "target_position_delta",
-                "submit_qty_source": "target_position_delta",
-                "submit_qty_source_truth_source": "target_position_delta",
+                "authority": "canonical_target_delta_sizing",
+                "submit_qty_source": "canonical_target_delta_sizing",
+                "submit_qty_source_truth_source": "order_sizing.build_target_delta_execution_sizing",
                 "position_state_source": "broker_verified_current_position",
                 "position_state_source_truth_source": "target_delta.broker_position_evidence",
                 "sell_qty_basis_qty": target_qty,
-                "sell_qty_basis_source": "target_position_delta",
-                "sell_qty_basis_qty_truth_source": "target_delta.delta_qty",
-                "sell_qty_basis_source_truth_source": "target_delta.target_position_delta",
+                "sell_qty_basis_source": "canonical_target_delta_sizing",
+                "sell_qty_basis_qty_truth_source": "target_delta.exchange_constrained_qty",
+                "sell_qty_basis_source_truth_source": "order_sizing.build_target_delta_execution_sizing",
             }
         )
         return _LiveExecutionIntent(
             side=target_side,
             order_qty=target_qty,
-            submit_qty_source="target_position_delta",
+            submit_qty_source="canonical_target_delta_sizing",
             harmless_dust_checked=True,
             entry_sizing=(target_sizing if target_side == "BUY" else None),
             exit_sizing=(target_sizing if target_side == "SELL" else None),
@@ -2530,6 +2551,51 @@ def _determine_live_execution_intent(
         )
 
     if signal == "BUY" and normalized_exposure.effective_flat:
+        if (
+            str(settings.MODE).strip().lower() == "live"
+            and bool(settings.LIVE_REAL_ORDER_ARMED)
+            and not bool(settings.LIVE_DRY_RUN)
+        ):
+            performance_gate = evaluate_strategy_performance_gate(
+                conn,
+                strategy_name=str(strategy_name or settings.STRATEGY_NAME),
+                pair=str(settings.PAIR),
+            )
+            if not performance_gate.allowed:
+                gate_payload = performance_gate.as_dict()
+                gate_summary = dict(gate_payload.get("summary") or {})
+                decision_observability.update(
+                    {
+                        "strategy_performance_gate": gate_payload,
+                        "strategy_performance_gate_blocked": True,
+                        "strategy_performance_gate_reason_code": gate_payload.get("reason_code"),
+                        "strategy_performance_gate_recommended_next_action": gate_payload.get(
+                            "recommended_next_action"
+                        ),
+                    }
+                )
+                RUN_LOG.warning(
+                    format_log_kv(
+                        "[ORDER_SKIP] strategy performance gate blocked entry",
+                        reason_code=str(gate_payload.get("reason_code") or "-"),
+                        reason=str(gate_payload.get("reason") or "-"),
+                        strategy_name=str(strategy_name or settings.STRATEGY_NAME),
+                        sample_count=int(gate_summary.get("sample_count") or 0),
+                        expectancy_per_trade=float(gate_summary.get("expectancy_per_trade") or 0.0),
+                        net_pnl=float(gate_summary.get("net_pnl") or 0.0),
+                        fee_total=float(gate_summary.get("fee_total") or 0.0),
+                        profit_factor=gate_summary.get("profit_factor"),
+                        execution_engine=_execution_engine(),
+                        authority_source="strategy_position",
+                        invariant_status="blocked_by_strategy_performance_gate",
+                        recommended_next_action=str(gate_payload.get("recommended_next_action") or "-"),
+                    )
+                )
+                notify(
+                    "live entry blocked by strategy performance gate: "
+                    f"{gate_payload.get('reason_code')} {gate_payload.get('reason')}"
+                )
+                return None
         if not math.isfinite(float(market_price)) or float(market_price) <= 0:
             reason = f"invalid market/reference price: {market_price}"
             RUN_LOG.info(
@@ -3001,7 +3067,7 @@ def _evaluate_live_execution_feasibility(
     )
     target_delta_sell_intent = (
         intent.side == "SELL"
-        and str(intent.submit_qty_source or "") == "target_position_delta"
+        and str(intent.submit_qty_source or "") in {"canonical_target_delta_sizing", "target_position_delta"}
         and str(intent.intent_type or "") == "target_delta_rebalance"
         and str(intent.strategy_context or "") == "target_delta"
     )
