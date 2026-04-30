@@ -91,11 +91,17 @@ uv run bithumb-bot trades --limit 20
 uv run bithumb-bot ops-report --limit 20
 uv run bithumb-bot decision-telemetry --limit 200
 uv run bithumb-bot strategy-report
+uv run bithumb-bot config-dump --masked
+uv run bithumb-bot live-dry-run --short 7 --long 30
 uv run bithumb-bot cash-drift-report --recent-limit 5
 uv run bithumb-bot experiment-report --sample-threshold 30 --top-n 3
 uv run bithumb-bot fee-pending-accounting-repair --client-order-id <id> --fill-id <fill_id> --fee <fee> --fee-provenance <evidence>
 uv run bithumb-bot run --short 7 --long 30
 ```
+
+Use `config-dump --masked` for operator config inspection. Direct Python imports of
+`bithumb_bot.config.settings` do not run the CLI bootstrap path and are not the
+supported way to validate `BITHUMB_ENV_FILE`-loaded runtime configuration.
 
 Operator reporting reference:
 

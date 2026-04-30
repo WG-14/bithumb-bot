@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +35,11 @@ from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker import order_rules
 from bithumb_bot.config import settings
+from bithumb_bot.config import (
+    validate_live_dry_run_loop_startup_contract,
+    validate_live_real_order_execution_preflight,
+)
+from bithumb_bot.execution_order_rules import ExecutionOrderRules
 from bithumb_bot.db_core import (
     ensure_db,
     get_fee_gap_accounting_repair_summary,
@@ -70,6 +78,10 @@ from bithumb_bot.utils_time import kst_str
 def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
     original_mode = settings.MODE
     original_live_dry_run = settings.LIVE_DRY_RUN
+    original_live_real_order_armed = settings.LIVE_REAL_ORDER_ARMED
+    original_execution_engine = settings.EXECUTION_ENGINE
+    original_target_exposure_krw = settings.TARGET_EXPOSURE_KRW
+    original_max_order_krw = settings.MAX_ORDER_KRW
     original_start_cash = settings.START_CASH_KRW
     original_db_path = settings.DB_PATH
     original_live_fill_fee_alert_min_notional_krw = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
@@ -88,6 +100,10 @@ def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
     finally:
         object.__setattr__(settings, "MODE", original_mode)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", original_live_real_order_armed)
+        object.__setattr__(settings, "EXECUTION_ENGINE", original_execution_engine)
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", original_target_exposure_krw)
+        object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order_krw)
         object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
         object.__setattr__(settings, "DB_PATH", original_db_path)
         object.__setattr__(
@@ -8411,3 +8427,265 @@ def test_recovery_report_includes_recent_dust_unsellable_sell_event(tmp_path, ca
     assert f"reason_code={DUST_RESIDUAL_UNSELLABLE}" in out
     assert "EXIT_PARTIAL_LEFT_DUST" in out
     assert "MANUAL_DUST_REVIEW_REQUIRED" in out
+
+
+def _set_live_dry_run_settings(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 30_000.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 30_000.0)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    monkeypatch.setenv("MODE", "live")
+    monkeypatch.setenv("LIVE_DRY_RUN", "true")
+    monkeypatch.setenv("LIVE_REAL_ORDER_ARMED", "false")
+
+
+def _patch_live_dry_run_dependencies(monkeypatch: pytest.MonkeyPatch, *, signal: str = "BUY") -> None:
+    monkeypatch.setattr(app_module, "validate_live_dry_run_loop_startup_contract", lambda _settings: None)
+    monkeypatch.setattr(app_module, "evaluate_startup_safety_gate", lambda: None)
+    monkeypatch.setattr(
+        app_module,
+        "compute_runtime_readiness_snapshot",
+        lambda _conn: SimpleNamespace(
+            as_dict=lambda: {
+                "accounting_projection_ok": True,
+                "projection_converged": True,
+                "open_order_count": 0,
+                "unresolved_open_order_count": 0,
+                "recovery_required_count": 0,
+                "submit_unknown_count": 0,
+                "broker_position_evidence": {
+                    "broker_qty_known": True,
+                    "broker_qty": 0.0,
+                    "balance_source_stale": False,
+                },
+                "min_qty": 0.0001,
+                "qty_step": 0.0001,
+                "min_notional_krw": 5_000.0,
+                "idempotency_scope": "test-live-dry-run",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "resolve_execution_order_rules",
+        lambda *_args, **_kwargs: ExecutionOrderRules(
+            market="KRW-BTC",
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=5_000.0,
+            bid_min_total_krw=5_000.0,
+            source="test",
+            source_mode="test",
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "compute_signal",
+        lambda *_args, **_kwargs: {
+            "ts": 1_710_000_000_000,
+            "last_close": 100_000_000.0,
+            "market_price": 100_000_000.0,
+            "signal": signal,
+            "raw_signal": signal,
+            "base_signal": signal,
+            "strategy": "sma_with_filter",
+            "reason": "test decision",
+            "confidence": 1.0,
+        },
+    )
+
+
+def test_live_run_still_rejects_dry_run_unarmed(tmp_path, monkeypatch):
+    _set_live_dry_run_settings(tmp_path, monkeypatch)
+
+    with pytest.raises(Exception) as exc:
+        validate_live_real_order_execution_preflight(settings)
+
+    assert "MODE=live `run` is real-order only" in str(exc.value)
+    assert "live-dry-run" in str(exc.value)
+
+
+def test_live_dry_run_command_requires_live_dry_run_true(tmp_path, monkeypatch):
+    _set_live_dry_run_settings(tmp_path, monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+
+    with pytest.raises(Exception) as exc:
+        validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "LIVE_DRY_RUN=true is required for live-dry-run" in str(exc.value)
+
+
+def test_live_dry_run_command_rejects_real_order_armed(tmp_path, monkeypatch):
+    _set_live_dry_run_settings(tmp_path, monkeypatch)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+
+    with pytest.raises(Exception) as exc:
+        validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "LIVE_REAL_ORDER_ARMED=false is required for live-dry-run" in str(exc.value)
+
+
+def test_live_dry_run_records_strategy_decision_and_never_creates_lifecycle_rows(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _set_live_dry_run_settings(tmp_path, monkeypatch)
+    _patch_live_dry_run_dependencies(monkeypatch, signal="BUY")
+    submit_calls: list[object] = []
+
+    class SubmitDetectingBroker:
+        def submit_order(self, *args, **kwargs):
+            submit_calls.append((args, kwargs))
+            raise AssertionError("submit_order must not be called")
+
+    monkeypatch.setattr(app_module, "DEFAULT_BITHUMB_BROKER_CLASS", SubmitDetectingBroker)
+
+    app_module.cmd_live_dry_run(7, 30)
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        decision = conn.execute(
+            "SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        order_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM orders WHERE status IN ('PENDING_SUBMIT','NEW','FILLED')"
+        ).fetchone()["count"]
+        fill_count = conn.execute("SELECT COUNT(*) AS count FROM fills").fetchone()["count"]
+        trade_count = conn.execute("SELECT COUNT(*) AS count FROM trades").fetchone()["count"]
+    finally:
+        conn.close()
+
+    assert submit_calls == []
+    assert decision is not None
+    ctx = json.loads(decision["context_json"])
+    assert ctx["live_dry_run_loop"] is True
+    assert ctx["real_order_submit_allowed"] is False
+    assert ctx["broker_submit_disabled"] is True
+    assert ctx["submit_expected"] is False
+    assert ctx["execution_decision"]["target_submit_plan"]["submit_expected"] is False
+    assert ctx["execution_decision"]["target_submit_plan"]["target_delta_side"] == "BUY"
+    assert ctx["execution_decision"]["target_submit_plan"]["target_desired_qty"] == pytest.approx(0.0003)
+    assert "live_dry_run_loop=1" in out
+    assert "submit_expected=0" in out
+    assert order_count == 0
+    assert fill_count == 0
+    assert trade_count == 0
+
+
+def test_live_dry_run_performance_gate_visible_and_submit_expected_false(tmp_path, monkeypatch):
+    _set_live_dry_run_settings(tmp_path, monkeypatch)
+    _patch_live_dry_run_dependencies(monkeypatch, signal="BUY")
+    monkeypatch.setattr(
+        app_module,
+        "evaluate_strategy_performance_gate",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            as_dict=lambda: {
+                "enabled": True,
+                "allowed": False,
+                "blocked": True,
+                "reason_code": "STRATEGY_PERFORMANCE_BLOCKED:STRATEGY_EXPECTANCY_NEGATIVE",
+                "reason": "negative expectancy",
+                "recommended_next_action": "keep_dry_run",
+                "summary": {
+                    "sample_count": 60,
+                    "expectancy_per_trade": -38.60,
+                    "net_pnl": -2315.89,
+                    "profit_factor": 0.4922,
+                },
+            }
+        ),
+    )
+
+    app_module.cmd_live_dry_run(7, 30)
+
+    conn = ensure_db()
+    try:
+        row = conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    ctx = json.loads(row["context_json"])
+    plan = ctx["execution_decision"]["target_submit_plan"]
+    assert ctx["submit_expected"] is False
+    assert plan["submit_expected"] is False
+    assert plan["strategy_performance_gate_blocked"] is True
+    assert plan["strategy_performance_gate_reason_code"] == "STRATEGY_PERFORMANCE_BLOCKED:STRATEGY_EXPECTANCY_NEGATIVE"
+    assert ctx["final_action"] == "BLOCK_STRATEGY_PERFORMANCE_GATE"
+
+
+def test_decision_telemetry_shows_live_dry_run_target_delta_plan(tmp_path, monkeypatch, capsys):
+    _set_live_dry_run_settings(tmp_path, monkeypatch)
+    _patch_live_dry_run_dependencies(monkeypatch, signal="BUY")
+
+    app_module.cmd_live_dry_run(7, 30)
+    capsys.readouterr()
+
+    app_module.cmd_decision_telemetry(limit=20)
+    out = capsys.readouterr().out
+
+    assert "live_dry_run_loop" in out
+    assert "BUY" in out
+    assert ",0," in out
+
+
+def test_config_dump_uses_cli_bootstrap_env_file_and_masks_secrets(tmp_path):
+    env_file = tmp_path / "operator.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MODE=paper",
+                "MAX_DAILY_ORDER_COUNT=3",
+                "KILL_SWITCH=false",
+                "EXECUTION_ENGINE=target_delta",
+                "TARGET_EXPOSURE_KRW=30000",
+                "BITHUMB_API_KEY=abc123",
+                "BITHUMB_API_SECRET=secret123",
+                "SLACK_WEBHOOK_URL=https://hooks.example.invalid/token",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "BITHUMB_ENV_FILE": str(env_file),
+        "UV_CACHE_DIR": "/tmp/uv-cache",
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "bithumb_bot", "config-dump", "--masked"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert "env_loaded=True" in completed.stdout
+    assert f"env_file={env_file}" in completed.stdout
+    assert "env_source_key=BITHUMB_ENV_FILE" in completed.stdout
+    assert "MAX_DAILY_ORDER_COUNT=3" in completed.stdout
+    assert "EXECUTION_ENGINE=target_delta" in completed.stdout
+    assert "BITHUMB_API_KEY=<set>" in completed.stdout
+    assert "BITHUMB_API_SECRET=<set>" in completed.stdout
+    assert "SLACK_WEBHOOK_URL=<set>" in completed.stdout
+    assert "abc123" not in completed.stdout
+    assert "secret123" not in completed.stdout
+
+
+def test_direct_python_import_is_not_supported_config_check_path_documented():
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+
+    assert "config-dump --masked" in text
+    assert "Direct Python imports" in text
+    assert "do not run the CLI bootstrap path" in text

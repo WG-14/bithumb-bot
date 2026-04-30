@@ -4,6 +4,7 @@ from .config import (
     PATH_MANAGER,
     settings,
     log_live_execution_contract,
+    validate_live_dry_run_loop_startup_contract,
     validate_live_mode_preflight,
     validate_live_run_startup_contract,
     validate_mode_or_raise,
@@ -39,6 +40,7 @@ from .db_core import (
     replay_fill_portfolio_snapshot,
     record_manual_flat_accounting_repair,
     record_external_cash_adjustment,
+    record_strategy_decision,
     summarize_fill_accounting_incident_projection,
     upsert_target_position_state,
 )
@@ -147,6 +149,7 @@ KILL_SWITCH = settings.KILL_SWITCH
 KILL_SWITCH_LIQUIDATE = settings.KILL_SWITCH_LIQUIDATE
 DEFAULT_BITHUMB_BROKER_CLASS = bithumb_broker_module.BithumbBroker
 LIVE_COMMAND_GUARDS = {
+    "live-dry-run": "live_dry_run_loop",
     "run": "startup",
     "cancel-open-orders": "preflight",
     "flatten-position": "preflight",
@@ -208,6 +211,8 @@ def _enforce_live_command_guard(command: str | None) -> None:
     try:
         if guard == "startup":
             validate_live_run_startup_contract(settings)
+        elif guard == "live_dry_run_loop":
+            validate_live_dry_run_loop_startup_contract(settings)
         elif guard == "preflight":
             validate_live_mode_preflight(settings)
         else:
@@ -757,6 +762,367 @@ def cmd_run(short_n: int, long_n: int):
         )
         print(f"[RUN] {e}")
         raise SystemExit(1) from e
+
+
+CONFIG_DUMP_FIELDS = (
+    "MODE",
+    "DB_PATH",
+    "RUN_ROOT",
+    "DATA_ROOT",
+    "LOG_ROOT",
+    "LIVE_DRY_RUN",
+    "LIVE_REAL_ORDER_ARMED",
+    "KILL_SWITCH",
+    "MAX_DAILY_ORDER_COUNT",
+    "EXECUTION_ENGINE",
+    "TARGET_EXPOSURE_KRW",
+    "STRATEGY_NAME",
+    "PAIR",
+    "INTERVAL",
+    "LIVE_PERFORMANCE_GATE_ENABLED",
+    "LIVE_PERFORMANCE_GATE_MIN_SAMPLE",
+    "LIVE_PERFORMANCE_GATE_MIN_EXPECTANCY_KRW",
+    "LIVE_PERFORMANCE_GATE_MIN_NET_PNL_KRW",
+    "LIVE_PERFORMANCE_GATE_MIN_PROFIT_FACTOR",
+    "LIVE_PERFORMANCE_GATE_MAX_FEE_DRAG_RATIO",
+    "BITHUMB_API_KEY",
+    "BITHUMB_API_SECRET",
+    "SLACK_WEBHOOK_URL",
+    "NOTIFIER_WEBHOOK_URL",
+    "TELEGRAM_BOT_TOKEN",
+)
+
+
+def _is_secret_config_key(key: str) -> bool:
+    lowered = str(key or "").lower()
+    return any(token in lowered for token in ("secret", "token", "password", "private", "webhook", "api_key"))
+
+
+def _masked_config_value(key: str, value: object, *, masked: bool) -> object:
+    if not masked or not _is_secret_config_key(key):
+        return value
+    text = "" if value is None else str(value)
+    if not text:
+        return ""
+    return "<set>"
+
+
+def cmd_config_dump(*, masked: bool = False) -> None:
+    env_summary = get_last_explicit_env_load_summary()
+    payload: dict[str, object] = {
+        "env_loaded": bool(env_summary.loaded),
+        "env_file": env_summary.env_file or "",
+        "env_source_key": env_summary.source_key or "",
+        "env_override": bool(env_summary.override),
+    }
+    for key in CONFIG_DUMP_FIELDS:
+        payload[key] = _masked_config_value(key, getattr(settings, key, os.getenv(key, "")), masked=masked)
+
+    print("[CONFIG-DUMP]")
+    for key, value in payload.items():
+        print(f"{key}={value}")
+
+
+def _apply_live_dry_run_no_submit_policy(
+    *,
+    execution_decision: dict[str, object],
+    performance_gate: object | None,
+) -> dict[str, object]:
+    decision = dict(execution_decision)
+    target_plan = (
+        dict(decision.get("target_submit_plan"))
+        if isinstance(decision.get("target_submit_plan"), dict)
+        else None
+    )
+
+    performance_gate_payload = None
+    if performance_gate is not None:
+        as_dict = getattr(performance_gate, "as_dict", None)
+        if callable(as_dict):
+            raw_payload = as_dict()
+            performance_gate_payload = dict(raw_payload) if isinstance(raw_payload, dict) else None
+        elif isinstance(performance_gate, dict):
+            performance_gate_payload = dict(performance_gate)
+
+    performance_blocked = bool(
+        performance_gate_payload
+        and performance_gate_payload.get("enabled", True)
+        and not bool(performance_gate_payload.get("allowed", True))
+    )
+    performance_fields: dict[str, object] = {}
+    if performance_gate_payload:
+        gate_summary = (
+            dict(performance_gate_payload.get("summary"))
+            if isinstance(performance_gate_payload.get("summary"), dict)
+            else {}
+        )
+        performance_fields = {
+            "strategy_performance_gate": performance_gate_payload,
+            "strategy_performance_gate_blocked": performance_blocked,
+            "strategy_performance_gate_reason_code": performance_gate_payload.get("reason_code"),
+            "strategy_performance_gate_reason": performance_gate_payload.get("reason"),
+            "strategy_performance_gate_sample_count": int(gate_summary.get("sample_count") or 0),
+            "strategy_performance_gate_expectancy_per_trade": float(
+                gate_summary.get("expectancy_per_trade") or 0.0
+            ),
+            "strategy_performance_gate_net_pnl": float(gate_summary.get("net_pnl") or 0.0),
+            "strategy_performance_gate_profit_factor": gate_summary.get("profit_factor"),
+            "strategy_performance_gate_recommended_next_action": performance_gate_payload.get(
+                "recommended_next_action"
+            ),
+            "recommended_next_action": performance_gate_payload.get("recommended_next_action"),
+        }
+
+    target_side = str((target_plan or {}).get("target_delta_side") or (target_plan or {}).get("side") or "").upper()
+    blocked_by_gate = bool(performance_blocked and target_side == "BUY")
+    previous_submit_expected = bool(decision.get("submit_expected"))
+    if target_plan is not None:
+        previous_submit_expected = bool(target_plan.get("submit_expected"))
+        target_plan["would_submit_before_live_dry_run"] = previous_submit_expected
+        target_plan["submit_expected"] = False
+        target_plan["live_dry_run_loop"] = True
+        target_plan["real_order_submit_allowed"] = False
+        target_plan["broker_submit_disabled"] = True
+        if performance_fields and target_side == "BUY":
+            target_plan.update(performance_fields)
+        if blocked_by_gate:
+            target_plan["final_action"] = "BLOCK_STRATEGY_PERFORMANCE_GATE"
+            target_plan["block_reason"] = str(
+                performance_fields.get("strategy_performance_gate_reason_code")
+                or "STRATEGY_PERFORMANCE_BLOCKED"
+            )
+            target_plan["pre_submit_proof_status"] = "failed"
+        elif str(target_plan.get("block_reason") or "none") == "none":
+            target_plan["final_action"] = "LIVE_DRY_RUN_NO_SUBMIT"
+            target_plan["block_reason"] = "live_dry_run_no_submit"
+            target_plan["pre_submit_proof_status"] = "not_required"
+        decision["target_submit_plan"] = target_plan
+
+    decision["would_submit_before_live_dry_run"] = previous_submit_expected
+    decision["submit_expected"] = False
+    decision["live_dry_run_loop"] = True
+    decision["real_order_submit_allowed"] = False
+    decision["broker_submit_disabled"] = True
+    if performance_fields:
+        decision.update(performance_fields)
+    if blocked_by_gate:
+        decision["final_action"] = "BLOCK_STRATEGY_PERFORMANCE_GATE"
+        decision["block_reason"] = str(
+            performance_fields.get("strategy_performance_gate_reason_code")
+            or "STRATEGY_PERFORMANCE_BLOCKED"
+        )
+        decision["pre_submit_proof_status"] = "failed"
+    elif str(decision.get("block_reason") or "none") == "none":
+        decision["final_action"] = "LIVE_DRY_RUN_NO_SUBMIT"
+        decision["block_reason"] = "live_dry_run_no_submit"
+        decision["pre_submit_proof_status"] = "not_required"
+    return decision
+
+
+def cmd_live_dry_run(short_n: int, long_n: int) -> None:
+    log_live_execution_contract(
+        settings,
+        caller="cmd_live_dry_run",
+        env_summary=get_last_explicit_env_load_summary().as_dict(),
+    )
+    try:
+        validate_live_dry_run_loop_startup_contract(settings)
+    except LiveModeValidationError as exc:
+        print(f"[LIVE-DRY-RUN] {exc}")
+        raise SystemExit(1) from exc
+
+    startup_gate_reason = evaluate_startup_safety_gate()
+    if startup_gate_reason is not None:
+        print(f"[LIVE-DRY-RUN] startup safety gate blocked: {startup_gate_reason}")
+        raise SystemExit(1)
+
+    now_ms = int(time.time() * 1000)
+    conn = ensure_db()
+    try:
+        try:
+            signal_result = compute_signal(
+                conn,
+                short_n,
+                long_n,
+                strategy_name=settings.STRATEGY_NAME,
+            )
+        except TypeError as exc:
+            if "strategy_name" not in str(exc):
+                raise
+            signal_result = compute_signal(conn, short_n, long_n)
+        if signal_result is None:
+            print("[LIVE-DRY-RUN] failed: insufficient candle history for one decision cycle")
+            raise SystemExit(1)
+
+        context = dict(signal_result)
+        strategy_name = str(context.pop("strategy", settings.STRATEGY_NAME))
+        signal = str(context.pop("signal", "HOLD")).upper()
+        reason = str(context.pop("reason", ""))
+        raw_signal = str(context.get("raw_signal") or context.get("base_signal") or signal).upper()
+        readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
+        target_resolution = _resolve_target_position_state_for_run_loop_compat(
+            conn,
+            readiness_payload=readiness_payload,
+            reference_price=context.get("market_price", context.get("last_close", context.get("close"))),
+            raw_signal=raw_signal,
+            updated_ts=now_ms,
+        )
+        previous_target_exposure_krw = target_resolution["previous_target_exposure_krw"]
+        target_policy_metadata = target_resolution["target_policy_metadata"]
+        if isinstance(target_policy_metadata, dict):
+            readiness_payload = {**readiness_payload, **target_policy_metadata}
+
+        performance_gate = None
+        if str(settings.EXECUTION_ENGINE or "").strip().lower() == "target_delta":
+            performance_gate = evaluate_strategy_performance_gate(
+                conn,
+                strategy_name=str(settings.STRATEGY_NAME),
+                pair=str(settings.PAIR),
+            )
+        execution_decision = build_execution_decision_summary(
+            decision_context=context,
+            readiness_payload=readiness_payload,
+            raw_signal=raw_signal,
+            final_signal=signal,
+            final_reason=reason,
+            previous_target_exposure_krw=previous_target_exposure_krw,
+            strategy_performance_gate=performance_gate,
+        ).as_dict()
+        execution_decision = _apply_live_dry_run_no_submit_policy(
+            execution_decision=execution_decision,
+            performance_gate=performance_gate,
+        )
+
+        context["execution_decision"] = execution_decision
+        context["execution_mode"] = "live_dry_run_loop"
+        context["live_dry_run_loop"] = True
+        context["real_order_submit_allowed"] = False
+        context["broker_submit_disabled"] = True
+        context["submit_expected"] = False
+        context["final_action"] = execution_decision.get("final_action", "LIVE_DRY_RUN_NO_SUBMIT")
+        context["pre_submit_proof_status"] = execution_decision.get("pre_submit_proof_status", "not_required")
+        context["execution_block_reason"] = execution_decision.get("block_reason", "live_dry_run_no_submit")
+        target_shadow = execution_decision.get("target_shadow_decision")
+        if isinstance(target_shadow, dict):
+            for target_key, target_value in target_shadow.items():
+                context[target_key] = target_value
+        target_plan = execution_decision.get("target_submit_plan")
+        if isinstance(target_plan, dict):
+            context["target_would_submit"] = bool(target_plan.get("submit_expected"))
+            context["target_submit_qty"] = target_plan.get("qty")
+            context["target_block_reason"] = target_plan.get("block_reason")
+            for target_key, target_value in target_plan.items():
+                if target_key.startswith("target_") or target_key.startswith("strategy_performance_gate"):
+                    context[target_key] = target_value
+            context["target_dust_policy"] = target_plan.get("dust_policy")
+            context["target_rejected_remainder"] = target_plan.get("rejected_remainder")
+            context["target_invariant_status"] = target_plan.get("invariant_status")
+        if isinstance(target_policy_metadata, dict):
+            for target_key, target_value in target_policy_metadata.items():
+                context.setdefault(target_key, target_value)
+
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=now_ms,
+            strategy_name=strategy_name,
+            signal=signal,
+            reason=reason,
+            candle_ts=int(context["ts"]) if context.get("ts") is not None else None,
+            market_price=(
+                float(context["last_close"])
+                if context.get("last_close") is not None
+                else (
+                    float(context["market_price"])
+                    if context.get("market_price") is not None
+                    else None
+                )
+            ),
+            confidence=float(context["confidence"]) if context.get("confidence") is not None else None,
+            context=context,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    target_plan_out = (
+        target_plan if isinstance(target_plan, dict) else {}
+    )
+    print("[LIVE-DRY-RUN]")
+    print(
+        "  "
+        f"decision_id={decision_id} execution_mode=live_dry_run_loop live_dry_run_loop=1 "
+        "real_order_submit_allowed=0 broker_submit_disabled=1 submit_expected=0"
+    )
+    print(
+        "  "
+        f"final_action={context.get('final_action')} execution_block_reason={context.get('execution_block_reason')} "
+        f"performance_gate_blocked={1 if bool(target_plan_out.get('strategy_performance_gate_blocked')) else 0} "
+        f"performance_gate_reason_code={target_plan_out.get('strategy_performance_gate_reason_code') or '-'}"
+    )
+    print(
+        "  "
+        f"target_delta_side={target_plan_out.get('target_delta_side', target_plan_out.get('side', '-'))} "
+        f"target_desired_qty={target_plan_out.get('target_desired_qty', '-')} "
+        f"target_final_submitted_qty={target_plan_out.get('target_final_submitted_qty', '-')} "
+        f"target_rejected_remainder={target_plan_out.get('rejected_remainder', '-')} "
+        f"target_dust_policy={target_plan_out.get('dust_policy', '-')} "
+        f"target_invariant_status={target_plan_out.get('invariant_status', '-')}"
+    )
+
+
+def _resolve_target_position_state_for_run_loop_compat(
+    conn,
+    *,
+    readiness_payload: dict[str, object],
+    reference_price: object,
+    raw_signal: str,
+    updated_ts: int,
+) -> dict[str, object]:
+    if str(settings.EXECUTION_ENGINE or "").strip().lower() != "target_delta":
+        return {
+            "previous_target_exposure_krw": None,
+            "target_policy_metadata": {},
+            "target_state": None,
+        }
+    previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+    execution_order_rules = resolve_execution_order_rules(readiness_payload, market=str(settings.PAIR))
+    policy = resolve_startup_target_position_policy(
+        existing_target_state=previous_target_state,
+        readiness_payload=readiness_payload,
+        order_rules=execution_order_rules.as_order_rules(),
+        reference_price=reference_price,
+        raw_signal=raw_signal,
+    )
+    metadata = policy.as_dict()
+    if policy.policy_action in {
+        "initialize_flat_target",
+        "adopt_existing_broker_position",
+        "initialize_true_dust_flat",
+    }:
+        upsert_target_position_state(
+            conn,
+            pair=settings.PAIR,
+            target_exposure_krw=float(policy.target_exposure_krw or 0.0),
+            target_qty=float(policy.target_qty or 0.0),
+            last_signal=str(raw_signal or "HOLD").upper(),
+            last_decision_id=None,
+            last_reference_price=float(reference_price or 0.0),
+            updated_ts=int(updated_ts),
+            target_origin=policy.target_origin,
+            adoption_reason=policy.adoption_reason,
+            adopted_broker_qty=policy.adopted_broker_qty,
+            adopted_broker_exposure_krw=policy.adopted_broker_exposure_krw,
+            created_from_signal=policy.created_from_signal,
+        )
+        previous_target_state = load_target_position_state(conn, pair=settings.PAIR)
+    previous_exposure = (
+        None if previous_target_state is None else float(previous_target_state.target_exposure_krw)
+    )
+    return {
+        "previous_target_exposure_krw": previous_exposure,
+        "target_policy_metadata": metadata,
+        "target_state": previous_target_state,
+    }
 
 
 def cmd_health() -> None:
@@ -5915,6 +6281,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status")
     sub.add_parser("audit")
     sub.add_parser("check")
+    config_dump = sub.add_parser(
+        "config-dump",
+        help="show bootstrap-loaded effective config for operator validation",
+        description="Print selected effective settings; use --masked for normal operator use.",
+    )
+    config_dump.add_argument("--masked", action="store_true")
     sub.add_parser(
         "health",
         help="show health summary (staleness/errors/trading state/recovery)",
@@ -6193,6 +6565,13 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run")
     r.add_argument("--short", type=int, default=SMA_SHORT)
     r.add_argument("--long", type=int, default=SMA_LONG)
+    live_dry_run = sub.add_parser(
+        "live-dry-run",
+        help="run one live no-submit decision cycle",
+        description="Validate live decision flow, target_delta plan, and performance gate without broker submission.",
+    )
+    live_dry_run.add_argument("--short", type=int, default=SMA_SHORT)
+    live_dry_run.add_argument("--long", type=int, default=SMA_LONG)
 
     args = p.parse_args(argv)
 
@@ -6223,6 +6602,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_status()
     elif args.cmd in ("audit", "check"):
         cmd_audit()
+    elif args.cmd == "config-dump":
+        cmd_config_dump(masked=bool(args.masked))
     elif args.cmd == "health":
         cmd_health()
     elif args.cmd == "trades":
@@ -6389,6 +6770,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
+    elif args.cmd == "live-dry-run":
+        cmd_live_dry_run(args.short, args.long)
     else:
         p.print_help()
         return 2

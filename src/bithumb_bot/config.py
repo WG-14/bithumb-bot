@@ -1061,17 +1061,36 @@ def validate_live_real_order_execution_preflight(cfg: Settings) -> None:
     if bool(cfg.LIVE_DRY_RUN):
         issues.append(
             "LIVE_DRY_RUN=false is required for MODE=live run; "
-            "live dry-run is diagnostic-only and cannot start the trading loop"
+            "MODE=live `run` is real-order only. Current config is live dry-run/unarmed. "
+            "Use `bithumb-bot live-dry-run --short ... --long ...` to validate live decision flow "
+            "without submitting orders"
         )
     if not bool(cfg.LIVE_REAL_ORDER_ARMED):
         issues.append(
             "LIVE_REAL_ORDER_ARMED=true is required for MODE=live run; "
-            "unarmed live execution cannot start the trading loop"
+            "unarmed live execution cannot start the real-order trading loop. "
+            "Only use `run` after real-order arming, performance gate approval, and startup safety checks"
         )
     if issues:
         raise LiveModeValidationError(
             "live real-order execution preflight failed: " + "; ".join(issues)
         )
+
+
+def validate_live_dry_run_loop_startup_contract(cfg: Settings) -> None:
+    """Validate that the live dry-run loop is explicitly unarmed and no-submit."""
+    issues: list[str] = []
+    if cfg.MODE != "live":
+        issues.append(f"MODE=live is required for live-dry-run (got MODE={cfg.MODE})")
+    if not bool(cfg.LIVE_DRY_RUN):
+        issues.append("LIVE_DRY_RUN=true is required for live-dry-run")
+    if bool(cfg.LIVE_REAL_ORDER_ARMED):
+        issues.append("LIVE_REAL_ORDER_ARMED=false is required for live-dry-run")
+    if issues:
+        raise LiveModeValidationError(
+            "live dry-run loop startup contract failed: " + "; ".join(issues)
+        )
+    validate_live_mode_preflight(cfg)
 
 
 def validate_live_run_startup_contract(cfg: Settings) -> None:

@@ -1,313 +1,541 @@
 You are working in GitHub repository `WG-14/bithumb-bot`.
 
-This is a focused follow-up patch after commit `2fc675a7e822b586f413a9c3db67740ef85ff728`.
+Use the EC2 incident analysis as context, but do not assume every prior conclusion is correct. Treat the following as falsifiable hypotheses to verify against the current repository code and tests. The goal is not to bypass the live guard. The goal is to make the repository a more robust, reproducible, and operable automated-trading experiment system. 
 
-Do not redo the whole previous hardening patch. The latest repository already appears to include the main structural improvements:
-
-```text
-- TargetDeltaExecutionSizingPlan
-- build_target_delta_execution_sizing()
-- target_submit_plan authority = canonical_target_delta_sizing
-- strategy_performance.py
-- LIVE_PERFORMANCE_GATE_* config settings
-- experiment_fingerprint.py
-- target-delta tests updated away from the old bypass behavior
-```
-
-The remaining risk is not that the previous patch failed entirely. The remaining risk is that two important edge cases may still allow operationally unsafe behavior:
+Current EC2 observation:
 
 ```text
-1. target_delta BUY rebalancing may bypass the strategy performance gate.
-2. target_delta SELL floor rounding may leave a below-step / below-min residual whose next-loop target-state semantics are not fully fixed by tests or observability.
-```
-
-Treat these as falsifiable hypotheses. Verify them against the current code before changing anything.
-
-## Scope
-
-This is a small but high-priority hardening task.
-
-Do not implement a new strategy, optimizer, dashboard, or full experiment-management framework. The patch should be limited to:
-
-```text
-- verifying and, if needed, fixing target_delta BUY performance-gate coverage
-- verifying and, if needed, fixing SELL floor-remainder state semantics / observability
-- adding focused tests
-- preserving recovery / flatten / closeout safety paths
-```
-
-## Files to inspect first
-
-Read the current versions of:
-
-```text
-src/bithumb_bot/order_sizing.py
-src/bithumb_bot/execution_service.py
-src/bithumb_bot/broker/live.py
-src/bithumb_bot/engine.py
-src/bithumb_bot/strategy_performance.py
-src/bithumb_bot/target_position.py
-src/bithumb_bot/reporting.py
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/lifecycle.py
-src/bithumb_bot/dust.py
-tests/test_target_position_execution.py
-tests/test_decision_telemetry.py
-tests/test_analytics_context.py
-```
-
-Confirm the latest commit behavior before editing.
-
-## Hypothesis 1: target_delta BUY can bypass the performance gate
-
-### Concern
-
-The previous patch added `evaluate_strategy_performance_gate()` and appears to call it in `broker/live.py` for live real-order BUY entry. However, target-delta submit plans may be handled in an early target-delta branch inside `_determine_live_execution_intent()`.
-
-If that branch returns before the normal BUY branch, then this case may bypass the performance gate:
-
-```text
-MODE=live
-LIVE_DRY_RUN=false
-LIVE_REAL_ORDER_ARMED=true
+MAX_DAILY_ORDER_COUNT=3
 EXECUTION_ENGINE=target_delta
-performance_gate.allowed == false
-target_submit_plan.side == BUY
-target_submit_plan.submit_expected == true
+TARGET_EXPOSURE_KRW=30000
+LIVE_DRY_RUN=true
+LIVE_REAL_ORDER_ARMED=false
+KILL_SWITCH=false
 ```
 
-This must not be allowed. A negative-expectancy strategy must not quietly create a BUY rebalance via target_delta just because it used a different execution path.
+The env was correctly updated, but:
 
-### Required behavior
+```bash
+uv run bithumb-bot run --short 7 --long 30
+```
 
-When all of these are true:
+fails with:
+
+```text
+LIVE_DRY_RUN=false is required for MODE=live run
+LIVE_REAL_ORDER_ARMED=true is required for MODE=live run
+unarmed live execution cannot start the trading loop
+```
+
+This confirms that the current `MODE=live run` path is real-order armed only. Do not “fix” this by weakening the real-order guard. Preserve the real-order guard. Add an explicit, safe live dry-run execution path.
+
+Also observed:
+
+```text
+strategy_performance_gate_blocked=1
+reason_code=STRATEGY_PERFORMANCE_BLOCKED:STRATEGY_EXPECTANCY_NEGATIVE
+sample_count=60
+expectancy_per_trade=-38.60
+net_pnl=-2315.89
+profit_factor=0.4922
+```
+
+Therefore, do not recommend or enable real-order arming as part of this task.
+
+## Core problem
+
+The repository currently separates `paper` and `live`, but it does not cleanly separate these execution intents:
+
+```text
+diagnostic-only
+live-simulated-run
+live-real-order
+recovery-only
+```
+
+Current behavior appears to be:
+
+```text
+paper:
+  strategy and DB experimentation possible
+  but live order rules / live readiness / target-delta live semantics are not exercised
+
+live + dry-run:
+  health / ops / reporting diagnostics possible
+  but run loop is blocked
+
+live + real-order armed:
+  run loop possible
+  but real order risk exists
+```
+
+The missing layer is:
+
+```text
+live-simulated-run:
+  use live market, live order rules, live readiness, target-delta, performance gate, and decision persistence
+  but hard-disable all broker order submission
+```
+
+## Hypotheses to verify
+
+### Hypothesis 1: `run` is currently real-order only by design
+
+Evidence to check:
+
+```text
+src/bithumb_bot/app.py
+src/bithumb_bot/config.py
+validate_live_run_startup_contract()
+LIVE_COMMAND_GUARDS
+cmd_run()
+```
+
+Expected current behavior:
 
 ```text
 MODE=live
-LIVE_DRY_RUN=false
+LIVE_DRY_RUN=true
+LIVE_REAL_ORDER_ARMED=false
+uv run bithumb-bot run --short 7 --long 30
+```
+
+must fail with the real-order startup contract.
+
+If this is confirmed, do not remove the guard. Instead, create a separate dry-run loop path.
+
+Refutation condition:
+
+```text
+An existing command or flag already supports live dry-run run-loop execution without broker submit.
+```
+
+If such a path exists, document it, add regression tests, and avoid duplicating it.
+
+### Hypothesis 2: `BITHUMB_ENV_FILE` loading is CLI-only, causing operator confusion
+
+Observed behavior:
+
+```bash
+BITHUMB_ENV_FILE=/home/ec2-user/bithumb-runtime/env/live.verify.env \
+uv run bithumb-bot health
+```
+
+shows env loaded correctly.
+
+But:
+
+```bash
+BITHUMB_ENV_FILE=/home/ec2-user/bithumb-runtime/env/live.verify.env \
+uv run python - <<'PY'
+from bithumb_bot.config import settings
+print(settings.MAX_DAILY_ORDER_COUNT)
+print(settings.KILL_SWITCH)
+PY
+```
+
+does not necessarily load the env file before `settings` is constructed.
+
+Verify:
+
+```text
+src/bithumb_bot/bootstrap.py
+run_cli()
+bootstrap_argv()
+load_explicit_env_file()
+config.settings initialization
+console script entrypoint
+```
+
+Expected result:
+
+```text
+BITHUMB_ENV_FILE works through the `bithumb-bot` CLI bootstrap path.
+Direct Python imports do not automatically bootstrap env loading.
+```
+
+Do not make this worse. Prefer adding official CLI config-inspection commands over relying on direct Python import snippets.
+
+### Hypothesis 3: performance gate works diagnostically but cannot be exercised through new live dry-run decisions
+
+Health reports the performance gate is blocked, but because live dry-run run-loop is not allowed, there is no official way to generate fresh `strategy_decisions` under live readiness / target-delta / performance-gate conditions without real-order arming.
+
+Verify:
+
+```text
+Can a new strategy decision be generated under:
+MODE=live
+LIVE_DRY_RUN=true
+LIVE_REAL_ORDER_ARMED=false
+EXECUTION_ENGINE=target_delta
+without broker order submission?
+```
+
+Expected current behavior:
+
+```text
+No official run-loop path exists.
+```
+
+Required end state:
+
+```text
+A live dry-run loop can create new decision rows and decision telemetry while guaranteeing no orders/fills are submitted.
+```
+
+## Required design direction
+
+Do not weaken `run` as a real-order command.
+
+Add an explicit live dry-run execution surface. Prefer a separate command:
+
+```bash
+uv run bithumb-bot live-dry-run --short 7 --long 30
+```
+
+Alternative acceptable design only if cleaner in the current CLI:
+
+```bash
+uv run bithumb-bot run-live-dry --short 7 --long 30
+```
+
+Avoid making `run` behavior ambiguous. If you add a flag instead, it must be explicit and impossible to confuse with real-order arming, for example:
+
+```bash
+uv run bithumb-bot run --live-dry-run --short 7 --long 30
+```
+
+but a separate command is preferred.
+
+## Required behavior for `live-dry-run`
+
+The command must only run when:
+
+```text
+MODE=live
+LIVE_DRY_RUN=true
+LIVE_REAL_ORDER_ARMED=false
+```
+
+It must fail closed if:
+
+```text
 LIVE_REAL_ORDER_ARMED=true
-target-delta final submit side == BUY
-strategy performance gate is enabled and not allowed
+LIVE_DRY_RUN=false
+MODE is not live
+DB_PATH is unsafe or missing
+live runtime paths are inside the repository
+startup/recovery safety gate is blocking
 ```
 
-then the target-delta BUY submit must be blocked before broker submission.
-
-The block must:
+It must perform enough live-environment checks to be useful:
 
 ```text
-- preserve target-delta diagnostics
-- keep SELL / flatten / target-closeout / panic-stop / reconcile / recovery paths available
-- emit an explicit reason code
-- be visible in order suppression / decision telemetry / ops-report or health where appropriate
+market validation
+order-rule snapshot / chance contract check
+accounts preflight using dry-run/unarmed base-missing policy
+runtime readiness snapshot
+target_position_state resolution
+strategy decision generation
+target-delta submit plan generation
+strategy performance gate evaluation
+decision persistence
+decision telemetry visibility
 ```
 
-Use existing reason-code patterns where possible, but the resulting operator-facing reason must clearly indicate strategy performance gating, e.g.:
+It must never submit live orders:
 
 ```text
-STRATEGY_PERFORMANCE_BLOCKED
-STRATEGY_EXPECTANCY_NEGATIVE
-STRATEGY_SAMPLE_INSUFFICIENT
-STRATEGY_NET_PNL_NEGATIVE
-STRATEGY_PROFIT_FACTOR_LOW
-STRATEGY_FEE_DRAG_EXCESSIVE
+No broker order submit
+No order record that implies real submission
+No fill application
+No exchange order creation
+No accidental submit through target_delta
+No accidental submit through residual closeout
+No accidental submit through strategy_position
 ```
 
-### Tests to add
+If the code path needs an execution service, create an explicit no-submit execution service for this command rather than relying on `LIVE_DRY_RUN=true` deep inside broker code.
 
-Add focused tests covering at least:
+## Persistence requirements
+
+`live-dry-run` should create enough records to validate decision flow:
 
 ```text
-test_target_delta_buy_rebalance_blocked_by_strategy_performance_gate_when_live_armed
-test_target_delta_hold_rebalance_buy_blocked_by_strategy_performance_gate_when_live_armed
-test_strategy_performance_gate_does_not_block_target_delta_sell
-test_strategy_performance_gate_does_not_block_recovery_or_flatten_commands_if_applicable
+strategy_decisions row must be recorded
+decision_context must include live_dry_run_loop=1 or equivalent
+target_delta plan fields must be present when execution engine is target_delta
+performance gate fields must be present
+submit_expected must be false
+final_action must clearly indicate diagnostic/no-submit or performance-gated block
 ```
 
-The tests should simulate enough lifecycle rows or monkeypatch the performance gate so the block is deterministic.
-
-Do not only assert that the gate function returns blocked. Assert that the target-delta BUY submit path itself becomes non-submitting.
-
-Expected assertions should include:
+Do not create misleading real-order lifecycle artifacts:
 
 ```text
-submit_expected == false
-final_action is a block action, not REBALANCE_TO_TARGET
-block_reason includes strategy performance gate reason
-target_submit_plan remains present for observability
-target_submit_plan.side == BUY
-target_sizing / invariant_status are still visible if they were computed
+Do not create orders rows with PENDING_SUBMIT / NEW / FILLED
+Do not create fills
+Do not create trades
+Do not mutate portfolio as if an order executed
 ```
 
-Also include a positive control:
-
-```text
-target_delta SELL remains allowed when performance gate is blocked
-```
-
-because poor strategy performance must not prevent risk-reducing exits.
-
-## Hypothesis 2: SELL floor remainder can create ambiguous target-state semantics
-
-### Current known behavior
-
-The updated tests appear to confirm this kind of behavior:
-
-```text
-desired SELL qty: 0.0004998
-qty_step: 0.0001
-final submitted qty: 0.0004
-rejected remainder: about 0.0000998
-dust_policy: exchange_step_remainder_tracked
-invariant_status: passed
-```
-
-This is a reasonable sizing policy. The remaining issue is what happens after the fill.
-
-If target_delta wants target exposure 0, but the actual broker/local state still has a below-step or below-min residual, the next loop must not repeatedly attempt closeout or present inconsistent “flat” state without evidence.
-
-### Required behavior
-
-After target-delta SELL floors a requested closeout and leaves a remainder:
-
-```text
-- the rejected remainder must be observable
-- the remainder must be classified as tracked dust / true dust / below-min residual according to existing dust and runtime-readiness semantics
-- the next HOLD cycle with target_exposure_krw=0 must not submit another SELL if the remaining qty is below exchange minimum / below step / non-executable
-- ops-report / health / decision telemetry must make the reason clear enough for an operator
-```
-
-Do not hide the residual by pretending the system is literally flat if broker/local quantity remains nonzero. It is acceptable to treat it as effective-flat only if the dust model supports that and reports it clearly.
-
-### Tests to add
-
-Add focused tests covering at least:
-
-```text
-test_target_delta_sell_floor_remainder_updates_or_reports_dust_target_state
-test_target_delta_sell_floor_remainder_does_not_repeat_submit_when_remainder_below_min
-test_target_delta_sell_floor_remainder_appears_in_ops_report_or_decision_context_as_tracked_dust_or_true_dust
-```
-
-Use existing DB helpers and state models where possible. If full live fill simulation is too large for this patch, build the smallest realistic test around the decision / execution / readiness layer and document the remaining integration boundary.
-
-The tests must prove:
-
-```text
-- rejected_remainder is present and nonzero
-- dust_policy is explicit
-- next target_delta HOLD / SELL logic does not create an endless closeout loop for non-executable remainder
-- operator-facing context distinguishes:
-  literal flat
-  effective flat due to dust
-  tracked dust / true dust / non-executable residual
-```
-
-## Implementation guidance
-
-Prefer a design-level fix over local symptom suppression.
-
-If performance gate enforcement currently lives only in the normal BUY branch, factor it into a small helper that can be called from both:
-
-```text
-- normal BUY entry path
-- target_delta BUY rebalance path
-```
-
-The helper should answer:
-
-```text
-should_block_new_entry_or_buy_rebalance(...)
-```
-
-It should not block:
-
-```text
-SELL
-flatten-position
-target-closeout
-panic-stop
-cancel-open-orders
-reconcile
-recover-order
-resume safety evaluation
-```
-
-If target-delta remainder handling is currently only diagnostic, make sure the state transition or next-loop behavior is safe. If a full state model change is too broad, at least add explicit observability and no-repeat-submit guard coverage.
+If an existing paper/live dry-run path already creates order-like diagnostics, keep it clearly marked as diagnostic and ensure ops reports cannot confuse it with actual order submission.
 
 ## Observability requirements
 
-Any new block or residual handling must carry enough fields for ops debugging:
+The new command must make the mode obvious in logs and reports.
+
+Add fields such as:
 
 ```text
-strategy_performance_gate_blocked
-strategy_performance_gate_reason_code
-strategy_performance_gate_reason
-strategy_performance_gate_sample_count
-strategy_performance_gate_expectancy_per_trade
-strategy_performance_gate_net_pnl
-strategy_performance_gate_profit_factor
-execution_engine
-target_delta_side
-target_desired_qty
-target_final_submitted_qty
-rejected_remainder
-dust_policy
-invariant_status
-authority
-submit_qty_source
-recommended_next_action
+execution_mode=live_dry_run_loop
+live_dry_run_loop=1
+real_order_submit_allowed=0
+broker_submit_disabled=1
+submit_expected=0
+performance_gate_blocked=...
+performance_gate_reason_code=...
+target_delta_side=...
+target_desired_qty=...
+target_final_submitted_qty=...
+target_rejected_remainder=...
+target_dust_policy=...
+target_invariant_status=...
+recommended_next_action=...
 ```
 
-Use existing reporting surfaces rather than inventing a new report unless necessary.
+`decision-telemetry` should be able to show that a recent decision came from the live dry-run loop.
 
-## Recovery and safety constraints
-
-Do not weaken any existing safety or recovery behavior.
-
-Preserve these invariants:
+`ops-report` or `health` should include enough information to distinguish:
 
 ```text
-- A performance gate blocks new BUY exposure, not emergency exits.
-- Recovery, reconcile, cancel-open-orders, flatten-position, target-closeout, and panic-stop remain available.
-- Startup safety gates remain fail-closed.
-- Live runtime artifacts remain outside the repository.
-- Explicit env loading behavior must not be weakened.
-- Existing dust and position-authority semantics must not be collapsed into raw qty-only logic.
+diagnostic-only health check
+live dry-run loop
+live real-order run
+recovery-only operation
 ```
 
-## Tests to run
+## Config inspection requirement
 
-Run focused tests first:
+Add an official CLI command to remove ambiguity from direct Python imports:
 
 ```bash
+uv run bithumb-bot config-dump --masked
+```
+
+Optionally also:
+
+```bash
+uv run bithumb-bot config-check
+```
+
+Minimum `config-dump --masked` output:
+
+```text
+env_loaded
+env_file
+env_source_key
+env_override
+MODE
+DB_PATH
+RUN_ROOT
+DATA_ROOT
+LOG_ROOT
+LIVE_DRY_RUN
+LIVE_REAL_ORDER_ARMED
+KILL_SWITCH
+MAX_DAILY_ORDER_COUNT
+EXECUTION_ENGINE
+TARGET_EXPOSURE_KRW
+STRATEGY_NAME
+PAIR
+INTERVAL
+LIVE_PERFORMANCE_GATE_ENABLED
+LIVE_PERFORMANCE_GATE_MIN_SAMPLE
+LIVE_PERFORMANCE_GATE_MIN_EXPECTANCY_KRW
+LIVE_PERFORMANCE_GATE_MIN_NET_PNL_KRW
+LIVE_PERFORMANCE_GATE_MIN_PROFIT_FACTOR
+LIVE_PERFORMANCE_GATE_MAX_FEE_DRAG_RATIO
+```
+
+Mask secrets:
+
+```text
+BITHUMB_API_KEY
+BITHUMB_API_SECRET
+SLACK_WEBHOOK_URL
+any token/password/private key fields
+```
+
+Do not require operators to run:
+
+```bash
+uv run python - <<'PY'
+from bithumb_bot.config import settings
+...
+PY
+```
+
+for normal config validation. That path bypasses CLI bootstrap and is misleading.
+
+## Guard policy refactor
+
+Keep the current `run` real-order guard strict.
+
+Introduce explicit command policy categories, for example:
+
+```text
+diagnostic:
+  health, ops-report, strategy-report, decision-telemetry, config-dump
+
+live_dry_run_loop:
+  live-dry-run
+
+live_real_startup:
+  run
+
+preflight_safety:
+  cancel-open-orders, flatten-position, target-closeout, panic-stop, recover-order
+```
+
+Make failure messages operator-actionable.
+
+Current message:
+
+```text
+LIVE_DRY_RUN=false is required for MODE=live run
+LIVE_REAL_ORDER_ARMED=true is required for MODE=live run
+```
+
+Improve to something like:
+
+```text
+MODE=live `run` is real-order only.
+Current config is live dry-run/unarmed.
+Use `bithumb-bot live-dry-run --short ... --long ...` to validate live decision flow without submitting orders.
+Only use `run` after real-order arming, performance gate approval, and startup safety checks.
+```
+
+## Safety invariants
+
+Do not weaken these:
+
+```text
+Real-order `run` still requires LIVE_DRY_RUN=false.
+Real-order `run` still requires LIVE_REAL_ORDER_ARMED=true.
+Performance gate still blocks negative-expectancy BUY exposure.
+Recovery / cancel / flatten / target-closeout / panic-stop remain available.
+Live DB path must stay outside the repository.
+Live runtime artifacts must stay outside the repository.
+Startup/recovery gates remain fail-closed.
+```
+
+`live-dry-run` must not become a hidden real-order path.
+
+## Tests to add
+
+Add focused tests. Minimum coverage:
+
+```text
+test_live_run_still_rejects_dry_run_unarmed
+test_live_dry_run_command_requires_live_dry_run_true
+test_live_dry_run_command_rejects_real_order_armed
+test_live_dry_run_records_strategy_decision
+test_live_dry_run_never_calls_broker_submit
+test_live_dry_run_target_delta_plan_visible
+test_live_dry_run_performance_gate_visible_and_submit_expected_false
+test_config_dump_uses_cli_bootstrap_env_file
+test_config_dump_masks_secrets
+test_direct_python_import_is_not_the_supported_config_check_path_or_documented_if_applicable
+```
+
+Use monkeypatch/fake broker where needed. Do not hit real Bithumb in unit tests.
+
+For no-submit invariants, assert explicitly that:
+
+```text
+broker.submit_order was not called
+orders table did not get a real PENDING_SUBMIT/NEW/FILLED row
+fills table unchanged
+trades table unchanged
+strategy_decisions row created
+```
+
+If the existing architecture makes a full integration test too large, write smaller tests around the command guard and execution service boundaries, and document the remaining integration gap in the final report.
+
+## Regression tests to run
+
+Run at least:
+
+```bash
+uv run pytest -q tests/test_operator_commands.py
 uv run pytest -q tests/test_target_position_execution.py
 uv run pytest -q tests/test_decision_telemetry.py
 uv run pytest -q tests/test_analytics_context.py
 ```
 
-Also run any new test files you add.
-
-Then run the relevant broader suite:
+Also run:
 
 ```bash
 uv run pytest -q -m fast_regression
 ```
 
-If the broader suite is unavailable or too slow, state exactly what was not run and why.
+If any group is unavailable or too slow, state exactly what was not run and why.
 
-## Acceptance criteria
+## Manual EC2 acceptance scenario
 
-The patch is acceptable only if all of these are true:
+After patch, this should work without real-order arming:
+
+```bash
+cd ~/apps/bithumb-bot
+export BITHUMB_ENV_FILE=/home/ec2-user/bithumb-runtime/env/live.verify.env
+
+grep -E '^(MODE|LIVE_DRY_RUN|LIVE_REAL_ORDER_ARMED|KILL_SWITCH|MAX_DAILY_ORDER_COUNT|EXECUTION_ENGINE|TARGET_EXPOSURE_KRW)=' /home/ec2-user/bithumb-runtime/env/live.verify.env
+
+uv run bithumb-bot config-dump --masked
+uv run bithumb-bot live-dry-run --short 7 --long 30
+uv run bithumb-bot decision-telemetry --limit 20
+uv run bithumb-bot ops-report --limit 20
+```
+
+Expected:
 
 ```text
-1. target_delta BUY cannot bypass strategy performance gate in live real-order mode.
-2. target_delta SELL remains available when performance gate is blocked.
-3. target_delta SELL floor remainder has explicit no-repeat / dust / residual semantics covered by tests.
-4. Existing canonical target-delta sizing behavior remains intact.
-5. Existing startup adoption and target-state persistence tests still pass.
-6. Operator-facing diagnostics clearly explain performance blocking and residual handling.
-7. Recovery / flatten / closeout paths are not blocked by negative strategy performance.
+LIVE_DRY_RUN=true
+LIVE_REAL_ORDER_ARMED=false
+live-dry-run starts
+new decision_id appears
+live_dry_run_loop=1 visible
+submit_expected=0
+real_order_submit_allowed=0
+no orders/fills/trades created
+performance gate visible if blocked
+target-delta plan visible if applicable
 ```
+
+This must still fail:
+
+```bash
+LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false uv run bithumb-bot run --short 7 --long 30
+```
+
+Expected failure should tell the operator to use `live-dry-run`.
+
+## Non-goals
+
+Do not implement:
+
+```text
+new alpha strategy
+optimizer
+dashboard
+new exchange integration
+full backtesting platform
+real-order promotion system in this patch
+systemd unit generation unless trivial
+```
+
+Mention these as follow-up work only.
 
 ## Final report format
 
@@ -324,10 +552,14 @@ Hypotheses checked
 - Hypothesis 2: confirmed / refuted / partially confirmed
   Evidence:
   Code/tests:
+- Hypothesis 3: confirmed / refuted / partially confirmed
+  Evidence:
+  Code/tests:
 
 Design changes
-- Performance gate coverage:
-- Target-delta remainder semantics:
+- Live dry-run loop:
+- Real-order run guard preservation:
+- Config inspection:
 - Observability:
 - Recovery / safety preservation:
 
@@ -336,6 +568,11 @@ Files changed
 
 Tests run
 - command: result
+
+Manual validation instructions
+- Commands to run on EC2.
+- Expected output.
+- What must still fail closed.
 
 Operational impact
 - What will happen differently on EC2.
@@ -346,5 +583,5 @@ Follow-up work
 - Only list items not completed in this patch.
 ```
 
-Be direct. If either hypothesis is already false in the current code, say so and only add regression tests if useful. Do not weaken the core priority: negative-expectancy strategies must not gain new BUY exposure through target_delta, and target-delta floor remainders must not create repeated closeout attempts or ambiguous flat/dust state.
+Be direct. Do not dilute the priority: the repository needs an explicit live-simulated-run layer. Real-order `run` must remain strict, but operators must be able to validate live decision flow, target-delta behavior, and performance-gate behavior without arming real orders.
 

@@ -355,6 +355,7 @@ class DecisionTelemetrySummary:
     strategy_name: str
     pair: str
     interval: str
+    execution_mode: str
     count: int
 
 
@@ -2163,6 +2164,7 @@ def fetch_decision_telemetry_summary(
             target_shadow.get("target_delta_notional_krw"),
             target_shadow.get("target_block_reason"),
             target_shadow.get("target_position_truth_state"),
+            str(context.get("execution_mode") or "-"),
         )
         grouped[key] = grouped.get(key, 0) + 1
 
@@ -2217,6 +2219,7 @@ def fetch_decision_telemetry_summary(
                 strategy_name=str(key[10]),
                 pair=str(key[11]),
                 interval=str(key[12]),
+                execution_mode=str(key[44]),
                 count=count,
             )
         for key, count in grouped.items()
@@ -4782,7 +4785,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
         "observed_sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
         "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,"
-        "strategy_name,pair,interval,count"
+        "strategy_name,pair,interval,execution_mode,count"
     )
     for row in rows:
         print(
@@ -4803,5 +4806,5 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{row.dust_tracking_qty:.8f},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},"
             f"{row.sell_qty_basis_qty:.8f},{row.sell_qty_boundary_kind},{row.sell_submit_lot_count},"
             f"{row.sell_normalized_exposure_qty:.8f},{row.sell_failure_category},{row.sell_failure_detail},"
-            f"{row.strategy_name},{row.pair},{row.interval},{row.count}"
+            f"{row.strategy_name},{row.pair},{row.interval},{row.execution_mode},{row.count}"
         )
