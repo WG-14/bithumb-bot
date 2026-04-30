@@ -1552,6 +1552,24 @@ class BithumbBroker:
             to_broker_balance=lambda pair: to_broker_balance(pair),
         )
 
+    def _build_accounts_v1_balance_source(self) -> AccountsV1BalanceSource:
+        order_currency, payment_currency = self._pair()
+        return AccountsV1BalanceSource(
+            fetch_accounts_raw=lambda: self.fetch_accounts_raw(),
+            order_currency=order_currency,
+            payment_currency=payment_currency,
+            now_ms=lambda: int(time.time() * 1000),
+            parse_accounts_response=lambda payload: parse_accounts_response(payload),
+            select_pair_balances=lambda accounts, **kwargs: select_pair_balances(accounts, **kwargs),
+            to_broker_balance=lambda pair: to_broker_balance(pair),
+        )
+
+    def get_accounts_v1_balance_snapshot(self) -> BalanceSnapshot:
+        """Fetch `/v1/accounts` even when live dry-run disables order submission."""
+        source = self._build_accounts_v1_balance_source()
+        self._balance_source = source
+        return source.fetch_snapshot()
+
     def _build_myasset_ws_connection(self):
         raise BrokerTemporaryError(
             "myAsset websocket private stream adapter is not configured; "

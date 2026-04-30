@@ -8603,6 +8603,36 @@ def test_live_dry_run_records_strategy_decision_and_never_creates_lifecycle_rows
     submit_calls: list[object] = []
 
     class SubmitDetectingBroker:
+        def get_accounts_v1_balance_snapshot(self):
+            return BalanceSnapshot(
+                source_id="accounts_v1_rest_snapshot",
+                observed_ts_ms=1_800_000_000_000,
+                asset_ts_ms=1_800_000_000_000,
+                balance=BrokerBalance(
+                    cash_available=1_000_000.0,
+                    cash_locked=0.0,
+                    asset_available=0.0,
+                    asset_locked=0.0,
+                ),
+            )
+
+        def get_accounts_validation_diagnostics(self):
+            return {
+                "source": "accounts_v1_rest_snapshot",
+                "reason": "ok",
+                "failure_category": "none",
+                "currencies": ["KRW"],
+                "execution_mode": "live_dry_run_unarmed",
+                "quote_currency": "KRW",
+                "base_currency": "BTC",
+                "base_currency_missing_policy": "allow_zero_position_start_in_dry_run",
+                "flat_start_allowed": False,
+                "flat_start_reason": "dry_run_unarmed_allowance",
+                "preflight_outcome": "pass_no_position_allowed",
+                "last_observed_ts_ms": 1_800_000_000_000,
+                "stale": False,
+            }
+
         def submit_order(self, *args, **kwargs):
             submit_calls.append((args, kwargs))
             raise AssertionError("submit_order must not be called")
@@ -8635,6 +8665,8 @@ def test_live_dry_run_records_strategy_decision_and_never_creates_lifecycle_rows
     assert ctx["execution_decision"]["target_submit_plan"]["submit_expected"] is False
     assert ctx["execution_decision"]["target_submit_plan"]["target_delta_side"] == "BUY"
     assert ctx["execution_decision"]["target_submit_plan"]["target_desired_qty"] == pytest.approx(0.0003)
+    assert ctx["balance_source"] == "accounts_v1_rest_snapshot"
+    assert ctx["broker_qty_known"] is True
     assert "live_dry_run_loop=1" in out
     assert "submit_expected=0" in out
     assert order_count == 0
@@ -8674,6 +8706,70 @@ def test_live_dry_run_missing_base_row_becomes_known_zero_broker_qty(tmp_path, m
     assert order_count == 0
     assert fill_count == 0
     assert trade_count == 0
+
+
+def test_live_dry_run_command_uses_accounts_snapshot_not_dry_run_static(tmp_path, monkeypatch):
+    _set_live_dry_run_settings(tmp_path, monkeypatch)
+    _patch_live_dry_run_dependencies(monkeypatch, signal="BUY", broker_qty_known=False)
+
+    class AccountsPreferredBroker:
+        def get_balance_snapshot(self):
+            return BalanceSnapshot(
+                source_id="dry_run_static",
+                observed_ts_ms=0,
+                asset_ts_ms=0,
+                balance=BrokerBalance(
+                    cash_available=30_000.0,
+                    cash_locked=0.0,
+                    asset_available=0.0,
+                    asset_locked=0.0,
+                ),
+            )
+
+        def get_accounts_v1_balance_snapshot(self):
+            return BalanceSnapshot(
+                source_id="accounts_v1_rest_snapshot",
+                observed_ts_ms=1_800_000_000_000,
+                asset_ts_ms=1_800_000_000_000,
+                balance=BrokerBalance(
+                    cash_available=1_000_000.0,
+                    cash_locked=0.0,
+                    asset_available=0.0,
+                    asset_locked=0.0,
+                ),
+            )
+
+        def get_accounts_validation_diagnostics(self):
+            return {
+                "source": "accounts_v1_rest_snapshot",
+                "reason": "ok",
+                "failure_category": "none",
+                "currencies": ["KRW"],
+                "execution_mode": "live_dry_run_unarmed",
+                "quote_currency": "KRW",
+                "base_currency": "BTC",
+                "base_currency_missing_policy": "allow_zero_position_start_in_dry_run",
+                "flat_start_allowed": False,
+                "flat_start_reason": "dry_run_unarmed_allowance",
+                "preflight_outcome": "pass_no_position_allowed",
+                "last_observed_ts_ms": 1_800_000_000_000,
+                "stale": False,
+            }
+
+    monkeypatch.setattr(app_module, "DEFAULT_BITHUMB_BROKER_CLASS", AccountsPreferredBroker)
+
+    app_module.cmd_live_dry_run(7, 30)
+
+    conn = ensure_db()
+    try:
+        ctx = json.loads(conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()["context_json"])
+    finally:
+        conn.close()
+
+    assert ctx["balance_source"] == "accounts_v1_rest_snapshot"
+    assert ctx["broker_qty_known"] is True
+    assert ctx["broker_qty_evidence_policy"] == "missing_base_row_known_zero_for_live_dry_run"
+    assert ctx["execution_block_reason"] != "broker_qty_unknown"
 
 
 @pytest.mark.parametrize(
@@ -8729,7 +8825,9 @@ def test_live_dry_run_accounts_transport_failure_remains_broker_qty_unknown(tmp_
     finally:
         conn.close()
 
-    assert ctx.get("broker_qty_known") in (None, False)
+    assert ctx.get("broker_qty_known") is False
+    assert ctx["balance_source"] == "accounts_v1_rest_snapshot"
+    assert ctx["broker_qty_evidence_policy"] == "accounts_evidence_fetch_failed"
     assert ctx["execution_block_reason"] == "broker_qty_unknown"
     assert order_count == 0
     assert fill_count == 0

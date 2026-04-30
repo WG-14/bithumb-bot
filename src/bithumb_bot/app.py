@@ -963,13 +963,66 @@ def _live_dry_run_missing_base_zero_policy_safe(readiness_payload: dict[str, obj
     return True
 
 
+def _market_currencies_for_account_evidence() -> tuple[str, str]:
+    market = str(settings.PAIR or "").strip().upper()
+    if "-" in market:
+        quote_currency, base_currency = market.split("-", 1)
+        return quote_currency.strip(), base_currency.strip()
+    return "KRW", "BTC"
+
+
+def _failed_live_dry_run_account_evidence(
+    *,
+    reason: str,
+    diagnostics: dict[str, object] | None = None,
+) -> LiveAccountEvidence:
+    diag = dict(diagnostics or {})
+    quote_currency, base_currency = _market_currencies_for_account_evidence()
+    return LiveAccountEvidence(
+        source="accounts_v1_rest_snapshot",
+        observed_ts_ms=int(diag.get("last_observed_ts_ms") or time.time() * 1000),
+        execution_mode=str(diag.get("execution_mode") or "live_dry_run_unarmed"),
+        quote_currency=str(diag.get("quote_currency") or quote_currency),
+        base_currency=str(diag.get("base_currency") or base_currency),
+        quote_qty_known=False,
+        quote_available=0.0,
+        quote_locked=0.0,
+        base_qty_known=False,
+        base_available=0.0,
+        base_locked=0.0,
+        base_currency_missing_policy=str(
+            diag.get("base_currency_missing_policy") or "allow_zero_position_start_in_dry_run"
+        ),
+        preflight_outcome=str(diag.get("preflight_outcome") or "fail_transport_or_schema_unavailable"),
+        flat_start_allowed=bool(diag.get("flat_start_allowed")),
+        flat_start_reason=str(diag.get("flat_start_reason") or ""),
+        evidence_policy="accounts_evidence_fetch_failed",
+        evidence_reason=reason,
+    )
+
+
 def _fetch_live_dry_run_account_evidence() -> LiveAccountEvidence | None:
+    broker = None
     try:
         broker = DEFAULT_BITHUMB_BROKER_CLASS()
-        snapshot = broker.get_balance_snapshot()
+        accounts_snapshot_getter = getattr(broker, "get_accounts_v1_balance_snapshot", None)
+        if callable(accounts_snapshot_getter):
+            snapshot = accounts_snapshot_getter()
+        else:
+            snapshot = broker.get_balance_snapshot()
         diagnostics = broker.get_accounts_validation_diagnostics()
     except Exception:
-        return None
+        diagnostics = {}
+        if broker is not None:
+            try:
+                raw_diagnostics = getattr(broker, "get_accounts_validation_diagnostics", lambda: {})()
+                diagnostics = dict(raw_diagnostics) if isinstance(raw_diagnostics, dict) else {}
+            except Exception:
+                diagnostics = {}
+        return _failed_live_dry_run_account_evidence(
+            reason=str(diagnostics.get("reason") or "accounts_evidence_fetch_failed"),
+            diagnostics=diagnostics,
+        )
     return build_live_account_evidence(snapshot=snapshot, diagnostics=diagnostics)
 
 
