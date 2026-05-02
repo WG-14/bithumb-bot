@@ -169,6 +169,32 @@ def test_entry_intent_uses_config_values_without_mutating_settings(settings_guar
     assert decision.context["entry"]["intent"]["max_budget_krw"] == pytest.approx(12_345.0)
 
 
+def test_position_lot_cost_context_uses_config_values_without_mutating_settings(settings_guard) -> None:
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 99.0)
+    object.__setattr__(settings, "ENTRY_EDGE_BUFFER_RATIO", 0.99)
+    config = replace(
+        sma_strategy_config_from_settings(short_n=2, long_n=3),
+        pair="BTC_KRW",
+        interval="1m",
+        slippage_bps=4.5,
+        live_fee_rate_estimate=0.0,
+        entry_edge_buffer_ratio=0.0017,
+        strategy_min_expected_edge_ratio=0.0,
+    )
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = SmaCrossStrategy.from_config(config).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    costs = decision.context["position_lot_interpretation_costs"]
+    assert costs["exit_slippage_bps"] == pytest.approx(4.5)
+    assert costs["exit_buffer_ratio"] == pytest.approx(0.0017)
+    assert settings.STRATEGY_ENTRY_SLIPPAGE_BPS == pytest.approx(99.0)
+    assert settings.ENTRY_EDGE_BUFFER_RATIO == pytest.approx(0.99)
+
+
 def test_invalid_sma_short_long_validation_remains() -> None:
     conn = sqlite3.connect(":memory:")
     try:

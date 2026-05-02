@@ -316,6 +316,8 @@ def _load_position_context(
     candle_ts: int,
     market_price: float,
     signal_context: dict[str, Any],
+    slippage_bps: float,
+    entry_edge_buffer_ratio: float,
 ) -> tuple[PositionContext, NormalizedExposure, PositionStateModel]:
     dust_context = build_dust_display_context(_load_last_reconcile_metadata(conn))
     resolution = get_effective_order_rules(pair)
@@ -394,8 +396,8 @@ def _load_position_context(
                 else lot_definition.max_qty_decimals
             ),
             exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
-            exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
-            exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+            exit_slippage_bps=float(slippage_bps),
+            exit_buffer_ratio=float(entry_edge_buffer_ratio),
         )
         exposure = position_state.normalized_exposure
         tracked_open_qty = float(exposure.open_exposure_qty)
@@ -420,8 +422,8 @@ def _load_position_context(
         min_notional_krw=float(rules.min_notional_krw),
         max_qty_decimals=int(rules.max_qty_decimals),
         exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
-        exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
-        exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+        exit_slippage_bps=float(slippage_bps),
+        exit_buffer_ratio=float(entry_edge_buffer_ratio),
     )
     if qty_open > 1e-12 and executable_lot.executable_qty <= 1e-12:
         try:
@@ -467,8 +469,8 @@ def _load_position_context(
             else lot_definition.max_qty_decimals
         ),
         exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
-        exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
-        exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+        exit_slippage_bps=float(slippage_bps),
+        exit_buffer_ratio=float(entry_edge_buffer_ratio),
     )
     exposure = position_state.normalized_exposure
     tracked_open_qty = float(exposure.open_exposure_qty)
@@ -789,6 +791,8 @@ class SmaCrossStrategy:
             candle_ts=ts_list[-1],
             market_price=float(closes[-1]),
             signal_context=signal_context,
+            slippage_bps=float(self.slippage_bps),
+            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
         )
         exit_rules = create_exit_rules(
             rule_names=self.exit_rule_names,
@@ -807,6 +811,10 @@ class SmaCrossStrategy:
             "strategy": self.name,
             "gap_ratio": gap_ratio,
             "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
+            "position_lot_interpretation_costs": {
+                "exit_slippage_bps": float(self.slippage_bps),
+                "exit_buffer_ratio": float(self.entry_edge_buffer_ratio),
+            },
             "blocked_by_cost_filter": bool(edge_filter_triggered),
             "blocked_by_fee_authority": bool(entry_reason == FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON),
             "fee_authority": _fee_authority_context(fee_authority),
@@ -1025,6 +1033,8 @@ class SmaWithFilterStrategy:
             candle_ts=ts_list[-1],
             market_price=float(closes[-1]),
             signal_context=signal_context,
+            slippage_bps=float(self.slippage_bps),
+            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
         )
         exit_rules = create_exit_rules(
             rule_names=self.exit_rule_names,
@@ -1108,6 +1118,10 @@ class SmaWithFilterStrategy:
             "blocked_filters": blocked_filters,
             "gap_ratio": gap_ratio,
             "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
+            "position_lot_interpretation_costs": {
+                "exit_slippage_bps": float(self.slippage_bps),
+                "exit_buffer_ratio": float(self.entry_edge_buffer_ratio),
+            },
             "blocked_by_cost_filter": bool(should_filter_entry and edge_filter_triggered),
             "blocked_by_fee_authority": bool("fee_authority_degraded" in blocked_filters),
             "entry": {
