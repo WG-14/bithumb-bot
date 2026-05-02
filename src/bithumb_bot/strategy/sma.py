@@ -1095,6 +1095,7 @@ class SmaWithFilterStrategy:
             pair=self.pair,
             interval=self.interval,
             candle_ts=int(ts_list[-1]),
+            through_ts_ms=None if signal_through_ts_ms is None else int(signal_through_ts_ms),
             short_n=int(self.short_n),
             long_n=int(self.long_n),
             thresholds=thresholds,

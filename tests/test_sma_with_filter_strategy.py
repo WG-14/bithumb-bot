@@ -163,6 +163,37 @@ def test_market_regime_allows_trend_entry_and_records_replay_fingerprint() -> No
     assert replay["fee_authority_source"]
 
 
+def test_replay_fingerprint_preserves_distinct_through_ts_ms() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    last_candle_ts = 1_700_000_000_000 + 4 * 60_000
+    through_ts_ms = last_candle_ts + 30_000
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.001,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.0,
+            live_fee_rate_estimate=0.0001,
+        ).decide(conn, through_ts_ms=through_ts_ms)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    replay = decision.context["replay_fingerprint"]
+    assert replay["candle_ts"] == last_candle_ts
+    assert replay["through_ts_ms"] == through_ts_ms
+    assert replay["strategy_name"] == "sma_with_filter"
+    assert replay["decision_contract_version"] == "decision_v2"
+    assert replay["regime_feature_version"] == decision.context["market_regime"]["version"]
+
+
 def test_market_regime_chop_blocks_buy_candidate_before_strategy_filters() -> None:
     conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 10.01])
     try:

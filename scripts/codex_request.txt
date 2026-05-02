@@ -1,244 +1,92 @@
-```text
+````text
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Task: evolve the repository from a collection of SMA filters and safety gates into a more reproducible, observable, and operator-readable automated trading experiment system.
+The previous patch appears to have successfully introduced the core structure:
+- `decision_contract.py` with `decision_v2`, `signal_flow`, `primary_block_layer`, `primary_block_reason`, `all_block_reasons`, and block-layer priority.
+- `strategy/market_regime.py` with `MarketRegimeSnapshot` and `classify_sma_market_regime()`.
+- Strategy integration in `sma.py` using `apply_decision_contract`, `build_replay_fingerprint`, and `classify_sma_market_regime`.
+- `pre_trade_economics.py` with order-sized expected edge/cost/net-edge calculations.
+- Execution-stage pre-trade economics wiring, apparently in or near `execution_service.py`.
+- Config/env support for `SMA_MARKET_REGIME_ENABLED`, `MIN_NET_EDGE_KRW`, `MIN_MARGIN_AFTER_COST_RATIO`, and `PRE_TRADE_ECONOMICS_BLOCKING_ENABLED`.
+- Tests for regime blocking, cost-edge separation, replay fingerprint, and pre-trade economics observation/blocking modes.
 
-Do not treat this as “add two more filters.” The core problem to verify and address is that strategy judgment, market suitability, cost/risk, execution feasibility, and operator interpretation are not yet unified into a clear decision contract. The goal is not to make BUY appear more often. The goal is to make every BUY candidate, HOLD result, blocked order, and live-dry-run decision explainable and reproducible from one decision row plus summary reporting.
+Do not redo the previous patch from scratch. Verify the current repository state first, then close the remaining operational gaps.
 
-Important context to verify in the repo, not assume blindly:
-- The repo already appears to have `sma_with_filter`.
-- Existing SMA/filter logic appears to include gap, volatility, overextension, cost-edge, fee/slippage, live dry-run posture, decision telemetry, target shadow decision, and performance gate.
-- Existing env/config likely exposes fields such as:
-  - `STRATEGY_NAME=sma_with_filter`
-  - `SMA_FILTER_GAP_MIN_RATIO`
-  - `SMA_FILTER_VOL_WINDOW`
-  - `SMA_FILTER_VOL_MIN_RANGE_RATIO`
-  - `SMA_FILTER_OVEREXT_*`
-  - `SMA_COST_EDGE_ENABLED`
-  - `ENTRY_EDGE_BUFFER_RATIO`
-  - `LIVE_FEE_RATE_ESTIMATE`
-  - `PAPER_FEE_RATE`
-  - `STRATEGY_ENTRY_SLIPPAGE_BPS`
-- Existing strategy decision context likely already contains items such as `base_signal`, `final_signal`, `blocked_filters`, `entry`, `position_gate`, `position_state`, `fee_authority`, and cost-edge ratios.
-- Existing execution/shadow decision logic likely already contains items such as `target_shadow_decision`, `target_would_submit`, `target_delta_notional_krw`, `target_block_reason`, and `target_submit_plan`.
+Core problem statement:
+The repository now has better per-decision explanation, but it may still fail the original operational goal: an operator running live dry run should be able to see, in one CLI/report view, why BUY is not happening and whether the system is waiting correctly, over-filtering, blocked by execution/order rules, or seeing economically meaningless candidates.
 
-First verify the actual repository structure, current code paths, and tests. Do not overwrite existing behavior blindly.
+This is not a general reporting improvement. It is the missing final layer of the decision-contract design: converting `decision_v2` fields into an operator-readable dry-run summary and ensuring those fields are visible through telemetry, not buried in raw JSON.
 
-Primary design objective:
-Create a layered `decision_v2` style contract that allows an operator to answer these questions from live dry run output:
-
-1. Is the current market regime suitable for this SMA strategy?
-2. Did the strategy produce a BUY candidate?
-3. Was the candidate blocked?
-4. If blocked, was it blocked by market regime, strategy filters, cost edge, position state, order rules, execution sizing, fee authority, or performance gate?
-5. If it would become a real order, does the order-sized expected edge beat fee/slippage/buffer in KRW terms?
-6. Can the decision be reproduced from stored context?
-
-Keep these hypotheses as hypotheses and implement verification support for them.
+Keep the following hypotheses as hypotheses and implement verification support for them.
 
 Hypothesis A:
-BUY absence may not mean the strategy is broken. It may mean block causes are not being aggregated in an operator-readable way.
+The previous patch improved individual decision rows, but the operator summary still does not aggregate `decision_v2` block causes.
 
 Verification:
-Inspect recent or testable `strategy_decisions`-style records and determine whether `base_signal=BUY` exists but `final_signal=HOLD`, or whether `base_signal=BUY` itself is rare.
+Search the repo for actual implemented CLI/reporting output, not just `scripts/codex_request.txt`.
+Look for modules such as:
+- `reporting.py`
+- CLI command files
+- decision telemetry commands
+- live dry-run reporting
+- scripts that read `strategy_decisions`
 
-Expected interpretation:
-- `base_signal=BUY` exists but `final_signal=HOLD` often: filters, position gate, execution gate, or policy block is the likely cause.
-- `base_signal=BUY` rarely exists: SMA parameters or current market regime may be the cause.
-- `base_signal=BUY`, `final_signal=BUY`, but `target_would_submit=false`: execution sizing or order-rule layer is the cause.
+Check whether any real command prints a summary like:
+- base BUY candidates
+- final BUY count
+- block layer counts
+- block reason counts
+- market regime distribution
+- BUY candidate pre-trade economics averages
+
+If this does not exist, implement it.
 
 Hypothesis B:
-Cost-edge may exist as a ratio-level check, but small live orders may still be economically meaningless in KRW terms.
+The new fields exist in context JSON but are not surfaced in decision telemetry CLI/report output.
 
 Verification:
-For BUY candidates, combine:
-- expected edge ratio
-- required edge ratio
-- roundtrip fee ratio
-- slippage ratio
-- buffer ratio
-- actual planned order KRW / target delta notional KRW
+Inspect decision telemetry tests and CLI output.
+Determine whether the following fields are visible to an operator without manually digging through raw JSON:
+- `decision_contract_version`
+- `primary_block_layer`
+- `primary_block_reason`
+- `all_block_reasons`
+- `market_regime.regime`
+- `market_regime.volatility_state`
+- `market_regime.allows_entry`
+- `pre_trade_economics.order_krw`
+- `pre_trade_economics.net_edge_krw`
+- `pre_trade_economics.meaningful_edge`
 
-Then calculate:
-- expected_edge_krw
-- expected_cost_krw
-- net_edge_krw
-- meaningful_edge
-
-Expected interpretation:
-- `expected_edge_ratio > required_edge_ratio` but `net_edge_krw < MIN_NET_EDGE_KRW` means the trade may pass ratio checks but still be operationally meaningless.
-- If `net_edge_krw` is sufficient but BUY is blocked, the cause is probably market regime, position state, order rules, or performance gate, not cost.
+If not, add output and tests.
 
 Hypothesis C:
-Existing gap/volatility/overextension filters are local conditions, not a stable operator-readable market regime classifier.
+`replay_fingerprint.through_ts_ms` currently conflates candle timestamp and strategy cutoff timestamp.
 
 Verification:
-Create a separate market regime snapshot and compare it with existing blocked filters:
-- chop + BUY candidate + cost-edge pass + later poor outcome suggests a regime filter may be useful.
-- trend_up + cost-edge pass + only volatility blocked suggests existing volatility threshold may be too conservative.
+Inspect `build_replay_fingerprint()` and where it is called from `sma.py`.
+If `through_ts_ms` is set equal to `candle_ts`, but `signal_through_ts_ms` can differ from the last candle timestamp, fix the API and callsite so both values are preserved:
+- `candle_ts`: actual final candle timestamp used for the decision.
+- `through_ts_ms`: actual candle-query cutoff / strategy decision cutoff.
 
-Do not conclude this automatically. Add observability and tests so this hypothesis can be supported or refuted.
+Add a test with an explicit `through_ts_ms` that differs from the last candle timestamp.
 
 Hypothesis D:
-Live dry run may be safe but not yet sufficiently reproducible as an experiment.
+High-volatility regime is not yet observable.
 
 Verification:
-From a single decision context, check whether the following can be reconstructed:
-- candle timestamp / input window
-- SMA short/long
-- gap threshold
-- volatility window and thresholds
-- overextension lookback and threshold
-- fee authority source
-- slippage setting
-- order sizing result
-- performance gate result
-- final primary block reason
+Inspect `classify_sma_market_regime()`.
+If volatility only supports `low` and `normal`, consider adding high-volatility observability, but do not make high-vol order-size reduction mandatory in this patch.
 
-If not, add missing fields to the decision context or replay fingerprint.
+This is P2. Do not prioritize it over dry-run summary and telemetry surfacing.
 
-Implementation priorities:
+Primary implementation priorities:
 
-Priority 1: Decision Contract v2
+P1 — Required: Add `decision_v2` dry-run/operator summary aggregation
 
-Introduce a stable, backward-compatible decision contract layer. Do not remove existing context fields unless tests prove they are unused and safe to preserve elsewhere.
+Find the current best location for dry-run or decision telemetry reporting. Prefer extending an existing command over creating a duplicate command, unless the existing structure makes that messy.
 
-Add or normalize a top-level structure like:
-
-{
-  "decision_contract_version": "decision_v2",
-  "signal_flow": {
-    "base_signal": "BUY",
-    "strategy_signal": "BUY",
-    "final_signal": "HOLD",
-    "final_action": "HOLD",
-    "primary_block_layer": "market_regime",
-    "primary_block_reason": "chop_market",
-    "all_block_reasons": [
-      "market_regime.chop_market",
-      "strategy_filters.cost_edge"
-    ]
-  },
-  "market_regime": {},
-  "strategy_features": {},
-  "strategy_filters": {},
-  "pre_trade_economics": {},
-  "position_gate": {},
-  "execution_plan": {},
-  "performance_gate": {},
-  "replay_fingerprint": {}
-}
-
-The exact field names may be adapted to fit existing repository conventions, but the meaning must remain intact.
-
-Primary block layer priority should be explicit and tested. Suggested priority:
-
-1. `fee_authority`
-2. `market_regime`
-3. `position_gate`
-4. `strategy_filters`
-5. `pre_trade_economics`
-6. `execution_order_rule`
-7. `performance_gate`
-
-If the existing architecture requires a different order, document why.
-
-Priority 2: MarketRegimeClassifier module
-
-Do not hardcode market regime as another ad hoc filter inside `sma.py`.
-
-Add a separate module, for example:
-
-`src/bithumb_bot/strategy/market_regime.py`
-
-Implement a small, deterministic snapshot model, for example:
-
-@dataclass(frozen=True)
-class MarketRegimeSnapshot:
-    version: str
-    regime: str
-    regime_score: float
-    trend_strength: float
-    chop_score: float
-    volatility_ratio: float
-    volatility_state: str
-    overextension_ratio: float
-    allows_entry: bool
-    block_reason: str
-    inputs: dict[str, object]
-
-Initial regime policy can be simple and should use existing SMA/filter features where possible:
-
-- trend_strength = abs(short_sma - long_sma) / long_sma
-- trend_direction = sign(short_sma - long_sma)
-- volatility_ratio = recent high-low or close range / last close, matching or reusing existing volatility filter semantics where possible
-- overextension_ratio = recent return or existing overextension measure
-- chop_score = inverse/normalized trend strength
-
-Suggested regime labels:
-- `trend_up`
-- `trend_down`
-- `chop`
-- `low_vol`
-- `high_vol`
-- `overextended_up`
-- `unknown`
-
-Suggested initial entry policy:
-- allow BUY only when `regime == "trend_up"` and volatility is acceptable and overextension is not excessive.
-- `chop`, `low_vol`, and `overextended_up` should block entry.
-- `high_vol` should initially block or warn, not immediately resize orders, unless existing architecture already supports safe deterministic scaling.
-
-Do not introduce high-volatility order-size reduction as the first step unless it can be cleanly tested and explained. First make regime-based allow/block observable and reproducible.
-
-Add `market_regime` to strategy decision context.
-
-Priority 3: PreTradeEconomics after execution planning
-
-Do not calculate KRW-level expected edge only inside the strategy layer. Strategy-level cost-edge ratio can remain where it is.
-
-Order-sized economics must be calculated after the planned order size or target delta notional is known, likely near the existing `target_submit_plan` / shadow execution decision path.
-
-Add a module, for example:
-
-`src/bithumb_bot/execution/pre_trade_economics.py`
-
-Implement a deterministic snapshot model, for example:
-
-@dataclass(frozen=True)
-class PreTradeEconomicsSnapshot:
-    version: str
-    side: str
-    order_krw: float
-    expected_edge_ratio: float
-    required_edge_ratio: float
-    roundtrip_fee_ratio: float
-    slippage_ratio: float
-    buffer_ratio: float
-    margin_after_cost_ratio: float
-    expected_edge_krw: float
-    expected_cost_krw: float
-    net_edge_krw: float
-    meaningful_edge: bool
-    reason: str
-    inputs: dict[str, object]
-
-Formula guidance:
-- `expected_edge_krw = order_krw * expected_edge_ratio`
-- `expected_cost_krw = order_krw * (roundtrip_fee_ratio + slippage_ratio + buffer_ratio)` unless existing code already has a better cost-floor model
-- `net_edge_krw = expected_edge_krw - expected_cost_krw`
-- `margin_after_cost_ratio = expected_edge_ratio - required_edge_ratio`
-- `meaningful_edge = net_edge_krw >= MIN_NET_EDGE_KRW and margin_after_cost_ratio >= MIN_MARGIN_AFTER_COST_RATIO`
-
-Add config/env defaults if missing:
-- `MIN_NET_EDGE_KRW`
-- `MIN_MARGIN_AFTER_COST_RATIO`
-
-Use conservative defaults. Avoid breaking current dry-run behavior. If the new meaningful-edge gate is too invasive for the first patch, make it observable first and only blocking when explicitly enabled by config. However, still compute and report it.
-
-Priority 4: Live dry-run operator summary
-
-Find the current live dry-run report or CLI output path. Add an operator-readable summary that aggregates recent decision rows by block cause and market regime.
+The summary must aggregate recent decision rows, preferably from the same source/table used by current decision telemetry.
 
 Target output shape:
 
@@ -248,7 +96,16 @@ base BUY candidates: 14
 final BUY: 0
 
 block layers:
-- market_regime.chop: 8
+- market_regime: 8
+- strategy_filters: 4
+- position_gate: 1
+- execution_order_rule: 1
+- pre_trade_economics: 0
+- fee_authority: 0
+- performance_gate: 0
+
+block reasons:
+- market_regime.chop_market: 8
 - strategy_filters.cost_edge: 4
 - position_gate.already_in_position: 1
 - execution_order_rule.min_notional: 1
@@ -258,185 +115,246 @@ regime distribution:
 - chop: 61%
 - low_vol: 13%
 - overextended_up: 8%
+- unknown: 0%
 
 BUY candidate economics:
+- count_with_economics: 10
 - avg_order_krw: 10000
+- min_order_krw: 5000
+- max_order_krw: 20000
 - avg_expected_edge_krw: 12
 - avg_expected_cost_krw: 15
 - avg_net_edge_krw: -3
 - meaningful_edge_count: 0
 
-If the repository already has a report format, preserve it and add these sections without removing existing diagnostics.
+Implementation details:
+- Parse context defensively. Older decision rows may not have `decision_v2`.
+- If a row lacks `signal_flow`, fall back to legacy fields where possible.
+- Do not crash on malformed or missing JSON.
+- Count `base_signal=BUY` as BUY candidates, even if final signal is HOLD.
+- Count `final_signal=BUY` separately.
+- For block layer/reason counts, prefer:
+  - `context.signal_flow.primary_block_layer`
+  - `context.signal_flow.primary_block_reason`
+  - `context.signal_flow.all_block_reasons`
+  - fall back to top-level `primary_block_layer`, `primary_block_reason`, `all_block_reasons`.
+- For market regime distribution, read `context.market_regime.regime`.
+- For economics, read `context.pre_trade_economics`.
 
-Testing requirements:
+Add tests for:
+- Aggregating mixed decision_v2 rows.
+- Handling older legacy rows without decision_v2.
+- Handling missing/malformed context safely.
+- Correctly counting BUY candidates vs final BUY.
+- Correctly aggregating block layers and block reasons.
+- Correctly aggregating market regimes.
+- Correctly aggregating economics only when present.
 
-Add focused tests. Do not only test that fields exist. Test cause separation and reproducibility.
+P1 — Required: Surface decision_v2 fields in decision telemetry CLI/report output
 
-Required tests:
+Find the existing decision telemetry command or report output. Add visible fields so the operator does not need to inspect raw JSON.
 
-1. Market regime allows trend entry:
-   Given a deterministic trend-up candle sequence, cost-edge pass, and no open position:
-   - `market_regime.regime == "trend_up"`
-   - `market_regime.allows_entry is True`
-   - `signal_flow.primary_block_layer` is not `market_regime`
-
-2. Chop blocks a BUY candidate:
-   Given a sequence where SMA creates a golden cross but trend strength is below threshold:
-   - `base_signal == "BUY"`
-   - `final_signal == "HOLD"`
-   - `market_regime.regime == "chop"`
-   - `signal_flow.primary_block_layer == "market_regime"`
-   - `signal_flow.primary_block_reason == "chop_market"` or equivalent
-
-3. Cost-edge remains distinguishable from market regime:
-   Given trend-up regime but insufficient expected edge:
-   - `market_regime.allows_entry is True`
-   - cost-edge filter blocks
-   - `signal_flow.primary_block_layer == "strategy_filters"`
-   - `signal_flow.primary_block_reason` identifies cost-edge
-
-4. KRW economics can mark a ratio-passing candidate as operationally meaningless:
-   Given ratio-level cost-edge pass but very small order KRW:
-   - `pre_trade_economics.net_edge_krw` is below threshold
-   - `pre_trade_economics.meaningful_edge is False`
-   - if blocking is enabled, `primary_block_layer == "pre_trade_economics"`
-   - if blocking is not enabled by default, report clearly that it is observation-only
-
-5. Execution order-rule block remains separate:
-   Given final strategy BUY but execution plan cannot submit due to min notional/order rule:
-   - `final_signal == "BUY"` or strategy-level action remains BUY as appropriate
-   - `target_would_submit is False`
-   - `signal_flow.primary_block_layer == "execution_order_rule"` or equivalent
-
-6. Replay fingerprint coverage:
-   Verify `replay_fingerprint` or equivalent context includes enough information to reconstruct:
-   - strategy name
-   - strategy version or decision contract version
-   - pair
-   - interval
-   - candle timestamp / through timestamp
-   - SMA short/long
-   - regime feature version
-   - key thresholds
-   - fee/slippage source
-   - order sizing result if available
-
-7. Backward compatibility:
-   Existing tests for `blocked_filters`, `filters`, `entry`, `position_gate`, `position_state`, `fee_authority`, `execution_decision`, and dry-run safety must still pass or be intentionally updated with a clear reason.
-
-Recovery and safety requirements:
-
-- Do not weaken live-order safety.
-- Do not make live real orders easier to arm.
-- Do not remove `LIVE_DRY_RUN` / `LIVE_REAL_ORDER_ARMED` protections.
-- New gates should default to conservative or observation-only behavior unless the repository already has a clear pattern for enabling blocking filters.
-- Preserve old context fields while adding the new contract unless there is a strong reason not to.
-- Keep all calculations deterministic and side-effect-free.
-- Avoid network calls in tests.
-- Use fixture candle data for regime and cost/economics tests.
-
-Observability requirements:
-
-Every decision involving a BUY candidate or blocked BUY candidate should expose:
-
-- `base_signal`
-- `final_signal`
+At minimum, each relevant decision display or compact summary should surface:
 - `primary_block_layer`
 - `primary_block_reason`
 - `all_block_reasons`
 - `market_regime.regime`
-- `market_regime.regime_score`
-- `market_regime.trend_strength`
-- `market_regime.chop_score`
 - `market_regime.volatility_state`
 - `market_regime.allows_entry`
-- `strategy_filters`
-- `pre_trade_economics` if an order size is known or can be estimated
-- `execution_plan` / target shadow decision if available
-- `replay_fingerprint`
+- `pre_trade_economics.order_krw`
+- `pre_trade_economics.net_edge_krw`
+- `pre_trade_economics.meaningful_edge`
 
-Scope boundaries:
+Add or update a test named similarly to:
+
+`test_decision_telemetry_cli_exposes_decision_v2_fields`
+
+The test should verify that CLI/report output includes:
+- `primary_block_layer`
+- `primary_block_reason`
+- `market_regime`
+- `volatility_state`
+- `net_edge_krw`
+- `meaningful_edge`
+
+Do not merely assert that these keys exist in raw context JSON. Assert that the operator-facing output includes them.
+
+P2 — Recommended: Fix replay fingerprint timestamp separation
+
+Inspect current `build_replay_fingerprint()` signature and callsite.
+
+If it currently sets:
+
+`through_ts_ms = candle_ts`
+
+change it to accept separate values:
+
+```python
+build_replay_fingerprint(
+    *,
+    strategy_name: str,
+    pair: str,
+    interval: str,
+    candle_ts: int | None,
+    through_ts_ms: int | None,
+    short_n: int,
+    long_n: int,
+    thresholds: dict[str, object],
+    fee_authority: dict[str, object],
+    slippage_bps: float,
+    regime_version: str,
+    order_sizing: dict[str, object] | None = None,
+)
+````
+
+Then call it from strategy code with:
+
+* `candle_ts=ts_list[-1]`
+* `through_ts_ms=signal_through_ts_ms`
+
+Add a focused test:
+
+* Set up a decision with explicit `through_ts_ms`.
+* Ensure `replay_fingerprint["candle_ts"]` equals the last candle timestamp.
+* Ensure `replay_fingerprint["through_ts_ms"]` equals the explicit cutoff timestamp.
+* Ensure existing replay fingerprint fields still exist.
+
+P2 — Optional: Add high-volatility observability only if low-risk
+
+If straightforward, add:
+
+* `SMA_FILTER_VOL_MAX_RANGE_RATIO=0` default, disabled when zero.
+* If `volatility_ratio > max`, classify `volatility_state="high"` and `regime="high_vol"`.
+
+Initial behavior:
+
+* Do not implement high-vol order-size scaling.
+* Do not tune thresholds.
+* Do not make high-vol behavior complex.
+* Either make `high_vol` block entry conservatively or observation-only, following existing repo conventions. Document the behavior clearly.
+* Add tests if implemented.
+
+If this expands scope too much, skip it and explicitly report that high-vol observability remains future work.
+
+P2 — Repository hygiene: Handle `scripts/codex_request.txt`
+
+Search whether `scripts/codex_request.txt` is intentionally kept.
+If it is just a temporary prompt file, remove it.
+If it should remain as documentation, move or convert the relevant durable content into something like:
+
+`docs/decision_v2_design.md`
+
+Do not keep temporary Codex prompt text in `scripts/` if it creates search noise for operational code work.
+
+Safety and recovery requirements:
 
 Do not:
-- Replace the SMA strategy with a different strategy.
-- Optimize thresholds based on a few dry-run samples.
-- Add complex ML or opaque scoring.
-- Make high-volatility order-size reduction the first mandatory behavior.
-- Treat `net_edge_krw > 0` as sufficient by itself.
-- Hide existing filter-level details under a single summary field.
+
+* Weaken live order safety.
+* Enable real orders.
+* Change `LIVE_DRY_RUN` / `LIVE_REAL_ORDER_ARMED` protections.
+* Make `PRE_TRADE_ECONOMICS_BLOCKING_ENABLED` default to true.
+* Make high-vol order-size reduction mandatory.
+* Tune strategy thresholds based on guesses.
+* Remove legacy context fields.
+* Break old telemetry rows.
 
 Do:
-- Add a layered decision contract.
-- Add market regime as a separate, testable classifier.
-- Add KRW-level pre-trade economics after execution sizing/planning.
-- Add primary block cause selection.
-- Add dry-run summary aggregation.
-- Add deterministic tests.
-- Preserve or improve safety.
+
+* Preserve backward compatibility.
+* Parse older rows defensively.
+* Keep new summary/reporting side-effect-free.
+* Keep tests deterministic.
+* Avoid network calls in tests.
+* Prefer additive CLI/report output over destructive format changes unless existing tests require adaptation.
+* Ensure malformed context does not crash summary commands.
 
 Suggested implementation sequence:
 
-1. Inspect repository structure:
-   - strategy modules
-   - execution planning modules
-   - config/env parsing
-   - dry-run CLI/reporting
-   - tests around SMA filters, decision telemetry, execution shadow decisions, and performance gate
+1. Inspect current reporting/CLI/telemetry code paths.
+2. Locate where `strategy_decisions` or equivalent decision records are read.
+3. Add a small pure function for summary aggregation, for example:
 
-2. Add `MarketRegimeSnapshot` and classifier module.
+   * `build_decision_v2_summary(rows: Sequence[...]) -> dict`
+   * or similar, matching repo style.
+4. Add formatter function for operator-readable output.
+5. Wire formatter into existing decision telemetry or dry-run summary command.
+6. Add tests for the pure aggregation function.
+7. Add CLI/report output tests for visible decision_v2 fields.
+8. Fix replay fingerprint timestamp separation if needed.
+9. Optionally add high-vol observability only if small and testable.
+10. Clean up or document `scripts/codex_request.txt`.
+11. Run the test suite.
 
-3. Wire market regime into `sma_with_filter` decision context without destroying existing `filters` / `blocked_filters`.
+Testing requirements:
 
-4. Add `decision_contract_version`, `signal_flow`, `primary_block_layer`, `primary_block_reason`, and `all_block_reasons`.
+Run the existing test suite with the repository’s normal test command, likely:
 
-5. Add `PreTradeEconomicsSnapshot` near execution planning after planned order KRW/target delta is available.
+`pytest`
 
-6. Add or extend dry-run summary aggregation.
+Also run any narrower relevant test files first if useful.
 
-7. Add tests for cause separation, economics, replay context, and backward compatibility.
+Required new or updated tests:
 
-8. Run the test suite.
+* `test_decision_v2_summary_counts_buy_candidates_and_final_buys`
+* `test_decision_v2_summary_counts_block_layers_and_reasons`
+* `test_decision_v2_summary_counts_market_regimes`
+* `test_decision_v2_summary_aggregates_pre_trade_economics`
+* `test_decision_v2_summary_handles_legacy_or_malformed_context`
+* `test_decision_telemetry_cli_exposes_decision_v2_fields`
+* `test_replay_fingerprint_preserves_distinct_through_ts_ms` if timestamp bug exists
 
-9. If tests fail, fix regressions without weakening safety gates.
+The exact names may vary, but the coverage must be present.
 
 Final report format:
 
-Return a concise but complete implementation report with these sections:
+Return a concise implementation report with these sections:
 
 1. Summary
-   - What changed
-   - Whether this was a design-contract change, regime classifier change, economics change, reporting change, or tests-only change
+
+   * What was changed.
+   * Whether the main patch was summary aggregation, telemetry surfacing, replay fingerprint fix, high-vol observability, or cleanup.
 
 2. Repository findings
-   - Which files/modules contained existing SMA filters, cost-edge logic, execution shadow decisions, and dry-run reporting
-   - Which assumptions were confirmed
-   - Which assumptions were false or only partially true
+
+   * Where existing decision contract, market regime, pre-trade economics, execution wiring, and telemetry/reporting code live.
+   * Which assumptions were confirmed.
+   * Which assumptions were false or only partially true.
 
 3. Hypothesis status
-   - Hypothesis A: supported / refuted / not fully tested, with evidence
-   - Hypothesis B: supported / refuted / not fully tested, with evidence
-   - Hypothesis C: supported / refuted / not fully tested, with evidence
-   - Hypothesis D: supported / refuted / not fully tested, with evidence
+
+   * Hypothesis A: supported / refuted / partially supported, with evidence.
+   * Hypothesis B: supported / refuted / partially supported, with evidence.
+   * Hypothesis C: supported / refuted / partially supported, with evidence.
+   * Hypothesis D: supported / refuted / deferred, with evidence.
 
 4. Design decisions
-   - Why market regime was separated from SMA filter logic
-   - Why KRW economics was placed after execution planning
-   - How primary block layer priority is resolved
-   - Whether pre-trade economics is blocking or observation-only by default
+
+   * Why the summary aggregation was placed where it was.
+   * How old/non-decision_v2 rows are handled.
+   * How block layer/reason priority is resolved in summary.
+   * Whether high-vol observability was implemented or deferred.
+   * Whether `scripts/codex_request.txt` was removed, moved, or kept.
 
 5. Tests
-   - List new tests
-   - List updated tests
-   - Include exact test command and result
+
+   * List new tests.
+   * List updated tests.
+   * Include exact commands run and results.
 
 6. Safety and recovery
-   - Confirm live-order safety was not weakened
-   - Confirm dry-run behavior remains safe
-   - Confirm rollback path or config disable path for new behavior
+
+   * Confirm live-order safety was not weakened.
+   * Confirm pre-trade economics blocking default remains unchanged.
+   * Confirm dry-run behavior remains safe.
+   * Explain how to disable or ignore the new reporting if needed.
 
 7. Remaining work
-   - Any thresholds that should be tuned later
-   - Any summary/reporting limitations
-   - Any replay gaps that still remain
+
+   * Any known limitations in summary/reporting.
+   * Whether high-vol regime support remains future work.
+   * Any replay or telemetry gaps that still remain.
+
+```
 ```
 

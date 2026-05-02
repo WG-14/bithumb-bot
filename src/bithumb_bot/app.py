@@ -119,8 +119,10 @@ from .reporting import (
     cmd_ops_report,
     cmd_risk_report,
     cmd_strategy_report,
+    fetch_decision_v2_summary,
     fetch_attribution_quality_summary,
     fetch_recovery_attribution_signal_summary,
+    print_decision_v2_summary,
     parse_kst_date_range_to_ts_ms,
 )
 from .storage_io import write_json_atomic
@@ -1081,90 +1083,11 @@ def _load_context_payload(raw_json: object) -> dict[str, object]:
 
 
 def _build_live_dry_run_decision_summary(conn: sqlite3.Connection, *, limit: int = 300) -> dict[str, object]:
-    rows = conn.execute(
-        """
-        SELECT context_json
-        FROM strategy_decisions
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (max(1, int(limit)),),
-    ).fetchall()
-    contexts = [_load_context_payload(row["context_json"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
-    base_buy = 0
-    final_buy = 0
-    block_counts: dict[str, int] = {}
-    regime_counts: dict[str, int] = {}
-    economics_rows: list[dict[str, object]] = []
-    for ctx in contexts:
-        signal_flow = ctx.get("signal_flow") if isinstance(ctx.get("signal_flow"), dict) else {}
-        base_signal = str(signal_flow.get("base_signal") or ctx.get("base_signal") or "HOLD").upper()
-        final_signal = str(signal_flow.get("final_signal") or ctx.get("final_signal") or ctx.get("signal") or "HOLD").upper()
-        if base_signal == "BUY":
-            base_buy += 1
-        if final_signal == "BUY":
-            final_buy += 1
-        block_reasons = signal_flow.get("all_block_reasons") if isinstance(signal_flow.get("all_block_reasons"), list) else ctx.get("all_block_reasons")
-        if isinstance(block_reasons, list):
-            for reason in block_reasons:
-                reason_text = str(reason).strip()
-                if reason_text:
-                    block_counts[reason_text] = block_counts.get(reason_text, 0) + 1
-        market_regime = ctx.get("market_regime") if isinstance(ctx.get("market_regime"), dict) else {}
-        regime = str(market_regime.get("regime") or "unknown")
-        regime_counts[regime] = regime_counts.get(regime, 0) + 1
-        economics = ctx.get("pre_trade_economics")
-        if isinstance(economics, dict) and base_signal == "BUY":
-            economics_rows.append(economics)
-
-    def _avg(key: str) -> float:
-        values = [float(row.get(key) or 0.0) for row in economics_rows]
-        return sum(values) / len(values) if values else 0.0
-
-    return {
-        "window": len(contexts),
-        "base_buy": base_buy,
-        "final_buy": final_buy,
-        "block_counts": block_counts,
-        "regime_counts": regime_counts,
-        "economics": {
-            "avg_order_krw": _avg("order_krw"),
-            "avg_expected_edge_krw": _avg("expected_edge_krw"),
-            "avg_expected_cost_krw": _avg("expected_cost_krw"),
-            "avg_net_edge_krw": _avg("net_edge_krw"),
-            "meaningful_edge_count": sum(1 for row in economics_rows if bool(row.get("meaningful_edge"))),
-        },
-    }
+    return fetch_decision_v2_summary(conn, limit=limit)
 
 
 def _print_live_dry_run_decision_summary(summary: dict[str, object]) -> None:
-    print("[DRY-RUN DECISION SUMMARY]")
-    print(f"  window: last {int(summary.get('window') or 0)} decisions")
-    print(f"  base BUY candidates: {int(summary.get('base_buy') or 0)}")
-    print(f"  final BUY: {int(summary.get('final_buy') or 0)}")
-    block_counts = summary.get("block_counts") if isinstance(summary.get("block_counts"), dict) else {}
-    print("  block layers:")
-    if block_counts:
-        for reason, count in sorted(block_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
-            print(f"  - {reason}: {count}")
-    else:
-        print("  - none: 0")
-    regime_counts = summary.get("regime_counts") if isinstance(summary.get("regime_counts"), dict) else {}
-    total_regimes = sum(int(count) for count in regime_counts.values())
-    print("  regime distribution:")
-    if regime_counts and total_regimes > 0:
-        for regime, count in sorted(regime_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
-            pct = (100.0 * int(count)) / float(total_regimes)
-            print(f"  - {regime}: {pct:.0f}%")
-    else:
-        print("  - unknown: 0%")
-    economics = summary.get("economics") if isinstance(summary.get("economics"), dict) else {}
-    print("  BUY candidate economics:")
-    print(f"  - avg_order_krw: {float(economics.get('avg_order_krw') or 0.0):.0f}")
-    print(f"  - avg_expected_edge_krw: {float(economics.get('avg_expected_edge_krw') or 0.0):.2f}")
-    print(f"  - avg_expected_cost_krw: {float(economics.get('avg_expected_cost_krw') or 0.0):.2f}")
-    print(f"  - avg_net_edge_krw: {float(economics.get('avg_net_edge_krw') or 0.0):.2f}")
-    print(f"  - meaningful_edge_count: {int(economics.get('meaningful_edge_count') or 0)}")
+    print_decision_v2_summary(summary)
 
 
 def cmd_live_dry_run(short_n: int, long_n: int) -> None:

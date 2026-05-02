@@ -15,6 +15,7 @@ from .analytics_context import (
     normalize_analysis_context_from_lifecycle_row,
 )
 from .config import PATH_MANAGER, settings
+from .decision_contract import BLOCK_LAYER_PRIORITY
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .fee_authority import resolve_fee_authority_snapshot
 from .broker.order_rules import get_effective_order_rules, rule_source_for
@@ -310,10 +311,20 @@ def build_fee_rate_drift_diagnostics(
 class DecisionTelemetrySummary:
     """Operator-facing telemetry summary; qty fields are diagnostic, not authority."""
 
+    decision_contract_version: str
     base_signal: str
     decision_type: str
     raw_signal: str
     final_signal: str
+    primary_block_layer: str
+    primary_block_reason: str
+    all_block_reasons: str
+    market_regime: str
+    market_regime_volatility_state: str
+    market_regime_allows_entry: bool | None
+    pre_trade_economics_order_krw: float | None
+    pre_trade_economics_net_edge_krw: float | None
+    pre_trade_economics_meaningful_edge: bool | None
     final_action: str
     submit_expected: bool
     pre_submit_proof_status: str
@@ -1540,6 +1551,256 @@ def _load_json_dict(raw_json: str | None) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+def _context_from_decision_row(row: object) -> tuple[dict[str, object], str, str]:
+    fallback_signal = ""
+    fallback_reason = ""
+    raw_context: object = None
+    if isinstance(row, sqlite3.Row):
+        keys = set(row.keys())
+        raw_context = row["context_json"] if "context_json" in keys else None
+        fallback_signal = str(row["signal"] or "") if "signal" in keys else ""
+        fallback_reason = str(row["reason"] or "") if "reason" in keys else ""
+    elif isinstance(row, dict):
+        raw_context = row.get("context_json")
+        fallback_signal = str(row.get("signal") or "")
+        fallback_reason = str(row.get("reason") or "")
+    else:
+        try:
+            raw_context = row[0]  # type: ignore[index]
+        except Exception:
+            raw_context = None
+    return _load_json_dict(str(raw_context or "")), fallback_signal, fallback_reason
+
+
+def _text_field(value: object, default: str = "-") -> str:
+    text = str(value if value is not None else "").strip()
+    return text if text else default
+
+
+def _bool_or_none(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes"}:
+        return True
+    if text in {"0", "false", "no"}:
+        return False
+    return None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _decision_v2_fields(context: dict[str, object], fallback_signal: str = "") -> dict[str, object]:
+    signal_flow = context.get("signal_flow") if isinstance(context.get("signal_flow"), dict) else {}
+    base_signal = _text_field(
+        signal_flow.get("base_signal")
+        or context.get("base_signal")
+        or context.get("raw_signal")
+        or fallback_signal
+        or "HOLD",
+        "HOLD",
+    ).upper()
+    final_signal = _text_field(
+        signal_flow.get("final_signal")
+        or context.get("final_signal")
+        or context.get("signal")
+        or fallback_signal
+        or "HOLD",
+        "HOLD",
+    ).upper()
+    primary_layer = _text_field(
+        signal_flow.get("primary_block_layer") or context.get("primary_block_layer"),
+        "-",
+    )
+    primary_reason = _text_field(
+        signal_flow.get("primary_block_reason") or context.get("primary_block_reason"),
+        "-",
+    )
+    raw_all_reasons = (
+        signal_flow.get("all_block_reasons")
+        if isinstance(signal_flow.get("all_block_reasons"), list)
+        else context.get("all_block_reasons")
+    )
+    all_reasons = [
+        str(item).strip()
+        for item in (raw_all_reasons if isinstance(raw_all_reasons, list) else [])
+        if str(item).strip()
+    ]
+    if primary_layer == "-" and all_reasons and "." in all_reasons[0]:
+        primary_layer = all_reasons[0].split(".", 1)[0]
+    if primary_reason == "-" and all_reasons:
+        primary_reason = all_reasons[0].split(".", 1)[1] if "." in all_reasons[0] else all_reasons[0]
+
+    market_regime = context.get("market_regime") if isinstance(context.get("market_regime"), dict) else {}
+    economics = (
+        context.get("pre_trade_economics")
+        if isinstance(context.get("pre_trade_economics"), dict)
+        else {}
+    )
+    return {
+        "decision_contract_version": _text_field(context.get("decision_contract_version"), "-"),
+        "base_signal": base_signal,
+        "final_signal": final_signal,
+        "primary_block_layer": primary_layer,
+        "primary_block_reason": primary_reason,
+        "all_block_reasons": all_reasons,
+        "market_regime": _text_field(market_regime.get("regime"), "unknown"),
+        "market_regime_volatility_state": _text_field(market_regime.get("volatility_state"), "unknown"),
+        "market_regime_allows_entry": _bool_or_none(market_regime.get("allows_entry")),
+        "pre_trade_economics_order_krw": _float_or_none(economics.get("order_krw")),
+        "pre_trade_economics_expected_edge_krw": _float_or_none(economics.get("expected_edge_krw")),
+        "pre_trade_economics_expected_cost_krw": _float_or_none(economics.get("expected_cost_krw")),
+        "pre_trade_economics_net_edge_krw": _float_or_none(economics.get("net_edge_krw")),
+        "pre_trade_economics_meaningful_edge": _bool_or_none(economics.get("meaningful_edge")),
+        "has_pre_trade_economics": bool(economics),
+    }
+
+
+def build_decision_v2_summary(rows: list[object]) -> dict[str, object]:
+    base_buy = 0
+    final_buy = 0
+    block_layer_counts: dict[str, int] = {}
+    block_reason_counts: dict[str, int] = {}
+    regime_counts: dict[str, int] = {}
+    economics_rows: list[dict[str, object]] = []
+
+    for row in rows:
+        context, fallback_signal, _fallback_reason = _context_from_decision_row(row)
+        fields = _decision_v2_fields(context, fallback_signal=fallback_signal)
+        base_signal = str(fields["base_signal"]).upper()
+        final_signal = str(fields["final_signal"]).upper()
+        if base_signal == "BUY":
+            base_buy += 1
+        if final_signal == "BUY":
+            final_buy += 1
+
+        primary_layer = str(fields["primary_block_layer"])
+        if primary_layer and primary_layer != "-":
+            block_layer_counts[primary_layer] = block_layer_counts.get(primary_layer, 0) + 1
+        for reason in fields["all_block_reasons"]:
+            reason_text = str(reason).strip()
+            if not reason_text:
+                continue
+            block_reason_counts[reason_text] = block_reason_counts.get(reason_text, 0) + 1
+
+        regime = str(fields["market_regime"] or "unknown")
+        regime_counts[regime] = regime_counts.get(regime, 0) + 1
+
+        if base_signal == "BUY" and bool(fields["has_pre_trade_economics"]):
+            economics_rows.append(fields)
+
+    def _values(key: str) -> list[float]:
+        return [
+            float(value)
+            for value in (row.get(key) for row in economics_rows)
+            if value is not None
+        ]
+
+    def _avg(key: str) -> float:
+        values = _values(key)
+        return sum(values) / len(values) if values else 0.0
+
+    order_values = _values("pre_trade_economics_order_krw")
+    economics = {
+        "count_with_economics": len(economics_rows),
+        "avg_order_krw": _avg("pre_trade_economics_order_krw"),
+        "min_order_krw": min(order_values) if order_values else 0.0,
+        "max_order_krw": max(order_values) if order_values else 0.0,
+        "avg_expected_edge_krw": _avg("pre_trade_economics_expected_edge_krw"),
+        "avg_expected_cost_krw": _avg("pre_trade_economics_expected_cost_krw"),
+        "avg_net_edge_krw": _avg("pre_trade_economics_net_edge_krw"),
+        "meaningful_edge_count": sum(
+            1 for row in economics_rows if row.get("pre_trade_economics_meaningful_edge") is True
+        ),
+    }
+    return {
+        "window": len(rows),
+        "base_buy": base_buy,
+        "final_buy": final_buy,
+        "block_layer_counts": block_layer_counts,
+        "block_reason_counts": block_reason_counts,
+        "block_counts": block_reason_counts,
+        "regime_counts": regime_counts,
+        "economics": economics,
+    }
+
+
+def fetch_decision_v2_summary(conn: sqlite3.Connection, *, limit: int = 300) -> dict[str, object]:
+    rows = conn.execute(
+        """
+        SELECT signal, reason, context_json
+        FROM strategy_decisions
+        ORDER BY decision_ts DESC, id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+    return build_decision_v2_summary(rows)
+
+
+def format_decision_v2_summary(summary: dict[str, object]) -> str:
+    lines = [
+        "[DRY-RUN DECISION SUMMARY]",
+        f"  window: last {int(summary.get('window') or 0)} decisions",
+        f"  base BUY candidates: {int(summary.get('base_buy') or 0)}",
+        f"  final BUY: {int(summary.get('final_buy') or 0)}",
+        "  block layers:",
+    ]
+    layer_counts = summary.get("block_layer_counts") if isinstance(summary.get("block_layer_counts"), dict) else {}
+    for layer in BLOCK_LAYER_PRIORITY:
+        lines.append(f"  - {layer}: {int(layer_counts.get(layer, 0))}")
+    for layer, count in sorted(layer_counts.items(), key=lambda item: str(item[0])):
+        if str(layer) not in BLOCK_LAYER_PRIORITY:
+            lines.append(f"  - {layer}: {int(count)}")
+
+    reason_counts = summary.get("block_reason_counts") if isinstance(summary.get("block_reason_counts"), dict) else {}
+    lines.append("  block reasons:")
+    if reason_counts:
+        for reason, count in sorted(reason_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            lines.append(f"  - {reason}: {int(count)}")
+    else:
+        lines.append("  - none: 0")
+
+    regime_counts = summary.get("regime_counts") if isinstance(summary.get("regime_counts"), dict) else {}
+    total_regimes = sum(int(count) for count in regime_counts.values())
+    lines.append("  regime distribution:")
+    if total_regimes > 0:
+        for regime, count in sorted(regime_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            pct = (100.0 * int(count)) / float(total_regimes)
+            lines.append(f"  - {regime}: {pct:.0f}%")
+    else:
+        lines.append("  - unknown: 0%")
+
+    economics = summary.get("economics") if isinstance(summary.get("economics"), dict) else {}
+    lines.extend(
+        [
+            "  BUY candidate economics:",
+            f"  - count_with_economics: {int(economics.get('count_with_economics') or 0)}",
+            f"  - avg_order_krw: {float(economics.get('avg_order_krw') or 0.0):.0f}",
+            f"  - min_order_krw: {float(economics.get('min_order_krw') or 0.0):.0f}",
+            f"  - max_order_krw: {float(economics.get('max_order_krw') or 0.0):.0f}",
+            f"  - avg_expected_edge_krw: {float(economics.get('avg_expected_edge_krw') or 0.0):.2f}",
+            f"  - avg_expected_cost_krw: {float(economics.get('avg_expected_cost_krw') or 0.0):.2f}",
+            f"  - avg_net_edge_krw: {float(economics.get('avg_net_edge_krw') or 0.0):.2f}",
+            f"  - meaningful_edge_count: {int(economics.get('meaningful_edge_count') or 0)}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def print_decision_v2_summary(summary: dict[str, object]) -> None:
+    print(format_decision_v2_summary(summary))
+
+
 def _sell_failure_category_from_observability(
     *,
     submission_reason_code: str | None,
@@ -2087,11 +2348,12 @@ def fetch_decision_telemetry_summary(
         if not isinstance(context, dict):
             context = {}
 
+        decision_v2 = _decision_v2_fields(context, fallback_signal=str(row["signal"] or ""))
         exposure = resolve_canonical_position_exposure_snapshot(context)
-        base_signal = str(context.get("base_signal") or context.get("raw_signal") or row["signal"])
+        base_signal = str(decision_v2["base_signal"])
         decision_type = str(context.get("decision_type") or row["signal"])
         raw_signal = str(context.get("raw_signal") or context.get("base_signal") or row["signal"])
-        final_signal = str(context.get("final_signal") or row["signal"])
+        final_signal = str(decision_v2["final_signal"])
         final_action = str(
             context.get("final_action")
             or context.get("decision_summary", {}).get("final_action")
@@ -2199,10 +2461,20 @@ def fetch_decision_telemetry_summary(
         )
 
         key = (
+            decision_v2["decision_contract_version"],
             base_signal,
             decision_type,
             raw_signal,
             final_signal,
+            decision_v2["primary_block_layer"],
+            decision_v2["primary_block_reason"],
+            "|".join(str(reason) for reason in decision_v2["all_block_reasons"]),
+            decision_v2["market_regime"],
+            decision_v2["market_regime_volatility_state"],
+            decision_v2["market_regime_allows_entry"],
+            decision_v2["pre_trade_economics_order_krw"],
+            decision_v2["pre_trade_economics_net_edge_krw"],
+            decision_v2["pre_trade_economics_meaningful_edge"],
             final_action,
             submit_expected,
             pre_submit_proof_status,
@@ -2254,61 +2526,71 @@ def fetch_decision_telemetry_summary(
 
     summaries = [
             DecisionTelemetrySummary(
-                base_signal=str(key[0]),
-                decision_type=str(key[1]),
-                raw_signal=str(key[2]),
-                final_signal=str(key[3]),
-                final_action=str(key[4]),
-                submit_expected=bool(key[5]),
-                pre_submit_proof_status=str(key[6]),
-                execution_block_reason=str(key[7]),
-                balance_source=str(key[45]),
-                balance_preflight=str(key[46]),
-                broker_qty_known=bool(key[47]),
-                broker_qty=(None if key[48] is None else float(key[48])),
-                broker_qty_evidence_policy=str(key[49]),
-                target_exposure_krw=(None if key[32] is None else float(key[32])),
-                current_effective_exposure_krw=(None if key[33] is None else float(key[33])),
-                tracked_residual_exposure_krw=(None if key[34] is None else float(key[34])),
-                buy_delta_krw=(None if key[35] is None else float(key[35])),
-                residual_live_sell_mode=str(key[36]),
-                residual_buy_sizing_mode=str(key[37]),
-                target_delta_side=str(key[38] or "-"),
-                target_would_submit=bool(key[39]),
-                target_submit_qty=(None if key[40] is None else float(key[40])),
-                target_delta_notional_krw=(None if key[41] is None else float(key[41])),
-                target_block_reason=str(key[42] or "-"),
-                target_position_truth_state=str(key[43] or "-"),
+                decision_contract_version=str(key[0]),
+                base_signal=str(key[1]),
+                decision_type=str(key[2]),
+                raw_signal=str(key[3]),
+                final_signal=str(key[4]),
+                primary_block_layer=str(key[5]),
+                primary_block_reason=str(key[6]),
+                all_block_reasons=str(key[7]),
+                market_regime=str(key[8]),
+                market_regime_volatility_state=str(key[9]),
+                market_regime_allows_entry=None if key[10] is None else bool(key[10]),
+                pre_trade_economics_order_krw=(None if key[11] is None else float(key[11])),
+                pre_trade_economics_net_edge_krw=(None if key[12] is None else float(key[12])),
+                pre_trade_economics_meaningful_edge=None if key[13] is None else bool(key[13]),
+                final_action=str(key[14]),
+                submit_expected=bool(key[15]),
+                pre_submit_proof_status=str(key[16]),
+                execution_block_reason=str(key[17]),
+                balance_source=str(key[55]),
+                balance_preflight=str(key[56]),
+                broker_qty_known=bool(key[57]),
+                broker_qty=(None if key[58] is None else float(key[58])),
+                broker_qty_evidence_policy=str(key[59]),
+                target_exposure_krw=(None if key[42] is None else float(key[42])),
+                current_effective_exposure_krw=(None if key[43] is None else float(key[43])),
+                tracked_residual_exposure_krw=(None if key[44] is None else float(key[44])),
+                buy_delta_krw=(None if key[45] is None else float(key[45])),
+                residual_live_sell_mode=str(key[46]),
+                residual_buy_sizing_mode=str(key[47]),
+                target_delta_side=str(key[48] or "-"),
+                target_would_submit=bool(key[49]),
+                target_submit_qty=(None if key[50] is None else float(key[50])),
+                target_delta_notional_krw=(None if key[51] is None else float(key[51])),
+                target_block_reason=str(key[52] or "-"),
+                target_position_truth_state=str(key[53] or "-"),
                 buy_flow_state=_derive_buy_flow_state(
-                    raw_signal=str(key[2]),
-                    final_signal=str(key[3]),
-                    entry_blocked=bool(key[8]),
+                    raw_signal=str(key[3]),
+                    final_signal=str(key[4]),
+                    entry_blocked=bool(key[18]),
                 ),
-                entry_blocked=bool(key[8]),
-                entry_allowed=bool(key[9]),
-                block_reason=str(key[13]),
-                dust_classification=str(key[14]),
-                effective_flat=bool(key[15]),
-                raw_qty_open=float(key[16]),
-                raw_total_asset_qty=float(key[17]),
-                position_qty=float(key[18]),
-                submit_payload_qty=float(key[19]),
-                normalized_exposure_active=bool(key[20]),
-                normalized_exposure_qty=float(key[21]),
-                open_exposure_qty=float(key[22]),
-                dust_tracking_qty=float(key[23]),
-                sell_open_exposure_qty=float(key[24]),
-                sell_dust_tracking_qty=float(key[25]),
-                sell_qty_basis_qty=float(key[26]),
-                sell_qty_boundary_kind=str(key[27]),
-                sell_submit_lot_count=int(key[30]),
-                sell_normalized_exposure_qty=float(key[31]),
-                sell_failure_category=str(key[28]),
-                sell_failure_detail=str(key[29]),
-                strategy_name=str(key[10]),
-                pair=str(key[11]),
-                interval=str(key[12]),
-                execution_mode=str(key[44]),
+                entry_blocked=bool(key[18]),
+                entry_allowed=bool(key[19]),
+                block_reason=str(key[23]),
+                dust_classification=str(key[24]),
+                effective_flat=bool(key[25]),
+                raw_qty_open=float(key[26]),
+                raw_total_asset_qty=float(key[27]),
+                position_qty=float(key[28]),
+                submit_payload_qty=float(key[29]),
+                normalized_exposure_active=bool(key[30]),
+                normalized_exposure_qty=float(key[31]),
+                open_exposure_qty=float(key[32]),
+                dust_tracking_qty=float(key[33]),
+                sell_open_exposure_qty=float(key[34]),
+                sell_dust_tracking_qty=float(key[35]),
+                sell_qty_basis_qty=float(key[36]),
+                sell_qty_boundary_kind=str(key[37]),
+                sell_submit_lot_count=int(key[40]),
+                sell_normalized_exposure_qty=float(key[41]),
+                sell_failure_category=str(key[38]),
+                sell_failure_detail=str(key[39]),
+                strategy_name=str(key[20]),
+                pair=str(key[21]),
+                interval=str(key[22]),
+                execution_mode=str(key[54]),
                 count=count,
             )
         for key, count in grouped.items()
@@ -4872,6 +5154,7 @@ def cmd_risk_report(*, limit: int = 20, as_json: bool = False) -> None:
 def cmd_decision_telemetry(*, limit: int = 200) -> None:
     conn = ensure_db()
     try:
+        decision_v2_summary = fetch_decision_v2_summary(conn, limit=max(1, int(limit)))
         rows = fetch_decision_telemetry_summary(conn, limit=max(1, int(limit)))
     finally:
         conn.close()
@@ -4884,6 +5167,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
     if not rows:
         print("  no strategy_decisions rows")
         return
+    print(format_decision_v2_summary(decision_v2_summary))
     print(
         "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
         "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
@@ -4897,9 +5181,18 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
         "observed_sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
         "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,"
+        "decision_contract_version,primary_block_layer,primary_block_reason,all_block_reasons,"
+        "market_regime,volatility_state,market_regime_allows_entry,pre_trade_economics_order_krw,"
+        "net_edge_krw,meaningful_edge,"
         "strategy_name,pair,interval,execution_mode,count"
     )
     for row in rows:
+        allows_entry = "-" if row.market_regime_allows_entry is None else (1 if row.market_regime_allows_entry else 0)
+        meaningful_edge = (
+            "-"
+            if row.pre_trade_economics_meaningful_edge is None
+            else (1 if row.pre_trade_economics_meaningful_edge else 0)
+        )
         print(
             "  "
             f"{row.base_signal},{row.decision_type},{row.raw_signal},{row.final_signal},{row.buy_flow_state},"
@@ -4920,5 +5213,9 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{row.dust_tracking_qty:.8f},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},"
             f"{row.sell_qty_basis_qty:.8f},{row.sell_qty_boundary_kind},{row.sell_submit_lot_count},"
             f"{row.sell_normalized_exposure_qty:.8f},{row.sell_failure_category},{row.sell_failure_detail},"
+            f"{row.decision_contract_version},{row.primary_block_layer},{row.primary_block_reason},"
+            f"{row.all_block_reasons},{row.market_regime},{row.market_regime_volatility_state},{allows_entry},"
+            f"{float(row.pre_trade_economics_order_krw or 0.0):.2f},"
+            f"{float(row.pre_trade_economics_net_edge_krw or 0.0):.2f},{meaningful_edge},"
             f"{row.strategy_name},{row.pair},{row.interval},{row.execution_mode},{row.count}"
         )

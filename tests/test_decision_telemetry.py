@@ -8,7 +8,7 @@ from bithumb_bot.app import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
 from bithumb_bot.decision_context import resolve_canonical_position_exposure_snapshot
-from bithumb_bot.reporting import fetch_decision_telemetry_summary, fetch_recent_decision_flow
+from bithumb_bot.reporting import build_decision_v2_summary, fetch_decision_telemetry_summary, fetch_recent_decision_flow
 
 
 def _collect_residue_paths(value, path: str = "") -> list[str]:
@@ -1216,6 +1216,214 @@ def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monke
     assert "BUY,BLOCKED_ENTRY,BUY,HOLD,BUY_BLOCKED,1,1,filtered entry: gap" in out
     assert "BUY,BUY,BUY,BUY,BUY_SUBMIT,0,1,sma golden cross" in out
     assert "HOLD,HOLD,HOLD,HOLD,HOLD,0,1,position held: no exit rule triggered" in out
+
+
+def test_decision_v2_summary_counts_buy_candidates_and_final_buys():
+    summary = build_decision_v2_summary(
+        [
+            {
+                "signal": "HOLD",
+                "context_json": json.dumps(
+                    {"signal_flow": {"base_signal": "BUY", "final_signal": "HOLD"}}
+                ),
+            },
+            {
+                "signal": "BUY",
+                "context_json": json.dumps(
+                    {"signal_flow": {"base_signal": "BUY", "final_signal": "BUY"}}
+                ),
+            },
+            {"signal": "HOLD", "context_json": json.dumps({"base_signal": "HOLD"})},
+        ]
+    )
+
+    assert summary["base_buy"] == 2
+    assert summary["final_buy"] == 1
+
+
+def test_decision_v2_summary_counts_block_layers_and_reasons():
+    summary = build_decision_v2_summary(
+        [
+            {
+                "signal": "HOLD",
+                "context_json": json.dumps(
+                    {
+                        "signal_flow": {
+                            "base_signal": "BUY",
+                            "final_signal": "HOLD",
+                            "primary_block_layer": "market_regime",
+                            "primary_block_reason": "chop_market",
+                            "all_block_reasons": [
+                                "market_regime.chop_market",
+                                "strategy_filters.cost_edge",
+                            ],
+                        }
+                    }
+                ),
+            },
+            {
+                "signal": "HOLD",
+                "context_json": json.dumps(
+                    {
+                        "base_signal": "BUY",
+                        "final_signal": "HOLD",
+                        "primary_block_layer": "execution_order_rule",
+                        "primary_block_reason": "min_notional",
+                        "all_block_reasons": ["execution_order_rule.min_notional"],
+                    }
+                ),
+            },
+        ]
+    )
+
+    assert summary["block_layer_counts"]["market_regime"] == 1
+    assert summary["block_layer_counts"]["execution_order_rule"] == 1
+    assert summary["block_reason_counts"]["market_regime.chop_market"] == 1
+    assert summary["block_reason_counts"]["strategy_filters.cost_edge"] == 1
+    assert summary["block_reason_counts"]["execution_order_rule.min_notional"] == 1
+
+
+def test_decision_v2_summary_counts_market_regimes():
+    summary = build_decision_v2_summary(
+        [
+            {"signal": "HOLD", "context_json": json.dumps({"market_regime": {"regime": "chop"}})},
+            {"signal": "HOLD", "context_json": json.dumps({"market_regime": {"regime": "chop"}})},
+            {"signal": "BUY", "context_json": json.dumps({"market_regime": {"regime": "trend_up"}})},
+        ]
+    )
+
+    assert summary["regime_counts"]["chop"] == 2
+    assert summary["regime_counts"]["trend_up"] == 1
+
+
+def test_decision_v2_summary_aggregates_pre_trade_economics():
+    summary = build_decision_v2_summary(
+        [
+            {
+                "signal": "HOLD",
+                "context_json": json.dumps(
+                    {
+                        "base_signal": "BUY",
+                        "pre_trade_economics": {
+                            "order_krw": 10_000,
+                            "expected_edge_krw": 12,
+                            "expected_cost_krw": 15,
+                            "net_edge_krw": -3,
+                            "meaningful_edge": False,
+                        },
+                    }
+                ),
+            },
+            {
+                "signal": "BUY",
+                "context_json": json.dumps(
+                    {
+                        "base_signal": "BUY",
+                        "pre_trade_economics": {
+                            "order_krw": 20_000,
+                            "expected_edge_krw": 30,
+                            "expected_cost_krw": 20,
+                            "net_edge_krw": 10,
+                            "meaningful_edge": True,
+                        },
+                    }
+                ),
+            },
+            {
+                "signal": "HOLD",
+                "context_json": json.dumps(
+                    {
+                        "base_signal": "HOLD",
+                        "pre_trade_economics": {
+                            "order_krw": 999_999,
+                            "net_edge_krw": 999,
+                            "meaningful_edge": True,
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    economics = summary["economics"]
+    assert economics["count_with_economics"] == 2
+    assert economics["avg_order_krw"] == pytest.approx(15_000)
+    assert economics["min_order_krw"] == pytest.approx(10_000)
+    assert economics["max_order_krw"] == pytest.approx(20_000)
+    assert economics["avg_expected_edge_krw"] == pytest.approx(21)
+    assert economics["avg_expected_cost_krw"] == pytest.approx(17.5)
+    assert economics["avg_net_edge_krw"] == pytest.approx(3.5)
+    assert economics["meaningful_edge_count"] == 1
+
+
+def test_decision_v2_summary_handles_legacy_or_malformed_context():
+    summary = build_decision_v2_summary(
+        [
+            {"signal": "BUY", "context_json": json.dumps({"raw_signal": "BUY"})},
+            {"signal": "HOLD", "context_json": "{bad json"},
+            {"signal": "HOLD", "context_json": json.dumps(["not", "a", "dict"])},
+        ]
+    )
+
+    assert summary["window"] == 3
+    assert summary["base_buy"] == 1
+    assert summary["final_buy"] == 1
+    assert summary["regime_counts"]["unknown"] == 3
+
+
+def test_decision_telemetry_cli_exposes_decision_v2_fields(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "decision-v2-cli.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=10,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="market regime blocked: chop_market",
+            candle_ts=10,
+            market_price=1.0,
+            context={
+                "decision_contract_version": "decision_v2",
+                "signal_flow": {
+                    "base_signal": "BUY",
+                    "final_signal": "HOLD",
+                    "primary_block_layer": "market_regime",
+                    "primary_block_reason": "chop_market",
+                    "all_block_reasons": ["market_regime.chop_market"],
+                },
+                "market_regime": {
+                    "regime": "chop",
+                    "volatility_state": "normal",
+                    "allows_entry": False,
+                },
+                "pre_trade_economics": {
+                    "order_krw": 10_000,
+                    "net_edge_krw": -3,
+                    "meaningful_edge": False,
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc = main(["decision-telemetry", "--limit", "20"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "primary_block_layer" in out
+    assert "primary_block_reason" in out
+    assert "market_regime" in out
+    assert "volatility_state" in out
+    assert "net_edge_krw" in out
+    assert "meaningful_edge" in out
+    assert "market_regime,chop_market" in out
+    assert "chop,normal,0" in out
+    assert "-3.00,0" in out
 
 
 def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeypatch):
