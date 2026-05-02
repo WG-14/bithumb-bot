@@ -1,360 +1,448 @@
-````text
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The previous patch appears to have successfully introduced the core structure:
-- `decision_contract.py` with `decision_v2`, `signal_flow`, `primary_block_layer`, `primary_block_reason`, `all_block_reasons`, and block-layer priority.
-- `strategy/market_regime.py` with `MarketRegimeSnapshot` and `classify_sma_market_regime()`.
-- Strategy integration in `sma.py` using `apply_decision_contract`, `build_replay_fingerprint`, and `classify_sma_market_regime`.
-- `pre_trade_economics.py` with order-sized expected edge/cost/net-edge calculations.
-- Execution-stage pre-trade economics wiring, apparently in or near `execution_service.py`.
-- Config/env support for `SMA_MARKET_REGIME_ENABLED`, `MIN_NET_EDGE_KRW`, `MIN_MARGIN_AFTER_COST_RATIO`, and `PRE_TRADE_ECONOMICS_BLOCKING_ENABLED`.
-- Tests for regime blocking, cost-edge separation, replay fingerprint, and pre-trade economics observation/blocking modes.
+Your task is to turn the repository into a more reproducible, diagnosable, and operable automated trading experiment system. Do not treat the current problem as merely “too many HOLD decisions.” Treat that as a symptom. The working hypothesis is:
 
-Do not redo the previous patch from scratch. Verify the current repository state first, then close the remaining operational gaps.
+> The higher-level structural issue is that strategy signal generation, gate decisions, execution intent, and experiment evaluation are already present in scattered forms, but they are not preserved and analyzed through one explicit, replayable decision trace / attribution model.
 
-Core problem statement:
-The repository now has better per-decision explanation, but it may still fail the original operational goal: an operator running live dry run should be able to see, in one CLI/report view, why BUY is not happening and whether the system is waiting correctly, over-filtering, blocked by execution/order rules, or seeing economically meaningless candidates.
+Keep this as a hypothesis until you verify it directly in the repo.
 
-This is not a general reporting improvement. It is the missing final layer of the decision-contract design: converting `decision_v2` fields into an operator-readable dry-run summary and ensuring those fields are visible through telemetry, not buried in raw JSON.
+Relevant starting context: the current repo appears to already have SMA signal generation, cost filtering, fee authority, position gates, execution telemetry, decision context normalization, and experiment fingerprinting concepts. Verify these directly before modifying anything. Do not assume this summary is fully correct. Use it as a guide only. 
 
-Keep the following hypotheses as hypotheses and implement verification support for them.
+## Primary objective
 
-Hypothesis A:
-The previous patch improved individual decision rows, but the operator summary still does not aggregate `decision_v2` block causes.
+Implement the first structural step toward a reproducible strategy experiment system:
 
-Verification:
-Search the repo for actual implemented CLI/reporting output, not just `scripts/codex_request.txt`.
-Look for modules such as:
-- `reporting.py`
-- CLI command files
-- decision telemetry commands
-- live dry-run reporting
-- scripts that read `strategy_decisions`
+1. Add a first-class `DecisionAttribution` model and report.
+2. Keep the design compatible with later replay / sweep work.
+3. Avoid adding another ad-hoc reporting function buried in an already overloaded reporting module.
+4. Prefer reusable normalization and aggregation primitives over symptom-specific patches.
+5. Add tests that prove attribution works from real stored `context_json`-style decision data.
+6. Preserve live/dry-run safety. This work must not submit orders or change trading behavior.
 
-Check whether any real command prints a summary like:
-- base BUY candidates
-- final BUY count
-- block layer counts
-- block reason counts
-- market regime distribution
-- BUY candidate pre-trade economics averages
+## Important constraint
 
-If this does not exist, implement it.
+Do **not** start by implementing a full `strategy-sweep` CLI. The correct first step is to make decision causes observable and stable. Only add sweep scaffolding if it is small, non-invasive, and directly supports the attribution model.
 
-Hypothesis B:
-The new fields exist in context JSON but are not surfaced in decision telemetry CLI/report output.
+## Investigation requirements
 
-Verification:
-Inspect decision telemetry tests and CLI output.
-Determine whether the following fields are visible to an operator without manually digging through raw JSON:
-- `decision_contract_version`
-- `primary_block_layer`
-- `primary_block_reason`
-- `all_block_reasons`
-- `market_regime.regime`
-- `market_regime.volatility_state`
-- `market_regime.allows_entry`
-- `pre_trade_economics.order_krw`
-- `pre_trade_economics.net_edge_krw`
-- `pre_trade_economics.meaningful_edge`
+Before coding, inspect at least these areas:
 
-If not, add output and tests.
+* `src/bithumb_bot/strategy/sma.py`
+* `src/bithumb_bot/decision_context.py`
+* `src/bithumb_bot/decision_contract.py`
+* `src/bithumb_bot/reporting.py`
+* CLI entrypoint files such as `app.py`, `bot.py`, or command registration modules
+* existing tests around:
 
-Hypothesis C:
-`replay_fingerprint.through_ts_ms` currently conflates candle timestamp and strategy cutoff timestamp.
+  * decision telemetry
+  * strategy decision persistence
+  * experiment fingerprinting
+  * blocked entry / blocked filter cases
 
-Verification:
-Inspect `build_replay_fingerprint()` and where it is called from `sma.py`.
-If `through_ts_ms` is set equal to `candle_ts`, but `signal_through_ts_ms` can differ from the last candle timestamp, fix the API and callsite so both values are preserved:
-- `candle_ts`: actual final candle timestamp used for the decision.
-- `through_ts_ms`: actual candle-query cutoff / strategy decision cutoff.
+Confirm where these concepts currently live:
 
-Add a test with an explicit `through_ts_ms` that differs from the last candle timestamp.
+* `raw_signal`
+* `final_signal`
+* `base_reason`
+* `entry_reason`
+* `entry_block_reason`
+* `blocked_by_cost_filter`
+* `blocked_by_fee_authority`
+* `signal_strength_label`
+* `gap_ratio`
+* `required_edge_ratio`
+* `decision_type`
+* `primary_block_layer`
+* `primary_block_reason`
+* `submit_expected`
+* `execution_block_reason`
+* `target_block_reason`
+* `experiment_fingerprint`
 
-Hypothesis D:
-High-volatility regime is not yet observable.
+If any of these fields are named differently or nested differently, adapt the implementation to the repository’s actual schema. Do not force the exact names if the repo already has a better canonical field.
 
-Verification:
-Inspect `classify_sma_market_regime()`.
-If volatility only supports `low` and `normal`, consider adding high-volatility observability, but do not make high-vol order-size reduction mandatory in this patch.
+## Design direction
 
-This is P2. Do not prioritize it over dry-run summary and telemetry surfacing.
+Add a dedicated module, preferably:
 
-Primary implementation priorities:
+```text
+src/bithumb_bot/decision_attribution.py
+```
 
-P1 — Required: Add `decision_v2` dry-run/operator summary aggregation
-
-Find the current best location for dry-run or decision telemetry reporting. Prefer extending an existing command over creating a duplicate command, unless the existing structure makes that messy.
-
-The summary must aggregate recent decision rows, preferably from the same source/table used by current decision telemetry.
-
-Target output shape:
-
-[DRY-RUN DECISION SUMMARY]
-window: last 300 decisions
-base BUY candidates: 14
-final BUY: 0
-
-block layers:
-- market_regime: 8
-- strategy_filters: 4
-- position_gate: 1
-- execution_order_rule: 1
-- pre_trade_economics: 0
-- fee_authority: 0
-- performance_gate: 0
-
-block reasons:
-- market_regime.chop_market: 8
-- strategy_filters.cost_edge: 4
-- position_gate.already_in_position: 1
-- execution_order_rule.min_notional: 1
-
-regime distribution:
-- trend_up: 18%
-- chop: 61%
-- low_vol: 13%
-- overextended_up: 8%
-- unknown: 0%
-
-BUY candidate economics:
-- count_with_economics: 10
-- avg_order_krw: 10000
-- min_order_krw: 5000
-- max_order_krw: 20000
-- avg_expected_edge_krw: 12
-- avg_expected_cost_krw: 15
-- avg_net_edge_krw: -3
-- meaningful_edge_count: 0
-
-Implementation details:
-- Parse context defensively. Older decision rows may not have `decision_v2`.
-- If a row lacks `signal_flow`, fall back to legacy fields where possible.
-- Do not crash on malformed or missing JSON.
-- Count `base_signal=BUY` as BUY candidates, even if final signal is HOLD.
-- Count `final_signal=BUY` separately.
-- For block layer/reason counts, prefer:
-  - `context.signal_flow.primary_block_layer`
-  - `context.signal_flow.primary_block_reason`
-  - `context.signal_flow.all_block_reasons`
-  - fall back to top-level `primary_block_layer`, `primary_block_reason`, `all_block_reasons`.
-- For market regime distribution, read `context.market_regime.regime`.
-- For economics, read `context.pre_trade_economics`.
-
-Add tests for:
-- Aggregating mixed decision_v2 rows.
-- Handling older legacy rows without decision_v2.
-- Handling missing/malformed context safely.
-- Correctly counting BUY candidates vs final BUY.
-- Correctly aggregating block layers and block reasons.
-- Correctly aggregating market regimes.
-- Correctly aggregating economics only when present.
-
-P1 — Required: Surface decision_v2 fields in decision telemetry CLI/report output
-
-Find the existing decision telemetry command or report output. Add visible fields so the operator does not need to inspect raw JSON.
-
-At minimum, each relevant decision display or compact summary should surface:
-- `primary_block_layer`
-- `primary_block_reason`
-- `all_block_reasons`
-- `market_regime.regime`
-- `market_regime.volatility_state`
-- `market_regime.allows_entry`
-- `pre_trade_economics.order_krw`
-- `pre_trade_economics.net_edge_krw`
-- `pre_trade_economics.meaningful_edge`
-
-Add or update a test named similarly to:
-
-`test_decision_telemetry_cli_exposes_decision_v2_fields`
-
-The test should verify that CLI/report output includes:
-- `primary_block_layer`
-- `primary_block_reason`
-- `market_regime`
-- `volatility_state`
-- `net_edge_krw`
-- `meaningful_edge`
-
-Do not merely assert that these keys exist in raw context JSON. Assert that the operator-facing output includes them.
-
-P2 — Recommended: Fix replay fingerprint timestamp separation
-
-Inspect current `build_replay_fingerprint()` signature and callsite.
-
-If it currently sets:
-
-`through_ts_ms = candle_ts`
-
-change it to accept separate values:
+This module should define a first-class attribution domain model. Suggested shape:
 
 ```python
-build_replay_fingerprint(
-    *,
-    strategy_name: str,
-    pair: str,
-    interval: str,
-    candle_ts: int | None,
-    through_ts_ms: int | None,
-    short_n: int,
-    long_n: int,
-    thresholds: dict[str, object],
-    fee_authority: dict[str, object],
-    slippage_bps: float,
-    regime_version: str,
-    order_sizing: dict[str, object] | None = None,
-)
-````
-
-Then call it from strategy code with:
-
-* `candle_ts=ts_list[-1]`
-* `through_ts_ms=signal_through_ts_ms`
-
-Add a focused test:
-
-* Set up a decision with explicit `through_ts_ms`.
-* Ensure `replay_fingerprint["candle_ts"]` equals the last candle timestamp.
-* Ensure `replay_fingerprint["through_ts_ms"]` equals the explicit cutoff timestamp.
-* Ensure existing replay fingerprint fields still exist.
-
-P2 — Optional: Add high-volatility observability only if low-risk
-
-If straightforward, add:
-
-* `SMA_FILTER_VOL_MAX_RANGE_RATIO=0` default, disabled when zero.
-* If `volatility_ratio > max`, classify `volatility_state="high"` and `regime="high_vol"`.
-
-Initial behavior:
-
-* Do not implement high-vol order-size scaling.
-* Do not tune thresholds.
-* Do not make high-vol behavior complex.
-* Either make `high_vol` block entry conservatively or observation-only, following existing repo conventions. Document the behavior clearly.
-* Add tests if implemented.
-
-If this expands scope too much, skip it and explicitly report that high-vol observability remains future work.
-
-P2 — Repository hygiene: Handle `scripts/codex_request.txt`
-
-Search whether `scripts/codex_request.txt` is intentionally kept.
-If it is just a temporary prompt file, remove it.
-If it should remain as documentation, move or convert the relevant durable content into something like:
-
-`docs/decision_v2_design.md`
-
-Do not keep temporary Codex prompt text in `scripts/` if it creates search noise for operational code work.
-
-Safety and recovery requirements:
-
-Do not:
-
-* Weaken live order safety.
-* Enable real orders.
-* Change `LIVE_DRY_RUN` / `LIVE_REAL_ORDER_ARMED` protections.
-* Make `PRE_TRADE_ECONOMICS_BLOCKING_ENABLED` default to true.
-* Make high-vol order-size reduction mandatory.
-* Tune strategy thresholds based on guesses.
-* Remove legacy context fields.
-* Break old telemetry rows.
-
-Do:
-
-* Preserve backward compatibility.
-* Parse older rows defensively.
-* Keep new summary/reporting side-effect-free.
-* Keep tests deterministic.
-* Avoid network calls in tests.
-* Prefer additive CLI/report output over destructive format changes unless existing tests require adaptation.
-* Ensure malformed context does not crash summary commands.
-
-Suggested implementation sequence:
-
-1. Inspect current reporting/CLI/telemetry code paths.
-2. Locate where `strategy_decisions` or equivalent decision records are read.
-3. Add a small pure function for summary aggregation, for example:
-
-   * `build_decision_v2_summary(rows: Sequence[...]) -> dict`
-   * or similar, matching repo style.
-4. Add formatter function for operator-readable output.
-5. Wire formatter into existing decision telemetry or dry-run summary command.
-6. Add tests for the pure aggregation function.
-7. Add CLI/report output tests for visible decision_v2 fields.
-8. Fix replay fingerprint timestamp separation if needed.
-9. Optionally add high-vol observability only if small and testable.
-10. Clean up or document `scripts/codex_request.txt`.
-11. Run the test suite.
-
-Testing requirements:
-
-Run the existing test suite with the repository’s normal test command, likely:
-
-`pytest`
-
-Also run any narrower relevant test files first if useful.
-
-Required new or updated tests:
-
-* `test_decision_v2_summary_counts_buy_candidates_and_final_buys`
-* `test_decision_v2_summary_counts_block_layers_and_reasons`
-* `test_decision_v2_summary_counts_market_regimes`
-* `test_decision_v2_summary_aggregates_pre_trade_economics`
-* `test_decision_v2_summary_handles_legacy_or_malformed_context`
-* `test_decision_telemetry_cli_exposes_decision_v2_fields`
-* `test_replay_fingerprint_preserves_distinct_through_ts_ms` if timestamp bug exists
-
-The exact names may vary, but the coverage must be present.
-
-Final report format:
-
-Return a concise implementation report with these sections:
-
-1. Summary
-
-   * What was changed.
-   * Whether the main patch was summary aggregation, telemetry surfacing, replay fingerprint fix, high-vol observability, or cleanup.
-
-2. Repository findings
-
-   * Where existing decision contract, market regime, pre-trade economics, execution wiring, and telemetry/reporting code live.
-   * Which assumptions were confirmed.
-   * Which assumptions were false or only partially true.
-
-3. Hypothesis status
-
-   * Hypothesis A: supported / refuted / partially supported, with evidence.
-   * Hypothesis B: supported / refuted / partially supported, with evidence.
-   * Hypothesis C: supported / refuted / partially supported, with evidence.
-   * Hypothesis D: supported / refuted / deferred, with evidence.
-
-4. Design decisions
-
-   * Why the summary aggregation was placed where it was.
-   * How old/non-decision_v2 rows are handled.
-   * How block layer/reason priority is resolved in summary.
-   * Whether high-vol observability was implemented or deferred.
-   * Whether `scripts/codex_request.txt` was removed, moved, or kept.
-
-5. Tests
-
-   * List new tests.
-   * List updated tests.
-   * Include exact commands run and results.
-
-6. Safety and recovery
-
-   * Confirm live-order safety was not weakened.
-   * Confirm pre-trade economics blocking default remains unchanged.
-   * Confirm dry-run behavior remains safe.
-   * Explain how to disable or ignore the new reporting if needed.
-
-7. Remaining work
-
-   * Any known limitations in summary/reporting.
-   * Whether high-vol regime support remains future work.
-   * Any replay or telemetry gaps that still remain.
-
+@dataclass(frozen=True)
+class DecisionAttribution:
+    raw_signal: str
+    final_signal: str
+    decision_type: str
+    base_reason: str
+    entry_reason: str
+    entry_block_reason: str | None
+    primary_block_layer: str
+    primary_block_reason: str
+    blocked_by_cost_filter: bool
+    blocked_by_fee_authority: bool
+    blocked_by_position_gate: bool
+    blocked_by_order_rule: bool
+    blocked_by_performance_gate: bool
+    gap_ratio: float | None
+    required_edge_ratio: float | None
+    signal_strength_label: str
+    submit_expected: bool | None
+    execution_block_reason: str | None
+    target_block_reason: str | None
 ```
+
+The exact fields may be extended if the repo already exposes useful canonical equivalents. However, do not remove the core diagnostic intent:
+
+* distinguish raw signal from final signal
+* distinguish strategy filter blocks from position/order/execution/performance blocks
+* preserve edge economics
+* preserve submit expectation
+* support aggregation by cause
+
+Add normalization functions along these lines:
+
+```python
+def normalize_decision_attribution_from_context(context: dict[str, Any]) -> DecisionAttribution:
+    ...
+
+def normalize_decision_attribution_from_row(row: sqlite3.Row) -> DecisionAttribution:
+    ...
+
+def summarize_decision_attributions(
+    rows: Iterable[DecisionAttribution],
+) -> DecisionAttributionSummary:
+    ...
 ```
+
+The normalizer must be defensive:
+
+* tolerate missing keys
+* tolerate older context versions
+* distinguish unknown from false where possible
+* never crash the report because one row has malformed JSON
+* expose skipped/malformed row counts in the summary
+
+## Report requirements
+
+Add a CLI command such as:
+
+```bash
+uv run bithumb-bot decision-attribution --limit 500
+```
+
+Also support JSON output:
+
+```bash
+uv run bithumb-bot decision-attribution --limit 500 --json
+```
+
+Optional useful filters, if straightforward:
+
+```bash
+--from
+--to
+--pair
+--interval
+```
+
+The report must be funnel-oriented, not just a HOLD counter.
+
+Minimum human-readable output sections:
+
+```text
+[DECISION ATTRIBUTION]
+
+sample_count=...
+malformed_context_count=...
+context_missing_count=...
+
+raw_signal:
+  HOLD ...
+  BUY ...
+  SELL ...
+
+final_signal:
+  HOLD ...
+  BUY ...
+  SELL ...
+
+decision_type:
+  ...
+
+candidate_funnel:
+  raw_BUY=...
+  final_BUY=...
+  submit_expected_BUY=...
+  raw_SELL=...
+  final_SELL=...
+  submit_expected_SELL=...
+
+block_layers:
+  ...
+
+block_reasons:
+  ...
+
+entry_reasons:
+  ...
+
+entry_block_reasons:
+  ...
+
+filters:
+  blocked_by_cost_filter_ratio=...
+  blocked_by_fee_authority_ratio=...
+  blocked_by_position_gate_ratio=...
+  blocked_by_order_rule_ratio=...
+  blocked_by_performance_gate_ratio=...
+
+edge:
+  gap_ratio_avg=...
+  gap_ratio_median=...
+  gap_ratio_p90=...
+  required_edge_ratio_avg=...
+  required_edge_ratio_median=...
+  gap_lt_required_ratio=...
+
+signal_strength:
+  neutral ...
+  weak ...
+  tradable ...
+
+submit_mismatch:
+  final_BUY_submit_expected_false=...
+  final_SELL_submit_expected_false=...
+
+interpretation:
+  primary_issue=...
+  secondary_issue=...
+```
+
+The `interpretation` section should be conservative and rule-based. It must not overclaim. For example:
+
+* If raw BUY is near zero, suggest `raw_buy_scarcity`.
+* If raw BUY exists but final BUY is near zero and many are cost-filtered, suggest `entry_edge_insufficient_or_cost_filter_strict`.
+* If final BUY exists but `submit_expected=false`, suggest `execution_intent_or_order_rule_block`.
+* If gap is usually below required edge, suggest `gap_below_required_edge`.
+* If malformed context is high, suggest `observability_schema_incomplete`.
+
+Keep these as diagnostic labels, not trading advice.
+
+## JSON output requirements
+
+The JSON output must be deterministic and testable. Include at least:
+
+```json
+{
+  "sample_count": 0,
+  "malformed_context_count": 0,
+  "context_missing_count": 0,
+  "raw_signal_counts": {},
+  "final_signal_counts": {},
+  "decision_type_counts": {},
+  "candidate_funnel": {},
+  "block_layer_counts": {},
+  "block_reason_counts": {},
+  "entry_reason_counts": {},
+  "entry_block_reason_counts": {},
+  "filter_ratios": {},
+  "edge_stats": {},
+  "signal_strength_counts": {},
+  "submit_mismatch": {},
+  "interpretation": {
+    "primary_issue": "...",
+    "secondary_issue": "..."
+  }
+}
+```
+
+## Structural requirements
+
+Do not make `reporting.py` more central unless the repo’s CLI conventions require a thin wrapper there. Prefer:
+
+```text
+src/bithumb_bot/decision_attribution.py
+```
+
+and, if the repo has command modules:
+
+```text
+src/bithumb_bot/commands/decision_attribution_report.py
+```
+
+If command modules do not exist, add the smallest CLI integration consistent with the current project structure.
+
+Avoid reading global `settings` inside the attribution normalizer except for resolving DB path in the command layer. Attribution should be reusable for:
+
+* live dry-run DB rows
+* historical decision rows
+* future replay rows
+* future strategy sweep rows
+
+## Future compatibility requirement
+
+Add comments or lightweight types that make the next step obvious:
+
+```text
+src/bithumb_bot/strategy_config.py
+src/bithumb_bot/strategy_replay.py
+src/bithumb_bot/strategy_sweep.py
+```
+
+Do not fully implement these unless the repo already has suitable scaffolding. The important part is that `DecisionAttribution` can be reused by future replay/sweep outputs.
+
+If you add any replay/sweep scaffolding, keep it non-invasive and explicitly mark it as attribution-compatible, not production trading logic.
+
+## Testing requirements
+
+Add or update tests. At minimum:
+
+```text
+tests/test_decision_attribution.py
+```
+
+Cover these cases:
+
+1. Normal BUY candidate blocked by cost filter:
+
+   * raw_signal=BUY
+   * final_signal=HOLD
+   * blocked_by_cost_filter=True
+   * gap_ratio < required_edge_ratio
+   * summary counts this as a BUY candidate blocked by cost/edge
+
+2. Raw BUY becomes final BUY but submit is not expected:
+
+   * final_signal=BUY
+   * submit_expected=False
+   * counted under `final_BUY_submit_expected_false`
+
+3. Raw BUY scarcity:
+
+   * mostly HOLD decisions
+   * interpretation returns `raw_buy_scarcity` or equivalent conservative label
+
+4. Malformed or missing context:
+
+   * does not crash
+   * increments malformed/missing counters
+
+5. Legacy/partial context:
+
+   * missing nested fields should produce `unknown` / `None` defaults
+   * should still contribute to raw/final signal counts if those fields exist
+
+6. JSON output shape:
+
+   * deterministic keys
+   * stable values for a small synthetic fixture
+
+If existing tests already create `strategy_decisions`, reuse that style. Prefer in-memory SQLite fixtures if possible.
+
+## Recovery and safety requirements
+
+* This change must not alter strategy decision behavior.
+* This change must not submit orders.
+* This change must not change live/dry-run gating.
+* This change must not mutate existing decision rows.
+* The report should be read-only against the database.
+* If the `strategy_decisions` table is missing, the command should fail gracefully with a useful message or return an empty report with a diagnostic note, following the repo’s existing style.
+* If some rows have bad JSON, continue processing and report the error count.
+* If no rows match filters, print an empty but valid report.
+
+## Observability requirements
+
+The report should make the following operational questions answerable without manual DB digging:
+
+* Are HOLDs mostly caused by no raw signal?
+* Are raw BUY/SELL candidates being generated but filtered?
+* Is the cost filter the dominant blocker?
+* Is fee authority blocking live entries?
+* Are position gates blocking entries or exits?
+* Are order rules or minimum notional constraints preventing submit?
+* Are there final BUY/SELL decisions that still do not expect submission?
+* Is `gap_ratio` generally below `required_edge_ratio`?
+* Is the decision context schema too incomplete to trust the report?
+
+## Scope boundary
+
+Do not solve trading profitability in this PR.
+
+Do not tune env values.
+
+Do not loosen gates.
+
+Do not change fee assumptions unless required for attribution extraction.
+
+Do not replace the strategy.
+
+Do not implement a full backtest engine before attribution is stable.
+
+The goal is not:
+
+```text
+HOLD 많음 → lower filters
+```
+
+The goal is:
+
+```text
+every decision -> normalized attribution -> reproducible diagnosis -> future replay/sweep comparison
+```
+
+## Suggested implementation order
+
+1. Inspect current decision context and reporting code.
+2. Identify the canonical source of `context_json` in `strategy_decisions`.
+3. Implement `DecisionAttribution`.
+4. Implement context normalization.
+5. Implement summary aggregation.
+6. Implement human-readable formatting.
+7. Implement JSON formatting.
+8. Add CLI command.
+9. Add tests.
+10. Run the test suite or the most relevant subset.
+11. Run the new CLI against a local/dev DB if available; otherwise test with fixtures only.
+12. Report exactly what was changed and what remains future work.
+
+## Final report format
+
+When finished, report in this exact structure:
+
+```text
+Summary
+- ...
+
+Files changed
+- path: what changed
+
+Verification
+- command: result
+- command: result
+
+Design notes
+- Explain how DecisionAttribution avoids another ad-hoc reporting patch.
+- Explain how this supports future replay/sweep work.
+- Explain any schema compatibility choices.
+
+Safety / recovery
+- Confirm the command is read-only.
+- Confirm malformed rows do not crash the report.
+- Confirm trading behavior was not changed.
+
+Findings
+- State whether the initial hypothesis was confirmed, partially confirmed, or not confirmed.
+- Mention any stronger structural issue discovered in the repo.
+
+Follow-up work
+- Next PR 1: StrategyConfig extraction
+- Next PR 2: candle-based replay engine
+- Next PR 3: strategy-sweep using replay output and attribution summary
+```
+
+Be strict about preserving the core priority: attribution first, replay/sweep second. Do not dilute the work into generic observability. This must be directly useful for operating `WG-14/bithumb-bot` as a reproducible automated trading experiment system.
 

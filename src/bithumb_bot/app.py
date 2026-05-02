@@ -125,6 +125,11 @@ from .reporting import (
     print_decision_v2_summary,
     parse_kst_date_range_to_ts_ms,
 )
+from .decision_attribution import (
+    build_decision_attribution_summary_from_db,
+    decision_attribution_summary_json,
+    format_decision_attribution_summary,
+)
 from .storage_io import write_json_atomic
 from .bootstrap import get_last_explicit_env_load_summary
 
@@ -6638,6 +6643,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     decision_telemetry.add_argument("--limit", type=int, default=200)
 
+    decision_attribution = sub.add_parser(
+        "decision-attribution",
+        help="funnel-oriented attribution summary from stored strategy decision context",
+        description="Read-only decision attribution report for strategy_decisions.context_json.",
+    )
+    decision_attribution.add_argument("--limit", type=int, default=500)
+    decision_attribution.add_argument("--from", dest="from_date", help="KST date (YYYY-MM-DD)")
+    decision_attribution.add_argument("--to", dest="to_date", help="KST date (YYYY-MM-DD)")
+    decision_attribution.add_argument("--pair")
+    decision_attribution.add_argument("--interval")
+    decision_attribution.add_argument("--json", action="store_true")
+
     fee_diag = sub.add_parser(
         "fee-diagnostics",
         help="validate real fee application against recent fills/roundtrips",
@@ -6834,6 +6851,48 @@ def main(argv: list[str] | None = None) -> int:
         cmd_risk_report(limit=max(1, int(args.limit)), as_json=bool(args.json))
     elif args.cmd == "decision-telemetry":
         cmd_decision_telemetry(limit=max(1, int(args.limit)))
+    elif args.cmd == "decision-attribution":
+        try:
+            from_ts_ms, to_ts_ms = parse_kst_date_range_to_ts_ms(
+                from_date=args.from_date,
+                to_date=args.to_date,
+            )
+        except ValueError:
+            p.error("invalid date format for --from/--to; expected YYYY-MM-DD")
+        if from_ts_ms is not None and to_ts_ms is not None and from_ts_ms > to_ts_ms:
+            p.error("--from must be earlier than or equal to --to")
+        conn = None
+        try:
+            conn = sqlite3.connect(f"file:{Path(settings.DB_PATH).absolute()}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            summary = build_decision_attribution_summary_from_db(
+                conn,
+                limit=max(1, int(args.limit)),
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+                pair=args.pair,
+                interval=args.interval,
+            )
+        except sqlite3.OperationalError:
+            empty_conn = sqlite3.connect(":memory:")
+            try:
+                summary = build_decision_attribution_summary_from_db(
+                    empty_conn,
+                    limit=max(1, int(args.limit)),
+                    from_ts_ms=from_ts_ms,
+                    to_ts_ms=to_ts_ms,
+                    pair=args.pair,
+                    interval=args.interval,
+                )
+            finally:
+                empty_conn.close()
+        finally:
+            if conn is not None:
+                conn.close()
+        if bool(args.json):
+            print(decision_attribution_summary_json(summary))
+        else:
+            print(format_decision_attribution_summary(summary))
     elif args.cmd == "fee-diagnostics":
         cmd_fee_diagnostics(
             fill_limit=max(1, int(args.fill_limit)),

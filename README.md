@@ -90,6 +90,7 @@ uv run bithumb-bot status
 uv run bithumb-bot trades --limit 20
 uv run bithumb-bot ops-report --limit 20
 uv run bithumb-bot decision-telemetry --limit 200
+uv run bithumb-bot decision-attribution --limit 500
 uv run bithumb-bot strategy-report
 uv run bithumb-bot config-dump --masked
 uv run bithumb-bot live-dry-run --short 7 --long 30
