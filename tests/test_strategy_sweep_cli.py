@@ -85,15 +85,33 @@ def _sweep_args(*, as_json: bool = True) -> list[str]:
     return args
 
 
+def _assert_no_forbidden_keys(payload) -> None:
+    if isinstance(payload, dict):
+        assert not any(
+            forbidden in str(key).lower()
+            for key in payload
+            for forbidden in FORBIDDEN_RESULT_KEY_PARTS
+        )
+        for value in payload.values():
+            _assert_no_forbidden_keys(value)
+    elif isinstance(payload, list):
+        for value in payload:
+            _assert_no_forbidden_keys(value)
+
+
 def test_strategy_sweep_cli_json_returns_deterministic_attribution_rows(
     configured_db, capsys
 ) -> None:
     _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
 
     rc = main(_sweep_args(as_json=True))
-    rows = json.loads(capsys.readouterr().out)
+    payload = json.loads(capsys.readouterr().out)
+    rows = payload["rows"]
 
     assert rc == 0
+    assert payload["plan"]["grid_count"] == 2
+    assert payload["plan"]["candle_count"] == 5
+    assert payload["plan"]["full_history"] is True
     assert len(rows) == 2
     required = {
         "config_id",
@@ -105,12 +123,7 @@ def test_strategy_sweep_cli_json_returns_deterministic_attribution_rows(
     }
     assert required.issubset(rows[0])
     assert rows[1]["final_buy"] < rows[0]["final_buy"]
-    assert all(
-        forbidden not in key.lower()
-        for row in rows
-        for key in row
-        for forbidden in FORBIDDEN_RESULT_KEY_PARTS
-    )
+    _assert_no_forbidden_keys(payload)
 
 
 def test_strategy_sweep_cli_human_output_includes_operator_fields(
@@ -123,6 +136,9 @@ def test_strategy_sweep_cli_human_output_includes_operator_fields(
 
     assert rc == 0
     assert "[STRATEGY-SWEEP]" in out
+    assert "mode=decision_attribution_only" in out
+    assert "grid_count=2" in out
+    assert "candle_count=5" in out
     assert "raw_BUY" in out
     assert "final_BUY" in out
     assert "cost_block" in out
@@ -245,13 +261,76 @@ def test_strategy_sweep_cli_json_has_no_pnl_fields(configured_db, capsys) -> Non
     _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
 
     rc = main(_sweep_args(as_json=True))
-    rows = json.loads(capsys.readouterr().out)
+    payload = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert rows
-    assert not any(
-        forbidden in key.lower()
-        for row in rows
-        for key in row
-        for forbidden in FORBIDDEN_RESULT_KEY_PARTS
-    )
+    assert payload["rows"]
+    _assert_no_forbidden_keys(payload)
+
+
+def test_strategy_sweep_cli_live_requires_execution_boundary(
+    configured_db, monkeypatch, capsys
+) -> None:
+    called = False
+
+    def fail_if_called(**_kwargs):
+        nonlocal called
+        called = True
+
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.cmd_strategy_sweep", fail_if_called)
+
+    with pytest.raises(SystemExit):
+        main(_sweep_args(as_json=True))
+    err = capsys.readouterr().err
+
+    assert called is False
+    assert (
+        "strategy-sweep in live mode requires "
+        "--from/--to/--through/--max-candles or --allow-full-history"
+    ) in err
+
+
+def test_strategy_sweep_cli_live_max_candles_allows_execution(
+    configured_db, capsys
+) -> None:
+    _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
+    object.__setattr__(settings, "MODE", "live")
+    args = _sweep_args(as_json=True) + ["--max-candles", "5000"]
+
+    rc = main(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["plan"]["allowed"] is True
+    assert payload["plan"]["max_candles"] == 5000
+    assert payload["plan"]["full_history"] is False
+    assert len(payload["rows"]) == 2
+
+
+def test_strategy_sweep_cli_invalid_max_candles_fails_cleanly(
+    configured_db, capsys
+) -> None:
+    args = _sweep_args(as_json=True) + ["--max-candles", "0"]
+
+    with pytest.raises(SystemExit):
+        main(args)
+    err = capsys.readouterr().err
+
+    assert "--max-candles must be a positive integer" in err
+
+
+def test_strategy_sweep_cli_allow_full_history_marks_plan(
+    configured_db, capsys
+) -> None:
+    _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
+    object.__setattr__(settings, "MODE", "live")
+    args = _sweep_args(as_json=True) + ["--allow-full-history"]
+
+    rc = main(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["plan"]["allowed"] is True
+    assert payload["plan"]["full_history"] is True
+    assert payload["plan"]["max_candles"] is None

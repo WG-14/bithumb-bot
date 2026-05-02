@@ -1,235 +1,475 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The repo has already progressed through:
-
-```text
-decision attribution → SmaStrategyConfig → candle-based replay → attribution-based sweep module
-```
-
-The next task is **not** PnL/backtesting. The next task is to expose the existing `strategy_sweep.py` module through a thin, read-only CLI so an operator can actually run and compare sweep results against existing `decision-attribution` output.
+The latest EC2 validation showed that the system has progressed far enough to expose a new class of problem: **the replay/sweep experiment commands are structurally correct but not yet bounded for live operational DB scale**. This is not just “the command was slow.” Treat it as a design gap: experiment commands need explicit execution budgets, bounded candle datasets, and efficient DB access.
 
 Use the prior analysis context as guidance, but verify every claim directly in the repo before editing. 
 
-## Core hypothesis to verify
+## Core facts from EC2 validation
 
-The repository already has:
-
-* `src/bithumb_bot/strategy_sweep.py`
-* `StrategySweepGrid`
-* `StrategySweepResult`
-* `StrategySweepSummaryRow`
-* `run_sma_strategy_sweep()`
-* `summarize_strategy_sweep_results()`
-
-and tests proving the sweep module is deterministic, attribution-based, read-only, and has no PnL/drawdown fields.
-
-However, the repo likely does **not** yet have a `strategy-sweep` CLI command, so operators cannot run the sweep directly against the local candle DB.
-
-Keep this as a hypothesis until you inspect the repo.
-
-## Required sequence
-
-Do this in order:
+The EC2 run showed:
 
 ```text
-1. Verify existing strategy_sweep module and tests
-2. Add a thin read-only strategy-sweep CLI
-3. Add CLI JSON/human output tests
-4. Do not add PnL/backtesting/fill simulation
-5. Do not add automatic env tuning
-6. Optionally add a small comparison helper only if it stays read-only and attribution-based
+decision-attribution worked on live data:
+  sample_count=500
+  malformed_context_count=0
+  context_missing_count=0
+  raw_BUY=0
+  raw_SELL=0
+  final_BUY=0
+  final_SELL=0
+  primary_issue=raw_signal_scarcity
+
+strategy-sweep was interrupted:
+  KeyboardInterrupt occurred while _load_replay_candles() was doing fetchall()
 ```
 
-## Required investigation before editing
+Keep these as observed facts from EC2, not guesses.
+
+## Core hypothesis to verify
+
+The most likely root cause is not a single bug. It is:
+
+```text
+Replay/sweep are good pure experiment modules, but the CLI/runtime path lacks an execution budget model for live DB scale.
+```
+
+Concrete hypotheses to verify:
+
+```text
+H1: unbounded candle fetch is the first bottleneck.
+H2: strategy-sweep reloads the same candles once per grid config.
+H3: candles lacks or does not use an efficient (pair, interval, ts) index.
+H4: live mode experiment commands allow full-history scans unless the operator manually limits the window.
+```
+
+Do not assume all are true. Inspect the repo and write code that makes the system robust even if only some are true.
+
+---
+
+# Required investigation before editing
 
 Inspect at least:
 
 ```text
-src/bithumb_bot/app.py
-src/bithumb_bot/strategy_sweep.py
 src/bithumb_bot/strategy_replay.py
-src/bithumb_bot/strategy_config.py
-src/bithumb_bot/decision_attribution.py
-tests/test_strategy_sweep.py
+src/bithumb_bot/strategy_sweep.py
+src/bithumb_bot/app.py
+src/bithumb_bot/db_core.py
+src/bithumb_bot/schema.py or migration/init files if present
 tests/test_strategy_replay.py
-tests/test_decision_attribution.py
+tests/test_strategy_sweep.py
+tests/test_strategy_sweep_cli.py
 tests/test_operator_commands.py
 ```
 
 Verify:
 
-* how CLI commands are registered in `app.py`
-* how `decision-attribution` CLI parses `--from`, `--to`, `--pair`, `--interval`, and `--json`
-* whether the repo has a shared date parsing helper such as `parse_kst_date_range_to_ts_ms`
-* whether `strategy-sweep` CLI already exists
-* whether existing tests use `main([...])` with `capsys` for CLI verification
-* whether `ensure_db()` is the correct DB entrypoint for read-only reporting commands
+* `_load_replay_candles()` currently fetches all matching candles with `fetchall()`.
+* `replay_sma_strategy_decisions()` currently loads candles internally.
+* `run_sma_strategy_sweep()` currently calls `replay_sma_strategy_decisions()` per config.
+* `strategy-sweep` CLI currently allows large/unbounded execution.
+* whether `candles(pair, interval, ts)` index already exists.
+* how DB schema/indexes are created and tested.
+* how CLI commands fail cleanly in current app style.
 
-Adapt to the actual repo style. Do not invent a separate CLI system.
+Adapt to the actual code. Preserve existing public APIs where reasonable.
 
 ---
 
-# Objective
+# Primary objective
 
-Add an operator-facing CLI command:
+Convert replay/sweep from “unbounded DB-backed experiment execution” into “bounded, reusable, operator-safe experiment execution.”
 
-```bash
-uv run bithumb-bot strategy-sweep \
-  --short 5,7,10 \
-  --long 20,30,50 \
-  --edge-buffer 0,0.0005,0.001,0.002 \
-  --min-expected-edge 0,0.0005,0.001 \
-  --slippage-bps 0,5 \
-  --json
+This patch should prioritize:
+
+```text
+1. explicit candle dataset boundary
+2. one-time candle loading for sweep
+3. max-candles / allow-full-history guard
+4. query/index optimization
+5. execution plan observability
 ```
 
-The command must run the existing attribution-based replay sweep and print either JSON or a compact human-readable table.
-
-The CLI output must remain attribution/replay focused. It must **not** include PnL, drawdown, fee drag, or any simulated fill/accounting metric.
+Do **not** implement PnL/backtest/fill simulation.
 
 ---
 
-# CLI requirements
+# Part 1: Introduce a bounded CandleReplayDataset
 
-## Command name
+In `src/bithumb_bot/strategy_replay.py`, add a dataset boundary.
+
+Suggested type:
+
+```python
+@dataclass(frozen=True)
+class CandleReplayDataset:
+    pair: str
+    interval: str
+    candles: tuple[tuple[int, float], ...]
+    from_ts_ms: int | None
+    to_ts_ms: int | None
+    through_ts_ms: int | None
+    max_candles: int | None
+    source: str = "sqlite:candles"
+```
+
+Adjust naming if repo style suggests better names.
+
+## Add a loader
+
+Replace or wrap `_load_replay_candles()` with a public/internal loader such as:
+
+```python
+def load_replay_candles(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    interval: str,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    through_ts_ms: int | None = None,
+    max_candles: int | None = None,
+) -> CandleReplayDataset:
+    ...
+```
+
+Requirements:
+
+* read only from `candles`
+* support `from_ts_ms`
+* support `to_ts_ms`
+* support `through_ts_ms`
+* support `max_candles`
+* return candles in ascending timestamp order
+* avoid unbounded full-history scans when `max_candles` is provided
+* keep behavior compatible for existing replay tests where feasible
+
+## Query design
+
+For bounded latest-N candles, prefer an efficient query shape:
+
+```sql
+SELECT ts, close
+FROM (
+    SELECT ts, close
+    FROM candles
+    WHERE pair=? AND interval=?
+      AND ts <= ?
+    ORDER BY ts DESC
+    LIMIT ?
+)
+ORDER BY ts ASC
+```
+
+If `from_ts_ms` is supplied, include it in the inner WHERE too.
+
+If no `max_candles` is supplied, you may keep ascending full-window query, but this must be guarded at CLI level in live mode.
+
+Be careful with `to_ts_ms` and `through_ts_ms`; use the stricter upper bound.
+
+---
+
+# Part 2: Split replay into DB loader wrapper + pure from-candles function
 
 Add:
 
-```text
-strategy-sweep
+```python
+def replay_sma_strategy_decisions_from_candles(
+    dataset: CandleReplayDataset,
+    config: StrategyReplayConfig,
+) -> StrategyReplayResult:
+    ...
 ```
 
-to the existing `bithumb-bot` CLI.
+This function must:
 
-## Options
+* not query SQLite
+* not mutate DB
+* not call broker APIs
+* use `dataset.candles`
+* preserve current attribution behavior
+* produce the same `DecisionAttributionSummary` as the existing replay path for equivalent candles
 
-Support at minimum:
+Then keep:
+
+```python
+def replay_sma_strategy_decisions(
+    conn: sqlite3.Connection,
+    config: StrategyReplayConfig,
+) -> StrategyReplayResult:
+    ...
+```
+
+as a wrapper that calls `load_replay_candles()` and then `replay_sma_strategy_decisions_from_candles()`.
+
+Extend `StrategyReplayConfig` with:
+
+```python
+max_candles: int | None = None
+```
+
+if needed.
+
+Update `build_strategy_replay_config_id()` so `max_candles` and the replay window are included deterministically. Do not include runtime timestamps.
+
+---
+
+# Part 3: Make strategy_sweep load candles once
+
+Update `src/bithumb_bot/strategy_sweep.py`.
+
+Current likely behavior:
 
 ```text
---short
---long
---edge-buffer
---min-expected-edge
---slippage-bps
---pair
---interval
+for each config:
+    replay_sma_strategy_decisions(conn, StrategyReplayConfig(...))
+```
+
+Required behavior:
+
+```text
+load candles once for base pair/interval/window/max_candles
+for each config:
+    replay_sma_strategy_decisions_from_candles(dataset, StrategyReplayConfig(...))
+```
+
+Add `max_candles` to `run_sma_strategy_sweep()`:
+
+```python
+def run_sma_strategy_sweep(
+    conn: sqlite3.Connection,
+    *,
+    base_config: SmaStrategyConfig,
+    grid: StrategySweepGrid,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    through_ts_ms: int | None = None,
+    max_candles: int | None = None,
+) -> list[StrategySweepResult]:
+    ...
+```
+
+Preserve deterministic order.
+
+Do not mutate `base_config` or `settings`.
+
+Use the maximum window needed for the grid. It is acceptable to load the same dataset for all configs based on pair/interval/window/max_candles. Invalid short/long configs should still be skipped.
+
+---
+
+# Part 4: Add execution plan / budget observability
+
+Add a small plan type, preferably in `strategy_sweep.py`:
+
+```python
+@dataclass(frozen=True)
+class StrategySweepExecutionPlan:
+    grid_count: int
+    candle_count: int
+    estimated_operations: int
+    max_candles: int | None
+    full_history: bool
+    allowed: bool
+    block_reason: str | None
+```
+
+Implement a helper such as:
+
+```python
+def build_strategy_sweep_execution_plan(
+    *,
+    grid: StrategySweepGrid,
+    candle_count: int,
+    max_candles: int | None,
+    from_ts_ms: int | None,
+    to_ts_ms: int | None,
+    through_ts_ms: int | None,
+    mode: str,
+    allow_full_history: bool,
+) -> StrategySweepExecutionPlan:
+    ...
+```
+
+The plan should:
+
+* count only valid configs where `short_n < long_n`
+* estimate operations as `grid_count * candle_count`
+* detect full-history mode when no window and no max-candles are provided
+* block unsafe live full-history runs unless `allow_full_history=True`
+* be deterministic and serializable
+
+This plan is not a trading recommendation. It is an execution safety/budget object.
+
+---
+
+# Part 5: Add CLI guard and options
+
+Update `strategy-sweep` CLI in `app.py`.
+
+Add options:
+
+```text
+--max-candles
+--allow-full-history
+```
+
+Required behavior:
+
+## In live mode
+
+If all are absent:
+
+```text
 --from
 --to
 --through
---json
+--max-candles
+--allow-full-history
 ```
 
-### List parsing
+then fail cleanly before running sweep.
 
-These should parse comma-separated values:
+Error text should be explicit, for example:
 
 ```text
---short 5,7,10
---long 20,30,50
---edge-buffer 0,0.0005,0.001
---min-expected-edge 0,0.0005,0.001
---slippage-bps 0,5
+strategy-sweep in live mode requires --from/--to/--through/--max-candles or --allow-full-history
 ```
 
-Parsing requirements:
+## In non-live mode
 
-* trim whitespace
-* reject empty lists
-* reject invalid integers/floats with useful CLI errors
-* preserve deterministic order
-* do not deduplicate unless the repo style already does so
+You may allow full-history by default, but still include plan metadata in output.
 
-### Pair and interval
+## JSON output
 
-Create a base config from existing settings:
+Prefer this shape:
 
-```python
-sma_strategy_config_from_settings()
+```json
+{
+  "plan": {
+    "grid_count": 216,
+    "candle_count": 5000,
+    "estimated_operations": 1080000,
+    "max_candles": 5000,
+    "full_history": false,
+    "allowed": true,
+    "block_reason": null
+  },
+  "rows": [
+    {
+      "config_id": "...",
+      "short_n": 5,
+      "long_n": 20,
+      "entry_edge_buffer_ratio": 0.001,
+      "strategy_min_expected_edge_ratio": 0.0,
+      "slippage_bps": 0.0,
+      "decision_count": 123,
+      "raw_buy": 4,
+      "final_buy": 2,
+      "submit_expected_buy": 0,
+      "raw_sell": 3,
+      "final_sell": 2,
+      "blocked_by_cost_filter_ratio": 0.12,
+      "gap_lt_required_ratio": 0.45,
+      "primary_issue": "..."
+    }
+  ]
+}
 ```
 
-Then use `dataclasses.replace()` or equivalent to override:
+If changing the previous JSON output from a bare list to an object is too disruptive, preserve backward compatibility only if tests require it. But the plan should be visible somehow. Prefer explicit `{"plan": ..., "rows": ...}` for operational safety.
 
-```text
-pair
-interval
-```
+## Human output
 
-when CLI options are supplied.
-
-Do **not** mutate global `settings`.
-
-### Time range
-
-Support `--from`, `--to`, and `--through`.
-
-Use the repo’s existing date/time parsing style if available. If `decision-attribution` uses a helper, reuse it.
-
-If the repo only supports epoch ms easily, document the accepted format in help text and tests. Prefer consistency with existing commands over inventing a new parser.
-
-Map these options into:
-
-```python
-run_sma_strategy_sweep(
-    conn,
-    base_config=...,
-    grid=...,
-    from_ts_ms=...,
-    to_ts_ms=...,
-    through_ts_ms=...,
-)
-```
-
-### JSON output
-
-For `--json`, emit a deterministic JSON array of summary rows.
-
-Each row should include exactly the attribution-based fields from `StrategySweepSummaryRow`:
-
-```text
-config_id
-short_n
-long_n
-entry_edge_buffer_ratio
-strategy_min_expected_edge_ratio
-slippage_bps
-decision_count
-raw_buy
-final_buy
-submit_expected_buy
-raw_sell
-final_sell
-blocked_by_cost_filter_ratio
-gap_lt_required_ratio
-primary_issue
-```
-
-If you use `dataclasses.asdict()`, ensure the output is stable:
-
-```python
-json.dumps(..., sort_keys=True, ensure_ascii=False)
-```
-
-Do not include PnL fields.
-
-### Human output
-
-For non-JSON output, print a compact operator-readable report. Example:
+Add plan lines before rows:
 
 ```text
 [STRATEGY-SWEEP]
-rows=12
-
-config_id          short long edge_buffer min_edge slippage decisions raw_BUY final_BUY cost_block gap_lt_required primary_issue
-abc123...          5     20   0.0005      0.0010   0.0      120       14      3         0.42       0.77            gap_below_required_edge
+mode=decision_attribution_only pnl_model=not_applied execution_model=not_applied
+grid_count=216 candle_count=5000 estimated_operations=1080000 full_history=0 max_candles=5000
+...
 ```
 
-The exact formatting can follow repo style, but it must expose the same core fields.
+Keep existing row fields. Do not add PnL.
+
+---
+
+# Part 6: Ensure candle index exists
+
+Find the DB schema/init/migration location. Add:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_candles_pair_interval_ts
+ON candles(pair, interval, ts);
+```
+
+Do this in the repo’s existing style.
+
+If another equivalent index already exists, do not duplicate. Instead add a test asserting an appropriate index exists or query plan uses it if practical.
+
+---
+
+# Required tests
+
+Add or update tests.
+
+## Replay dataset tests
+
+In `tests/test_strategy_replay.py` or a new file:
+
+1. `load_replay_candles(max_candles=N)` returns at most N candles.
+2. Candles are returned ascending by `ts`.
+3. `from_ts_ms`, `to_ts_ms`, and `through_ts_ms` are respected.
+4. `replay_sma_strategy_decisions_from_candles()` matches the existing DB-backed wrapper for the same dataset.
+5. Pure from-candles replay does not query or mutate SQLite.
+
+## Sweep one-load behavior tests
+
+In `tests/test_strategy_sweep.py`:
+
+1. `run_sma_strategy_sweep(..., max_candles=N)` works and produces deterministic rows.
+2. The candle dataset is loaded once for multiple configs. If mocking is acceptable, monkeypatch `load_replay_candles` and assert one call. If not, use a small injectable helper consistent with repo style.
+3. `base_config` and settings remain unchanged.
+4. Results still use `DecisionAttributionSummary`.
+5. No PnL/drawdown/fee-drag fields are introduced.
+
+## Execution plan tests
+
+Test:
+
+1. valid grid count excludes invalid short>=long configs.
+2. estimated operations = valid_grid_count * candle_count.
+3. live full-history without window/max-candles/allow-full-history is blocked.
+4. live bounded run is allowed.
+5. non-live full-history behavior follows chosen policy.
+
+## CLI tests
+
+Update `tests/test_strategy_sweep_cli.py`.
+
+Required cases:
+
+1. In live mode, running `strategy-sweep` without `--from`, `--to`, `--through`, `--max-candles`, or `--allow-full-history` fails before sweep execution.
+2. In live mode, `--max-candles 5000` allows execution.
+3. JSON output includes `plan` and `rows`.
+4. Human output includes execution plan and `mode=decision_attribution_only`.
+5. Read-only sentinel tests still pass.
+6. PnL/drawdown/fee_drag/profit/loss keys are absent.
+7. Invalid `--max-candles` fails cleanly.
+8. `--allow-full-history` works but marks `full_history=true` in the plan.
+
+## Index tests
+
+Add or update schema tests:
+
+1. ensure DB initialization creates an index on candles including pair, interval, ts, or equivalent.
+2. if existing tests inspect indexes, extend them.
+3. avoid brittle exact index name if the repo style prefers structural validation.
 
 ---
 
 # Safety requirements
 
-The CLI must be read-only.
+This patch must remain read-only for replay/sweep.
 
 It must not:
 
@@ -244,174 +484,10 @@ write open_position_lots
 call broker APIs
 call recovery/repair functions
 change runtime state
-mutate global settings
 perform PnL/backtest/fill simulation
 ```
 
-It should open the DB with the repo’s normal reporting pattern, run SELECTs over candles through replay/sweep, print output, and close the connection.
-
-If `candles` table is missing or no candles match, return a valid empty result rather than crashing where feasible.
-
----
-
-# Required tests
-
-Add or update tests. Prefer a new file if the repo style supports it:
-
-```text
-tests/test_strategy_sweep_cli.py
-```
-
-or extend `tests/test_strategy_sweep.py` if CLI tests live there.
-
-## Test 1: JSON CLI returns deterministic attribution rows
-
-Set up a temp DB with candle fixture, then call:
-
-```python
-main([
-    "strategy-sweep",
-    "--short", "2",
-    "--long", "3",
-    "--edge-buffer", "0,0.02",
-    "--min-expected-edge", "0",
-    "--slippage-bps", "0",
-    "--pair", "BTC_KRW",
-    "--interval", "1m",
-    "--json",
-])
-```
-
-Expected:
-
-```text
-rc == 0
-JSON parses
-list length == 2
-rows contain config_id, raw_buy, final_buy, blocked_by_cost_filter_ratio, gap_lt_required_ratio, primary_issue
-high edge buffer row has final_buy lower than low edge buffer row
-no PnL/drawdown fields
-```
-
-## Test 2: human CLI output includes operator fields
-
-Call the same command without `--json`.
-
-Expected output includes:
-
-```text
-[STRATEGY-SWEEP]
-raw_BUY or raw_buy
-final_BUY or final_buy
-cost_block or blocked_by_cost_filter_ratio
-primary_issue
-```
-
-Use flexible assertions consistent with existing tests.
-
-## Test 3: invalid list arguments fail cleanly
-
-Examples:
-
-```text
---short ""
---long "abc"
---edge-buffer "0,not-a-float"
-```
-
-Expected:
-
-```text
-SystemExit or nonzero rc according to app.py style
-useful error text
-```
-
-## Test 4: CLI does not mutate settings
-
-Set `settings.ENTRY_EDGE_BUFFER_RATIO` and `settings.STRATEGY_ENTRY_SLIPPAGE_BPS` to sentinel values with the repo’s existing settings guard style.
-
-Run CLI with different sweep values.
-
-Expected:
-
-```text
-settings sentinels unchanged
-```
-
-## Test 5: CLI is read-only
-
-Create sentinel rows in:
-
-```text
-orders
-fills
-portfolio
-open_position_lots
-```
-
-Run CLI.
-
-Expected:
-
-```text
-row counts and sentinel values unchanged
-```
-
-If exact schemas are hard to create, use minimal tables only if the sweep/replay path does not require them. The point is to prove the CLI does not write.
-
-## Test 6: no PnL fields
-
-Assert JSON row keys do not contain:
-
-```text
-pnl
-drawdown
-fee_drag
-profit
-loss
-```
-
----
-
-# Optional next helper: replay/live attribution comparison
-
-After CLI support, consider adding only a small read-only helper if it is low-risk:
-
-```text
-stored strategy_decisions attribution summary
-vs
-strategy_replay attribution summary
-for the same pair/interval/time window
-```
-
-Do not build a large report yet. A small helper or tests are enough.
-
-The comparison should use these fields:
-
-```text
-raw_BUY
-final_BUY
-raw_SELL
-final_SELL
-blocked_by_cost_filter_ratio
-gap_lt_required_ratio
-primary_issue
-schema_quality
-```
-
-This is important because replay currently does not model:
-
-```text
-position lifecycle
-broker state
-execution/order rules
-performance gate
-cash drift/accounting repairs
-```
-
-So replay should be treated as **signal/filter attribution replay**, not a full live-decision clone.
-
-If this helper risks scope creep, skip it and list it as next work.
+Schema/index creation through existing DB initialization is acceptable if consistent with repo behavior.
 
 ---
 
@@ -431,38 +507,37 @@ accounting repair replay
 lot-native lifecycle replay
 performance gate replay
 automatic env tuning
-live order actions
+best config recommendation
 ```
 
-Do not add “recommended best config” logic. The sweep should expose attribution metrics, not make trading recommendations.
+Do not add a timeout as the main fix. Timeouts hide the design issue. The fix must be bounded datasets, one-load replay, execution plan, and index support.
 
 ---
 
-# Operational validation
+# EC2 validation to run after patch
 
-After tests pass, if a local/dev DB is available, run:
+After tests pass, run bounded commands on EC2.
+
+First:
 
 ```bash
 uv run bithumb-bot decision-attribution --limit 500 --json
 ```
 
-Inspect and report:
+Then:
 
-```text
-schema_quality.all_block_reasons_present_count
-schema_quality.primary_block_present_count
-schema_quality.primary_all_block_conflict_count
-malformed_context_count
-context_missing_count
-candidate_funnel.raw_BUY
-candidate_funnel.final_BUY
-candidate_funnel.submit_expected_BUY
-filter_ratios.blocked_by_cost_filter_ratio
-edge_stats.gap_lt_required_ratio
-interpretation.primary_issue
+```bash
+uv run bithumb-bot strategy-sweep \
+  --short 5 \
+  --long 20 \
+  --edge-buffer 0,0.001 \
+  --min-expected-edge 0 \
+  --slippage-bps 0 \
+  --max-candles 5000 \
+  --json
 ```
 
-Then run:
+Then a larger bounded grid:
 
 ```bash
 uv run bithumb-bot strategy-sweep \
@@ -471,51 +546,29 @@ uv run bithumb-bot strategy-sweep \
   --edge-buffer 0,0.0005,0.001,0.002 \
   --min-expected-edge 0,0.0005,0.001 \
   --slippage-bps 0,5 \
+  --max-candles 5000 \
   --json
 ```
 
-Interpretation rules:
+Expected:
 
-```text
-raw_BUY almost zero
-→ sweep edge-buffer changes are less relevant than SMA period / market regime
+* command completes without manual interrupt
+* JSON includes execution plan
+* `plan.candle_count <= 5000`
+* `plan.grid_count` matches valid combinations
+* no PnL fields
+* rows contain attribution metrics only
 
-raw_BUY present but final_BUY low
-→ edge/cost sweep is meaningful
-
-blocked_by_cost_filter_ratio high and gap_lt_required_ratio high
-→ cost/edge settings are strict relative to this candle window
-
-final_BUY exists but submit_expected low in live decision-attribution
-→ not a replay/sweep issue; inspect execution/order-rule/performance-gate path
-```
-
-If no DB is available, state that clearly. Do not fabricate runtime observations.
-
----
-
-# Validation commands
-
-Run targeted tests:
+Also inspect index/query plan if possible:
 
 ```bash
-uv run pytest tests/test_strategy_sweep.py
-uv run pytest tests/test_strategy_sweep_cli.py
-uv run pytest tests/test_strategy_replay.py
-uv run pytest tests/test_sma_strategy_config.py
-uv run pytest tests/test_decision_attribution.py
+sqlite3 /home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite \
+"PRAGMA index_list(candles);"
 ```
 
-Run related decision/operator tests:
-
 ```bash
-uv run pytest tests/test_decision_telemetry.py tests/test_strategy_decision_persistence.py tests/test_operator_commands.py
-```
-
-Run full suite if feasible:
-
-```bash
-uv run pytest
+sqlite3 /home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite \
+"EXPLAIN QUERY PLAN SELECT ts, close FROM candles WHERE pair='KRW-BTC' AND interval='1m' ORDER BY ts ASC;"
 ```
 
 ---
@@ -535,31 +588,39 @@ Verification
 - command: result
 - command: result
 
-Strategy-sweep CLI
-- Explain command options and parsing.
-- Explain JSON output shape.
-- Explain human output shape.
-- Confirm output is attribution-based and excludes PnL/drawdown/fee-drag.
+Root-cause hypotheses
+- H1 unbounded candle fetch: confirmed / partially confirmed / not confirmed
+- H2 repeated candle reload per grid config: confirmed / partially confirmed / not confirmed
+- H3 missing/unused candle index: confirmed / partially confirmed / not confirmed
+- H4 missing live execution-budget guard: confirmed / partially confirmed / not confirmed
+
+Replay dataset boundary
+- Explain CandleReplayDataset.
+- Explain max_candles/from/to/through behavior.
+- Explain from-candles replay and DB wrapper behavior.
+
+Sweep execution budget
+- Explain StrategySweepExecutionPlan.
+- Explain live full-history guard.
+- Explain one-time candle loading for sweep.
+- Explain JSON/human plan output.
 
 Safety / recovery
-- Confirm CLI is read-only.
-- Confirm settings are not mutated.
+- Confirm replay/sweep remain read-only.
 - Confirm no trading behavior or live gates changed.
-- Confirm no DB mutation occurs during sweep.
-
-Findings
-- State whether the hypothesis was confirmed, partially confirmed, or not confirmed.
-- Mention any stronger structural issue discovered.
+- Confirm no PnL/backtest/fill simulation was added.
+- Confirm schema/index changes are safe and idempotent.
 
 Operational notes
-- Explain how to compare decision-attribution and strategy-sweep results.
-- Explain why replay/sweep should not be interpreted as PnL/backtest.
+- Explain recommended EC2 commands.
+- Explain how to interpret raw_signal_scarcity vs cost-filter blocking.
+- Explain why sweep remains attribution-only, not profitability analysis.
 
 Next steps
-- PR 1: add replay/live attribution comparison helper or report
-- PR 2: add optional sorting/filtering for strategy-sweep output
+- PR 1: replay-vs-live attribution comparison report
+- PR 2: optional sorting/filtering of sweep output
 - PR 3: only later add lightweight portfolio/PnL simulation
 ```
 
-Keep the priority strict: **make sweep executable and comparable; do not add PnL/backtest yet.**
+Keep the priority strict: **bounded experiment execution first; replay/sweep performance and operational safety before any PnL/backtest work.**
 

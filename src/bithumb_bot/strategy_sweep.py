@@ -6,9 +6,11 @@ from typing import Iterable
 
 from .strategy_config import SmaStrategyConfig
 from .strategy_replay import (
+    CandleReplayDataset,
     StrategyReplayConfig,
     StrategyReplayResult,
-    replay_sma_strategy_decisions,
+    load_replay_candles,
+    replay_sma_strategy_decisions_from_candles,
 )
 
 
@@ -47,6 +49,87 @@ class StrategySweepSummaryRow:
     primary_issue: str
 
 
+@dataclass(frozen=True)
+class StrategySweepExecutionPlan:
+    grid_count: int
+    candle_count: int
+    estimated_operations: int
+    max_candles: int | None
+    full_history: bool
+    allowed: bool
+    block_reason: str | None
+
+
+def _valid_grid_configs(
+    *,
+    base_config: SmaStrategyConfig,
+    grid: StrategySweepGrid,
+) -> tuple[SmaStrategyConfig, ...]:
+    configs: list[SmaStrategyConfig] = []
+    for short_n in grid.short_values:
+        for long_n in grid.long_values:
+            if int(short_n) >= int(long_n):
+                continue
+            for entry_edge_buffer_ratio in grid.entry_edge_buffer_values:
+                for strategy_min_expected_edge_ratio in grid.strategy_min_expected_edge_values:
+                    for slippage_bps in grid.slippage_bps_values:
+                        configs.append(
+                            replace(
+                                base_config,
+                                short_n=int(short_n),
+                                long_n=int(long_n),
+                                entry_edge_buffer_ratio=float(entry_edge_buffer_ratio),
+                                strategy_min_expected_edge_ratio=float(
+                                    strategy_min_expected_edge_ratio
+                                ),
+                                slippage_bps=float(slippage_bps),
+                            )
+                        )
+    return tuple(configs)
+
+
+def build_strategy_sweep_execution_plan(
+    *,
+    grid: StrategySweepGrid,
+    candle_count: int,
+    max_candles: int | None,
+    from_ts_ms: int | None,
+    to_ts_ms: int | None,
+    through_ts_ms: int | None,
+    mode: str,
+    allow_full_history: bool,
+) -> StrategySweepExecutionPlan:
+    grid_count = sum(
+        1
+        for short_n in grid.short_values
+        for long_n in grid.long_values
+        if int(short_n) < int(long_n)
+    )
+    grid_count *= (
+        len(grid.entry_edge_buffer_values)
+        * len(grid.strategy_min_expected_edge_values)
+        * len(grid.slippage_bps_values)
+    )
+    full_history = (
+        from_ts_ms is None
+        and to_ts_ms is None
+        and through_ts_ms is None
+        and max_candles is None
+    )
+    block_reason = None
+    if str(mode) == "live" and full_history and not bool(allow_full_history):
+        block_reason = "live_full_history_requires_window_or_max_candles"
+    return StrategySweepExecutionPlan(
+        grid_count=int(grid_count),
+        candle_count=int(candle_count),
+        estimated_operations=int(grid_count) * int(candle_count),
+        max_candles=None if max_candles is None else int(max_candles),
+        full_history=bool(full_history),
+        allowed=block_reason is None,
+        block_reason=block_reason,
+    )
+
+
 def run_sma_strategy_sweep(
     conn: sqlite3.Connection,
     *,
@@ -55,41 +138,56 @@ def run_sma_strategy_sweep(
     from_ts_ms: int | None = None,
     to_ts_ms: int | None = None,
     through_ts_ms: int | None = None,
+    max_candles: int | None = None,
+) -> list[StrategySweepResult]:
+    configs = _valid_grid_configs(base_config=base_config, grid=grid)
+    dataset = load_replay_candles(
+        conn,
+        pair=base_config.pair,
+        interval=base_config.interval,
+        from_ts_ms=from_ts_ms,
+        to_ts_ms=to_ts_ms,
+        through_ts_ms=through_ts_ms,
+        max_candles=max_candles,
+    )
+    return run_sma_strategy_sweep_from_candles(
+        dataset,
+        configs=configs,
+        from_ts_ms=from_ts_ms,
+        to_ts_ms=to_ts_ms,
+        through_ts_ms=through_ts_ms,
+        max_candles=max_candles,
+    )
+
+
+def run_sma_strategy_sweep_from_candles(
+    dataset: CandleReplayDataset,
+    *,
+    configs: Iterable[SmaStrategyConfig],
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    through_ts_ms: int | None = None,
+    max_candles: int | None = None,
 ) -> list[StrategySweepResult]:
     results: list[StrategySweepResult] = []
-    for short_n in grid.short_values:
-        for long_n in grid.long_values:
-            if int(short_n) >= int(long_n):
-                continue
-            for entry_edge_buffer_ratio in grid.entry_edge_buffer_values:
-                for strategy_min_expected_edge_ratio in grid.strategy_min_expected_edge_values:
-                    for slippage_bps in grid.slippage_bps_values:
-                        strategy_config = replace(
-                            base_config,
-                            short_n=int(short_n),
-                            long_n=int(long_n),
-                            entry_edge_buffer_ratio=float(entry_edge_buffer_ratio),
-                            strategy_min_expected_edge_ratio=float(
-                                strategy_min_expected_edge_ratio
-                            ),
-                            slippage_bps=float(slippage_bps),
-                        )
-                        replay_result = replay_sma_strategy_decisions(
-                            conn,
-                            StrategyReplayConfig(
-                                strategy_config=strategy_config,
-                                from_ts_ms=from_ts_ms,
-                                to_ts_ms=to_ts_ms,
-                                through_ts_ms=through_ts_ms,
-                            ),
-                        )
-                        results.append(
-                            StrategySweepResult(
-                                config_id=replay_result.config_id,
-                                strategy_config=strategy_config,
-                                replay_result=replay_result,
-                            )
-                        )
+    for strategy_config in configs:
+        replay_result = replay_sma_strategy_decisions_from_candles(
+            dataset,
+            StrategyReplayConfig(
+                strategy_config=strategy_config,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+                through_ts_ms=through_ts_ms,
+                max_candles=max_candles,
+            ),
+        )
+        results.append(
+            StrategySweepResult(
+                config_id=replay_result.config_id,
+                strategy_config=strategy_config,
+                replay_result=replay_result,
+            )
+        )
     return results
 
 

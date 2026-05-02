@@ -9,8 +9,11 @@ from bithumb_bot.config import settings
 from bithumb_bot.decision_attribution import DecisionAttributionSummary
 from bithumb_bot.strategy_config import sma_strategy_config_from_settings
 from bithumb_bot.strategy_replay import (
+    CandleReplayDataset,
     StrategyReplayConfig,
+    load_replay_candles,
     replay_sma_strategy_decisions,
+    replay_sma_strategy_decisions_from_candles,
 )
 
 
@@ -66,6 +69,46 @@ def test_replay_returns_empty_result_for_insufficient_candles() -> None:
     assert result.insufficient_candle_count == 4
 
 
+def test_load_replay_candles_max_candles_returns_latest_n_ascending() -> None:
+    conn = _build_candle_db([10.0, 11.0, 12.0, 13.0, 14.0])
+    try:
+        dataset = load_replay_candles(
+            conn,
+            pair="BTC_KRW",
+            interval="1m",
+            max_candles=3,
+        )
+    finally:
+        conn.close()
+
+    assert len(dataset.candles) == 3
+    assert [close for _ts, close in dataset.candles] == [12.0, 13.0, 14.0]
+    assert [ts for ts, _close in dataset.candles] == sorted(
+        ts for ts, _close in dataset.candles
+    )
+
+
+def test_load_replay_candles_respects_from_to_and_through_bounds() -> None:
+    conn = _build_candle_db([10.0, 11.0, 12.0, 13.0, 14.0])
+    base_ts = 1_700_000_000_000
+    try:
+        dataset = load_replay_candles(
+            conn,
+            pair="BTC_KRW",
+            interval="1m",
+            from_ts_ms=base_ts + 60_000,
+            to_ts_ms=base_ts + 4 * 60_000,
+            through_ts_ms=base_ts + 3 * 60_000,
+        )
+    finally:
+        conn.close()
+
+    assert [close for _ts, close in dataset.candles] == [11.0, 12.0, 13.0]
+    assert dataset.from_ts_ms == base_ts + 60_000
+    assert dataset.to_ts_ms == base_ts + 4 * 60_000
+    assert dataset.through_ts_ms == base_ts + 3 * 60_000
+
+
 def test_replay_golden_cross_produces_raw_buy() -> None:
     conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
     try:
@@ -79,6 +122,49 @@ def test_replay_golden_cross_produces_raw_buy() -> None:
     assert result.decision_count == 1
     assert result.attribution_summary.candidate_funnel["raw_BUY"] >= 1
     assert result.attribution_summary.raw_signal_counts["BUY"] >= 1
+
+
+def test_replay_from_candles_matches_db_backed_wrapper_for_same_dataset() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0, 11.0])
+    config = StrategyReplayConfig(strategy_config=_base_config(), max_candles=5)
+    try:
+        dataset = load_replay_candles(
+            conn,
+            pair="BTC_KRW",
+            interval="1m",
+            max_candles=5,
+        )
+        pure = replay_sma_strategy_decisions_from_candles(dataset, config)
+        db_backed = replay_sma_strategy_decisions(conn, config)
+    finally:
+        conn.close()
+
+    assert pure.config_id == db_backed.config_id
+    assert pure.decision_count == db_backed.decision_count
+    assert pure.attribution_summary.as_dict() == db_backed.attribution_summary.as_dict()
+
+
+def test_replay_from_candles_does_not_need_sqlite_connection() -> None:
+    dataset = CandleReplayDataset(
+        pair="BTC_KRW",
+        interval="1m",
+        candles=tuple(
+            (1_700_000_000_000 + idx * 60_000, close)
+            for idx, close in enumerate([10.0, 10.0, 10.0, 10.0, 11.0])
+        ),
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        max_candles=None,
+    )
+
+    result = replay_sma_strategy_decisions_from_candles(
+        dataset,
+        StrategyReplayConfig(strategy_config=_base_config()),
+    )
+
+    assert result.decision_count == 1
+    assert result.attribution_summary.candidate_funnel["raw_BUY"] >= 1
 
 
 def test_replay_high_edge_buffer_turns_buy_candidate_into_cost_filtered_hold() -> None:

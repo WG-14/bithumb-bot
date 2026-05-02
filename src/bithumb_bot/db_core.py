@@ -414,6 +414,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candles_pair_interval_ts
+        ON candles(pair, interval, ts)
+        """
+    )
 
     conn.execute(
         """

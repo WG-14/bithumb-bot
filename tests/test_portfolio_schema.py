@@ -23,6 +23,24 @@ def test_schema_bootstrap_creates_portfolio_split_columns(tmp_path):
     assert "asset_locked" in cols
 
 
+def test_schema_bootstrap_creates_candles_pair_interval_ts_index(tmp_path):
+    conn = ensure_db(str(tmp_path / "candles-index.sqlite"))
+    try:
+        index_rows = conn.execute("PRAGMA index_list(candles)").fetchall()
+        indexed_columns = []
+        for index_row in index_rows:
+            index_name = str(index_row[1])
+            columns = [
+                str(column_row[2])
+                for column_row in conn.execute(f"PRAGMA index_info({index_name})").fetchall()
+            ]
+            indexed_columns.append(tuple(columns))
+    finally:
+        conn.close()
+
+    assert ("pair", "interval", "ts") in indexed_columns
+
+
 def test_portfolio_read_write_supports_breakdown_shape(tmp_path):
     conn = ensure_db(str(tmp_path / "shape.sqlite"))
     init_portfolio(conn)

@@ -134,6 +134,7 @@ from .decision_attribution import (
 from .strategy_config import sma_strategy_config_from_settings
 from .strategy_sweep import (
     StrategySweepGrid,
+    build_strategy_sweep_execution_plan,
     run_sma_strategy_sweep,
     summarize_strategy_sweep_results,
 )
@@ -6503,6 +6504,16 @@ def _parse_csv_floats(option_name: str):
     return lambda value: _parse_csv_values(value, option_name=option_name, parser=float)
 
 
+def _positive_int_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("--max-candles must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("--max-candles must be a positive integer")
+    return parsed
+
+
 def _connect_readonly_or_empty_candles() -> sqlite3.Connection:
     try:
         conn = sqlite3.connect(f"file:{Path(settings.DB_PATH).absolute()}?mode=ro", uri=True)
@@ -6531,8 +6542,22 @@ def _connect_readonly_or_empty_candles() -> sqlite3.Connection:
     return empty_conn
 
 
-def _format_strategy_sweep_rows(rows: list[object]) -> str:
-    lines = ["[STRATEGY-SWEEP]", f"rows={len(rows)}", ""]
+def _format_strategy_sweep_rows(*, plan: object, rows: list[object]) -> str:
+    lines = [
+        "[STRATEGY-SWEEP]",
+        "mode=decision_attribution_only pnl_model=not_applied execution_model=not_applied",
+        (
+            f"grid_count={int(getattr(plan, 'grid_count'))} "
+            f"candle_count={int(getattr(plan, 'candle_count'))} "
+            f"estimated_operations={int(getattr(plan, 'estimated_operations'))} "
+            f"full_history={1 if bool(getattr(plan, 'full_history')) else 0} "
+            f"max_candles={getattr(plan, 'max_candles')}"
+        ),
+        f"allowed={1 if bool(getattr(plan, 'allowed')) else 0} "
+        f"block_reason={getattr(plan, 'block_reason')}",
+        f"rows={len(rows)}",
+        "",
+    ]
     lines.append(
         "config_id          short long edge_buffer min_edge slippage decisions "
         "raw_BUY final_BUY submit_BUY raw_SELL final_SELL cost_block gap_lt_required primary_issue"
@@ -6572,6 +6597,8 @@ def cmd_strategy_sweep(
     from_ts_ms: int | None,
     to_ts_ms: int | None,
     through_ts_ms: int | None,
+    max_candles: int | None,
+    allow_full_history: bool,
     as_json: bool,
 ) -> None:
     base_config = sma_strategy_config_from_settings()
@@ -6592,6 +6619,23 @@ def cmd_strategy_sweep(
         ),
         slippage_bps_values=tuple(float(value) for value in slippage_bps_values),
     )
+    preflight_plan = build_strategy_sweep_execution_plan(
+        grid=grid,
+        candle_count=0,
+        max_candles=max_candles,
+        from_ts_ms=from_ts_ms,
+        to_ts_ms=to_ts_ms,
+        through_ts_ms=through_ts_ms,
+        mode=settings.MODE,
+        allow_full_history=allow_full_history,
+    )
+    if not preflight_plan.allowed:
+        print(
+            "strategy-sweep in live mode requires "
+            "--from/--to/--through/--max-candles or --allow-full-history"
+        )
+        raise SystemExit(1)
+
     conn = _connect_readonly_or_empty_candles()
     try:
         results = run_sma_strategy_sweep(
@@ -6601,15 +6645,36 @@ def cmd_strategy_sweep(
             from_ts_ms=from_ts_ms,
             to_ts_ms=to_ts_ms,
             through_ts_ms=through_ts_ms,
+            max_candles=max_candles,
         )
     finally:
         conn.close()
 
     rows = summarize_strategy_sweep_results(results)
+    candle_count = results[0].replay_result.candle_count if results else 0
+    plan = build_strategy_sweep_execution_plan(
+        grid=grid,
+        candle_count=candle_count,
+        max_candles=max_candles,
+        from_ts_ms=from_ts_ms,
+        to_ts_ms=to_ts_ms,
+        through_ts_ms=through_ts_ms,
+        mode=settings.MODE,
+        allow_full_history=allow_full_history,
+    )
     if as_json:
-        print(json.dumps([asdict(row) for row in rows], sort_keys=True, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "plan": asdict(plan),
+                    "rows": [asdict(row) for row in rows],
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+        )
     else:
-        print(_format_strategy_sweep_rows(rows))
+        print(_format_strategy_sweep_rows(plan=plan, rows=rows))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -6823,6 +6888,8 @@ def main(argv: list[str] | None = None) -> int:
     strategy_sweep.add_argument("--from", dest="from_date", help="KST date (YYYY-MM-DD)")
     strategy_sweep.add_argument("--to", dest="to_date", help="KST date (YYYY-MM-DD)")
     strategy_sweep.add_argument("--through", dest="through_date", help="KST date (YYYY-MM-DD)")
+    strategy_sweep.add_argument("--max-candles", type=_positive_int_arg)
+    strategy_sweep.add_argument("--allow-full-history", action="store_true")
     strategy_sweep.add_argument("--json", action="store_true")
 
     fee_diag = sub.add_parser(
@@ -7077,6 +7144,18 @@ def main(argv: list[str] | None = None) -> int:
             p.error("invalid date format for --from/--to/--through; expected YYYY-MM-DD")
         if from_ts_ms is not None and to_ts_ms is not None and from_ts_ms > to_ts_ms:
             p.error("--from must be earlier than or equal to --to")
+        if (
+            settings.MODE == "live"
+            and from_ts_ms is None
+            and to_ts_ms is None
+            and through_ts_ms is None
+            and args.max_candles is None
+            and not bool(args.allow_full_history)
+        ):
+            p.error(
+                "strategy-sweep in live mode requires "
+                "--from/--to/--through/--max-candles or --allow-full-history"
+            )
         cmd_strategy_sweep(
             short_values=args.short,
             long_values=args.long,
@@ -7088,6 +7167,8 @@ def main(argv: list[str] | None = None) -> int:
             from_ts_ms=from_ts_ms,
             to_ts_ms=to_ts_ms,
             through_ts_ms=through_ts_ms,
+            max_candles=args.max_candles,
+            allow_full_history=bool(args.allow_full_history),
             as_json=bool(args.json),
         )
     elif args.cmd == "fee-diagnostics":

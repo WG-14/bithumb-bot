@@ -28,6 +28,19 @@ class StrategyReplayConfig:
     from_ts_ms: int | None = None
     to_ts_ms: int | None = None
     through_ts_ms: int | None = None
+    max_candles: int | None = None
+
+
+@dataclass(frozen=True)
+class CandleReplayDataset:
+    pair: str
+    interval: str
+    candles: tuple[tuple[int, float], ...]
+    from_ts_ms: int | None
+    to_ts_ms: int | None
+    through_ts_ms: int | None
+    max_candles: int | None
+    source: str = "sqlite:candles"
 
 
 @dataclass(frozen=True)
@@ -45,6 +58,7 @@ def _stable_payload(config: StrategyReplayConfig) -> dict[str, object]:
         "from_ts_ms": config.from_ts_ms,
         "to_ts_ms": config.to_ts_ms,
         "through_ts_ms": config.through_ts_ms,
+        "max_candles": config.max_candles,
     }
 
 
@@ -53,13 +67,68 @@ def build_strategy_replay_config_id(config: StrategyReplayConfig) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _upper_bound_ts(config: StrategyReplayConfig) -> int | None:
+def _upper_bound_ts(
+    *,
+    to_ts_ms: int | None,
+    through_ts_ms: int | None,
+) -> int | None:
     values = [
         int(value)
-        for value in (config.to_ts_ms, config.through_ts_ms)
+        for value in (to_ts_ms, through_ts_ms)
         if value is not None
     ]
     return min(values) if values else None
+
+
+def load_replay_candles(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    interval: str,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    through_ts_ms: int | None = None,
+    max_candles: int | None = None,
+) -> CandleReplayDataset:
+    if max_candles is not None and int(max_candles) <= 0:
+        raise ValueError("max_candles must be positive")
+    upper_bound_ts = _upper_bound_ts(to_ts_ms=to_ts_ms, through_ts_ms=through_ts_ms)
+    params: list[object] = [str(pair), str(interval)]
+    where = "WHERE pair=? AND interval=?"
+    if from_ts_ms is not None:
+        where += " AND ts >= ?"
+        params.append(int(from_ts_ms))
+    if upper_bound_ts is not None:
+        where += " AND ts <= ?"
+        params.append(int(upper_bound_ts))
+    if max_candles is not None:
+        params.append(int(max_candles))
+        query = f"""
+            SELECT ts, close
+            FROM (
+                SELECT ts, close
+                FROM candles
+                {where}
+                ORDER BY ts DESC
+                LIMIT ?
+            )
+            ORDER BY ts ASC
+        """
+    else:
+        query = f"SELECT ts, close FROM candles {where} ORDER BY ts ASC"
+    candles = tuple(
+        (int(row[0]), float(row[1]))
+        for row in conn.execute(query, tuple(params)).fetchall()
+    )
+    return CandleReplayDataset(
+        pair=str(pair),
+        interval=str(interval),
+        candles=candles,
+        from_ts_ms=None if from_ts_ms is None else int(from_ts_ms),
+        to_ts_ms=None if to_ts_ms is None else int(to_ts_ms),
+        through_ts_ms=None if through_ts_ms is None else int(through_ts_ms),
+        max_candles=None if max_candles is None else int(max_candles),
+    )
 
 
 def _load_replay_candles(
@@ -68,6 +137,7 @@ def _load_replay_candles(
     strategy_config: SmaStrategyConfig,
     upper_bound_ts: int | None,
 ) -> list[tuple[int, float]]:
+    """Compatibility wrapper for older tests/imports; prefer load_replay_candles."""
     query = "SELECT ts, close FROM candles WHERE pair=? AND interval=?"
     params: list[object] = [strategy_config.pair, strategy_config.interval]
     if upper_bound_ts is not None:
@@ -232,16 +302,32 @@ def replay_sma_strategy_decisions(
     conn: sqlite3.Connection,
     config: StrategyReplayConfig,
 ) -> StrategyReplayResult:
+    dataset = load_replay_candles(
+        conn,
+        pair=config.strategy_config.pair,
+        interval=config.strategy_config.interval,
+        from_ts_ms=config.from_ts_ms,
+        to_ts_ms=config.to_ts_ms,
+        through_ts_ms=config.through_ts_ms,
+        max_candles=config.max_candles,
+    )
+    return replay_sma_strategy_decisions_from_candles(dataset, config)
+
+
+def replay_sma_strategy_decisions_from_candles(
+    dataset: CandleReplayDataset,
+    config: StrategyReplayConfig,
+) -> StrategyReplayResult:
     strategy_config = config.strategy_config
     if int(strategy_config.short_n) >= int(strategy_config.long_n):
         raise ValueError("short_n must be smaller than long_n")
+    if dataset.pair != strategy_config.pair:
+        raise ValueError("dataset pair does not match strategy config")
+    if dataset.interval != strategy_config.interval:
+        raise ValueError("dataset interval does not match strategy config")
 
     config_id = build_strategy_replay_config_id(config)
-    candles = _load_replay_candles(
-        conn,
-        strategy_config=strategy_config,
-        upper_bound_ts=_upper_bound_ts(config),
-    )
+    candles = list(dataset.candles)
     replay_start_index = int(strategy_config.long_n) + 1
     if len(candles) < replay_start_index + 1:
         return StrategyReplayResult(

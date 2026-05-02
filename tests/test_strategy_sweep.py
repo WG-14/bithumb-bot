@@ -8,13 +8,15 @@ import pytest
 from bithumb_bot.config import settings
 from bithumb_bot.decision_attribution import DecisionAttributionSummary
 from bithumb_bot.strategy_config import sma_strategy_config_from_settings
-from bithumb_bot.strategy_replay import StrategyReplayResult
+from bithumb_bot.strategy_replay import CandleReplayDataset, StrategyReplayResult
 from bithumb_bot.strategy_sweep import (
     StrategySweepGrid,
     StrategySweepSummaryRow,
+    build_strategy_sweep_execution_plan,
     run_sma_strategy_sweep,
     summarize_strategy_sweep_results,
 )
+import bithumb_bot.strategy_sweep as strategy_sweep_module
 
 
 def _build_candle_db(closes: list[float]) -> sqlite3.Connection:
@@ -116,6 +118,68 @@ def test_sweep_result_order_and_summary_rows_are_deterministic() -> None:
     assert [asdict(row) for row in summarize_strategy_sweep_results(first)] == [
         asdict(row) for row in summarize_strategy_sweep_results(second)
     ]
+
+
+def test_sweep_max_candles_produces_deterministic_rows() -> None:
+    closes = [9.0, 10.0, 10.0, 10.0, 10.0, 11.0]
+    conn_a = _build_candle_db(closes)
+    conn_b = _build_candle_db(closes)
+    try:
+        first = run_sma_strategy_sweep(
+            conn_a,
+            base_config=_base_config(),
+            grid=_single_cross_grid(),
+            max_candles=5,
+        )
+        second = run_sma_strategy_sweep(
+            conn_b,
+            base_config=_base_config(),
+            grid=_single_cross_grid(),
+            max_candles=5,
+        )
+    finally:
+        conn_a.close()
+        conn_b.close()
+
+    assert [asdict(row) for row in summarize_strategy_sweep_results(first)] == [
+        asdict(row) for row in summarize_strategy_sweep_results(second)
+    ]
+    assert first[0].replay_result.candle_count == 5
+
+
+def test_sweep_loads_candle_dataset_once(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    dataset = CandleReplayDataset(
+        pair="BTC_KRW",
+        interval="1m",
+        candles=tuple(
+            (1_700_000_000_000 + idx * 60_000, close)
+            for idx, close in enumerate([10.0, 10.0, 10.0, 10.0, 11.0])
+        ),
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        max_candles=5,
+    )
+    calls = []
+
+    def fake_loader(*args, **kwargs):
+        calls.append((args, kwargs))
+        return dataset
+
+    monkeypatch.setattr(strategy_sweep_module, "load_replay_candles", fake_loader)
+    try:
+        results = run_sma_strategy_sweep(
+            conn,
+            base_config=_base_config(),
+            grid=_single_cross_grid(entry_edge_buffer_values=(0.0, 0.02)),
+            max_candles=5,
+        )
+    finally:
+        conn.close()
+
+    assert len(calls) == 1
+    assert len(results) == 2
 
 
 def test_sweep_results_use_replay_and_decision_attribution_summary() -> None:
@@ -232,3 +296,69 @@ def test_summary_rows_are_deterministic_and_attribution_based() -> None:
     }.issubset(row_fields)
     assert not any("pnl" in field_name.lower() for field_name in row_fields)
     assert not any("drawdown" in field_name.lower() for field_name in row_fields)
+    assert not any("fee_drag" in field_name.lower() for field_name in row_fields)
+
+
+def test_sweep_execution_plan_counts_valid_grid_and_operations() -> None:
+    grid = _single_cross_grid(short_values=(2, 3), long_values=(3, 4))
+
+    plan = build_strategy_sweep_execution_plan(
+        grid=grid,
+        candle_count=5000,
+        max_candles=5000,
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        mode="live",
+        allow_full_history=False,
+    )
+
+    assert plan.grid_count == 3
+    assert plan.estimated_operations == 15_000
+    assert plan.full_history is False
+    assert plan.allowed is True
+
+
+def test_sweep_execution_plan_blocks_live_unbounded_full_history() -> None:
+    plan = build_strategy_sweep_execution_plan(
+        grid=_single_cross_grid(),
+        candle_count=100,
+        max_candles=None,
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        mode="live",
+        allow_full_history=False,
+    )
+
+    assert plan.full_history is True
+    assert plan.allowed is False
+    assert plan.block_reason == "live_full_history_requires_window_or_max_candles"
+
+
+def test_sweep_execution_plan_allows_live_bounded_and_non_live_full_history() -> None:
+    live_bounded = build_strategy_sweep_execution_plan(
+        grid=_single_cross_grid(),
+        candle_count=100,
+        max_candles=None,
+        from_ts_ms=1,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        mode="live",
+        allow_full_history=False,
+    )
+    paper_full = build_strategy_sweep_execution_plan(
+        grid=_single_cross_grid(),
+        candle_count=100,
+        max_candles=None,
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        mode="paper",
+        allow_full_history=False,
+    )
+
+    assert live_bounded.allowed is True
+    assert live_bounded.full_history is False
+    assert paper_full.allowed is True
+    assert paper_full.full_history is True
