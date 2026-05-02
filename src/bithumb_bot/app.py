@@ -17,6 +17,7 @@ import argparse
 import sqlite3
 import math
 import json
+from dataclasses import asdict, replace
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
@@ -129,6 +130,12 @@ from .decision_attribution import (
     build_decision_attribution_summary_from_db,
     decision_attribution_summary_json,
     format_decision_attribution_summary,
+)
+from .strategy_config import sma_strategy_config_from_settings
+from .strategy_sweep import (
+    StrategySweepGrid,
+    run_sma_strategy_sweep,
+    summarize_strategy_sweep_results,
 )
 from .storage_io import write_json_atomic
 from .bootstrap import get_last_explicit_env_load_summary
@@ -6474,6 +6481,137 @@ def cmd_backfill_broker_order(
     print("  trading remains disabled; run reconcile and recovery-report before resume")
 
 
+def _parse_csv_values(value: str, *, option_name: str, parser) -> tuple:
+    raw_parts = str(value or "").split(",")
+    parts = [part.strip() for part in raw_parts]
+    if not parts or any(part == "" for part in parts):
+        raise argparse.ArgumentTypeError(f"{option_name} requires a non-empty comma-separated list")
+    parsed = []
+    for part in parts:
+        try:
+            parsed.append(parser(part))
+        except (TypeError, ValueError) as exc:
+            raise argparse.ArgumentTypeError(f"{option_name} contains invalid value: {part}") from exc
+    return tuple(parsed)
+
+
+def _parse_csv_ints(option_name: str):
+    return lambda value: _parse_csv_values(value, option_name=option_name, parser=int)
+
+
+def _parse_csv_floats(option_name: str):
+    return lambda value: _parse_csv_values(value, option_name=option_name, parser=float)
+
+
+def _connect_readonly_or_empty_candles() -> sqlite3.Connection:
+    try:
+        conn = sqlite3.connect(f"file:{Path(settings.DB_PATH).absolute()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        candles_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='candles'"
+        ).fetchone()
+        if candles_table is not None:
+            return conn
+        conn.close()
+    except sqlite3.OperationalError:
+        pass
+
+    empty_conn = sqlite3.connect(":memory:")
+    empty_conn.row_factory = sqlite3.Row
+    empty_conn.execute(
+        """
+        CREATE TABLE candles (
+            ts INTEGER NOT NULL,
+            pair TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            close REAL NOT NULL
+        )
+        """
+    )
+    return empty_conn
+
+
+def _format_strategy_sweep_rows(rows: list[object]) -> str:
+    lines = ["[STRATEGY-SWEEP]", f"rows={len(rows)}", ""]
+    lines.append(
+        "config_id          short long edge_buffer min_edge slippage decisions "
+        "raw_BUY final_BUY submit_BUY raw_SELL final_SELL cost_block gap_lt_required primary_issue"
+    )
+    for row in rows:
+        gap = getattr(row, "gap_lt_required_ratio")
+        gap_text = "-" if gap is None else f"{float(gap):.2f}"
+        lines.append(
+            f"{getattr(row, 'config_id'):<18} "
+            f"{int(getattr(row, 'short_n')):<5} "
+            f"{int(getattr(row, 'long_n')):<4} "
+            f"{float(getattr(row, 'entry_edge_buffer_ratio')):<11.4f} "
+            f"{float(getattr(row, 'strategy_min_expected_edge_ratio')):<8.4f} "
+            f"{float(getattr(row, 'slippage_bps')):<8.2f} "
+            f"{int(getattr(row, 'decision_count')):<9} "
+            f"{int(getattr(row, 'raw_buy')):<7} "
+            f"{int(getattr(row, 'final_buy')):<9} "
+            f"{int(getattr(row, 'submit_expected_buy')):<10} "
+            f"{int(getattr(row, 'raw_sell')):<8} "
+            f"{int(getattr(row, 'final_sell')):<10} "
+            f"{float(getattr(row, 'blocked_by_cost_filter_ratio')):<10.2f} "
+            f"{gap_text:<15} "
+            f"{getattr(row, 'primary_issue')}"
+        )
+    return "\n".join(lines)
+
+
+def cmd_strategy_sweep(
+    *,
+    short_values: tuple[int, ...],
+    long_values: tuple[int, ...],
+    entry_edge_buffer_values: tuple[float, ...],
+    strategy_min_expected_edge_values: tuple[float, ...],
+    slippage_bps_values: tuple[float, ...],
+    pair: str | None,
+    interval: str | None,
+    from_ts_ms: int | None,
+    to_ts_ms: int | None,
+    through_ts_ms: int | None,
+    as_json: bool,
+) -> None:
+    base_config = sma_strategy_config_from_settings()
+    overrides: dict[str, object] = {}
+    if pair is not None:
+        overrides["pair"] = str(pair)
+    if interval is not None:
+        overrides["interval"] = str(interval)
+    if overrides:
+        base_config = replace(base_config, **overrides)
+
+    grid = StrategySweepGrid(
+        short_values=tuple(int(value) for value in short_values),
+        long_values=tuple(int(value) for value in long_values),
+        entry_edge_buffer_values=tuple(float(value) for value in entry_edge_buffer_values),
+        strategy_min_expected_edge_values=tuple(
+            float(value) for value in strategy_min_expected_edge_values
+        ),
+        slippage_bps_values=tuple(float(value) for value in slippage_bps_values),
+    )
+    conn = _connect_readonly_or_empty_candles()
+    try:
+        results = run_sma_strategy_sweep(
+            conn,
+            base_config=base_config,
+            grid=grid,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            through_ts_ms=through_ts_ms,
+        )
+    finally:
+        conn.close()
+
+    rows = summarize_strategy_sweep_results(results)
+    if as_json:
+        print(json.dumps([asdict(row) for row in rows], sort_keys=True, ensure_ascii=False))
+    else:
+        print(_format_strategy_sweep_rows(rows))
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bithumb-bot")
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -6654,6 +6792,38 @@ def main(argv: list[str] | None = None) -> int:
     decision_attribution.add_argument("--pair")
     decision_attribution.add_argument("--interval")
     decision_attribution.add_argument("--json", action="store_true")
+
+    strategy_sweep = sub.add_parser(
+        "strategy-sweep",
+        help="run attribution-only SMA replay sweeps over local candles",
+        description=(
+            "Read-only attribution replay sweep over candles; emits signal/filter metrics "
+            "without PnL, drawdown, fill simulation, or order actions."
+        ),
+    )
+    strategy_sweep.add_argument("--short", required=True, type=_parse_csv_ints("--short"))
+    strategy_sweep.add_argument("--long", required=True, type=_parse_csv_ints("--long"))
+    strategy_sweep.add_argument(
+        "--edge-buffer",
+        required=True,
+        type=_parse_csv_floats("--edge-buffer"),
+    )
+    strategy_sweep.add_argument(
+        "--min-expected-edge",
+        required=True,
+        type=_parse_csv_floats("--min-expected-edge"),
+    )
+    strategy_sweep.add_argument(
+        "--slippage-bps",
+        required=True,
+        type=_parse_csv_floats("--slippage-bps"),
+    )
+    strategy_sweep.add_argument("--pair")
+    strategy_sweep.add_argument("--interval")
+    strategy_sweep.add_argument("--from", dest="from_date", help="KST date (YYYY-MM-DD)")
+    strategy_sweep.add_argument("--to", dest="to_date", help="KST date (YYYY-MM-DD)")
+    strategy_sweep.add_argument("--through", dest="through_date", help="KST date (YYYY-MM-DD)")
+    strategy_sweep.add_argument("--json", action="store_true")
 
     fee_diag = sub.add_parser(
         "fee-diagnostics",
@@ -6893,6 +7063,33 @@ def main(argv: list[str] | None = None) -> int:
             print(decision_attribution_summary_json(summary))
         else:
             print(format_decision_attribution_summary(summary))
+    elif args.cmd == "strategy-sweep":
+        try:
+            from_ts_ms, to_ts_ms = parse_kst_date_range_to_ts_ms(
+                from_date=args.from_date,
+                to_date=args.to_date,
+            )
+            through_ts_ms = parse_kst_date_range_to_ts_ms(
+                from_date=None,
+                to_date=args.through_date,
+            )[1]
+        except ValueError:
+            p.error("invalid date format for --from/--to/--through; expected YYYY-MM-DD")
+        if from_ts_ms is not None and to_ts_ms is not None and from_ts_ms > to_ts_ms:
+            p.error("--from must be earlier than or equal to --to")
+        cmd_strategy_sweep(
+            short_values=args.short,
+            long_values=args.long,
+            entry_edge_buffer_values=args.edge_buffer,
+            strategy_min_expected_edge_values=args.min_expected_edge,
+            slippage_bps_values=args.slippage_bps,
+            pair=args.pair,
+            interval=args.interval,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            through_ts_ms=through_ts_ms,
+            as_json=bool(args.json),
+        )
     elif args.cmd == "fee-diagnostics":
         cmd_fee_diagnostics(
             fill_limit=max(1, int(args.fill_limit)),
