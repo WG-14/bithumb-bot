@@ -1,417 +1,520 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is to turn the repository into a more reproducible, diagnosable, and operable automated trading experiment system. Do not treat the current problem as merely “too many HOLD decisions.” Treat that as a symptom. The working hypothesis is:
+The previous patch has already added `src/bithumb_bot/decision_attribution.py` and `tests/test_decision_attribution.py`, and pytest reportedly passes. Do not reimplement that patch from scratch. Your task is to perform the next structural step without weakening the core priority.
 
-> The higher-level structural issue is that strategy signal generation, gate decisions, execution intent, and experiment evaluation are already present in scattered forms, but they are not preserved and analyzed through one explicit, replayable decision trace / attribution model.
+Core hypothesis to verify, not assume:
 
-Keep this as a hypothesis until you verify it directly in the repo.
+> The repository is moving from an automated trading bot toward a reproducible automated trading experiment system. The next risk is jumping into `strategy-sweep` too early. Before sweep/backtest work, decision attribution must be hardened against real stored decision data and aligned with the canonical decision contract, so live dry-run, historical DB rows, and future replay/sweep outputs all use the same block classification model.
 
-Relevant starting context: the current repo appears to already have SMA signal generation, cost filtering, fee authority, position gates, execution telemetry, decision context normalization, and experiment fingerprinting concepts. Verify these directly before modifying anything. Do not assume this summary is fully correct. Use it as a guide only. 
+Use this hypothesis as a starting point only. Verify it directly in the repo. A prior analysis of the intended sequence is attached as context. 
 
 ## Primary objective
 
-Implement the first structural step toward a reproducible strategy experiment system:
+Harden the existing `DecisionAttribution` implementation and align blocker classification with the repository’s canonical decision contract.
 
-1. Add a first-class `DecisionAttribution` model and report.
-2. Keep the design compatible with later replay / sweep work.
-3. Avoid adding another ad-hoc reporting function buried in an already overloaded reporting module.
-4. Prefer reusable normalization and aggregation primitives over symptom-specific patches.
-5. Add tests that prove attribution works from real stored `context_json`-style decision data.
-6. Preserve live/dry-run safety. This work must not submit orders or change trading behavior.
+This is not a generic observability task. This is a repository-specific design step to make future replay/sweep results comparable with live/dry-run decisions.
 
-## Important constraint
+## Do not do this yet
 
-Do **not** start by implementing a full `strategy-sweep` CLI. The correct first step is to make decision causes observable and stable. Only add sweep scaffolding if it is small, non-invasive, and directly supports the attribution model.
+Do **not** implement full `strategy-sweep`.
 
-## Investigation requirements
+Do **not** implement full PnL backtesting.
 
-Before coding, inspect at least these areas:
+Do **not** tune `.env` values.
 
-* `src/bithumb_bot/strategy/sma.py`
-* `src/bithumb_bot/decision_context.py`
-* `src/bithumb_bot/decision_contract.py`
-* `src/bithumb_bot/reporting.py`
-* CLI entrypoint files such as `app.py`, `bot.py`, or command registration modules
-* existing tests around:
+Do **not** loosen trading gates.
 
-  * decision telemetry
-  * strategy decision persistence
-  * experiment fingerprinting
-  * blocked entry / blocked filter cases
+Do **not** change live trading behavior.
 
-Confirm where these concepts currently live:
+Do **not** submit, cancel, or mutate orders.
 
-* `raw_signal`
-* `final_signal`
-* `base_reason`
-* `entry_reason`
-* `entry_block_reason`
-* `blocked_by_cost_filter`
-* `blocked_by_fee_authority`
-* `signal_strength_label`
-* `gap_ratio`
-* `required_edge_ratio`
-* `decision_type`
-* `primary_block_layer`
-* `primary_block_reason`
-* `submit_expected`
-* `execution_block_reason`
-* `target_block_reason`
-* `experiment_fingerprint`
+Do **not** mutate existing `strategy_decisions` rows.
 
-If any of these fields are named differently or nested differently, adapt the implementation to the repository’s actual schema. Do not force the exact names if the repo already has a better canonical field.
+The next correct sequence is:
 
-## Design direction
+```text
+1. Harden decision attribution against real DB data
+2. Align attribution blocker classification with decision_contract
+3. Extract replayable SmaStrategyConfig
+4. Add candle-based decision replay
+5. Add strategy-sweep using replay + attribution summary
+6. Add lightweight portfolio/PnL simulation later
+```
 
-Add a dedicated module, preferably:
+This task should cover steps 1 and 2. Add only minimal scaffolding for step 3 if it directly clarifies the boundary, but do not let the scope creep.
+
+## Required investigation
+
+Inspect the current repository state before editing. At minimum inspect:
 
 ```text
 src/bithumb_bot/decision_attribution.py
+src/bithumb_bot/decision_contract.py
+src/bithumb_bot/strategy/sma.py
+src/bithumb_bot/app.py
+src/bithumb_bot/reporting.py
+tests/test_decision_attribution.py
+tests/test_decision_telemetry.py
+tests/test_strategy_decision_persistence.py
 ```
 
-This module should define a first-class attribution domain model. Suggested shape:
+Verify these facts directly:
+
+* `DecisionAttribution` exists and is read-only / settings-independent.
+* `decision_contract.py` defines canonical block layer priority.
+* `decision_contract.py` emits or can emit:
+
+  * `primary_block_layer`
+  * `primary_block_reason`
+  * `all_block_reasons`
+  * `signal_flow`
+* `decision_attribution.py` currently derives some blocker booleans from string matching fallback logic.
+* CLI command `decision-attribution` exists and supports human/json output.
+* Tests cover malformed/missing context, cost filter attribution, submit mismatch, JSON output, and CLI JSON.
+
+If any of these are false, adapt the task while preserving the priority: attribution hardening first, replay/sweep second.
+
+## Required design change
+
+Update `DecisionAttribution` so canonical block classification comes from the decision contract whenever possible.
+
+The target structure is:
+
+```text
+decision_contract builds:
+  primary_block_layer
+  primary_block_reason
+  all_block_reasons
+
+decision_attribution consumes:
+  primary_block_layer
+  primary_block_reason
+  all_block_reasons
+
+summary reports:
+  block layer distribution
+  block reason distribution
+  blocked_by_* ratios
+```
+
+Do not treat `execution_block_reason` substring matching as the main source of truth. It may remain as a compatibility fallback only.
+
+## Concrete implementation requirements
+
+### 1. Add `all_block_reasons` to `DecisionAttribution`
+
+Extend the model with a field like:
 
 ```python
-@dataclass(frozen=True)
-class DecisionAttribution:
-    raw_signal: str
-    final_signal: str
-    decision_type: str
-    base_reason: str
-    entry_reason: str
-    entry_block_reason: str | None
-    primary_block_layer: str
-    primary_block_reason: str
-    blocked_by_cost_filter: bool
-    blocked_by_fee_authority: bool
-    blocked_by_position_gate: bool
-    blocked_by_order_rule: bool
-    blocked_by_performance_gate: bool
-    gap_ratio: float | None
-    required_edge_ratio: float | None
-    signal_strength_label: str
-    submit_expected: bool | None
-    execution_block_reason: str | None
-    target_block_reason: str | None
+all_block_reasons: tuple[str, ...]
 ```
 
-The exact fields may be extended if the repo already exposes useful canonical equivalents. However, do not remove the core diagnostic intent:
+or an equivalent immutable sequence.
 
-* distinguish raw signal from final signal
-* distinguish strategy filter blocks from position/order/execution/performance blocks
-* preserve edge economics
-* preserve submit expectation
-* support aggregation by cause
-
-Add normalization functions along these lines:
+Normalize it from any canonical repo shape that exists, for example:
 
 ```python
-def normalize_decision_attribution_from_context(context: dict[str, Any]) -> DecisionAttribution:
+context["all_block_reasons"]
+context["signal_flow"]["all_block_reasons"]
+```
+
+Support both formats if needed:
+
+```text
+["strategy_filters.cost_edge", "position_gate.already_in_position"]
+[("strategy_filters", "cost_edge"), ("position_gate", "already_in_position")]
+```
+
+Normalize to stable string form:
+
+```text
+layer.reason
+```
+
+Be defensive:
+
+* ignore empty items
+* deduplicate while preserving order
+* tolerate malformed entries
+* do not crash on older contexts
+
+### 2. Reuse canonical block layer priority
+
+If `decision_contract.py` exposes `BLOCK_LAYER_PRIORITY`, import and use it in `decision_attribution.py`.
+
+Do not duplicate the priority list unless import cycles force it. If an import cycle exists, resolve it with a small helper or shared constant, not by creating two drifting definitions.
+
+The canonical layers should remain consistent with the repo, likely including:
+
+```text
+fee_authority
+market_regime
+position_gate
+strategy_filters
+pre_trade_economics
+execution_order_rule
+performance_gate
+```
+
+Verify the actual list in the repo and use that.
+
+### 3. Recompute primary block from `all_block_reasons` when needed
+
+Implement a helper along these lines:
+
+```python
+def normalize_all_block_reasons(value: Any) -> tuple[str, ...]:
     ...
 
-def normalize_decision_attribution_from_row(row: sqlite3.Row) -> DecisionAttribution:
+def split_block_reason(value: str) -> tuple[str, str] | None:
     ...
 
-def summarize_decision_attributions(
-    rows: Iterable[DecisionAttribution],
-) -> DecisionAttributionSummary:
+def select_primary_block_from_all_reasons(
+    all_block_reasons: Sequence[str],
+) -> tuple[str, str] | None:
     ...
 ```
 
-The normalizer must be defensive:
+Behavior:
 
-* tolerate missing keys
-* tolerate older context versions
-* distinguish unknown from false where possible
-* never crash the report because one row has malformed JSON
-* expose skipped/malformed row counts in the summary
+* If `primary_block_layer` / `primary_block_reason` are present and valid, keep them.
+* If they are missing but `all_block_reasons` exists, derive primary using `BLOCK_LAYER_PRIORITY`.
+* If both exist but conflict, do not silently hide it. Add a diagnostic counter or compatibility note if feasible.
+* If neither exists, keep the current safe defaults:
 
-## Report requirements
+  * `primary_block_layer="none"`
+  * `primary_block_reason="none"`
 
-Add a CLI command such as:
+### 4. Make `blocked_by_*` booleans contract-first
 
-```bash
-uv run bithumb-bot decision-attribution --limit 500
+Compute blocker booleans from canonical block reasons first:
+
+```text
+blocked_by_fee_authority
+blocked_by_position_gate
+blocked_by_cost_filter
+blocked_by_order_rule
+blocked_by_performance_gate
 ```
 
-Also support JSON output:
+Recommended mapping:
+
+```text
+fee_authority.* -> blocked_by_fee_authority
+position_gate.* -> blocked_by_position_gate
+execution_order_rule.* -> blocked_by_order_rule
+performance_gate.* -> blocked_by_performance_gate
+strategy_filters.cost_edge or strategy_filters.filtered entry: cost_edge -> blocked_by_cost_filter
+pre_trade_economics.net_edge_below_minimum -> likely cost/edge related, but keep naming conservative
+```
+
+Keep existing direct boolean fields as sources too:
+
+```text
+context["blocked_by_cost_filter"]
+context["blocked_by_fee_authority"]
+```
+
+Precedence should be:
+
+```text
+1. explicit canonical all_block_reasons / primary_block_layer
+2. explicit boolean fields
+3. nested filter fields such as filters.cost_edge.blocked
+4. legacy string fallback from execution_block_reason / target_block_reason
+```
+
+The legacy string fallback must remain for old rows, but tests should prove canonical reasons are preferred.
+
+### 5. Improve summary output without breaking compatibility
+
+Update summary aggregation to include `all_block_reasons` if useful.
+
+At minimum, ensure:
+
+```text
+block_layer_counts
+block_reason_counts
+filter_ratios
+interpretation
+```
+
+are driven by canonical block reasons when present.
+
+If you add new summary fields, JSON output must remain deterministic and tests must assert the shape.
+
+Do not remove existing JSON keys unless absolutely necessary.
+
+### 6. Add a real-data validation helper if feasible
+
+Add a read-only command option or internal helper that surfaces attribution schema quality.
+
+Possible minimal addition:
 
 ```bash
 uv run bithumb-bot decision-attribution --limit 500 --json
 ```
 
-Optional useful filters, if straightforward:
-
-```bash
---from
---to
---pair
---interval
-```
-
-The report must be funnel-oriented, not just a HOLD counter.
-
-Minimum human-readable output sections:
+already exists. If so, do not add a new command. Instead, make sure the JSON exposes enough to diagnose:
 
 ```text
-[DECISION ATTRIBUTION]
-
-sample_count=...
-malformed_context_count=...
-context_missing_count=...
-
-raw_signal:
-  HOLD ...
-  BUY ...
-  SELL ...
-
-final_signal:
-  HOLD ...
-  BUY ...
-  SELL ...
-
-decision_type:
-  ...
-
-candidate_funnel:
-  raw_BUY=...
-  final_BUY=...
-  submit_expected_BUY=...
-  raw_SELL=...
-  final_SELL=...
-  submit_expected_SELL=...
-
-block_layers:
-  ...
-
-block_reasons:
-  ...
-
-entry_reasons:
-  ...
-
-entry_block_reasons:
-  ...
-
-filters:
-  blocked_by_cost_filter_ratio=...
-  blocked_by_fee_authority_ratio=...
-  blocked_by_position_gate_ratio=...
-  blocked_by_order_rule_ratio=...
-  blocked_by_performance_gate_ratio=...
-
-edge:
-  gap_ratio_avg=...
-  gap_ratio_median=...
-  gap_ratio_p90=...
-  required_edge_ratio_avg=...
-  required_edge_ratio_median=...
-  gap_lt_required_ratio=...
-
-signal_strength:
-  neutral ...
-  weak ...
-  tradable ...
-
-submit_mismatch:
-  final_BUY_submit_expected_false=...
-  final_SELL_submit_expected_false=...
-
-interpretation:
-  primary_issue=...
-  secondary_issue=...
+malformed_context_count
+context_missing_count
+block_layer_counts
+block_reason_counts
+filter_ratios
+edge_stats.gap_lt_required_ratio
+submit_mismatch
+interpretation.primary_issue
 ```
 
-The `interpretation` section should be conservative and rule-based. It must not overclaim. For example:
-
-* If raw BUY is near zero, suggest `raw_buy_scarcity`.
-* If raw BUY exists but final BUY is near zero and many are cost-filtered, suggest `entry_edge_insufficient_or_cost_filter_strict`.
-* If final BUY exists but `submit_expected=false`, suggest `execution_intent_or_order_rule_block`.
-* If gap is usually below required edge, suggest `gap_below_required_edge`.
-* If malformed context is high, suggest `observability_schema_incomplete`.
-
-Keep these as diagnostic labels, not trading advice.
-
-## JSON output requirements
-
-The JSON output must be deterministic and testable. Include at least:
+If useful and low-risk, add a field such as:
 
 ```json
-{
-  "sample_count": 0,
-  "malformed_context_count": 0,
-  "context_missing_count": 0,
-  "raw_signal_counts": {},
-  "final_signal_counts": {},
-  "decision_type_counts": {},
-  "candidate_funnel": {},
-  "block_layer_counts": {},
-  "block_reason_counts": {},
-  "entry_reason_counts": {},
-  "entry_block_reason_counts": {},
-  "filter_ratios": {},
-  "edge_stats": {},
-  "signal_strength_counts": {},
-  "submit_mismatch": {},
-  "interpretation": {
-    "primary_issue": "...",
-    "secondary_issue": "..."
-  }
+"schema_quality": {
+  "all_block_reasons_present_count": 0,
+  "primary_block_present_count": 0,
+  "primary_all_block_conflict_count": 0
 }
 ```
 
-## Structural requirements
-
-Do not make `reporting.py` more central unless the repo’s CLI conventions require a thin wrapper there. Prefer:
-
-```text
-src/bithumb_bot/decision_attribution.py
-```
-
-and, if the repo has command modules:
-
-```text
-src/bithumb_bot/commands/decision_attribution_report.py
-```
-
-If command modules do not exist, add the smallest CLI integration consistent with the current project structure.
-
-Avoid reading global `settings` inside the attribution normalizer except for resolving DB path in the command layer. Attribution should be reusable for:
-
-* live dry-run DB rows
-* historical decision rows
-* future replay rows
-* future strategy sweep rows
-
-## Future compatibility requirement
-
-Add comments or lightweight types that make the next step obvious:
-
-```text
-src/bithumb_bot/strategy_config.py
-src/bithumb_bot/strategy_replay.py
-src/bithumb_bot/strategy_sweep.py
-```
-
-Do not fully implement these unless the repo already has suitable scaffolding. The important part is that `DecisionAttribution` can be reused by future replay/sweep outputs.
-
-If you add any replay/sweep scaffolding, keep it non-invasive and explicitly mark it as attribution-compatible, not production trading logic.
+Only add this if it is well tested and does not bloat the report.
 
 ## Testing requirements
 
-Add or update tests. At minimum:
+Update or add tests in:
 
 ```text
 tests/test_decision_attribution.py
 ```
 
-Cover these cases:
+Add coverage for these repository-specific cases:
 
-1. Normal BUY candidate blocked by cost filter:
+### Test 1: canonical all_block_reasons drives cost filter attribution
 
-   * raw_signal=BUY
-   * final_signal=HOLD
-   * blocked_by_cost_filter=True
-   * gap_ratio < required_edge_ratio
-   * summary counts this as a BUY candidate blocked by cost/edge
+Input context:
 
-2. Raw BUY becomes final BUY but submit is not expected:
+```json
+{
+  "raw_signal": "BUY",
+  "final_signal": "HOLD",
+  "all_block_reasons": ["strategy_filters.cost_edge"],
+  "signal_flow": {
+    "primary_block_layer": "strategy_filters",
+    "primary_block_reason": "cost_edge"
+  }
+}
+```
 
-   * final_signal=BUY
-   * submit_expected=False
-   * counted under `final_BUY_submit_expected_false`
+Expected:
 
-3. Raw BUY scarcity:
+```text
+blocked_by_cost_filter=True
+primary_block_layer=strategy_filters
+primary_block_reason=cost_edge
+block_reason_counts includes strategy_filters.cost_edge
+```
 
-   * mostly HOLD decisions
-   * interpretation returns `raw_buy_scarcity` or equivalent conservative label
+### Test 2: primary block can be derived from all_block_reasons
 
-4. Malformed or missing context:
+Input context has no `primary_block_layer`, no `primary_block_reason`, but has:
 
-   * does not crash
-   * increments malformed/missing counters
+```json
+{
+  "all_block_reasons": [
+    "strategy_filters.cost_edge",
+    "position_gate.already_in_position"
+  ]
+}
+```
 
-5. Legacy/partial context:
+Expected:
 
-   * missing nested fields should produce `unknown` / `None` defaults
-   * should still contribute to raw/final signal counts if those fields exist
+```text
+primary_block_layer follows BLOCK_LAYER_PRIORITY
+primary_block_reason matches selected layer
+```
 
-6. JSON output shape:
+Use the actual `BLOCK_LAYER_PRIORITY` from the repo.
 
-   * deterministic keys
-   * stable values for a small synthetic fixture
+### Test 3: canonical execution_order_rule beats string fallback
 
-If existing tests already create `strategy_decisions`, reuse that style. Prefer in-memory SQLite fixtures if possible.
+Input context:
+
+```json
+{
+  "raw_signal": "BUY",
+  "final_signal": "BUY",
+  "all_block_reasons": ["execution_order_rule.min_notional"],
+  "execution_block_reason": "some unrelated text"
+}
+```
+
+Expected:
+
+```text
+blocked_by_order_rule=True
+blocked_by_performance_gate=False
+```
+
+### Test 4: legacy fallback still works
+
+Input context has no `all_block_reasons`, no primary block, but has:
+
+```json
+{
+  "execution_block_reason": "missing_order_rule_min_qty"
+}
+```
+
+Expected:
+
+```text
+blocked_by_order_rule=True
+```
+
+### Test 5: malformed all_block_reasons does not crash
+
+Use malformed shapes:
+
+```json
+{
+  "all_block_reasons": [null, "", {}, ["bad"], "position_gate.already_in_position"]
+}
+```
+
+Expected:
+
+```text
+normalization succeeds
+valid reason retained
+invalid entries ignored
+```
+
+### Test 6: JSON output remains deterministic
+
+Assert:
+
+```text
+json keys are sorted or stable
+existing keys remain present
+new keys, if any, have deterministic structure
+```
+
+### Test 7: CLI still works
+
+Keep or update the existing CLI JSON test so:
+
+```bash
+main(["decision-attribution", "--limit", "5", "--json"])
+```
+
+still returns valid JSON and includes the expected canonical block classification.
 
 ## Recovery and safety requirements
 
-* This change must not alter strategy decision behavior.
-* This change must not submit orders.
-* This change must not change live/dry-run gating.
-* This change must not mutate existing decision rows.
-* The report should be read-only against the database.
-* If the `strategy_decisions` table is missing, the command should fail gracefully with a useful message or return an empty report with a diagnostic note, following the repo’s existing style.
-* If some rows have bad JSON, continue processing and report the error count.
-* If no rows match filters, print an empty but valid report.
+The patch must be read-only with respect to trading data.
+
+Confirm:
+
+* no order submission behavior changed
+* no strategy decision behavior changed
+* no live/dry-run gate behavior changed
+* no existing DB rows are mutated
+* malformed rows do not crash attribution
+* missing `strategy_decisions` table still returns an empty/safe result or graceful diagnostic according to current repo style
+* old contexts without `all_block_reasons` still work
+
+If a schema mismatch is found, do not add a migration unless absolutely necessary. Prefer compatibility normalization.
 
 ## Observability requirements
 
-The report should make the following operational questions answerable without manual DB digging:
-
-* Are HOLDs mostly caused by no raw signal?
-* Are raw BUY/SELL candidates being generated but filtered?
-* Is the cost filter the dominant blocker?
-* Is fee authority blocking live entries?
-* Are position gates blocking entries or exits?
-* Are order rules or minimum notional constraints preventing submit?
-* Are there final BUY/SELL decisions that still do not expect submission?
-* Is `gap_ratio` generally below `required_edge_ratio`?
-* Is the decision context schema too incomplete to trust the report?
-
-## Scope boundary
-
-Do not solve trading profitability in this PR.
-
-Do not tune env values.
-
-Do not loosen gates.
-
-Do not change fee assumptions unless required for attribution extraction.
-
-Do not replace the strategy.
-
-Do not implement a full backtest engine before attribution is stable.
-
-The goal is not:
+After this patch, the attribution report should answer these questions more reliably:
 
 ```text
-HOLD 많음 → lower filters
+Are HOLDs mostly caused by no raw signal?
+Are raw BUY/SELL candidates being generated but filtered?
+Is cost/edge filtering the dominant blocker?
+Is fee authority blocking entries?
+Are position gates blocking entries or exits?
+Are order rules or minimum notional constraints preventing submit?
+Are final BUY/SELL decisions failing submit expectation?
+Is gap_ratio generally below required_edge_ratio?
+Is the decision context schema too incomplete to trust?
 ```
 
-The goal is:
+The key improvement is that these answers should come from contract-backed block reasons, not mostly from string contains heuristics.
+
+## Validation commands
+
+Run the relevant test subset first:
+
+```bash
+uv run pytest tests/test_decision_attribution.py
+```
+
+Then run related tests:
+
+```bash
+uv run pytest tests/test_decision_telemetry.py tests/test_strategy_decision_persistence.py
+```
+
+Then run the full suite if feasible:
+
+```bash
+uv run pytest
+```
+
+If the local/dev DB is available, also run:
+
+```bash
+uv run bithumb-bot decision-attribution --limit 500
+uv run bithumb-bot decision-attribution --limit 500 --json
+```
+
+If no DB data is available, state that clearly in the final report. Do not fabricate runtime results.
+
+## What to do after this patch, but not in this patch
+
+Prepare the repo for the next PR:
 
 ```text
-every decision -> normalized attribution -> reproducible diagnosis -> future replay/sweep comparison
+refactor: extract replayable SMA strategy config
 ```
 
-## Suggested implementation order
+Future target shape:
 
-1. Inspect current decision context and reporting code.
-2. Identify the canonical source of `context_json` in `strategy_decisions`.
-3. Implement `DecisionAttribution`.
-4. Implement context normalization.
-5. Implement summary aggregation.
-6. Implement human-readable formatting.
-7. Implement JSON formatting.
-8. Add CLI command.
-9. Add tests.
-10. Run the test suite or the most relevant subset.
-11. Run the new CLI against a local/dev DB if available; otherwise test with fixtures only.
-12. Report exactly what was changed and what remains future work.
+```python
+@dataclass(frozen=True)
+class SmaStrategyConfig:
+    short_n: int
+    long_n: int
+    entry_edge_buffer_ratio: float
+    strategy_min_expected_edge_ratio: float
+    slippage_bps: float
+    live_fee_rate_estimate: float
+    exit_rule_names: tuple[str, ...]
+    exit_max_holding_min: int
+    exit_min_take_profit_ratio: float
+    exit_small_loss_tolerance_ratio: float
+```
+
+Do not implement this unless the attribution alignment work is complete and the change is trivial. The boundary to preserve is:
+
+```text
+command/runtime layer:
+  settings -> SmaStrategyConfig
+
+strategy layer:
+  SmaStrategyConfig only
+
+replay/sweep layer:
+  many SmaStrategyConfig values -> comparable attribution summaries
+```
 
 ## Final report format
 
-When finished, report in this exact structure:
+When finished, report exactly in this structure:
 
 ```text
 Summary
@@ -424,25 +527,28 @@ Verification
 - command: result
 - command: result
 
-Design notes
-- Explain how DecisionAttribution avoids another ad-hoc reporting patch.
-- Explain how this supports future replay/sweep work.
-- Explain any schema compatibility choices.
+Decision-contract alignment
+- Explain how all_block_reasons is normalized.
+- Explain how primary block selection uses BLOCK_LAYER_PRIORITY.
+- Explain how blocked_by_* fields are now contract-first.
+- Explain what legacy fallbacks remain and why.
 
 Safety / recovery
-- Confirm the command is read-only.
-- Confirm malformed rows do not crash the report.
+- Confirm this is read-only.
 - Confirm trading behavior was not changed.
+- Confirm malformed or legacy contexts do not crash.
+- Confirm missing/empty DB behavior.
 
 Findings
-- State whether the initial hypothesis was confirmed, partially confirmed, or not confirmed.
-- Mention any stronger structural issue discovered in the repo.
+- State whether the hypothesis was confirmed, partially confirmed, or not confirmed.
+- Mention whether any stronger structural issue was discovered.
 
-Follow-up work
-- Next PR 1: StrategyConfig extraction
-- Next PR 2: candle-based replay engine
-- Next PR 3: strategy-sweep using replay output and attribution summary
+Next steps
+- PR 1: extract SmaStrategyConfig
+- PR 2: add candle-based decision replay
+- PR 3: add strategy-sweep using replay + attribution summary
+- PR 4: only later add lightweight portfolio/PnL simulation
 ```
 
-Be strict about preserving the core priority: attribution first, replay/sweep second. Do not dilute the work into generic observability. This must be directly useful for operating `WG-14/bithumb-bot` as a reproducible automated trading experiment system.
+Keep the core priority intact: **attribution hardening and decision-contract alignment first; replay/sweep second; PnL/backtest later.**
 

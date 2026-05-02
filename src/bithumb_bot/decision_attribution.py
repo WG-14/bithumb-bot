@@ -5,7 +5,9 @@ import sqlite3
 from collections import Counter
 from dataclasses import dataclass
 from statistics import median
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
+
+from .decision_contract import BLOCK_LAYER_PRIORITY
 
 
 SIGNALS = ("HOLD", "BUY", "SELL", "UNKNOWN")
@@ -35,6 +37,7 @@ class DecisionAttribution:
     entry_block_reason: str | None
     primary_block_layer: str
     primary_block_reason: str
+    all_block_reasons: tuple[str, ...]
     blocked_by_cost_filter: bool
     blocked_by_fee_authority: bool
     blocked_by_position_gate: bool
@@ -48,6 +51,7 @@ class DecisionAttribution:
     target_block_reason: str | None
     experiment_fingerprint: str | None = None
     context_status: str = "ok"
+    primary_all_block_conflict: bool = False
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,7 @@ class DecisionAttributionSummary:
     edge_stats: dict[str, float | None]
     signal_strength_counts: dict[str, int]
     submit_mismatch: dict[str, int]
+    schema_quality: dict[str, int]
     interpretation: dict[str, str]
 
     def as_dict(self) -> dict[str, object]:
@@ -86,6 +91,7 @@ class DecisionAttributionSummary:
             "edge_stats": self.edge_stats,
             "signal_strength_counts": self.signal_strength_counts,
             "submit_mismatch": self.submit_mismatch,
+            "schema_quality": self.schema_quality,
             "interpretation": self.interpretation,
         }
 
@@ -127,10 +133,6 @@ def _bool_or_none(value: Any) -> bool | None:
     return None
 
 
-def _bool(value: Any) -> bool:
-    return bool(_bool_or_none(value))
-
-
 def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -154,6 +156,81 @@ def _first_float(*values: Any) -> float | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def split_block_reason(value: str) -> tuple[str, str] | None:
+    text = str(value if value is not None else "").strip()
+    if not text or text.lower() in {"none", "null", "-"} or "." not in text:
+        return None
+    layer, reason = (part.strip() for part in text.split(".", 1))
+    if not layer or not reason:
+        return None
+    return layer, reason
+
+
+def _normalize_block_reason_item(value: Any) -> str | None:
+    if isinstance(value, str):
+        parsed = split_block_reason(value)
+        if parsed is None:
+            return None
+        layer, reason = parsed
+        return f"{layer}.{reason}"
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        layer = _optional_text(value[0])
+        reason = _optional_text(value[1])
+        if layer is None or reason is None:
+            return None
+        return f"{layer}.{reason}"
+    return None
+
+
+def normalize_all_block_reasons(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    raw_items = value if isinstance(value, (list, tuple)) else [value]
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in raw_items:
+        reason = _normalize_block_reason_item(item)
+        if reason is None or reason in seen:
+            continue
+        seen.add(reason)
+        normalized.append(reason)
+    return tuple(normalized)
+
+
+def select_primary_block_from_all_reasons(
+    all_block_reasons: Sequence[str],
+) -> tuple[str, str] | None:
+    parsed = [item for item in (split_block_reason(reason) for reason in all_block_reasons) if item]
+    if not parsed:
+        return None
+    for layer in BLOCK_LAYER_PRIORITY:
+        for candidate_layer, candidate_reason in parsed:
+            if candidate_layer == layer:
+                return candidate_layer, candidate_reason
+    return parsed[0]
+
+
+def _reason_pairs(all_block_reasons: Sequence[str]) -> set[tuple[str, str]]:
+    return {parsed for parsed in (split_block_reason(reason) for reason in all_block_reasons) if parsed}
+
+
+def _has_layer(all_block_reasons: Sequence[str], layer: str) -> bool:
+    return any(parsed_layer == layer for parsed_layer, _reason in _reason_pairs(all_block_reasons))
+
+
+def _has_reason(all_block_reasons: Sequence[str], layer: str, reason: str) -> bool:
+    return (layer, reason) in _reason_pairs(all_block_reasons)
+
+
+def _legacy_reason_contains(*values: str | None, needles: str) -> bool:
+    needle_values = tuple(part.strip().lower() for part in needles.split("|") if part.strip())
+    return any(
+        any(needle in value.lower() for needle in needle_values)
+        for value in values
+        if value
+    )
 
 
 def _load_context_from_row(row: Any) -> tuple[dict[str, Any], str]:
@@ -187,6 +264,10 @@ def normalize_decision_attribution_from_context(context: dict[str, Any]) -> Deci
     signal_strength = _dict(context.get("signal_strength"))
     features = _dict(context.get("features"))
     pre_trade_economics = _dict(context.get("pre_trade_economics"))
+    all_block_reasons = normalize_all_block_reasons(context.get("all_block_reasons"))
+    nested_all_block_reasons = normalize_all_block_reasons(signal_flow.get("all_block_reasons"))
+    if nested_all_block_reasons:
+        all_block_reasons = normalize_all_block_reasons((*all_block_reasons, *nested_all_block_reasons))
 
     raw_signal = _signal(
         context.get("raw_signal")
@@ -220,33 +301,107 @@ def normalize_decision_attribution_from_context(context: dict[str, Any]) -> Deci
         or target_plan.get("block_reason")
         or target_shadow.get("target_block_reason")
     )
-    primary_block_layer = _first_text(
+    explicit_primary_block_layer = _first_text(
         context.get("primary_block_layer"),
         signal_flow.get("primary_block_layer"),
         default="none",
     )
-    primary_block_reason = _first_text(
+    explicit_primary_block_reason = _first_text(
         context.get("primary_block_reason"),
         signal_flow.get("primary_block_reason"),
         context.get("entry_block_reason"),
         default="none",
     )
+    derived_primary_block = select_primary_block_from_all_reasons(all_block_reasons)
+    has_explicit_primary = (
+        explicit_primary_block_layer != "none"
+        and explicit_primary_block_reason != "none"
+    )
+    if has_explicit_primary:
+        primary_block_layer = explicit_primary_block_layer
+        primary_block_reason = explicit_primary_block_reason
+    elif derived_primary_block is not None:
+        primary_block_layer, primary_block_reason = derived_primary_block
+    else:
+        primary_block_layer = "none"
+        primary_block_reason = "none"
+    primary_all_block_conflict = (
+        has_explicit_primary
+        and derived_primary_block is not None
+        and derived_primary_block != (explicit_primary_block_layer, explicit_primary_block_reason)
+    )
+    if not all_block_reasons and primary_block_layer != "none" and primary_block_reason != "none":
+        all_block_reasons = (f"{primary_block_layer}.{primary_block_reason}",)
 
     entry_allowed = _bool_or_none(position_gate.get("entry_allowed"))
-    blocked_by_position_gate = raw_signal == "BUY" and entry_allowed is False
+    canonical_cost_filter = (
+        _has_reason(all_block_reasons, "strategy_filters", "cost_edge")
+        or _has_reason(all_block_reasons, "pre_trade_economics", "net_edge_below_minimum")
+    )
+    canonical_fee_authority = _has_layer(all_block_reasons, "fee_authority")
+    canonical_position_gate = _has_layer(all_block_reasons, "position_gate")
+    canonical_order_rule = _has_layer(all_block_reasons, "execution_order_rule")
+    canonical_performance_gate = _has_layer(all_block_reasons, "performance_gate")
+
+    explicit_cost_filter = _bool_or_none(context.get("blocked_by_cost_filter"))
+    explicit_fee_authority = _bool_or_none(context.get("blocked_by_fee_authority"))
+    explicit_position_gate = _bool_or_none(context.get("blocked_by_position_gate"))
+    explicit_order_rule = _bool_or_none(context.get("blocked_by_order_rule"))
+    explicit_performance_gate = _bool_or_none(context.get("blocked_by_performance_gate"))
+
+    nested_cost_filter = cost_edge.get("blocked") is True
+    nested_position_gate = raw_signal == "BUY" and entry_allowed is False
+    legacy_order_rule = _legacy_reason_contains(
+        execution_block_reason,
+        target_block_reason,
+        needles="order_rule|min_notional|min_qty",
+    )
+    legacy_performance_gate = _legacy_reason_contains(
+        execution_block_reason,
+        primary_block_reason,
+        needles="performance_gate",
+    )
+    blocked_by_cost_filter = (
+        canonical_cost_filter
+        or (explicit_cost_filter is True)
+        or nested_cost_filter
+        or (
+            not all_block_reasons
+            and _legacy_reason_contains(
+                execution_block_reason,
+                target_block_reason,
+                primary_block_reason,
+                needles="cost_edge|edge_below|net_edge_below_minimum",
+            )
+        )
+    )
+    blocked_by_fee_authority = (
+        canonical_fee_authority
+        or (explicit_fee_authority is True)
+        or (
+            not all_block_reasons
+            and _legacy_reason_contains(
+                execution_block_reason,
+                primary_block_layer,
+                primary_block_reason,
+                needles="fee_authority",
+            )
+        )
+    )
+    blocked_by_position_gate = (
+        canonical_position_gate
+        or (explicit_position_gate is True)
+        or nested_position_gate
+    )
     blocked_by_order_rule = (
-        primary_block_layer == "execution_order_rule"
-        or "order_rule" in str(execution_block_reason or "")
-        or "min_notional" in str(execution_block_reason or "")
-        or "min_qty" in str(execution_block_reason or "")
-        or "order_rule" in str(target_block_reason or "")
-        or "min_notional" in str(target_block_reason or "")
-        or "min_qty" in str(target_block_reason or "")
+        canonical_order_rule
+        or (explicit_order_rule is True)
+        or (not all_block_reasons and legacy_order_rule)
     )
     blocked_by_performance_gate = (
-        primary_block_layer == "performance_gate"
-        or "performance_gate" in str(execution_block_reason or "")
-        or "performance_gate" in str(primary_block_reason or "")
+        canonical_performance_gate
+        or (explicit_performance_gate is True)
+        or (not all_block_reasons and legacy_performance_gate)
     )
 
     experiment_fingerprint = context.get("experiment_fingerprint")
@@ -264,8 +419,9 @@ def normalize_decision_attribution_from_context(context: dict[str, Any]) -> Deci
         entry_block_reason=_optional_text(context.get("entry_block_reason")),
         primary_block_layer=primary_block_layer,
         primary_block_reason=primary_block_reason,
-        blocked_by_cost_filter=_bool(context.get("blocked_by_cost_filter") or cost_edge.get("blocked") is True),
-        blocked_by_fee_authority=_bool(context.get("blocked_by_fee_authority") or "fee_authority" in primary_block_layer),
+        all_block_reasons=all_block_reasons,
+        blocked_by_cost_filter=blocked_by_cost_filter,
+        blocked_by_fee_authority=blocked_by_fee_authority,
         blocked_by_position_gate=blocked_by_position_gate,
         blocked_by_order_rule=blocked_by_order_rule,
         blocked_by_performance_gate=blocked_by_performance_gate,
@@ -285,6 +441,7 @@ def normalize_decision_attribution_from_context(context: dict[str, Any]) -> Deci
         execution_block_reason=execution_block_reason,
         target_block_reason=target_block_reason,
         experiment_fingerprint=experiment_fingerprint_text,
+        primary_all_block_conflict=primary_all_block_conflict,
     )
 
 
@@ -306,6 +463,7 @@ def normalize_decision_attribution_from_row(row: sqlite3.Row | Any) -> DecisionA
             entry_block_reason=None,
             primary_block_layer="none",
             primary_block_reason="none",
+            all_block_reasons=(),
             blocked_by_cost_filter=False,
             blocked_by_fee_authority=False,
             blocked_by_position_gate=False,
@@ -411,9 +569,9 @@ def summarize_decision_attributions(
     decision_type_counts = Counter(row.decision_type for row in items)
     block_layer_counts = Counter(row.primary_block_layer for row in items if row.primary_block_layer != "none")
     block_reason_counts = Counter(
-        f"{row.primary_block_layer}.{row.primary_block_reason}"
+        reason
         for row in items
-        if row.primary_block_layer != "none" and row.primary_block_reason != "none"
+        for reason in row.all_block_reasons
     )
     entry_reason_counts = Counter(row.entry_reason for row in items)
     entry_block_reason_counts = Counter(row.entry_block_reason or "none" for row in items)
@@ -440,6 +598,15 @@ def summarize_decision_attributions(
             1 for row in items if row.final_signal == "SELL" and row.submit_expected is False
         ),
     }
+    schema_quality = {
+        "all_block_reasons_present_count": sum(1 for row in items if row.all_block_reasons),
+        "primary_block_present_count": sum(
+            1
+            for row in items
+            if row.primary_block_layer != "none" and row.primary_block_reason != "none"
+        ),
+        "primary_all_block_conflict_count": sum(1 for row in items if row.primary_all_block_conflict),
+    }
     partial = {
         "sample_count": sample_count,
         "malformed_context_count": malformed_context_count,
@@ -465,6 +632,7 @@ def summarize_decision_attributions(
         edge_stats=partial["edge_stats"],
         signal_strength_counts=_sorted_counts(signal_strength_counts),
         submit_mismatch=submit_mismatch,
+        schema_quality=schema_quality,
         interpretation=_interpret(partial),
     )
 
@@ -574,6 +742,10 @@ def format_decision_attribution_summary(summary: DecisionAttributionSummary) -> 
     add_counts("signal_strength", summary.signal_strength_counts)
     lines.append("submit_mismatch:")
     for key, value in summary.submit_mismatch.items():
+        lines.append(f"  {key}={value}")
+    lines.append("")
+    lines.append("schema_quality:")
+    for key, value in summary.schema_quality.items():
         lines.append(f"  {key}={value}")
     lines.append("")
     lines.append("interpretation:")
