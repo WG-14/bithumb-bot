@@ -1,55 +1,68 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The repository has already progressed through decision attribution hardening and initial `SmaStrategyConfig` extraction. The next task is to close one remaining SMA config boundary before adding replay, then implement a **candle-based decision replay** that uses `SmaStrategyConfig` and `DecisionAttribution`. Do **not** jump to full `strategy-sweep` or PnL backtesting yet.
+The repository has already progressed through:
+
+```text id="vr3ex7"
+decision attribution → SmaStrategyConfig → candle-based strategy replay
+```
+
+The current task is to **close the remaining SMA config boundary** and then add the first attribution-based `strategy_sweep` module. Do **not** implement PnL/backtesting yet.
 
 Use the prior analysis context as guidance, but verify every claim directly in the repo before editing. 
 
 ## Core hypothesis to verify
 
-The repo is almost ready for replay, but `strategy/sma.py` still has a hidden `.env` coupling inside `_load_position_context()` because `build_position_state_model()` and `build_executable_lot()` still receive:
+The repo now has `strategy_replay.py` with `StrategyReplayConfig`, `StrategyReplayResult`, deterministic `config_id`, candle loading, SMA recomputation, cost filter application, replay context generation, and `DecisionAttributionSummary` aggregation.
 
-```python
+However, the live SMA strategy path may still have hidden `.env` coupling in `_load_position_context()` because `build_position_state_model()` and `build_executable_lot()` still receive:
+
+```python id="fvea67"
 settings.STRATEGY_ENTRY_SLIPPAGE_BPS
 settings.ENTRY_EDGE_BUFFER_RATIO
 ```
 
-If true, then even with `SmaStrategyConfig`, replay/sweep would not be fully reproducible because part of the position/executable-lot interpretation would still depend on global runtime settings. Keep this as a hypothesis until you inspect the code.
+If true, this must be fixed before sweep. Otherwise replay/sweep can be config-driven while the live decision path still interprets position/executable-lot costs through global settings.
+
+Keep this as a hypothesis until you inspect the code.
 
 ## Required sequence
 
 Do this in order:
 
-```text
-1. Close the remaining SmaStrategyConfig boundary in strategy/sma.py
-2. Add candle-based strategy decision replay
-3. Do not implement strategy-sweep yet
-4. Do not implement PnL/backtesting yet
+```text id="rknvkg"
+1. Verify and close the remaining _load_position_context config boundary
+2. Add targeted tests proving live strategy path uses config slippage/buffer
+3. Add attribution-based strategy_sweep module
+4. Add strategy_sweep tests
+5. Do not implement PnL/backtest/fill simulation
+6. CLI is optional and should come after the module if low-risk
 ```
 
 ## Required investigation before editing
 
 Inspect at least:
 
-```text
+```text id="p0zf14"
 src/bithumb_bot/strategy/sma.py
 src/bithumb_bot/strategy_config.py
+src/bithumb_bot/strategy_replay.py
 src/bithumb_bot/decision_attribution.py
-src/bithumb_bot/decision_contract.py
 tests/test_sma_strategy_config.py
+tests/test_strategy_replay.py
 tests/test_decision_attribution.py
 ```
 
 Verify:
 
 * `SmaStrategyConfig` exists.
-* `sma_strategy_config_from_settings()` exists.
 * `SmaCrossStrategy.from_config()` exists.
-* `_build_entry_intent_context()` already receives `buy_fraction` and `max_order_krw` from strategy/config values.
-* `_load_position_context()` still does or does not read `settings.STRATEGY_ENTRY_SLIPPAGE_BPS` and `settings.ENTRY_EDGE_BUFFER_RATIO`.
-* `DecisionAttribution` and `summarize_decision_attributions()` are available for replay output.
-* Attribution is already contract-backed and read-only.
+* `strategy_replay.py` uses `SmaStrategyConfig`.
+* `strategy_replay.py` returns `DecisionAttributionSummary`.
+* `strategy_replay.py` is read-only and does not mutate trading state.
+* `_load_position_context()` still does or does not use `settings.STRATEGY_ENTRY_SLIPPAGE_BPS` / `settings.ENTRY_EDGE_BUFFER_RATIO`.
+* No `strategy_sweep.py` module exists yet, unless already added.
 
-If the repo has already fixed some of this, adapt while preserving the goal: **replay must be config-driven, attribution-compatible, and not a trading/backtest engine.**
+Adapt to the actual repo state, but preserve the priority: **config boundary closure first, attribution sweep second, PnL later.**
 
 ---
 
@@ -57,39 +70,37 @@ If the repo has already fixed some of this, adapt while preserving the goal: **r
 
 ## Required patch
 
-If `_load_position_context()` still reads these directly:
+If `_load_position_context()` still reads:
 
-```python
+```python id="2p1zer"
 settings.STRATEGY_ENTRY_SLIPPAGE_BPS
 settings.ENTRY_EDGE_BUFFER_RATIO
 ```
 
-replace that hidden global dependency with explicit parameters.
+change `_load_position_context()` to accept explicit cost parameters:
 
-Change `_load_position_context()` to accept:
-
-```python
+```python id="g11n1o"
 slippage_bps: float
 entry_edge_buffer_ratio: float
 ```
 
-Then replace uses like:
+Replace:
 
-```python
+```python id="saqgfu"
 exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS)
 exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO)
 ```
 
 with:
 
-```python
+```python id="g1ocx9"
 exit_slippage_bps=float(slippage_bps)
 exit_buffer_ratio=float(entry_edge_buffer_ratio)
 ```
 
-Update the call from `SmaCrossStrategy.decide()`:
+Update the call inside `SmaCrossStrategy.decide()`:
 
-```python
+```python id="cpsjwc"
 position, exposure, position_state = _load_position_context(
     conn,
     pair=self.pair,
@@ -101,336 +112,378 @@ position, exposure, position_state = _load_position_context(
 )
 ```
 
-This is a small but important structural fix. It ensures `SmaStrategyConfig` controls the cost parameters used not only in entry intent and edge filtering, but also in position/executable-lot interpretation.
+This patch is small but structurally important. It makes `SmaStrategyConfig` control the cost parameters used by the live decision path, not only replay.
 
-## Required tests
+## Required test
 
-Update `tests/test_sma_strategy_config.py` or add a targeted test.
+Update `tests/test_sma_strategy_config.py`.
 
-Add a test proving that custom config values for:
+Add a test proving that custom `SmaStrategyConfig.slippage_bps` and `SmaStrategyConfig.entry_edge_buffer_ratio` flow into the live `SmaCrossStrategy.decide()` position/executable-lot path without mutating global `settings`.
 
-```text
-slippage_bps
-entry_edge_buffer_ratio
-```
+Preferred approach:
 
-are propagated into decision/position context or a stable observable context field, without mutating global `settings`.
+* Create a small in-memory candle DB as existing tests do.
+* Use `SmaCrossStrategy.from_config()` with custom values.
+* Make the decision path produce a context where the relevant position state / normalized exposure diagnostics expose the values.
+* If those values are not directly exposed, add a minimal stable diagnostic field consistent with the repo’s existing context style.
+* Do not rely on broad implementation internals unless unavoidable.
 
-If the exact fields are difficult to observe, assert through a stable context surface that already records the relevant edge/cost parameters, or add a minimal diagnostic field if consistent with the repo’s decision context style.
-
-Do not overfit to implementation internals unless necessary.
+At minimum, the test must fail if `_load_position_context()` silently falls back to global settings.
 
 ---
 
-# Part 2: add candle-based decision replay
+# Part 2: add attribution-based strategy sweep module
 
 ## Objective
 
-Add an initial replay module that answers this question:
+Add the first `strategy_sweep` implementation that compares multiple `SmaStrategyConfig` combinations by running the existing candle-based replay and reading its `DecisionAttributionSummary`.
 
-> Given historical candles and an explicit `SmaStrategyConfig`, how would SMA raw/final/block decision attribution change?
+This is not a trading simulator. This is not a PnL backtest. This is not a fee-drag or max-drawdown report.
 
-This is **not** a full backtest. This is **not** a PnL engine. This is **not** a trading simulator.
+The sweep’s job is to answer:
 
-The replay result must flow through the existing attribution path:
-
-```text
-replay decision context
-→ DecisionAttribution
-→ summarize_decision_attributions()
-→ DecisionAttributionSummary
+```text id="iww58i"
+For the same historical candles, how do different SMA/edge configs change:
+raw BUY/SELL candidates,
+final BUY/SELL candidates,
+cost-filter blocking,
+gap-vs-required-edge,
+and primary attribution issue?
 ```
-
-This is the point of the architecture: live dry-run, historical decisions, and future sweep results must be comparable using the same attribution model.
 
 ## Add file
 
 Prefer:
 
-```text
-src/bithumb_bot/strategy_replay.py
+```text id="u8tc23"
+src/bithumb_bot/strategy_sweep.py
 ```
 
 ## Suggested types
 
-Use names close to these:
+Use dataclasses similar to these:
 
-```python
+```python id="w9g2u7"
 @dataclass(frozen=True)
-class StrategyReplayConfig:
-    strategy_config: SmaStrategyConfig
-    from_ts_ms: int | None = None
-    to_ts_ms: int | None = None
-    through_ts_ms: int | None = None
+class StrategySweepGrid:
+    short_values: tuple[int, ...]
+    long_values: tuple[int, ...]
+    entry_edge_buffer_values: tuple[float, ...]
+    strategy_min_expected_edge_values: tuple[float, ...]
+    slippage_bps_values: tuple[float, ...] = (0.0,)
 ```
 
-```python
+```python id="lakx14"
 @dataclass(frozen=True)
-class StrategyReplayResult:
+class StrategySweepResult:
     config_id: str
-    attribution_summary: DecisionAttributionSummary
+    strategy_config: SmaStrategyConfig
+    replay_result: StrategyReplayResult
+```
+
+```python id="kzkgzl"
+@dataclass(frozen=True)
+class StrategySweepSummaryRow:
+    config_id: str
+    short_n: int
+    long_n: int
+    entry_edge_buffer_ratio: float
+    strategy_min_expected_edge_ratio: float
+    slippage_bps: float
     decision_count: int
+    raw_buy: int
+    final_buy: int
+    submit_expected_buy: int
+    raw_sell: int
+    final_sell: int
+    blocked_by_cost_filter_ratio: float
+    gap_lt_required_ratio: float | None
+    primary_issue: str
 ```
 
-You may include additional diagnostic fields if useful:
+You can adjust names if the repo style suggests better names, but preserve the diagnostic content.
 
-```python
-insufficient_candle_count: int
-candle_count: int
+## Required behavior
+
+Implement a function such as:
+
+```python id="n5nftg"
+def run_sma_strategy_sweep(
+    conn: sqlite3.Connection,
+    *,
+    base_config: SmaStrategyConfig,
+    grid: StrategySweepGrid,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    through_ts_ms: int | None = None,
+) -> list[StrategySweepResult]:
+    ...
 ```
 
-Keep the JSON/reporting surface deterministic.
+It should:
 
-## Replay scope
+* generate all combinations from the grid
+* skip invalid configs where `short_n >= long_n`
+* create a new `SmaStrategyConfig` for each combination, using `dataclasses.replace`
+* call `replay_sma_strategy_decisions()`
+* return results preserving deterministic order
+* not mutate `base_config`
+* not mutate global `settings`
+* not write to the database
 
-Initial replay should do only this:
+Also implement a summarizer:
 
-```text
-load candles for pair/interval
-recompute SMA raw signal for each replayable candle window
-compute gap_ratio
-compute required_edge_ratio / cost_floor_ratio using SmaStrategyConfig
-apply cost/edge filter
-produce replay decision contexts
-normalize to DecisionAttribution
-summarize with summarize_decision_attributions()
+```python id="v0cttk"
+def summarize_strategy_sweep_results(
+    results: Iterable[StrategySweepResult],
+) -> list[StrategySweepSummaryRow]:
+    ...
 ```
 
-The replay should generate a decision for each candle index where enough prior candles exist.
+The row values must come from `result.replay_result.attribution_summary`, especially:
 
-Minimum context fields per replay decision should include enough for attribution:
-
-```text
-raw_signal
-final_signal
-decision_type
-base_reason
-entry_reason
-entry_block_reason
-gap_ratio
-required_edge_ratio
-blocked_by_cost_filter
-signal_strength_label
-primary_block_layer
-primary_block_reason
-all_block_reasons
-experiment_fingerprint or config_id
+```text id="oiojki"
+candidate_funnel.raw_BUY
+candidate_funnel.final_BUY
+candidate_funnel.submit_expected_BUY
+candidate_funnel.raw_SELL
+candidate_funnel.final_SELL
+filter_ratios.blocked_by_cost_filter_ratio
+edge_stats.gap_lt_required_ratio
+interpretation.primary_issue
 ```
 
-For cost-filtered BUY/SELL candidates, set canonical block data consistently, for example:
+## Required initial metrics
 
-```python
-primary_block_layer = "strategy_filters"
-primary_block_reason = "cost_edge"
-all_block_reasons = ["strategy_filters.cost_edge"]
-blocked_by_cost_filter = True
+Do not add PnL metrics. The first summary rows should contain only attribution/replay metrics:
+
+```text id="5do5hj"
+config_id
+short_n
+long_n
+entry_edge_buffer_ratio
+strategy_min_expected_edge_ratio
+slippage_bps
+decision_count
+raw_BUY
+final_BUY
+submit_expected_BUY
+raw_SELL
+final_SELL
+blocked_by_cost_filter_ratio
+gap_lt_required_ratio
+primary_issue
 ```
 
-For non-filtered candidates, do not invent execution success. Since this replay is not an execution engine, be conservative with `submit_expected`. It can be `None` unless the repo already has a clear replay convention.
+If you add JSON helpers, make them deterministic.
 
-## Config ID
+## Optional CLI
 
-Create a deterministic `config_id`.
+A CLI is optional in this patch.
 
-Acceptable implementation:
+If you add one, keep it small and read-only:
 
-```text
-stable JSON of SmaStrategyConfig + replay range → sha256 prefix
+```bash id="xsgkuo"
+uv run bithumb-bot strategy-sweep \
+  --short 5,7,10 \
+  --long 20,30,50 \
+  --edge-buffer 0.0002,0.0005,0.0008 \
+  --min-expected-edge 0.0006,0.0009,0.0012 \
+  --slippage-bps 0,5 \
+  --json
 ```
 
-Do not include runtime timestamps.
+The CLI must output attribution summary rows, not PnL.
 
-Do not include nondeterministic object reprs.
+If adding the CLI risks slowing the patch, skip it and implement/test the module only.
 
-## Explicit non-goals
+---
 
-Do not implement:
-
-```text
-strategy-sweep CLI
-PnL
-net PnL
-max drawdown
-fee drag
-order submission simulation
-fill simulation
-broker reconciliation
-cash drift replay
-accounting repair replay
-lot-native lifecycle replay
-performance gate replay
-```
-
-This replay is a decision-attribution replay only.
-
-## Safety requirements
-
-The replay must be read-only.
-
-It must not:
-
-```text
-insert into strategy_decisions
-insert/update orders
-insert/update fills
-insert/update portfolio
-insert/update open_position_lots
-call broker APIs
-call recovery/repair functions
-submit/cancel orders
-change runtime state
-```
-
-Use only candle reads and pure calculations.
-
-If you need to query SQLite, use read-only SELECTs only.
-
-## Tests for strategy replay
+# Required tests for strategy sweep
 
 Add:
 
-```text
-tests/test_strategy_replay.py
+```text id="0sytm1"
+tests/test_strategy_sweep.py
 ```
 
-Required test cases:
+Cover:
 
-### 1. Insufficient candles
+## 1. Grid expansion and invalid config filtering
 
-Given fewer than `long_n + 2` candles, replay returns:
+Given:
 
-```text
-decision_count == 0
-attribution_summary.sample_count == 0
+```text id="l1n78v"
+short_values=(2, 3)
+long_values=(3,)
 ```
-
-or an equivalent explicit empty result. It must not crash.
-
-### 2. Golden cross produces raw BUY
-
-Use a simple deterministic candle fixture that creates a golden cross.
 
 Expected:
 
-```text
-candidate_funnel.raw_BUY >= 1
-raw_signal_counts includes BUY
+```text id="bsasjz"
+short=2,long=3 included
+short=3,long=3 skipped
 ```
 
-### 3. High edge buffer turns BUY candidate into cost-filtered HOLD
+## 2. Deterministic result order
 
-Run the same candle fixture with two configs:
-
-* low/no edge buffer
-* high edge buffer
-
-Expected for high buffer:
-
-```text
-raw_BUY >= 1
-final_BUY lower than raw_BUY, or final_BUY == 0 if all BUY candidates filtered
-blocked_by_cost_filter_ratio > 0
-block_reason_counts includes strategy_filters.cost_edge
-edge_stats.gap_lt_required_ratio is not None
-```
-
-This test is critical. It proves replay is useful for comparing “too loose vs too strict” settings without mutating `.env`.
-
-### 4. Determinism
-
-Run replay twice with the same candles and same config.
+Run the same sweep twice on the same candle fixture.
 
 Expected:
 
-```text
-same config_id
-same decision_count
-same attribution_summary.as_dict()
+```text id="zrzgy2"
+same config_id order
+same summary rows
 ```
 
-### 5. Replay uses DecisionAttributionSummary
+## 3. Sweep uses replay result and attribution summary
 
-Assert the result’s summary is an instance of the existing `DecisionAttributionSummary`, not a parallel bespoke summary.
+Assert each result has:
 
-### 6. Replay is read-only
+```text id="05765z"
+StrategyReplayResult
+DecisionAttributionSummary
+```
 
-Create tables such as:
+or equivalent type checks.
 
-```text
+## 4. Edge buffer changes final BUY / cost filter metrics
+
+Use a fixture with at least one golden cross.
+
+Sweep:
+
+```text id="necnxw"
+entry_edge_buffer_values=(0.0, 0.02)
+```
+
+Expected:
+
+```text id="hts52w"
+raw_buy is same or comparable across configs
+high-buffer final_buy lower than low-buffer final_buy
+high-buffer blocked_by_cost_filter_ratio > low-buffer ratio
+```
+
+This is the key test. It proves the sweep compares decision attribution, not environment mutation.
+
+## 5. Sweep does not mutate base config or settings
+
+Create a `base_config`, run sweep, assert:
+
+```text id="m0g65h"
+base_config unchanged
+settings.ENTRY_EDGE_BUFFER_RATIO unchanged
+settings.STRATEGY_ENTRY_SLIPPAGE_BPS unchanged
+```
+
+Use the existing settings guard style if needed.
+
+## 6. Sweep is read-only
+
+Create sentinel tables/rows like in replay tests:
+
+```text id="brmwk3"
 orders
 fills
 portfolio
 open_position_lots
 ```
 
-with sentinel rows or row counts. Run replay. Assert row counts and sentinel values are unchanged.
+Run sweep. Assert row counts and sentinel values are unchanged.
 
-If those schemas are difficult to create exactly, create minimal tables only if replay does not require them. The point is to ensure replay does not write.
+## 7. Summary row content is deterministic and attribution-based
 
-### 7. Config-driven cost parameters
+Assert `summarize_strategy_sweep_results()` returns rows with:
 
-Use two `SmaStrategyConfig` values that differ only in `entry_edge_buffer_ratio` or `slippage_bps`. Assert the replay attribution changes accordingly while global `settings` remains unchanged.
-
-## CLI
-
-A CLI is optional in this patch.
-
-If adding a CLI is low-risk and consistent with `app.py`, you may add:
-
-```bash
-uv run bithumb-bot strategy-replay --short 5 --long 20 --json
+```text id="yqlggh"
+config_id
+short_n
+long_n
+entry_edge_buffer_ratio
+strategy_min_expected_edge_ratio
+slippage_bps
+decision_count
+raw_buy
+final_buy
+blocked_by_cost_filter_ratio
+gap_lt_required_ratio
+primary_issue
 ```
 
-But do not let CLI work delay the core module/tests. A tested library module is enough for this PR.
+No PnL fields should appear.
 
-If adding CLI, it must be read-only and must output attribution summary JSON, not PnL.
+---
 
-## Observability requirements
+# Safety requirements
 
-After this patch, an operator/developer should be able to answer:
+This patch must not alter trading behavior.
 
-```text
-For this explicit SMA config, how many raw BUY/SELL candidates appear on historical candles?
-How many become final BUY/SELL after the cost filter?
-Is gap_ratio generally below required_edge_ratio?
-Which strategy filter blocked candidates?
-Does increasing edge_buffer reduce final BUYs?
-Can this be compared to live dry-run decision-attribution output?
+Confirm:
+
+```text id="hhg1ff"
+no order submission behavior changed
+no live/dry-run gates changed
+no strategy decision semantics changed except config boundary parameter source
+no DB writes during replay/sweep
+no broker API calls
+no recovery/repair calls
+no PnL/backtest assumptions introduced
 ```
 
-The answer should come from `DecisionAttributionSummary`, not a new incompatible report format.
+If you modify `SmaCrossStrategy.decide()` only to pass explicit config parameters into `_load_position_context()`, that should be behavior-preserving for default configs.
 
-## Validation commands
+---
+
+# Observability requirements
+
+After this patch, a developer/operator should be able to compare configs on the same candles by answering:
+
+```text id="lpsk7p"
+How many raw BUY/SELL candidates did this config produce?
+How many final BUY/SELL decisions remained after cost filtering?
+Did the cost filter block most candidates?
+Was gap_ratio usually below required_edge_ratio?
+Which config is too strict before any PnL assumptions?
+Can this summary be compared directly to decision-attribution output?
+```
+
+The answer must come from `DecisionAttributionSummary`, not from a separate bespoke sweep metric model.
+
+---
+
+# Validation commands
 
 Run targeted tests:
 
-```bash
+```bash id="4nd2l2"
 uv run pytest tests/test_sma_strategy_config.py
-uv run pytest tests/test_decision_attribution.py
 uv run pytest tests/test_strategy_replay.py
+uv run pytest tests/test_strategy_sweep.py
+uv run pytest tests/test_decision_attribution.py
 ```
 
-Run related tests:
+Run related decision tests:
 
-```bash
+```bash id="atjeav"
 uv run pytest tests/test_decision_telemetry.py tests/test_strategy_decision_persistence.py
 ```
 
-Run full suite if feasible:
+Run the full suite if feasible:
 
-```bash
+```bash id="d5q2k9"
 uv run pytest
 ```
 
 If a local/dev DB is available, run:
 
-```bash
+```bash id="8fz22s"
 uv run bithumb-bot decision-attribution --limit 500 --json
 ```
 
 Inspect and report:
 
-```text
+```text id="gz1eq9"
 schema_quality.all_block_reasons_present_count
 schema_quality.primary_block_present_count
 schema_quality.primary_all_block_conflict_count
@@ -446,11 +499,36 @@ interpretation.primary_issue
 
 If no local/dev DB is available, state that clearly. Do not fabricate runtime observations.
 
-## Final report format
+---
+
+# Explicit non-goals
+
+Do not implement:
+
+```text id="vlvmmd"
+net PnL
+gross PnL
+max drawdown
+fee drag
+fill simulation
+broker reconciliation replay
+cash drift replay
+accounting repair replay
+lot-native lifecycle replay
+performance gate replay
+automatic env tuning
+live order actions
+```
+
+This patch is about attribution-based config comparison only.
+
+---
+
+# Final report format
 
 When finished, report exactly in this structure:
 
-```text
+```text id="a3qjny"
 Summary
 - ...
 
@@ -461,32 +539,32 @@ Verification
 - command: result
 - command: result
 
-SmaStrategyConfig boundary closure
+Config boundary closure
 - State whether _load_position_context previously used settings for slippage/buffer.
 - Explain how slippage_bps and entry_edge_buffer_ratio now flow from SmaStrategyConfig/SmaCrossStrategy.
-- Confirm remaining settings reads are runtime-only or constructor defaults, and explain any that remain.
+- Explain remaining settings reads and why they are acceptable or deferred.
 
-Replay design
-- Explain StrategyReplayConfig and StrategyReplayResult.
-- Explain how config_id is deterministic.
-- Explain how replay decisions become DecisionAttribution objects.
-- Explain why this is not a backtest/PnL engine.
+Strategy sweep design
+- Explain StrategySweepGrid, StrategySweepResult, and summary rows.
+- Explain how sweep uses replay_sma_strategy_decisions().
+- Explain how summary rows are derived from DecisionAttributionSummary.
+- Confirm no PnL/backtest assumptions were introduced.
 
 Safety / recovery
-- Confirm replay is read-only.
-- Confirm no trading behavior changed.
-- Confirm no live/dry-run gates changed.
-- Confirm no DB mutation occurs during replay.
+- Confirm sweep is read-only.
+- Confirm no trading behavior or live gates changed.
+- Confirm no DB mutation occurs during sweep.
+- Confirm base_config and settings are not mutated.
 
 Findings
 - State whether the hypothesis was confirmed, partially confirmed, or not confirmed.
 - Mention any stronger structural issue discovered.
 
 Next steps
-- PR 1: add strategy-sweep using replay attribution summary
-- PR 2: add optional strategy-replay CLI if not added here
+- PR 1: optional strategy-sweep CLI, if not added
+- PR 2: compare live decision-attribution output against replay output for the same time window
 - PR 3: only later add lightweight portfolio/PnL simulation
 ```
 
-Keep the priority strict: **close the config boundary, then add candle-based attribution replay; do not implement sweep or PnL yet.**
+Keep the priority strict: **close the remaining config boundary, then add attribution-based sweep; do not add PnL/backtest yet.**
 
