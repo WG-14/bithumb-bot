@@ -453,9 +453,18 @@ class Settings:
         "SMA_COST_EDGE_MIN_RATIO",
         os.getenv("STRATEGY_MIN_EXPECTED_EDGE_RATIO", "0"),
     )
+    SMA_MARKET_REGIME_ENABLED: bool = parse_bool_env_strict("SMA_MARKET_REGIME_ENABLED", "true")
     ENTRY_EDGE_BUFFER_RATIO: float = parse_float_env("ENTRY_EDGE_BUFFER_RATIO", "0.0005")
     STRATEGY_MIN_EXPECTED_EDGE_RATIO: float = parse_float_env(
         "STRATEGY_MIN_EXPECTED_EDGE_RATIO", "0"
+    )
+    MIN_NET_EDGE_KRW: float = parse_non_negative_float_env("MIN_NET_EDGE_KRW", "0")
+    MIN_MARGIN_AFTER_COST_RATIO: float = parse_non_negative_float_env(
+        "MIN_MARGIN_AFTER_COST_RATIO", "0"
+    )
+    PRE_TRADE_ECONOMICS_BLOCKING_ENABLED: bool = parse_bool_env_strict(
+        "PRE_TRADE_ECONOMICS_BLOCKING_ENABLED",
+        "false",
     )
     STRATEGY_EXIT_RULES: str = os.getenv("STRATEGY_EXIT_RULES", "opposite_cross,max_holding_time")
     STRATEGY_EXIT_MAX_HOLDING_MIN: int = int(os.getenv("STRATEGY_EXIT_MAX_HOLDING_MIN", "0"))

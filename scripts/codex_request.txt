@@ -1,710 +1,442 @@
-You are working in GitHub repository `WG-14/bithumb-bot`.
-
-This is a production-safety and experiment-system hardening task. Do not treat this as a cosmetic `broker_qty_unknown` suppression patch. The current problem is that `live-dry-run` successfully runs without submitting orders, but the live account evidence read during `/v1/accounts` preflight is still not connected to the actual target-delta decision path.
-
-Use the EC2 acceptance result as context, but keep all root causes falsifiable.
-
-## Current EC2 evidence
-
-After commit `9b8455d70d2c37e47769569b3328c4ca5d231272`, EC2 was updated successfully:
-
 ```text
-HEAD=9b8455d70d2c37e47769569b3328c4ca5d231272
-working tree clean
+You are working in the GitHub repository `WG-14/bithumb-bot`.
+
+Task: evolve the repository from a collection of SMA filters and safety gates into a more reproducible, observable, and operator-readable automated trading experiment system.
+
+Do not treat this as “add two more filters.” The core problem to verify and address is that strategy judgment, market suitability, cost/risk, execution feasibility, and operator interpretation are not yet unified into a clear decision contract. The goal is not to make BUY appear more often. The goal is to make every BUY candidate, HOLD result, blocked order, and live-dry-run decision explainable and reproducible from one decision row plus summary reporting.
+
+Important context to verify in the repo, not assume blindly:
+- The repo already appears to have `sma_with_filter`.
+- Existing SMA/filter logic appears to include gap, volatility, overextension, cost-edge, fee/slippage, live dry-run posture, decision telemetry, target shadow decision, and performance gate.
+- Existing env/config likely exposes fields such as:
+  - `STRATEGY_NAME=sma_with_filter`
+  - `SMA_FILTER_GAP_MIN_RATIO`
+  - `SMA_FILTER_VOL_WINDOW`
+  - `SMA_FILTER_VOL_MIN_RANGE_RATIO`
+  - `SMA_FILTER_OVEREXT_*`
+  - `SMA_COST_EDGE_ENABLED`
+  - `ENTRY_EDGE_BUFFER_RATIO`
+  - `LIVE_FEE_RATE_ESTIMATE`
+  - `PAPER_FEE_RATE`
+  - `STRATEGY_ENTRY_SLIPPAGE_BPS`
+- Existing strategy decision context likely already contains items such as `base_signal`, `final_signal`, `blocked_filters`, `entry`, `position_gate`, `position_state`, `fee_authority`, and cost-edge ratios.
+- Existing execution/shadow decision logic likely already contains items such as `target_shadow_decision`, `target_would_submit`, `target_delta_notional_krw`, `target_block_reason`, and `target_submit_plan`.
+
+First verify the actual repository structure, current code paths, and tests. Do not overwrite existing behavior blindly.
+
+Primary design objective:
+Create a layered `decision_v2` style contract that allows an operator to answer these questions from live dry run output:
+
+1. Is the current market regime suitable for this SMA strategy?
+2. Did the strategy produce a BUY candidate?
+3. Was the candidate blocked?
+4. If blocked, was it blocked by market regime, strategy filters, cost edge, position state, order rules, execution sizing, fee authority, or performance gate?
+5. If it would become a real order, does the order-sized expected edge beat fee/slippage/buffer in KRW terms?
+6. Can the decision be reproduced from stored context?
+
+Keep these hypotheses as hypotheses and implement verification support for them.
+
+Hypothesis A:
+BUY absence may not mean the strategy is broken. It may mean block causes are not being aggregated in an operator-readable way.
+
+Verification:
+Inspect recent or testable `strategy_decisions`-style records and determine whether `base_signal=BUY` exists but `final_signal=HOLD`, or whether `base_signal=BUY` itself is rare.
+
+Expected interpretation:
+- `base_signal=BUY` exists but `final_signal=HOLD` often: filters, position gate, execution gate, or policy block is the likely cause.
+- `base_signal=BUY` rarely exists: SMA parameters or current market regime may be the cause.
+- `base_signal=BUY`, `final_signal=BUY`, but `target_would_submit=false`: execution sizing or order-rule layer is the cause.
+
+Hypothesis B:
+Cost-edge may exist as a ratio-level check, but small live orders may still be economically meaningless in KRW terms.
+
+Verification:
+For BUY candidates, combine:
+- expected edge ratio
+- required edge ratio
+- roundtrip fee ratio
+- slippage ratio
+- buffer ratio
+- actual planned order KRW / target delta notional KRW
+
+Then calculate:
+- expected_edge_krw
+- expected_cost_krw
+- net_edge_krw
+- meaningful_edge
+
+Expected interpretation:
+- `expected_edge_ratio > required_edge_ratio` but `net_edge_krw < MIN_NET_EDGE_KRW` means the trade may pass ratio checks but still be operationally meaningless.
+- If `net_edge_krw` is sufficient but BUY is blocked, the cause is probably market regime, position state, order rules, or performance gate, not cost.
+
+Hypothesis C:
+Existing gap/volatility/overextension filters are local conditions, not a stable operator-readable market regime classifier.
+
+Verification:
+Create a separate market regime snapshot and compare it with existing blocked filters:
+- chop + BUY candidate + cost-edge pass + later poor outcome suggests a regime filter may be useful.
+- trend_up + cost-edge pass + only volatility blocked suggests existing volatility threshold may be too conservative.
+
+Do not conclude this automatically. Add observability and tests so this hypothesis can be supported or refuted.
+
+Hypothesis D:
+Live dry run may be safe but not yet sufficiently reproducible as an experiment.
+
+Verification:
+From a single decision context, check whether the following can be reconstructed:
+- candle timestamp / input window
+- SMA short/long
+- gap threshold
+- volatility window and thresholds
+- overextension lookback and threshold
+- fee authority source
+- slippage setting
+- order sizing result
+- performance gate result
+- final primary block reason
+
+If not, add missing fields to the decision context or replay fingerprint.
+
+Implementation priorities:
+
+Priority 1: Decision Contract v2
+
+Introduce a stable, backward-compatible decision contract layer. Do not remove existing context fields unless tests prove they are unused and safe to preserve elsewhere.
+
+Add or normalize a top-level structure like:
+
+{
+  "decision_contract_version": "decision_v2",
+  "signal_flow": {
+    "base_signal": "BUY",
+    "strategy_signal": "BUY",
+    "final_signal": "HOLD",
+    "final_action": "HOLD",
+    "primary_block_layer": "market_regime",
+    "primary_block_reason": "chop_market",
+    "all_block_reasons": [
+      "market_regime.chop_market",
+      "strategy_filters.cost_edge"
+    ]
+  },
+  "market_regime": {},
+  "strategy_features": {},
+  "strategy_filters": {},
+  "pre_trade_economics": {},
+  "position_gate": {},
+  "execution_plan": {},
+  "performance_gate": {},
+  "replay_fingerprint": {}
+}
+
+The exact field names may be adapted to fit existing repository conventions, but the meaning must remain intact.
+
+Primary block layer priority should be explicit and tested. Suggested priority:
+
+1. `fee_authority`
+2. `market_regime`
+3. `position_gate`
+4. `strategy_filters`
+5. `pre_trade_economics`
+6. `execution_order_rule`
+7. `performance_gate`
+
+If the existing architecture requires a different order, document why.
+
+Priority 2: MarketRegimeClassifier module
+
+Do not hardcode market regime as another ad hoc filter inside `sma.py`.
+
+Add a separate module, for example:
+
+`src/bithumb_bot/strategy/market_regime.py`
+
+Implement a small, deterministic snapshot model, for example:
+
+@dataclass(frozen=True)
+class MarketRegimeSnapshot:
+    version: str
+    regime: str
+    regime_score: float
+    trend_strength: float
+    chop_score: float
+    volatility_ratio: float
+    volatility_state: str
+    overextension_ratio: float
+    allows_entry: bool
+    block_reason: str
+    inputs: dict[str, object]
+
+Initial regime policy can be simple and should use existing SMA/filter features where possible:
+
+- trend_strength = abs(short_sma - long_sma) / long_sma
+- trend_direction = sign(short_sma - long_sma)
+- volatility_ratio = recent high-low or close range / last close, matching or reusing existing volatility filter semantics where possible
+- overextension_ratio = recent return or existing overextension measure
+- chop_score = inverse/normalized trend strength
+
+Suggested regime labels:
+- `trend_up`
+- `trend_down`
+- `chop`
+- `low_vol`
+- `high_vol`
+- `overextended_up`
+- `unknown`
+
+Suggested initial entry policy:
+- allow BUY only when `regime == "trend_up"` and volatility is acceptable and overextension is not excessive.
+- `chop`, `low_vol`, and `overextended_up` should block entry.
+- `high_vol` should initially block or warn, not immediately resize orders, unless existing architecture already supports safe deterministic scaling.
+
+Do not introduce high-volatility order-size reduction as the first step unless it can be cleanly tested and explained. First make regime-based allow/block observable and reproducible.
+
+Add `market_regime` to strategy decision context.
+
+Priority 3: PreTradeEconomics after execution planning
+
+Do not calculate KRW-level expected edge only inside the strategy layer. Strategy-level cost-edge ratio can remain where it is.
+
+Order-sized economics must be calculated after the planned order size or target delta notional is known, likely near the existing `target_submit_plan` / shadow execution decision path.
+
+Add a module, for example:
+
+`src/bithumb_bot/execution/pre_trade_economics.py`
+
+Implement a deterministic snapshot model, for example:
+
+@dataclass(frozen=True)
+class PreTradeEconomicsSnapshot:
+    version: str
+    side: str
+    order_krw: float
+    expected_edge_ratio: float
+    required_edge_ratio: float
+    roundtrip_fee_ratio: float
+    slippage_ratio: float
+    buffer_ratio: float
+    margin_after_cost_ratio: float
+    expected_edge_krw: float
+    expected_cost_krw: float
+    net_edge_krw: float
+    meaningful_edge: bool
+    reason: str
+    inputs: dict[str, object]
+
+Formula guidance:
+- `expected_edge_krw = order_krw * expected_edge_ratio`
+- `expected_cost_krw = order_krw * (roundtrip_fee_ratio + slippage_ratio + buffer_ratio)` unless existing code already has a better cost-floor model
+- `net_edge_krw = expected_edge_krw - expected_cost_krw`
+- `margin_after_cost_ratio = expected_edge_ratio - required_edge_ratio`
+- `meaningful_edge = net_edge_krw >= MIN_NET_EDGE_KRW and margin_after_cost_ratio >= MIN_MARGIN_AFTER_COST_RATIO`
+
+Add config/env defaults if missing:
+- `MIN_NET_EDGE_KRW`
+- `MIN_MARGIN_AFTER_COST_RATIO`
+
+Use conservative defaults. Avoid breaking current dry-run behavior. If the new meaningful-edge gate is too invasive for the first patch, make it observable first and only blocking when explicitly enabled by config. However, still compute and report it.
+
+Priority 4: Live dry-run operator summary
+
+Find the current live dry-run report or CLI output path. Add an operator-readable summary that aggregates recent decision rows by block cause and market regime.
+
+Target output shape:
+
+[DRY-RUN DECISION SUMMARY]
+window: last 300 decisions
+base BUY candidates: 14
+final BUY: 0
+
+block layers:
+- market_regime.chop: 8
+- strategy_filters.cost_edge: 4
+- position_gate.already_in_position: 1
+- execution_order_rule.min_notional: 1
+
+regime distribution:
+- trend_up: 18%
+- chop: 61%
+- low_vol: 13%
+- overextended_up: 8%
+
+BUY candidate economics:
+- avg_order_krw: 10000
+- avg_expected_edge_krw: 12
+- avg_expected_cost_krw: 15
+- avg_net_edge_krw: -3
+- meaningful_edge_count: 0
+
+If the repository already has a report format, preserve it and add these sections without removing existing diagnostics.
+
+Testing requirements:
+
+Add focused tests. Do not only test that fields exist. Test cause separation and reproducibility.
+
+Required tests:
+
+1. Market regime allows trend entry:
+   Given a deterministic trend-up candle sequence, cost-edge pass, and no open position:
+   - `market_regime.regime == "trend_up"`
+   - `market_regime.allows_entry is True`
+   - `signal_flow.primary_block_layer` is not `market_regime`
+
+2. Chop blocks a BUY candidate:
+   Given a sequence where SMA creates a golden cross but trend strength is below threshold:
+   - `base_signal == "BUY"`
+   - `final_signal == "HOLD"`
+   - `market_regime.regime == "chop"`
+   - `signal_flow.primary_block_layer == "market_regime"`
+   - `signal_flow.primary_block_reason == "chop_market"` or equivalent
+
+3. Cost-edge remains distinguishable from market regime:
+   Given trend-up regime but insufficient expected edge:
+   - `market_regime.allows_entry is True`
+   - cost-edge filter blocks
+   - `signal_flow.primary_block_layer == "strategy_filters"`
+   - `signal_flow.primary_block_reason` identifies cost-edge
+
+4. KRW economics can mark a ratio-passing candidate as operationally meaningless:
+   Given ratio-level cost-edge pass but very small order KRW:
+   - `pre_trade_economics.net_edge_krw` is below threshold
+   - `pre_trade_economics.meaningful_edge is False`
+   - if blocking is enabled, `primary_block_layer == "pre_trade_economics"`
+   - if blocking is not enabled by default, report clearly that it is observation-only
+
+5. Execution order-rule block remains separate:
+   Given final strategy BUY but execution plan cannot submit due to min notional/order rule:
+   - `final_signal == "BUY"` or strategy-level action remains BUY as appropriate
+   - `target_would_submit is False`
+   - `signal_flow.primary_block_layer == "execution_order_rule"` or equivalent
+
+6. Replay fingerprint coverage:
+   Verify `replay_fingerprint` or equivalent context includes enough information to reconstruct:
+   - strategy name
+   - strategy version or decision contract version
+   - pair
+   - interval
+   - candle timestamp / through timestamp
+   - SMA short/long
+   - regime feature version
+   - key thresholds
+   - fee/slippage source
+   - order sizing result if available
+
+7. Backward compatibility:
+   Existing tests for `blocked_filters`, `filters`, `entry`, `position_gate`, `position_state`, `fee_authority`, `execution_decision`, and dry-run safety must still pass or be intentionally updated with a clear reason.
+
+Recovery and safety requirements:
+
+- Do not weaken live-order safety.
+- Do not make live real orders easier to arm.
+- Do not remove `LIVE_DRY_RUN` / `LIVE_REAL_ORDER_ARMED` protections.
+- New gates should default to conservative or observation-only behavior unless the repository already has a clear pattern for enabling blocking filters.
+- Preserve old context fields while adding the new contract unless there is a strong reason not to.
+- Keep all calculations deterministic and side-effect-free.
+- Avoid network calls in tests.
+- Use fixture candle data for regime and cost/economics tests.
+
+Observability requirements:
+
+Every decision involving a BUY candidate or blocked BUY candidate should expose:
+
+- `base_signal`
+- `final_signal`
+- `primary_block_layer`
+- `primary_block_reason`
+- `all_block_reasons`
+- `market_regime.regime`
+- `market_regime.regime_score`
+- `market_regime.trend_strength`
+- `market_regime.chop_score`
+- `market_regime.volatility_state`
+- `market_regime.allows_entry`
+- `strategy_filters`
+- `pre_trade_economics` if an order size is known or can be estimated
+- `execution_plan` / target shadow decision if available
+- `replay_fingerprint`
+
+Scope boundaries:
+
+Do not:
+- Replace the SMA strategy with a different strategy.
+- Optimize thresholds based on a few dry-run samples.
+- Add complex ML or opaque scoring.
+- Make high-volatility order-size reduction the first mandatory behavior.
+- Treat `net_edge_krw > 0` as sufficient by itself.
+- Hide existing filter-level details under a single summary field.
+
+Do:
+- Add a layered decision contract.
+- Add market regime as a separate, testable classifier.
+- Add KRW-level pre-trade economics after execution sizing/planning.
+- Add primary block cause selection.
+- Add dry-run summary aggregation.
+- Add deterministic tests.
+- Preserve or improve safety.
+
+Suggested implementation sequence:
+
+1. Inspect repository structure:
+   - strategy modules
+   - execution planning modules
+   - config/env parsing
+   - dry-run CLI/reporting
+   - tests around SMA filters, decision telemetry, execution shadow decisions, and performance gate
+
+2. Add `MarketRegimeSnapshot` and classifier module.
+
+3. Wire market regime into `sma_with_filter` decision context without destroying existing `filters` / `blocked_filters`.
+
+4. Add `decision_contract_version`, `signal_flow`, `primary_block_layer`, `primary_block_reason`, and `all_block_reasons`.
+
+5. Add `PreTradeEconomicsSnapshot` near execution planning after planned order KRW/target delta is available.
+
+6. Add or extend dry-run summary aggregation.
+
+7. Add tests for cause separation, economics, replay context, and backward compatibility.
+
+8. Run the test suite.
+
+9. If tests fail, fix regressions without weakening safety gates.
+
+Final report format:
+
+Return a concise but complete implementation report with these sections:
+
+1. Summary
+   - What changed
+   - Whether this was a design-contract change, regime classifier change, economics change, reporting change, or tests-only change
+
+2. Repository findings
+   - Which files/modules contained existing SMA filters, cost-edge logic, execution shadow decisions, and dry-run reporting
+   - Which assumptions were confirmed
+   - Which assumptions were false or only partially true
+
+3. Hypothesis status
+   - Hypothesis A: supported / refuted / not fully tested, with evidence
+   - Hypothesis B: supported / refuted / not fully tested, with evidence
+   - Hypothesis C: supported / refuted / not fully tested, with evidence
+   - Hypothesis D: supported / refuted / not fully tested, with evidence
+
+4. Design decisions
+   - Why market regime was separated from SMA filter logic
+   - Why KRW economics was placed after execution planning
+   - How primary block layer priority is resolved
+   - Whether pre-trade economics is blocking or observation-only by default
+
+5. Tests
+   - List new tests
+   - List updated tests
+   - Include exact test command and result
+
+6. Safety and recovery
+   - Confirm live-order safety was not weakened
+   - Confirm dry-run behavior remains safe
+   - Confirm rollback path or config disable path for new behavior
+
+7. Remaining work
+   - Any thresholds that should be tuned later
+   - Any summary/reporting limitations
+   - Any replay gaps that still remain
 ```
-
-Running `live-dry-run` created one new strategy decision and did not create real execution artifacts:
-
-```text
-before:
-strategy_decisions  6826
-orders              182
-fills               145
-trades              144
-
-after:
-strategy_decisions  6827
-orders              182
-fills               145
-trades              144
-```
-
-So the no-submit invariant is still working.
-
-However, the latest decision still failed the acceptance criteria:
-
-```text
-decision_id=6827
-execution_mode=live_dry_run_loop
-execution_block_reason=broker_qty_unknown
-balance_source=dry_run_static
-balance_preflight=not_checked
-balance_execution_mode=unknown
-base_missing_policy=unknown
-broker_qty_known=0
-broker_qty=0.0
-broker_qty_evidence_policy=unknown_or_unsafe_accounts_evidence
-target_delta_side=NONE
-```
-
-At the same time, the command logs show that `/v1/accounts` was actually called and passed with the expected zero-position allowance:
-
-```text
-/v1/accounts preflight passed with zero-position allowance
-reason_code=ACCOUNTS_BASE_ROW_MISSING_ALLOWED
-execution_mode=live_dry_run_unarmed
-quote_currency=KRW
-base_currency=BTC
-base_currency_missing_policy=allow_zero_position_start_in_dry_run
-row_count=2
-currencies=KRW,P
-```
-
-Therefore, the current patch created the `LiveAccountEvidence` object and the known-zero policy, but the actual `cmd_live_dry_run` decision path is still using `dry_run_static` evidence instead of `accounts_v1_rest_snapshot` evidence. 
-
-## Core problem
-
-The problem is not that `LiveAccountEvidence` does not exist. It does exist.
-
-The problem is that the live account evidence pipeline is not connected end-to-end:
-
-```text
-cmd_live_dry_run()
-→ /v1/accounts preflight succeeds
-→ accounts evidence is visible in logs
-→ decision generation path still uses dry_run_static
-→ build_live_account_evidence() does not receive the real accounts snapshot/diagnostics
-→ target-delta receives broker_qty_known=0
-→ target-delta blocks with broker_qty_unknown
-```
-
-The goal of this patch is to connect the existing evidence object to the actual `live-dry-run` decision path.
-
-Do not broaden real-order behavior. Do not make missing BTC row globally mean zero. Known-zero is valid only under explicitly safe live-dry-run conditions.
-
-## Hypotheses to verify
-
-### Hypothesis 1: `live-dry-run` preflight account evidence and decision evidence are currently separate paths
-
-Evidence from EC2 strongly supports this:
-
-```text
-/v1/accounts preflight: pass_no_position_allowed
-decision context: dry_run_static / not_checked / broker_qty_unknown
-```
-
-Inspect:
-
-```text
-src/bithumb_bot/app.py
-  cmd_live_dry_run()
-  _apply_live_dry_run_no_submit_policy()
-  record_strategy_decision()
-
-src/bithumb_bot/broker/balance_source.py
-  LiveAccountEvidence
-  build_live_account_evidence()
-  AccountsV1BalanceSource
-
-src/bithumb_bot/execution_service.py
-  build_execution_decision_summary()
-
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/position_state_snapshot.py
-src/bithumb_bot/target_position.py
-```
-
-Refutation condition:
-
-```text
-cmd_live_dry_run already passes accounts_v1_rest_snapshot evidence into build_execution_decision_summary(), but that evidence is overwritten later.
-```
-
-If this is true, fix the overwrite point instead of adding duplicate evidence plumbing.
-
-### Hypothesis 2: `LiveAccountEvidence` exists but is not injected into the execution decision
-
-The latest code added `LiveAccountEvidence`, `build_live_account_evidence()`, `as_broker_position_evidence()`, and `as_decision_context_fields()`. But EC2 still shows:
-
-```text
-balance_source=dry_run_static
-broker_qty_known=0
-broker_qty_evidence_policy=unknown_or_unsafe_accounts_evidence
-```
-
-Verify whether `cmd_live_dry_run()` calls:
-
-```text
-fetch live account snapshot
-get account diagnostics
-build_live_account_evidence(snapshot, diagnostics)
-merge evidence.as_broker_position_evidence() into target-delta input
-merge evidence.as_decision_context_fields() into context_json
-```
-
-Refutation condition:
-
-```text
-cmd_live_dry_run does all of the above, but another branch replaces it with DryRunBalanceSource.
-```
-
-### Hypothesis 3: `dry_run_static` is still used as broker evidence for live-dry-run
-
-`dry_run_static` is acceptable for paper-like diagnostics, but not for live-dry-run’s broker position evidence. `live-dry-run` is supposed to use live market/order-rule/account evidence while disabling submit.
-
-Current bad state:
-
-```text
-execution_mode=live_dry_run_loop
-balance_source=dry_run_static
-balance_preflight=not_checked
-broker_qty_known=0
-```
-
-Required state:
-
-```text
-execution_mode=live_dry_run_loop
-balance_source=accounts_v1_rest_snapshot
-balance_preflight=pass_no_position_allowed
-broker_qty_known=1
-broker_qty=0.0
-broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
-```
-
-Refutation condition:
-
-```text
-dry_run_static appears only as a fallback after accounts evidence fails, and the EC2 failure was due to actual account evidence failure.
-```
-
-If so, surface the real account evidence failure reason. Do not silently fall back to `dry_run_static`.
-
-### Hypothesis 4: existing tests cover object-level behavior but not the real command-level path
-
-Pytest passed, but EC2 acceptance failed. This suggests tests may cover:
-
-```text
-LiveAccountEvidence object construction
-known-zero policy function
-telemetry field formatting
-no-submit invariant
-```
-
-but not the command-level path:
-
-```text
-app_main(["live-dry-run", ...])
-→ fake /v1/accounts payload
-→ strategy_decisions.context_json
-→ target-delta no longer broker_qty_unknown
-```
-
-Verify existing tests before writing new ones.
-
-Refutation condition:
-
-```text
-An end-to-end live-dry-run command test exists but does not match EC2 because the fixture differs.
-```
-
-If so, update the fixture to match EC2: KRW row present, BTC row missing, live dry-run unarmed, local flat, no unresolved orders.
-
-## Required design direction
-
-Do not add another evidence object. The evidence object already exists.
-
-Connect the existing evidence object into the live-dry-run decision path:
-
-```text
-actual /v1/accounts snapshot
-→ build_live_account_evidence(snapshot, diagnostics)
-→ evidence.as_broker_position_evidence()
-→ runtime readiness / target-delta input
-→ build_execution_decision_summary()
-→ _apply_live_dry_run_no_submit_policy()
-→ record_strategy_decision(context_json)
-```
-
-The final live-dry-run decision must be based on `accounts_v1_rest_snapshot`, not `dry_run_static`.
-
-## Concrete implementation requirements
-
-### 1. Acquire actual account evidence inside `cmd_live_dry_run`
-
-Inside the `live-dry-run` command path, fetch a live account snapshot using the same live account source / broker diagnostic path that powers the `/v1/accounts` preflight.
-
-Required behavior:
-
-```text
-MODE=live
-LIVE_DRY_RUN=true
-LIVE_REAL_ORDER_ARMED=false
-command=live-dry-run
-```
-
-must use account evidence from:
-
-```text
-accounts_v1_rest_snapshot
-```
-
-not:
-
-```text
-dry_run_static
-```
-
-If account snapshot acquisition fails, fail closed or record explicit account evidence failure. Do not quietly fall back to `dry_run_static` as broker evidence for target-delta.
-
-### 2. Build `LiveAccountEvidence` from the actual snapshot and diagnostics
-
-Use the existing function:
-
-```text
-build_live_account_evidence(snapshot, diagnostics)
-```
-
-For EC2’s current case:
-
-```text
-/v1/accounts payload has KRW row
-BTC row is missing
-execution_mode=live_dry_run_unarmed
-base_currency_missing_policy=allow_zero_position_start_in_dry_run
-preflight_outcome=pass_no_position_allowed
-local position flat
-unresolved orders none
-```
-
-the resulting decision context must contain:
-
-```text
-balance_source=accounts_v1_rest_snapshot
-balance_source_preflight_outcome=pass_no_position_allowed
-balance_source_execution_mode=live_dry_run_unarmed
-base_currency_missing_policy=allow_zero_position_start_in_dry_run
-broker_qty_known=1
-broker_qty=0.0
-broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
-broker_qty_evidence_reason=valid_accounts_snapshot_missing_base_row_allowed_for_unarmed_live_dry_run
-```
-
-### 3. Feed evidence into target-delta input
-
-The evidence must affect target-delta behavior, not only reporting.
-
-`build_execution_decision_summary()` or the equivalent target-delta input path must receive:
-
-```text
-broker_qty_known=1
-broker_qty=0.0
-balance_source=accounts_v1_rest_snapshot
-broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
-```
-
-Under the valid known-zero case, `execution_block_reason` must not remain `broker_qty_unknown`.
-
-Acceptable outcomes:
-
-```text
-target_delta_side=NONE
-target_block_reason=no_delta / already_at_target / no_target
-```
-
-or, if target exposure requires BUY:
-
-```text
-target_delta_side=BUY
-target_would_submit=1
-target_submit_allowed=0
-submit_expected=0
-final_action=BLOCK_LIVE_DRY_RUN_NO_SUBMIT or STRATEGY_PERFORMANCE_BLOCKED
-```
-
-`orders/fills/trades` must remain unchanged.
-
-### 4. Preserve no-submit invariants
-
-`live-dry-run` must still never:
-
-```text
-submit broker orders
-create orders rows with PENDING_SUBMIT / NEW / FILLED
-create fills
-create trades
-mutate portfolio as if an execution occurred
-attach exchange_order_id
-apply fills
-```
-
-Only diagnostic decision rows are allowed.
-
-### 5. Preserve real-order safety
-
-Do not make this inference globally true:
-
-```text
-missing BTC row == broker_qty=0
-```
-
-Known-zero from missing base row is valid only when all safe conditions hold:
-
-```text
-MODE=live
-LIVE_DRY_RUN=true
-LIVE_REAL_ORDER_ARMED=false
-execution_mode=live_dry_run_unarmed
-base_currency_missing_policy=allow_zero_position_start_in_dry_run
-accounts response is valid
-quote row is present and parseable
-local position is flat or explicitly harmless/effective-flat
-unresolved/open/recovery-required orders are absent
-startup gate is not blocking
-```
-
-Unsafe cases must remain fail-closed:
-
-```text
-LIVE_REAL_ORDER_ARMED=true
-LIVE_DRY_RUN=false
-accounts transport/auth/schema failure
-quote row missing
-local position nonzero and not harmless/effective-flat
-unresolved/open/recovery-required orders present
-runtime readiness blocks resume
-```
-
-### 6. Make evidence visible in decision telemetry and ops-report
-
-`decision-telemetry` must show at least:
-
-```text
-execution_mode
-execution_block_reason
-balance_source
-balance_preflight
-broker_qty_known
-broker_qty
-broker_qty_evidence_policy
-target_delta_side
-target_would_submit
-target_submit_allowed
-submit_expected
-```
-
-`ops-report` must distinguish:
-
-```text
-local_position_state=FLAT
-broker_position_evidence=known_zero
-balance_source=accounts_v1_rest_snapshot
-```
-
-from:
-
-```text
-local_position_state=FLAT
-broker_position_evidence=unknown
-balance_source=-
-```
-
-Current EC2 failure showed:
-
-```text
-broker_position_evidence=unknown
-broker_qty=0.00000000
-broker_qty_evidence_policy=missing
-balance_source=-
-local_position_state=FLAT
-```
-
-After patch, valid live-dry-run known-zero should not display broker evidence as unknown.
-
-## Tests to add or update
-
-Add or fix command-level tests. Do not stop at unit tests for `LiveAccountEvidence`.
-
-Minimum required tests:
-
-```text
-test_live_dry_run_command_uses_accounts_snapshot_not_dry_run_static
-test_live_dry_run_missing_base_row_becomes_known_zero_in_decision_context
-test_live_dry_run_missing_base_row_no_longer_blocks_broker_qty_unknown_when_safe
-test_live_dry_run_records_accounts_evidence_provenance
-test_live_dry_run_never_creates_orders_fills_trades_with_accounts_evidence
-test_live_dry_run_accounts_transport_failure_fails_closed_or_records_unknown
-test_live_dry_run_does_not_fallback_to_dry_run_static_as_broker_evidence
-test_real_order_missing_base_row_does_not_become_known_zero_unsafely
-test_decision_telemetry_surfaces_accounts_evidence_fields
-test_ops_report_distinguishes_local_flat_from_broker_evidence_known_zero
-```
-
-Use fake `/v1/accounts` payloads. Do not hit real Bithumb in tests.
-
-### Test fixture A: KRW row present, BTC row missing, live-dry-run unarmed
-
-Setup:
-
-```text
-MODE=live
-LIVE_DRY_RUN=true
-LIVE_REAL_ORDER_ARMED=false
-EXECUTION_ENGINE=target_delta
-TARGET_EXPOSURE_KRW=30000
-local portfolio flat
-unresolved orders none
-/v1/accounts returns KRW row but no BTC row
-```
-
-Expected:
-
-```text
-strategy_decisions +1
-orders/fills/trades unchanged
-balance_source=accounts_v1_rest_snapshot
-balance_source_preflight_outcome=pass_no_position_allowed
-balance_source_execution_mode=live_dry_run_unarmed
-base_currency_missing_policy=allow_zero_position_start_in_dry_run
-broker_qty_known=1
-broker_qty=0.0
-broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
-execution_block_reason != broker_qty_unknown
-```
-
-### Test fixture B: KRW row present, BTC row present with zero qty
-
-Expected:
-
-```text
-broker_qty_known=1
-broker_qty=0.0
-broker_qty_evidence_policy=accounts_base_row
-balance_source=accounts_v1_rest_snapshot
-```
-
-### Test fixture C: KRW row present, BTC row present with nonzero qty
-
-Expected:
-
-```text
-broker_qty_known=1
-broker_qty=<account qty>
-broker_qty_evidence_policy=accounts_base_row
-```
-
-### Test fixture D: accounts transport/auth/schema failure
-
-Expected:
-
-```text
-broker_qty_known=0
-execution_block_reason=broker_qty_unknown or explicit accounts evidence failure block
-submit_expected=0
-orders/fills/trades unchanged
-```
-
-### Test fixture E: real-order path, BTC row missing
-
-Expected:
-
-```text
-missing base row must not become known-zero merely because the live-dry-run path does so.
-real-order safety behavior must remain strict.
-```
-
-## Regression tests to run
-
-Run at minimum:
-
-```bash
-uv run pytest -q tests/test_operator_commands.py
-uv run pytest -q tests/test_target_position_execution.py
-uv run pytest -q tests/test_decision_telemetry.py
-uv run pytest -q tests/test_ops_report.py
-uv run pytest -q tests/test_analytics_context.py
-```
-
-Also run:
-
-```bash
-uv run pytest -q -m fast_regression
-```
-
-If any suite is unavailable or too slow, state exactly what was not run and why.
-
-## Manual EC2 acceptance after patch
-
-Run:
-
-```bash
-cd ~/apps/bithumb-bot
-git pull
-git rev-parse HEAD
-git status --short
-
-export BITHUMB_ENV_FILE=/home/ec2-user/bithumb-runtime/env/live.verify.env
-DB=/home/ec2-user/bithumb-runtime/data/live/trades/live.sqlite
-
-sqlite3 -header -column "$DB" "
-SELECT 'strategy_decisions' AS table_name, COUNT(*) AS n FROM strategy_decisions
-UNION ALL
-SELECT 'orders', COUNT(*) FROM orders
-UNION ALL
-SELECT 'fills', COUNT(*) FROM fills
-UNION ALL
-SELECT 'trades', COUNT(*) FROM trades;
-"
-
-uv run bithumb-bot live-dry-run --short 7 --long 30
-
-sqlite3 -header -column "$DB" "
-SELECT 'strategy_decisions' AS table_name, COUNT(*) AS n FROM strategy_decisions
-UNION ALL
-SELECT 'orders', COUNT(*) FROM orders
-UNION ALL
-SELECT 'fills', COUNT(*) FROM fills
-UNION ALL
-SELECT 'trades', COUNT(*) FROM trades;
-"
-
-sqlite3 -header -column "$DB" "
-SELECT
-  id AS decision_id,
-  datetime(decision_ts / 1000, 'unixepoch', '+9 hours') AS kst,
-  signal,
-  reason,
-  json_extract(context_json, '$.execution_mode') AS execution_mode,
-  json_extract(context_json, '$.execution_block_reason') AS execution_block_reason,
-  json_extract(context_json, '$.balance_source') AS balance_source,
-  json_extract(context_json, '$.balance_source_preflight_outcome') AS balance_preflight,
-  json_extract(context_json, '$.balance_source_execution_mode') AS balance_execution_mode,
-  json_extract(context_json, '$.base_currency_missing_policy') AS base_missing_policy,
-  json_extract(context_json, '$.broker_qty_known') AS broker_qty_known,
-  json_extract(context_json, '$.broker_qty') AS broker_qty,
-  json_extract(context_json, '$.broker_qty_evidence_policy') AS broker_qty_evidence_policy,
-  json_extract(context_json, '$.broker_qty_evidence_reason') AS broker_qty_evidence_reason,
-  json_extract(context_json, '$.target_delta_side') AS target_delta_side,
-  json_extract(context_json, '$.target_submit_plan.submit_allowed') AS target_submit_allowed
-FROM strategy_decisions
-ORDER BY id DESC
-LIMIT 5;
-"
-
-uv run bithumb-bot decision-telemetry --limit 30
-uv run bithumb-bot ops-report --limit 30
-```
-
-Expected:
-
-```text
-strategy_decisions increases by 1
-orders unchanged
-fills unchanged
-trades unchanged
-
-latest decision:
-  execution_mode=live_dry_run_loop
-  balance_source=accounts_v1_rest_snapshot
-  balance_preflight=pass_no_position_allowed
-  balance_execution_mode=live_dry_run_unarmed
-  base_missing_policy=allow_zero_position_start_in_dry_run
-  broker_qty_known=1
-  broker_qty=0.0
-  broker_qty_evidence_policy=missing_base_row_known_zero_for_live_dry_run
-  execution_block_reason != broker_qty_unknown
-```
-
-If target exposure is nonzero and current broker exposure is known zero, a target-delta BUY candidate may appear. That is acceptable only if:
-
-```text
-real_order_submit_allowed=0
-broker_submit_disabled=1
-submit_expected=0
-orders/fills/trades unchanged
-performance gate is visible if it blocks
-```
-
-## Safety invariants
-
-Do not weaken:
-
-```text
-live-dry-run no-submit invariant
-real-order run arming requirements
-performance gate
-startup/recovery gates
-DB path outside repository
-runtime artifacts outside repository
-recovery/cancel/flatten/target-closeout availability
-```
-
-Do not make `dry_run_static` an acceptable broker evidence source for `live-dry-run` target-delta decisions.
-
-Do not make missing BTC row globally equal zero.
-
-## Non-goals
-
-Do not implement:
-
-```text
-new trading strategy
-optimizer
-dashboard
-full backtesting platform
-real-order promotion system
-systemd/tmux automation
-```
-
-## Final report format
-
-When finished, report exactly in this structure:
-
-```text
-Summary
-- What changed and why.
-
-Hypotheses checked
-- Hypothesis 1: confirmed / refuted / partially confirmed
-  Evidence:
-  Code/tests:
-- Hypothesis 2: confirmed / refuted / partially confirmed
-  Evidence:
-  Code/tests:
-- Hypothesis 3: confirmed / refuted / partially confirmed
-  Evidence:
-  Code/tests:
-- Hypothesis 4: confirmed / refuted / partially confirmed
-  Evidence:
-  Code/tests:
-
-Design changes
-- Live-dry-run account snapshot path:
-- Evidence injection:
-- Target-delta behavior:
-- Decision context / telemetry:
-- Ops-report / health:
-- Safety preservation:
-
-Files changed
-- path: purpose
-
-Tests run
-- command: result
-
-Manual EC2 validation
-- Commands to run:
-- Expected output:
-- What must remain unchanged:
-
-Operational impact
-- What will happen differently on EC2.
-- What remains fail-closed.
-- What remains operator-configurable.
-
-Follow-up work
-- Only list items not completed in this patch.
-```
-
-Be direct. The priority is not to add more evidence classes. The priority is to ensure that the existing live account evidence is actually used by the `live-dry-run` target-delta decision path, without ever allowing live order submission.
 

@@ -114,6 +114,7 @@ def test_filtered_sma_can_change_trade_signal_to_hold() -> None:
             min_volatility_ratio=0.0,
             overextended_lookback=1,
             overextended_max_return_ratio=0.0,
+            market_regime_enabled=False,
         ).decide(conn)
     finally:
         conn.close()
@@ -123,6 +124,98 @@ def test_filtered_sma_can_change_trade_signal_to_hold() -> None:
     assert plain.signal == "BUY"
     assert filtered.signal == "HOLD"
     assert filtered.reason.startswith("filtered entry")
+
+
+def test_market_regime_allows_trend_entry_and_records_replay_fingerprint() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.001,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.0,
+            live_fee_rate_estimate=0.0001,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "BUY"
+    assert decision.context["market_regime"]["regime"] == "trend_up"
+    assert decision.context["market_regime"]["allows_entry"] is True
+    assert decision.context["signal_flow"]["primary_block_layer"] != "market_regime"
+    replay = decision.context["replay_fingerprint"]
+    assert replay["strategy_name"] == "sma_with_filter"
+    assert replay["decision_contract_version"] == "decision_v2"
+    assert replay["pair"] == "BTC_KRW"
+    assert replay["interval"] == "1m"
+    assert replay["sma_short"] == 2
+    assert replay["sma_long"] == 3
+    assert replay["regime_feature_version"] == decision.context["market_regime"]["version"]
+    assert replay["thresholds"]["sma_filter_gap_min_ratio"] == pytest.approx(0.001)
+    assert replay["fee_authority_source"]
+
+
+def test_market_regime_chop_blocks_buy_candidate_before_strategy_filters() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 10.01])
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.001,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            cost_edge_enabled=False,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.context["base_signal"] == "BUY"
+    assert decision.signal == "HOLD"
+    assert decision.context["market_regime"]["regime"] == "chop"
+    assert decision.context["signal_flow"]["primary_block_layer"] == "market_regime"
+    assert decision.context["signal_flow"]["primary_block_reason"] == "chop_market"
+    assert "market_regime.chop_market" in decision.context["signal_flow"]["all_block_reasons"]
+
+
+def test_cost_edge_block_remains_distinguishable_from_market_regime() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.001,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.10,
+            live_fee_rate_estimate=0.02,
+            entry_edge_buffer_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.context["market_regime"]["allows_entry"] is True
+    assert "cost_edge" in decision.context["blocked_filters"]
+    assert decision.context["signal_flow"]["primary_block_layer"] == "strategy_filters"
+    assert decision.context["signal_flow"]["primary_block_reason"] == "cost_edge"
 
 
 def test_gap_filter_blocks_entry_and_writes_context() -> None:

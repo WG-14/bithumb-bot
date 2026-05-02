@@ -1070,6 +1070,103 @@ def _merge_live_dry_run_account_evidence(
     return merged
 
 
+def _load_context_payload(raw_json: object) -> dict[str, object]:
+    if not raw_json:
+        return {}
+    try:
+        loaded = json.loads(str(raw_json))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _build_live_dry_run_decision_summary(conn: sqlite3.Connection, *, limit: int = 300) -> dict[str, object]:
+    rows = conn.execute(
+        """
+        SELECT context_json
+        FROM strategy_decisions
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+    contexts = [_load_context_payload(row["context_json"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
+    base_buy = 0
+    final_buy = 0
+    block_counts: dict[str, int] = {}
+    regime_counts: dict[str, int] = {}
+    economics_rows: list[dict[str, object]] = []
+    for ctx in contexts:
+        signal_flow = ctx.get("signal_flow") if isinstance(ctx.get("signal_flow"), dict) else {}
+        base_signal = str(signal_flow.get("base_signal") or ctx.get("base_signal") or "HOLD").upper()
+        final_signal = str(signal_flow.get("final_signal") or ctx.get("final_signal") or ctx.get("signal") or "HOLD").upper()
+        if base_signal == "BUY":
+            base_buy += 1
+        if final_signal == "BUY":
+            final_buy += 1
+        block_reasons = signal_flow.get("all_block_reasons") if isinstance(signal_flow.get("all_block_reasons"), list) else ctx.get("all_block_reasons")
+        if isinstance(block_reasons, list):
+            for reason in block_reasons:
+                reason_text = str(reason).strip()
+                if reason_text:
+                    block_counts[reason_text] = block_counts.get(reason_text, 0) + 1
+        market_regime = ctx.get("market_regime") if isinstance(ctx.get("market_regime"), dict) else {}
+        regime = str(market_regime.get("regime") or "unknown")
+        regime_counts[regime] = regime_counts.get(regime, 0) + 1
+        economics = ctx.get("pre_trade_economics")
+        if isinstance(economics, dict) and base_signal == "BUY":
+            economics_rows.append(economics)
+
+    def _avg(key: str) -> float:
+        values = [float(row.get(key) or 0.0) for row in economics_rows]
+        return sum(values) / len(values) if values else 0.0
+
+    return {
+        "window": len(contexts),
+        "base_buy": base_buy,
+        "final_buy": final_buy,
+        "block_counts": block_counts,
+        "regime_counts": regime_counts,
+        "economics": {
+            "avg_order_krw": _avg("order_krw"),
+            "avg_expected_edge_krw": _avg("expected_edge_krw"),
+            "avg_expected_cost_krw": _avg("expected_cost_krw"),
+            "avg_net_edge_krw": _avg("net_edge_krw"),
+            "meaningful_edge_count": sum(1 for row in economics_rows if bool(row.get("meaningful_edge"))),
+        },
+    }
+
+
+def _print_live_dry_run_decision_summary(summary: dict[str, object]) -> None:
+    print("[DRY-RUN DECISION SUMMARY]")
+    print(f"  window: last {int(summary.get('window') or 0)} decisions")
+    print(f"  base BUY candidates: {int(summary.get('base_buy') or 0)}")
+    print(f"  final BUY: {int(summary.get('final_buy') or 0)}")
+    block_counts = summary.get("block_counts") if isinstance(summary.get("block_counts"), dict) else {}
+    print("  block layers:")
+    if block_counts:
+        for reason, count in sorted(block_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            print(f"  - {reason}: {count}")
+    else:
+        print("  - none: 0")
+    regime_counts = summary.get("regime_counts") if isinstance(summary.get("regime_counts"), dict) else {}
+    total_regimes = sum(int(count) for count in regime_counts.values())
+    print("  regime distribution:")
+    if regime_counts and total_regimes > 0:
+        for regime, count in sorted(regime_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            pct = (100.0 * int(count)) / float(total_regimes)
+            print(f"  - {regime}: {pct:.0f}%")
+    else:
+        print("  - unknown: 0%")
+    economics = summary.get("economics") if isinstance(summary.get("economics"), dict) else {}
+    print("  BUY candidate economics:")
+    print(f"  - avg_order_krw: {float(economics.get('avg_order_krw') or 0.0):.0f}")
+    print(f"  - avg_expected_edge_krw: {float(economics.get('avg_expected_edge_krw') or 0.0):.2f}")
+    print(f"  - avg_expected_cost_krw: {float(economics.get('avg_expected_cost_krw') or 0.0):.2f}")
+    print(f"  - avg_net_edge_krw: {float(economics.get('avg_net_edge_krw') or 0.0):.2f}")
+    print(f"  - meaningful_edge_count: {int(economics.get('meaningful_edge_count') or 0)}")
+
+
 def cmd_live_dry_run(short_n: int, long_n: int) -> None:
     log_live_execution_contract(
         settings,
@@ -1158,6 +1255,13 @@ def cmd_live_dry_run(short_n: int, long_n: int) -> None:
         context["final_action"] = execution_decision.get("final_action", "LIVE_DRY_RUN_NO_SUBMIT")
         context["pre_submit_proof_status"] = execution_decision.get("pre_submit_proof_status", "not_required")
         context["execution_block_reason"] = execution_decision.get("block_reason", "live_dry_run_no_submit")
+        if isinstance(execution_decision.get("pre_trade_economics"), dict):
+            context["pre_trade_economics"] = dict(execution_decision["pre_trade_economics"])
+        if isinstance(execution_decision.get("signal_flow"), dict):
+            context["signal_flow"] = dict(execution_decision["signal_flow"])
+            context["primary_block_layer"] = context["signal_flow"].get("primary_block_layer")
+            context["primary_block_reason"] = context["signal_flow"].get("primary_block_reason")
+            context["all_block_reasons"] = context["signal_flow"].get("all_block_reasons", [])
         target_shadow = execution_decision.get("target_shadow_decision")
         if isinstance(target_shadow, dict):
             for target_key, target_value in target_shadow.items():
@@ -1173,6 +1277,17 @@ def cmd_live_dry_run(short_n: int, long_n: int) -> None:
             context["target_dust_policy"] = target_plan.get("dust_policy")
             context["target_rejected_remainder"] = target_plan.get("rejected_remainder")
             context["target_invariant_status"] = target_plan.get("invariant_status")
+            replay_fingerprint = context.get("replay_fingerprint")
+            if isinstance(replay_fingerprint, dict):
+                replay_fingerprint["order_sizing"] = {
+                    "source": target_plan.get("source"),
+                    "authority": target_plan.get("authority"),
+                    "side": target_plan.get("side"),
+                    "notional_krw": target_plan.get("notional_krw"),
+                    "target_delta_notional_krw": target_plan.get("target_delta_notional_krw"),
+                    "submit_expected": bool(target_plan.get("submit_expected")),
+                    "block_reason": target_plan.get("block_reason"),
+                }
         if isinstance(target_policy_metadata, dict):
             for target_key, target_value in target_policy_metadata.items():
                 context.setdefault(target_key, target_value)
@@ -1217,6 +1332,7 @@ def cmd_live_dry_run(short_n: int, long_n: int) -> None:
             context=context,
         )
         conn.commit()
+        dry_run_decision_summary = _build_live_dry_run_decision_summary(conn, limit=300)
     finally:
         conn.close()
 
@@ -1244,6 +1360,7 @@ def cmd_live_dry_run(short_n: int, long_n: int) -> None:
         f"target_dust_policy={target_plan_out.get('dust_policy', '-')} "
         f"target_invariant_status={target_plan_out.get('invariant_status', '-')}"
     )
+    _print_live_dry_run_decision_summary(dry_run_decision_summary)
 
 
 def _resolve_target_position_state_for_run_loop_compat(

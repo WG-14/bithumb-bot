@@ -117,6 +117,9 @@ def _set_live_armed_target_delta() -> dict[str, object]:
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
         "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
         "TARGET_EXPOSURE_KRW": settings.TARGET_EXPOSURE_KRW,
+        "MIN_NET_EDGE_KRW": settings.MIN_NET_EDGE_KRW,
+        "MIN_MARGIN_AFTER_COST_RATIO": settings.MIN_MARGIN_AFTER_COST_RATIO,
+        "PRE_TRADE_ECONOMICS_BLOCKING_ENABLED": settings.PRE_TRADE_ECONOMICS_BLOCKING_ENABLED,
     }
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
@@ -128,6 +131,24 @@ def _set_live_armed_target_delta() -> dict[str, object]:
 def _restore_settings(old: dict[str, object]) -> None:
     for key, value in old.items():
         object.__setattr__(settings, key, value)
+
+
+def _cost_edge_context() -> dict[str, object]:
+    return {
+        "raw_signal": "BUY",
+        "final_signal": "BUY",
+        "market_price": 100_000_000.0,
+        "filters": {
+            "cost_edge": {
+                "value": 0.003,
+                "threshold": 0.002,
+                "roundtrip_fee_ratio": 0.001,
+                "slippage_ratio": 0.0005,
+                "buffer_ratio": 0.0005,
+            }
+        },
+        "market_regime": {"regime": "trend_up", "allows_entry": True, "block_reason": "none"},
+    }
 
 
 def test_target_shadow_sell_models_ec2_residual_as_executable_delta() -> None:
@@ -166,6 +187,86 @@ def test_target_shadow_buy_subtracts_current_position_exposure() -> None:
     assert decision.delta_notional_krw == pytest.approx(42_523.0)
     assert decision.submit_notional_krw == pytest.approx(42_523.0)
     assert decision.would_submit is True
+
+
+def test_pre_trade_economics_marks_small_ratio_passing_buy_observation_only() -> None:
+    old = _set_live_armed_target_delta()
+    try:
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 10_000.0)
+        object.__setattr__(settings, "MIN_NET_EDGE_KRW", 20.0)
+        object.__setattr__(settings, "MIN_MARGIN_AFTER_COST_RATIO", 0.0)
+        object.__setattr__(settings, "PRE_TRADE_ECONOMICS_BLOCKING_ENABLED", False)
+        summary = build_execution_decision_summary(
+            decision_context=_cost_edge_context(),
+            readiness_payload=_readiness(broker_qty=0.0) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+            },
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        _restore_settings(old)
+
+    assert summary.pre_trade_economics is not None
+    assert summary.pre_trade_economics["expected_edge_ratio"] > summary.pre_trade_economics["required_edge_ratio"]
+    assert summary.pre_trade_economics["net_edge_krw"] < 20.0
+    assert summary.pre_trade_economics["meaningful_edge"] is False
+    assert summary.pre_trade_economics["blocking_enabled"] is False
+    assert summary.final_action != "BLOCK_PRE_TRADE_ECONOMICS"
+
+
+def test_pre_trade_economics_can_block_when_enabled() -> None:
+    old = _set_live_armed_target_delta()
+    try:
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 10_000.0)
+        object.__setattr__(settings, "MIN_NET_EDGE_KRW", 20.0)
+        object.__setattr__(settings, "MIN_MARGIN_AFTER_COST_RATIO", 0.0)
+        object.__setattr__(settings, "PRE_TRADE_ECONOMICS_BLOCKING_ENABLED", True)
+        summary = build_execution_decision_summary(
+            decision_context=_cost_edge_context(),
+            readiness_payload=_readiness(broker_qty=0.0) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+            },
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        _restore_settings(old)
+
+    assert summary.pre_trade_economics is not None
+    assert summary.pre_trade_economics["meaningful_edge"] is False
+    assert summary.final_action == "BLOCK_PRE_TRADE_ECONOMICS"
+    assert summary.signal_flow is not None
+    assert summary.signal_flow["primary_block_layer"] == "pre_trade_economics"
+
+
+def test_execution_order_rule_block_remains_separate_from_strategy_signal() -> None:
+    old = _set_live_armed_target_delta()
+    try:
+        object.__setattr__(settings, "TARGET_EXPOSURE_KRW", 4_000.0)
+        summary = build_execution_decision_summary(
+            decision_context=_cost_edge_context(),
+            readiness_payload=_readiness(broker_qty=0.0) | {
+                "residual_proof_min_qty": 0.0001,
+                "residual_proof_min_notional_krw": 5000.0,
+            },
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=0.0,
+        )
+    finally:
+        _restore_settings(old)
+
+    assert summary.final_signal == "BUY"
+    assert summary.target_submit_plan is not None
+    assert summary.target_submit_plan["submit_expected"] is False
+    assert summary.target_submit_plan["block_reason"] == "delta_below_exchange_min"
+    assert summary.signal_flow is not None
+    assert summary.signal_flow["primary_block_layer"] == "execution_order_rule"
 
 
 def test_target_shadow_true_dust_is_noop_below_exchange_minimum() -> None:

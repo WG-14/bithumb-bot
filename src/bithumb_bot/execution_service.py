@@ -6,10 +6,12 @@ from typing import Callable, Protocol
 from . import runtime_state
 from .config import settings
 from .db_core import ensure_db
+from .decision_contract import apply_decision_contract
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .execution_order_rules import resolve_execution_order_rules
 from .oms import build_order_intent_key
 from .order_sizing import build_target_delta_execution_sizing
+from .pre_trade_economics import build_pre_trade_economics_snapshot
 from .target_position import TargetPositionSettings, build_target_position_decision
 
 if False:  # pragma: no cover
@@ -99,6 +101,8 @@ class ExecutionDecisionSummary:
     buy_submit_plan: dict[str, object] | None
     target_shadow_decision: dict[str, object] | None
     target_submit_plan: dict[str, object] | None
+    pre_trade_economics: dict[str, object] | None = None
+    signal_flow: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -131,6 +135,10 @@ class ExecutionDecisionSummary:
             "target_submit_plan": (
                 None if self.target_submit_plan is None else dict(self.target_submit_plan)
             ),
+            "pre_trade_economics": (
+                None if self.pre_trade_economics is None else dict(self.pre_trade_economics)
+            ),
+            "signal_flow": None if self.signal_flow is None else dict(self.signal_flow),
         }
 
 
@@ -249,6 +257,65 @@ def _target_delta_buy_blocked_by_performance_gate(raw_gate: object | None, *, si
         return False
     payload = _strategy_performance_gate_payload(raw_gate)
     return bool(payload and payload.get("enabled", True) and not bool(payload.get("allowed", True)))
+
+
+def _cost_edge_context(decision_context: dict[str, object]) -> dict[str, object]:
+    filters = decision_context.get("filters")
+    if not isinstance(filters, dict):
+        return {}
+    cost_edge = filters.get("cost_edge")
+    return dict(cost_edge) if isinstance(cost_edge, dict) else {}
+
+
+def _build_buy_pre_trade_economics(
+    *,
+    decision_context: dict[str, object],
+    plan: dict[str, object] | None,
+    side: str,
+    source: str,
+) -> dict[str, object] | None:
+    if str(side).strip().upper() != "BUY" or not isinstance(plan, dict):
+        return None
+    cost_edge = _cost_edge_context(decision_context)
+    if not cost_edge:
+        return None
+    order_krw = plan.get("notional_krw", plan.get("target_final_submitted_notional_krw", plan.get("delta_krw")))
+    snapshot = build_pre_trade_economics_snapshot(
+        side="BUY",
+        order_krw=None if order_krw is None else float(order_krw or 0.0),
+        expected_edge_ratio=float(cost_edge.get("value", cost_edge.get("expected_edge_ratio", 0.0)) or 0.0),
+        required_edge_ratio=float(cost_edge.get("threshold", cost_edge.get("required_edge_ratio", 0.0)) or 0.0),
+        roundtrip_fee_ratio=float(cost_edge.get("roundtrip_fee_ratio", 0.0) or 0.0),
+        slippage_ratio=float(cost_edge.get("slippage_ratio", 0.0) or 0.0),
+        buffer_ratio=float(cost_edge.get("buffer_ratio", 0.0) or 0.0),
+        min_net_edge_krw=float(getattr(settings, "MIN_NET_EDGE_KRW", 0.0) or 0.0),
+        min_margin_after_cost_ratio=float(getattr(settings, "MIN_MARGIN_AFTER_COST_RATIO", 0.0) or 0.0),
+        blocking_enabled=bool(getattr(settings, "PRE_TRADE_ECONOMICS_BLOCKING_ENABLED", False)),
+        source=source,
+    )
+    return snapshot.as_dict()
+
+
+def _execution_contract_reasons(
+    *,
+    target_or_buy_plan: dict[str, object] | None,
+    pre_trade_economics: dict[str, object] | None,
+) -> list[tuple[str, str]]:
+    reasons: list[tuple[str, str]] = []
+    if isinstance(pre_trade_economics, dict) and bool(pre_trade_economics.get("blocking_enabled")) and not bool(
+        pre_trade_economics.get("meaningful_edge", True)
+    ):
+        reasons.append(("pre_trade_economics", str(pre_trade_economics.get("reason") or "net_edge_below_minimum")))
+    if isinstance(target_or_buy_plan, dict):
+        block_reason = str(target_or_buy_plan.get("block_reason") or "none")
+        final_action = str(target_or_buy_plan.get("final_action") or "")
+        submit_expected = bool(target_or_buy_plan.get("submit_expected"))
+        if not submit_expected and block_reason not in {"", "none", "residual_buy_sizing_mode_telemetry"}:
+            if "PERFORMANCE" in final_action or block_reason.startswith("STRATEGY_PERFORMANCE"):
+                reasons.append(("performance_gate", block_reason))
+            else:
+                reasons.append(("execution_order_rule", block_reason))
+    return reasons
 
 
 def _residual_intent_ts(payload: dict[str, object]) -> int:
@@ -522,6 +589,7 @@ def build_execution_decision_summary(
     buy_submit_plan: dict[str, object] | None = None
     target_shadow_decision: dict[str, object] | None = None
     target_submit_plan: dict[str, object] | None = None
+    pre_trade_economics: dict[str, object] | None = None
     execution_engine = _execution_engine()
 
     if bool(getattr(settings, "TARGET_EXECUTION_SHADOW", False)) or execution_engine == "target_delta":
@@ -670,6 +738,23 @@ def build_execution_decision_summary(
             )
             if performance_gate_fields and str(target_decision.delta_side) == "BUY":
                 target_submit_plan.update(performance_gate_fields)
+            pre_trade_economics = _build_buy_pre_trade_economics(
+                decision_context=payload,
+                plan=target_submit_plan,
+                side=str(target_decision.delta_side),
+                source="target_submit_plan",
+            )
+            if pre_trade_economics is not None:
+                target_submit_plan["pre_trade_economics"] = pre_trade_economics
+                if bool(pre_trade_economics.get("blocking_enabled")) and not bool(
+                    pre_trade_economics.get("meaningful_edge")
+                ):
+                    target_submit_plan["submit_expected"] = False
+                    target_submit_plan["pre_submit_proof_status"] = "failed"
+                    target_submit_plan["final_action"] = "BLOCK_PRE_TRADE_ECONOMICS"
+                    target_submit_plan["block_reason"] = str(
+                        pre_trade_economics.get("reason") or "net_edge_below_minimum"
+                    )
 
     if execution_engine == "target_delta":
         if target_submit_plan is not None:
@@ -682,6 +767,17 @@ def build_execution_decision_summary(
             submit_expected = False
             proof_status = "failed"
             block_reason = "target_delta_decision_missing"
+        contract_payload = dict(payload)
+        if pre_trade_economics is not None:
+            contract_payload["pre_trade_economics"] = pre_trade_economics
+        contract_payload = apply_decision_contract(
+            contract_payload,
+            final_action=action,
+            extra_block_reasons=_execution_contract_reasons(
+                target_or_buy_plan=target_submit_plan,
+                pre_trade_economics=pre_trade_economics,
+            ),
+        )
         return ExecutionDecisionSummary(
             raw_signal=raw,
             final_signal=final,
@@ -707,6 +803,8 @@ def build_execution_decision_summary(
             buy_submit_plan=None,
             target_shadow_decision=target_shadow_decision,
             target_submit_plan=target_submit_plan,
+            pre_trade_economics=pre_trade_economics,
+            signal_flow=contract_payload.get("signal_flow") if isinstance(contract_payload.get("signal_flow"), dict) else None,
         )
 
     if raw == "BUY":
@@ -773,6 +871,25 @@ def build_execution_decision_summary(
                 block_reason=block_reason,
                 idempotency_key=None,
             ).as_dict()
+            pre_trade_economics = _build_buy_pre_trade_economics(
+                decision_context=payload,
+                plan=buy_submit_plan,
+                side="BUY",
+                source="buy_submit_plan",
+            )
+            if pre_trade_economics is not None:
+                buy_submit_plan["pre_trade_economics"] = pre_trade_economics
+                if bool(pre_trade_economics.get("blocking_enabled")) and not bool(
+                    pre_trade_economics.get("meaningful_edge")
+                ):
+                    action = "BLOCK_PRE_TRADE_ECONOMICS"
+                    submit_expected = False
+                    proof_status = "failed"
+                    block_reason = str(pre_trade_economics.get("reason") or "net_edge_below_minimum")
+                    buy_submit_plan["final_action"] = action
+                    buy_submit_plan["submit_expected"] = False
+                    buy_submit_plan["pre_submit_proof_status"] = proof_status
+                    buy_submit_plan["block_reason"] = block_reason
     elif raw == "SELL":
         if strategy_candidate is not None and final == "SELL":
             action = "EXIT_STRATEGY_POSITION"
@@ -867,6 +984,17 @@ def build_execution_decision_summary(
         proof_status = "not_required"
         block_reason = _first_block_reason(final_reason, payload.get("block_reason"))
 
+    contract_payload = dict(payload)
+    if pre_trade_economics is not None:
+        contract_payload["pre_trade_economics"] = pre_trade_economics
+    contract_payload = apply_decision_contract(
+        contract_payload,
+        final_action=action,
+        extra_block_reasons=_execution_contract_reasons(
+            target_or_buy_plan=target_submit_plan or buy_submit_plan,
+            pre_trade_economics=pre_trade_economics,
+        ),
+    )
     return ExecutionDecisionSummary(
         raw_signal=raw,
         final_signal=final,
@@ -886,6 +1014,8 @@ def build_execution_decision_summary(
         buy_submit_plan=buy_submit_plan,
         target_shadow_decision=target_shadow_decision,
         target_submit_plan=target_submit_plan,
+        pre_trade_economics=pre_trade_economics,
+        signal_flow=contract_payload.get("signal_flow") if isinstance(contract_payload.get("signal_flow"), dict) else None,
     )
 
 

@@ -1254,6 +1254,81 @@ def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeyp
     assert ctx["entry_reason"] == "filtered entry: cost_edge"
 
 
+def test_live_dry_run_decision_summary_aggregates_contract_causes(tmp_path, monkeypatch, capsys):
+    from bithumb_bot.app import _build_live_dry_run_decision_summary, _print_live_dry_run_decision_summary
+
+    db_path = str(tmp_path / "dry-run-summary.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        for idx, context in enumerate(
+            [
+                {
+                    "base_signal": "BUY",
+                    "final_signal": "HOLD",
+                    "signal_flow": {
+                        "base_signal": "BUY",
+                        "final_signal": "HOLD",
+                        "all_block_reasons": ["market_regime.chop_market"],
+                    },
+                    "market_regime": {"regime": "chop"},
+                    "pre_trade_economics": {
+                        "order_krw": 10000.0,
+                        "expected_edge_krw": 12.0,
+                        "expected_cost_krw": 15.0,
+                        "net_edge_krw": -3.0,
+                        "meaningful_edge": False,
+                    },
+                },
+                {
+                    "base_signal": "BUY",
+                    "final_signal": "HOLD",
+                    "signal_flow": {
+                        "base_signal": "BUY",
+                        "final_signal": "HOLD",
+                        "all_block_reasons": ["strategy_filters.cost_edge"],
+                    },
+                    "market_regime": {"regime": "trend_up"},
+                    "pre_trade_economics": {
+                        "order_krw": 20000.0,
+                        "expected_edge_krw": 30.0,
+                        "expected_cost_krw": 20.0,
+                        "net_edge_krw": 10.0,
+                        "meaningful_edge": True,
+                    },
+                },
+            ]
+        ):
+            record_strategy_decision(
+                conn,
+                decision_ts=idx + 1,
+                strategy_name="sma_with_filter",
+                signal="HOLD",
+                reason="blocked",
+                candle_ts=idx + 1,
+                market_price=1.0,
+                context=context,
+            )
+        conn.commit()
+        summary = _build_live_dry_run_decision_summary(conn, limit=300)
+    finally:
+        conn.close()
+
+    assert summary["base_buy"] == 2
+    assert summary["final_buy"] == 0
+    assert summary["block_counts"]["market_regime.chop_market"] == 1
+    assert summary["block_counts"]["strategy_filters.cost_edge"] == 1
+    assert summary["economics"]["meaningful_edge_count"] == 1
+
+    _print_live_dry_run_decision_summary(summary)
+    out = capsys.readouterr().out
+    assert "[DRY-RUN DECISION SUMMARY]" in out
+    assert "base BUY candidates: 2" in out
+    assert "market_regime.chop_market: 1" in out
+
+
 def test_record_strategy_decision_preserves_residual_execution_action(tmp_path, monkeypatch):
     db_path = str(tmp_path / "decision-residual-action.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
