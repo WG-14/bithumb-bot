@@ -125,6 +125,45 @@ def test_canonical_all_block_reasons_drive_cost_filter_attribution() -> None:
     assert summary.filter_ratios["blocked_by_cost_filter_ratio"] == 1.0
 
 
+def test_strategy_filter_cost_edge_phrase_variant_is_cost_filter() -> None:
+    attribution = normalize_decision_attribution_from_context(
+        {
+            "raw_signal": "BUY",
+            "final_signal": "HOLD",
+            "all_block_reasons": ["strategy_filters.filtered entry: cost_edge"],
+        }
+    )
+    summary = summarize_decision_attributions([attribution])
+
+    assert attribution.blocked_by_cost_filter is True
+    assert summary.block_reason_counts["strategy_filters.filtered entry: cost_edge"] == 1
+    assert summary.filter_ratios["blocked_by_cost_filter_ratio"] == 1.0
+
+
+def test_strategy_filter_cost_edge_underscore_variant_is_cost_filter() -> None:
+    attribution = normalize_decision_attribution_from_context(
+        {"all_block_reasons": ["strategy_filters.filtered_entry_cost_edge"]}
+    )
+
+    assert attribution.blocked_by_cost_filter is True
+
+
+def test_pre_trade_economics_edge_variant_is_cost_filter() -> None:
+    attribution = normalize_decision_attribution_from_context(
+        {"all_block_reasons": ["pre_trade_economics.edge_below_required"]}
+    )
+
+    assert attribution.blocked_by_cost_filter is True
+
+
+def test_non_edge_strategy_filter_is_not_cost_filter() -> None:
+    attribution = normalize_decision_attribution_from_context(
+        {"all_block_reasons": ["strategy_filters.market_regime_block"]}
+    )
+
+    assert attribution.blocked_by_cost_filter is False
+
+
 def test_primary_block_is_derived_from_all_block_reasons_using_contract_priority() -> None:
     attribution = normalize_decision_attribution_from_context(
         {

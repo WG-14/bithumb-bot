@@ -224,6 +224,27 @@ def _has_reason(all_block_reasons: Sequence[str], layer: str, reason: str) -> bo
     return (layer, reason) in _reason_pairs(all_block_reasons)
 
 
+def _has_layer_reason_containing(
+    all_block_reasons: Sequence[str],
+    layer: str,
+    *needles: str,
+) -> bool:
+    needle_values = tuple(str(needle).strip().lower() for needle in needles if str(needle).strip())
+    if not needle_values:
+        return False
+    for raw_reason in all_block_reasons:
+        parsed = split_block_reason(raw_reason)
+        if parsed is None:
+            continue
+        parsed_layer, parsed_reason = parsed
+        if parsed_layer != layer:
+            continue
+        reason_text = parsed_reason.lower()
+        if any(needle in reason_text for needle in needle_values):
+            return True
+    return False
+
+
 def _legacy_reason_contains(*values: str | None, needles: str) -> bool:
     needle_values = tuple(part.strip().lower() for part in needles.split("|") if part.strip())
     return any(
@@ -337,6 +358,19 @@ def normalize_decision_attribution_from_context(context: dict[str, Any]) -> Deci
     canonical_cost_filter = (
         _has_reason(all_block_reasons, "strategy_filters", "cost_edge")
         or _has_reason(all_block_reasons, "pre_trade_economics", "net_edge_below_minimum")
+        or _has_layer_reason_containing(
+            all_block_reasons,
+            "strategy_filters",
+            "cost_edge",
+            "edge_below",
+        )
+        or _has_layer_reason_containing(
+            all_block_reasons,
+            "pre_trade_economics",
+            "cost_edge",
+            "edge_below",
+            "net_edge_below_minimum",
+        )
     )
     canonical_fee_authority = _has_layer(all_block_reasons, "fee_authority")
     canonical_position_gate = _has_layer(all_block_reasons, "position_gate")

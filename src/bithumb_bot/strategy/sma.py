@@ -28,6 +28,11 @@ from ..fee_authority import (
     FeeAuthoritySnapshot,
     build_fee_authority_snapshot,
 )
+from ..strategy_config import (
+    SmaStrategyConfig,
+    normalize_exit_rule_names,
+    sma_strategy_config_from_settings,
+)
 from ..utils_time import parse_interval_sec
 from .base import PositionContext, StrategyDecision
 from .exit_rules import ExitRule, create_exit_rules
@@ -81,7 +86,7 @@ def _base_signal(*, prev_s: float, prev_l: float, curr_s: float, curr_l: float) 
 
 
 def _resolve_exit_rule_names(raw: str) -> list[str]:
-    return [token.strip().lower() for token in str(raw or "").split(",") if token.strip()]
+    return list(normalize_exit_rule_names(raw or ""))
 
 
 def _load_last_reconcile_metadata(conn: sqlite3.Connection) -> str | None:
@@ -136,13 +141,18 @@ def _fee_authority_context(fee_authority: FeeAuthoritySnapshot) -> dict[str, obj
     return fee_authority.as_dict()
 
 
-def _build_entry_intent_context(*, pair: str) -> dict[str, Any]:
+def _build_entry_intent_context(
+    *,
+    pair: str,
+    buy_fraction: float,
+    max_order_krw: float,
+) -> dict[str, Any]:
     return {
         "pair": str(pair),
         "intent": "enter_open_exposure",
         "budget_model": "cash_fraction_capped_by_max_order_krw",
-        "budget_fraction_of_cash": float(settings.BUY_FRACTION),
-        "max_budget_krw": float(settings.MAX_ORDER_KRW),
+        "budget_fraction_of_cash": float(buy_fraction),
+        "max_budget_krw": float(max_order_krw),
         "requires_execution_sizing": True,
     }
 
@@ -154,6 +164,8 @@ def _build_entry_decision_context(
     base_reason: str,
     entry_signal: str,
     entry_reason: str,
+    buy_fraction: float,
+    max_order_krw: float,
 ) -> dict[str, Any]:
     return {
         "base_signal": base_signal,
@@ -161,7 +173,11 @@ def _build_entry_decision_context(
         "entry_signal": entry_signal,
         "entry_reason": entry_reason,
         "allowed": entry_signal == "BUY",
-        "intent": _build_entry_intent_context(pair=pair),
+        "intent": _build_entry_intent_context(
+            pair=pair,
+            buy_fraction=buy_fraction,
+            max_order_krw=max_order_krw,
+        ),
     }
 
 
@@ -271,6 +287,7 @@ def _evaluate_entry_edge_filter(
 
 
 def _live_armed_entry_fee_authority_blocks(fee_authority: FeeAuthoritySnapshot) -> bool:
+    # Runtime live safety policy: keep this tied to live settings, not replay/sweep config.
     return bool(
         settings.MODE == "live"
         and not bool(settings.LIVE_DRY_RUN)
@@ -668,8 +685,29 @@ class SmaCrossStrategy:
     live_fee_rate_estimate: float = settings.LIVE_FEE_RATE_ESTIMATE
     entry_edge_buffer_ratio: float = settings.ENTRY_EDGE_BUFFER_RATIO
     strategy_min_expected_edge_ratio: float = settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
+    buy_fraction: float = settings.BUY_FRACTION
+    max_order_krw: float = settings.MAX_ORDER_KRW
 
     name: str = "sma_cross"
+
+    @classmethod
+    def from_config(cls, config: SmaStrategyConfig) -> "SmaCrossStrategy":
+        return cls(
+            short_n=int(config.short_n),
+            long_n=int(config.long_n),
+            pair=str(config.pair),
+            interval=str(config.interval),
+            exit_rule_names=list(config.exit_rule_names),
+            exit_max_holding_min=int(config.exit_max_holding_min),
+            exit_min_take_profit_ratio=float(config.exit_min_take_profit_ratio),
+            exit_small_loss_tolerance_ratio=float(config.exit_small_loss_tolerance_ratio),
+            slippage_bps=float(config.slippage_bps),
+            live_fee_rate_estimate=float(config.live_fee_rate_estimate),
+            entry_edge_buffer_ratio=float(config.entry_edge_buffer_ratio),
+            strategy_min_expected_edge_ratio=float(config.strategy_min_expected_edge_ratio),
+            buy_fraction=float(config.buy_fraction),
+            max_order_krw=float(config.max_order_krw),
+        )
 
     def decide(
         self,
@@ -787,6 +825,8 @@ class SmaCrossStrategy:
                 base_reason=base_reason,
                 entry_signal=entry_signal,
                 entry_reason=entry_reason,
+                buy_fraction=float(self.buy_fraction),
+                max_order_krw=float(self.max_order_krw),
             ),
             "position_gate": _build_position_gate_context(position_state.normalized_exposure),
             "position_state": _build_position_state_context(position_state),
@@ -840,6 +880,8 @@ class SmaWithFilterStrategy:
     exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
     exit_min_take_profit_ratio: float = settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
     exit_small_loss_tolerance_ratio: float = settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO
+    buy_fraction: float = settings.BUY_FRACTION
+    max_order_krw: float = settings.MAX_ORDER_KRW
 
     name: str = "sma_with_filter"
 
@@ -1075,6 +1117,8 @@ class SmaWithFilterStrategy:
                     base_reason=base_reason,
                     entry_signal=entry_signal,
                     entry_reason=entry_reason,
+                    buy_fraction=float(self.buy_fraction),
+                    max_order_krw=float(self.max_order_krw),
                 ),
                 "cost_edge_blocked": bool(should_filter_entry and edge_filter_triggered),
             },
@@ -1129,51 +1173,57 @@ def create_sma_strategy(
     entry_edge_buffer_ratio: float | None = None,
     strategy_min_expected_edge_ratio: float | None = None,
     live_fee_rate_estimate: float | None = None,
+    buy_fraction: float | None = None,
+    max_order_krw: float | None = None,
 ) -> SmaCrossStrategy:
-    return SmaCrossStrategy(
+    settings_config = sma_strategy_config_from_settings(short_n=short_n, long_n=long_n)
+    config = SmaStrategyConfig(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
         long_n=int(settings.SMA_LONG if long_n is None else long_n),
-        pair=settings.PAIR if pair is None else str(pair),
-        interval=settings.INTERVAL if interval is None else str(interval),
+        pair=settings_config.pair if pair is None else str(pair),
+        interval=settings_config.interval if interval is None else str(interval),
         exit_rule_names=(
-            _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
+            settings_config.exit_rule_names
             if exit_rule_names is None
-            else [str(name).strip().lower() for name in exit_rule_names if str(name).strip()]
+            else normalize_exit_rule_names(exit_rule_names)
         ),
         exit_max_holding_min=int(
-            settings.STRATEGY_EXIT_MAX_HOLDING_MIN
+            settings_config.exit_max_holding_min
             if exit_max_holding_min is None
             else exit_max_holding_min
         ),
         exit_min_take_profit_ratio=float(
-            settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
+            settings_config.exit_min_take_profit_ratio
             if exit_min_take_profit_ratio is None
             else exit_min_take_profit_ratio
         ),
         exit_small_loss_tolerance_ratio=float(
-            settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO
+            settings_config.exit_small_loss_tolerance_ratio
             if exit_small_loss_tolerance_ratio is None
             else exit_small_loss_tolerance_ratio
         ),
         slippage_bps=float(
-            settings.STRATEGY_ENTRY_SLIPPAGE_BPS if slippage_bps is None else slippage_bps
+            settings_config.slippage_bps if slippage_bps is None else slippage_bps
         ),
         entry_edge_buffer_ratio=float(
-            settings.ENTRY_EDGE_BUFFER_RATIO
+            settings_config.entry_edge_buffer_ratio
             if entry_edge_buffer_ratio is None
             else entry_edge_buffer_ratio
         ),
         strategy_min_expected_edge_ratio=float(
-            settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
+            settings_config.strategy_min_expected_edge_ratio
             if strategy_min_expected_edge_ratio is None
             else strategy_min_expected_edge_ratio
         ),
         live_fee_rate_estimate=float(
-            settings.LIVE_FEE_RATE_ESTIMATE
+            settings_config.live_fee_rate_estimate
             if live_fee_rate_estimate is None
             else live_fee_rate_estimate
         ),
+        buy_fraction=float(settings_config.buy_fraction if buy_fraction is None else buy_fraction),
+        max_order_krw=float(settings_config.max_order_krw if max_order_krw is None else max_order_krw),
     )
+    return SmaCrossStrategy.from_config(config)
 
 
 def create_sma_with_filter_strategy(

@@ -1,308 +1,125 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The previous patch has already added `src/bithumb_bot/decision_attribution.py` and `tests/test_decision_attribution.py`, and pytest reportedly passes. Do not reimplement that patch from scratch. Your task is to perform the next structural step without weakening the core priority.
+The previous patches have already added and hardened `src/bithumb_bot/decision_attribution.py`. The current implementation imports `BLOCK_LAYER_PRIORITY` from `decision_contract`, has `DecisionAttribution.all_block_reasons`, `schema_quality`, and `primary_all_block_conflict`, and is designed as a replay-compatible read-only attribution model. Verify this directly in the repo before editing. The prior analysis context is attached here and should be treated as guidance, not as a fact to blindly assume. 
 
-Core hypothesis to verify, not assume:
+Your next task is **not** to implement `strategy-sweep` yet. The next correct step is:
 
-> The repository is moving from an automated trading bot toward a reproducible automated trading experiment system. The next risk is jumping into `strategy-sweep` too early. Before sweep/backtest work, decision attribution must be hardened against real stored decision data and aligned with the canonical decision contract, so live dry-run, historical DB rows, and future replay/sweep outputs all use the same block classification model.
+1. Apply one small attribution hardening patch for cost/edge block reason variants.
+2. Then extract a replayable `SmaStrategyConfig` boundary so future replay/sweep work does not stay coupled to global `settings`.
 
-Use this hypothesis as a starting point only. Verify it directly in the repo. A prior analysis of the intended sequence is attached as context. 
-
-## Primary objective
-
-Harden the existing `DecisionAttribution` implementation and align blocker classification with the repository’s canonical decision contract.
-
-This is not a generic observability task. This is a repository-specific design step to make future replay/sweep results comparable with live/dry-run decisions.
-
-## Do not do this yet
-
-Do **not** implement full `strategy-sweep`.
-
-Do **not** implement full PnL backtesting.
-
-Do **not** tune `.env` values.
-
-Do **not** loosen trading gates.
-
-Do **not** change live trading behavior.
-
-Do **not** submit, cancel, or mutate orders.
-
-Do **not** mutate existing `strategy_decisions` rows.
-
-The next correct sequence is:
+Keep the priority intact:
 
 ```text
-1. Harden decision attribution against real DB data
-2. Align attribution blocker classification with decision_contract
-3. Extract replayable SmaStrategyConfig
-4. Add candle-based decision replay
-5. Add strategy-sweep using replay + attribution summary
-6. Add lightweight portfolio/PnL simulation later
+attribution hardening → SmaStrategyConfig extraction → candle-based decision replay → strategy-sweep → only later lightweight PnL simulation
 ```
 
-This task should cover steps 1 and 2. Add only minimal scaffolding for step 3 if it directly clarifies the boundary, but do not let the scope creep.
+## Core hypothesis to verify
 
-## Required investigation
+The repository is now ready to move beyond attribution itself, but it is still structurally blocked from reproducible replay/sweep because `SmaCrossStrategy` and related SMA decision helpers still read runtime `settings` directly. This creates a risk that future replay/sweep work will be another environment-bound patch rather than a reproducible experiment system.
 
-Inspect the current repository state before editing. At minimum inspect:
+Keep this as a hypothesis until you verify it in the code.
+
+## Required investigation before editing
+
+Inspect at least:
 
 ```text
 src/bithumb_bot/decision_attribution.py
 src/bithumb_bot/decision_contract.py
 src/bithumb_bot/strategy/sma.py
 src/bithumb_bot/app.py
-src/bithumb_bot/reporting.py
 tests/test_decision_attribution.py
 tests/test_decision_telemetry.py
 tests/test_strategy_decision_persistence.py
 ```
 
-Verify these facts directly:
+Verify:
 
-* `DecisionAttribution` exists and is read-only / settings-independent.
-* `decision_contract.py` defines canonical block layer priority.
-* `decision_contract.py` emits or can emit:
+* `decision_attribution.py` already imports `BLOCK_LAYER_PRIORITY`.
+* `DecisionAttribution` already has `all_block_reasons`.
+* cost filter classification currently treats exact canonical reasons like:
 
-  * `primary_block_layer`
-  * `primary_block_reason`
-  * `all_block_reasons`
-  * `signal_flow`
-* `decision_attribution.py` currently derives some blocker booleans from string matching fallback logic.
-* CLI command `decision-attribution` exists and supports human/json output.
-* Tests cover malformed/missing context, cost filter attribution, submit mismatch, JSON output, and CLI JSON.
+  * `strategy_filters.cost_edge`
+  * `pre_trade_economics.net_edge_below_minimum`
+* `SmaCrossStrategy` still has dataclass defaults sourced from `settings`.
+* `_build_entry_intent_context()` still reads `settings.BUY_FRACTION` and `settings.MAX_ORDER_KRW`, unless already changed.
+* live runtime gates such as `_live_armed_entry_fee_authority_blocks()` still depend on live mode settings and should remain runtime-only, not replay policy.
 
-If any of these are false, adapt the task while preserving the priority: attribution hardening first, replay/sweep second.
+If the repo has already changed, adapt to the actual code while preserving the sequence: attribution hardening first, config boundary second, no full sweep yet.
 
-## Required design change
+## Part 1: small attribution hardening patch
 
-Update `DecisionAttribution` so canonical block classification comes from the decision contract whenever possible.
+### Problem
 
-The target structure is:
+Current canonical cost filter classification is likely too exact. It may identify:
 
 ```text
-decision_contract builds:
-  primary_block_layer
-  primary_block_reason
-  all_block_reasons
-
-decision_attribution consumes:
-  primary_block_layer
-  primary_block_reason
-  all_block_reasons
-
-summary reports:
-  block layer distribution
-  block reason distribution
-  blocked_by_* ratios
+strategy_filters.cost_edge
+pre_trade_economics.net_edge_below_minimum
 ```
 
-Do not treat `execution_block_reason` substring matching as the main source of truth. It may remain as a compatibility fallback only.
+but miss legitimate canonical variants such as:
 
-## Concrete implementation requirements
+```text
+strategy_filters.filtered entry: cost_edge
+strategy_filters.filtered_entry_cost_edge
+strategy_filters.entry_edge_below_required
+pre_trade_economics.edge_below_required
+pre_trade_economics.net_edge_below_minimum
+```
 
-### 1. Add `all_block_reasons` to `DecisionAttribution`
+If those variants exist in stored contexts, the report may count the block layer correctly but fail to mark `blocked_by_cost_filter=True`.
 
-Extend the model with a field like:
+### Required change
+
+Add a narrow helper in `decision_attribution.py` such as:
 
 ```python
-all_block_reasons: tuple[str, ...]
+def _has_layer_reason_containing(
+    all_block_reasons: Sequence[str],
+    layer: str,
+    *needles: str,
+) -> bool:
+    ...
 ```
 
-or an equivalent immutable sequence.
+It should:
 
-Normalize it from any canonical repo shape that exists, for example:
+* parse existing normalized `layer.reason` strings with `split_block_reason`
+* match only within the given layer
+* compare reason text case-insensitively
+* ignore malformed reasons
+* avoid broad matching across unrelated layers
 
-```python
-context["all_block_reasons"]
-context["signal_flow"]["all_block_reasons"]
-```
-
-Support both formats if needed:
+Then update `canonical_cost_filter` so it remains contract-first but recognizes safe cost/edge variants within only these layers:
 
 ```text
-["strategy_filters.cost_edge", "position_gate.already_in_position"]
-[("strategy_filters", "cost_edge"), ("position_gate", "already_in_position")]
-```
-
-Normalize to stable string form:
-
-```text
-layer.reason
-```
-
-Be defensive:
-
-* ignore empty items
-* deduplicate while preserving order
-* tolerate malformed entries
-* do not crash on older contexts
-
-### 2. Reuse canonical block layer priority
-
-If `decision_contract.py` exposes `BLOCK_LAYER_PRIORITY`, import and use it in `decision_attribution.py`.
-
-Do not duplicate the priority list unless import cycles force it. If an import cycle exists, resolve it with a small helper or shared constant, not by creating two drifting definitions.
-
-The canonical layers should remain consistent with the repo, likely including:
-
-```text
-fee_authority
-market_regime
-position_gate
 strategy_filters
 pre_trade_economics
-execution_order_rule
-performance_gate
 ```
 
-Verify the actual list in the repo and use that.
+Accept variants containing conservative terms such as:
 
-### 3. Recompute primary block from `all_block_reasons` when needed
+```text
+cost_edge
+edge_below
+edge
+net_edge_below_minimum
+```
 
-Implement a helper along these lines:
+Do **not** make every `strategy_filters.*` reason a cost filter. Only edge/cost-related reasons should set `blocked_by_cost_filter=True`.
+
+### Required tests
+
+Update `tests/test_decision_attribution.py` with targeted tests:
+
+1. Cost edge phrase variant:
 
 ```python
-def normalize_all_block_reasons(value: Any) -> tuple[str, ...]:
-    ...
-
-def split_block_reason(value: str) -> tuple[str, str] | None:
-    ...
-
-def select_primary_block_from_all_reasons(
-    all_block_reasons: Sequence[str],
-) -> tuple[str, str] | None:
-    ...
-```
-
-Behavior:
-
-* If `primary_block_layer` / `primary_block_reason` are present and valid, keep them.
-* If they are missing but `all_block_reasons` exists, derive primary using `BLOCK_LAYER_PRIORITY`.
-* If both exist but conflict, do not silently hide it. Add a diagnostic counter or compatibility note if feasible.
-* If neither exists, keep the current safe defaults:
-
-  * `primary_block_layer="none"`
-  * `primary_block_reason="none"`
-
-### 4. Make `blocked_by_*` booleans contract-first
-
-Compute blocker booleans from canonical block reasons first:
-
-```text
-blocked_by_fee_authority
-blocked_by_position_gate
-blocked_by_cost_filter
-blocked_by_order_rule
-blocked_by_performance_gate
-```
-
-Recommended mapping:
-
-```text
-fee_authority.* -> blocked_by_fee_authority
-position_gate.* -> blocked_by_position_gate
-execution_order_rule.* -> blocked_by_order_rule
-performance_gate.* -> blocked_by_performance_gate
-strategy_filters.cost_edge or strategy_filters.filtered entry: cost_edge -> blocked_by_cost_filter
-pre_trade_economics.net_edge_below_minimum -> likely cost/edge related, but keep naming conservative
-```
-
-Keep existing direct boolean fields as sources too:
-
-```text
-context["blocked_by_cost_filter"]
-context["blocked_by_fee_authority"]
-```
-
-Precedence should be:
-
-```text
-1. explicit canonical all_block_reasons / primary_block_layer
-2. explicit boolean fields
-3. nested filter fields such as filters.cost_edge.blocked
-4. legacy string fallback from execution_block_reason / target_block_reason
-```
-
-The legacy string fallback must remain for old rows, but tests should prove canonical reasons are preferred.
-
-### 5. Improve summary output without breaking compatibility
-
-Update summary aggregation to include `all_block_reasons` if useful.
-
-At minimum, ensure:
-
-```text
-block_layer_counts
-block_reason_counts
-filter_ratios
-interpretation
-```
-
-are driven by canonical block reasons when present.
-
-If you add new summary fields, JSON output must remain deterministic and tests must assert the shape.
-
-Do not remove existing JSON keys unless absolutely necessary.
-
-### 6. Add a real-data validation helper if feasible
-
-Add a read-only command option or internal helper that surfaces attribution schema quality.
-
-Possible minimal addition:
-
-```bash
-uv run bithumb-bot decision-attribution --limit 500 --json
-```
-
-already exists. If so, do not add a new command. Instead, make sure the JSON exposes enough to diagnose:
-
-```text
-malformed_context_count
-context_missing_count
-block_layer_counts
-block_reason_counts
-filter_ratios
-edge_stats.gap_lt_required_ratio
-submit_mismatch
-interpretation.primary_issue
-```
-
-If useful and low-risk, add a field such as:
-
-```json
-"schema_quality": {
-  "all_block_reasons_present_count": 0,
-  "primary_block_present_count": 0,
-  "primary_all_block_conflict_count": 0
-}
-```
-
-Only add this if it is well tested and does not bloat the report.
-
-## Testing requirements
-
-Update or add tests in:
-
-```text
-tests/test_decision_attribution.py
-```
-
-Add coverage for these repository-specific cases:
-
-### Test 1: canonical all_block_reasons drives cost filter attribution
-
-Input context:
-
-```json
 {
-  "raw_signal": "BUY",
-  "final_signal": "HOLD",
-  "all_block_reasons": ["strategy_filters.cost_edge"],
-  "signal_flow": {
-    "primary_block_layer": "strategy_filters",
-    "primary_block_reason": "cost_edge"
-  }
+    "raw_signal": "BUY",
+    "final_signal": "HOLD",
+    "all_block_reasons": ["strategy_filters.filtered entry: cost_edge"],
 }
 ```
 
@@ -310,207 +127,387 @@ Expected:
 
 ```text
 blocked_by_cost_filter=True
-primary_block_layer=strategy_filters
-primary_block_reason=cost_edge
-block_reason_counts includes strategy_filters.cost_edge
+block_reason_counts includes strategy_filters.filtered entry: cost_edge
 ```
 
-### Test 2: primary block can be derived from all_block_reasons
+2. Underscore variant:
 
-Input context has no `primary_block_layer`, no `primary_block_reason`, but has:
-
-```json
+```python
 {
-  "all_block_reasons": [
-    "strategy_filters.cost_edge",
-    "position_gate.already_in_position"
-  ]
+    "all_block_reasons": ["strategy_filters.filtered_entry_cost_edge"]
 }
 ```
 
 Expected:
 
 ```text
-primary_block_layer follows BLOCK_LAYER_PRIORITY
-primary_block_reason matches selected layer
+blocked_by_cost_filter=True
 ```
 
-Use the actual `BLOCK_LAYER_PRIORITY` from the repo.
+3. Pre-trade economics edge variant:
 
-### Test 3: canonical execution_order_rule beats string fallback
-
-Input context:
-
-```json
+```python
 {
-  "raw_signal": "BUY",
-  "final_signal": "BUY",
-  "all_block_reasons": ["execution_order_rule.min_notional"],
-  "execution_block_reason": "some unrelated text"
+    "all_block_reasons": ["pre_trade_economics.edge_below_required"]
 }
 ```
 
 Expected:
 
 ```text
-blocked_by_order_rule=True
-blocked_by_performance_gate=False
+blocked_by_cost_filter=True
 ```
 
-### Test 4: legacy fallback still works
+4. Non-edge strategy filter should not be misclassified:
 
-Input context has no `all_block_reasons`, no primary block, but has:
-
-```json
+```python
 {
-  "execution_block_reason": "missing_order_rule_min_qty"
+    "all_block_reasons": ["strategy_filters.market_regime_block"]
 }
 ```
 
 Expected:
 
 ```text
-blocked_by_order_rule=True
+blocked_by_cost_filter=False
 ```
 
-### Test 5: malformed all_block_reasons does not crash
+This is a hardening patch, not a redesign.
 
-Use malformed shapes:
+## Part 2: extract replayable SMA strategy config
 
-```json
-{
-  "all_block_reasons": [null, "", {}, ["bad"], "position_gate.already_in_position"]
-}
-```
+After the small attribution hardening patch, add a config boundary for SMA strategy parameters.
 
-Expected:
+### Goal
+
+Create a stable configuration object so future replay/sweep can generate many strategy configurations without mutating environment variables or reading global `settings` inside the strategy path.
+
+The goal is **not** to remove `settings` entirely. The goal is to move the boundary:
 
 ```text
-normalization succeeds
-valid reason retained
-invalid entries ignored
+CLI / runtime layer:
+  settings → SmaStrategyConfig
+
+strategy layer:
+  SmaStrategyConfig values
+
+future replay / sweep layer:
+  many SmaStrategyConfig values → comparable DecisionAttribution summaries
 ```
 
-### Test 6: JSON output remains deterministic
+### Add file
 
-Assert:
+Prefer:
 
 ```text
-json keys are sorted or stable
-existing keys remain present
-new keys, if any, have deterministic structure
+src/bithumb_bot/strategy_config.py
 ```
 
-### Test 7: CLI still works
+Define:
 
-Keep or update the existing CLI JSON test so:
+```python
+from dataclasses import dataclass
 
-```bash
-main(["decision-attribution", "--limit", "5", "--json"])
+@dataclass(frozen=True)
+class SmaStrategyConfig:
+    short_n: int
+    long_n: int
+    pair: str
+    interval: str
+    exit_rule_names: tuple[str, ...]
+    exit_max_holding_min: int
+    exit_min_take_profit_ratio: float
+    exit_small_loss_tolerance_ratio: float
+    slippage_bps: float
+    live_fee_rate_estimate: float
+    entry_edge_buffer_ratio: float
+    strategy_min_expected_edge_ratio: float
+    buy_fraction: float
+    max_order_krw: float
 ```
 
-still returns valid JSON and includes the expected canonical block classification.
+Add a factory:
 
-## Recovery and safety requirements
+```python
+def sma_strategy_config_from_settings(
+    *,
+    short_n: int | None = None,
+    long_n: int | None = None,
+) -> SmaStrategyConfig:
+    ...
+```
 
-The patch must be read-only with respect to trading data.
+It should read from the repo’s existing settings object and preserve current defaults.
+
+Normalize `exit_rule_names` as an immutable tuple. Reuse existing parsing logic if available, or move the parser to avoid duplication.
+
+### Update `SmaCrossStrategy`
+
+Adapt `src/bithumb_bot/strategy/sma.py` so `SmaCrossStrategy` can be constructed from this config without changing existing public behavior.
+
+Acceptable approaches:
+
+```python
+@dataclass(frozen=True)
+class SmaCrossStrategy:
+    config: SmaStrategyConfig
+```
+
+or, less invasive:
+
+```python
+@dataclass(frozen=True)
+class SmaCrossStrategy:
+    short_n: int
+    long_n: int
+    ...
+    
+    @classmethod
+    def from_config(cls, config: SmaStrategyConfig) -> "SmaCrossStrategy":
+        ...
+```
+
+Choose the least disruptive option that still gives future replay/sweep a stable config object.
+
+Existing call sites must continue to work. If the app currently instantiates:
+
+```python
+SmaCrossStrategy(short_n, long_n)
+```
+
+that should still work, or all call sites must be updated safely.
+
+### Remove direct settings reads from entry intent context
+
+Currently `_build_entry_intent_context()` may read:
+
+```python
+settings.BUY_FRACTION
+settings.MAX_ORDER_KRW
+```
+
+This is sweep-relevant and should come from config.
+
+Change from:
+
+```python
+_build_entry_intent_context(pair=pair)
+```
+
+to something like:
+
+```python
+_build_entry_intent_context(
+    pair=pair,
+    buy_fraction=config.buy_fraction,
+    max_order_krw=config.max_order_krw,
+)
+```
+
+or, if keeping the existing dataclass fields:
+
+```python
+_build_entry_intent_context(
+    pair=self.pair,
+    buy_fraction=self.buy_fraction,
+    max_order_krw=self.max_order_krw,
+)
+```
+
+The stored decision context should still show the same `budget_fraction_of_cash` and `max_budget_krw` values as before when constructed from settings.
+
+### Do not move runtime-only live gates into replay config
+
+Do not treat this as a replay policy:
+
+```python
+_live_armed_entry_fee_authority_blocks()
+```
+
+That function depends on runtime live mode safety settings. Leave it as runtime-only behavior. You may add a short comment clarifying that this is runtime/live safety policy and should not become a replay/sweep parameter in this patch.
+
+Do not change live gate behavior.
+
+## Required tests for SmaStrategyConfig
+
+Add tests, preferably:
+
+```text
+tests/test_sma_strategy_config.py
+```
+
+Cover:
+
+### 1. Factory preserves settings defaults
+
+Verify `sma_strategy_config_from_settings()` produces values equivalent to current settings-based `SmaCrossStrategy` defaults:
+
+```text
+short_n
+long_n
+pair
+interval
+exit_rule_names
+exit_max_holding_min
+exit_min_take_profit_ratio
+exit_small_loss_tolerance_ratio
+slippage_bps
+live_fee_rate_estimate
+entry_edge_buffer_ratio
+strategy_min_expected_edge_ratio
+buy_fraction
+max_order_krw
+```
+
+Use monkeypatch or `object.__setattr__` following existing project test style if settings is frozen.
+
+### 2. Existing constructor behavior is preserved
+
+If `SmaCrossStrategy(short_n, long_n)` remains supported, verify it produces equivalent config/fields as before.
+
+If you switch to `SmaCrossStrategy(config=...)`, update all call sites and add a compatibility test if possible.
+
+### 3. `from_config` or config construction preserves decision context
+
+Create a small in-memory DB fixture with enough candles to trigger a deterministic decision if existing tests have a helper. Compare the relevant context fields between:
+
+```python
+SmaCrossStrategy(short_n, long_n)
+```
+
+and:
+
+```python
+SmaCrossStrategy.from_config(sma_strategy_config_from_settings(short_n=..., long_n=...))
+```
+
+Do not require full trading behavior. Compare only stable strategy context fields such as:
+
+```text
+pair
+interval
+gap_ratio
+signal_strength_label
+entry.intent.budget_fraction_of_cash
+entry.intent.max_budget_krw
+experiment_fingerprint.thresholds if present
+```
+
+### 4. Entry intent no longer depends on direct settings reads
+
+Set config values for:
+
+```text
+buy_fraction
+max_order_krw
+```
+
+to values different from global settings. Verify the decision context entry intent uses the config values.
+
+This test is important. It proves replay/sweep can vary order sizing inputs without mutating global `.env`.
+
+### 5. Invalid short/long validation remains
+
+Verify:
+
+```python
+short_n >= long_n
+```
+
+still raises the existing validation error.
+
+## Safety requirements
+
+This patch must be safe and non-mutating except for normal test DB fixtures.
 
 Confirm:
 
 * no order submission behavior changed
-* no strategy decision behavior changed
 * no live/dry-run gate behavior changed
-* no existing DB rows are mutated
-* malformed rows do not crash attribution
-* missing `strategy_decisions` table still returns an empty/safe result or graceful diagnostic according to current repo style
-* old contexts without `all_block_reasons` still work
-
-If a schema mismatch is found, do not add a migration unless absolutely necessary. Prefer compatibility normalization.
+* no order cancellation behavior changed
+* no trading loop semantics changed
+* no existing DB rows are mutated by attribution reporting
+* `decision-attribution` remains read-only
+* old decision contexts without expanded cost reason variants still work
+* old constructor usage still works, or all call sites are updated and tested
 
 ## Observability requirements
 
-After this patch, the attribution report should answer these questions more reliably:
+After this patch:
 
-```text
-Are HOLDs mostly caused by no raw signal?
-Are raw BUY/SELL candidates being generated but filtered?
-Is cost/edge filtering the dominant blocker?
-Is fee authority blocking entries?
-Are position gates blocking entries or exits?
-Are order rules or minimum notional constraints preventing submit?
-Are final BUY/SELL decisions failing submit expectation?
-Is gap_ratio generally below required_edge_ratio?
-Is the decision context schema too incomplete to trust?
-```
-
-The key improvement is that these answers should come from contract-backed block reasons, not mostly from string contains heuristics.
+* `decision-attribution` should classify cost/edge variants more reliably.
+* `schema_quality` should remain available.
+* `block_reason_counts` should preserve exact canonical reason strings.
+* `blocked_by_cost_filter_ratio` should reflect edge/cost variants within canonical layers.
+* SMA decisions should carry entry intent budget values from strategy config, not hidden global settings.
+* Future replay/sweep work should be able to create multiple SMA configs without changing `.env`.
 
 ## Validation commands
 
-Run the relevant test subset first:
+Run:
 
 ```bash
 uv run pytest tests/test_decision_attribution.py
 ```
 
-Then run related tests:
+Run the new config tests:
+
+```bash
+uv run pytest tests/test_sma_strategy_config.py
+```
+
+Run related strategy/decision tests:
 
 ```bash
 uv run pytest tests/test_decision_telemetry.py tests/test_strategy_decision_persistence.py
 ```
 
-Then run the full suite if feasible:
+Then run full tests if feasible:
 
 ```bash
 uv run pytest
 ```
 
-If the local/dev DB is available, also run:
+If a local/dev DB is available, also run:
 
 ```bash
-uv run bithumb-bot decision-attribution --limit 500
 uv run bithumb-bot decision-attribution --limit 500 --json
 ```
 
-If no DB data is available, state that clearly in the final report. Do not fabricate runtime results.
-
-## What to do after this patch, but not in this patch
-
-Prepare the repo for the next PR:
+Inspect and report:
 
 ```text
-refactor: extract replayable SMA strategy config
+schema_quality.all_block_reasons_present_count
+schema_quality.primary_block_present_count
+schema_quality.primary_all_block_conflict_count
+malformed_context_count
+context_missing_count
+candidate_funnel.raw_BUY
+candidate_funnel.final_BUY
+candidate_funnel.submit_expected_BUY
+filter_ratios.blocked_by_cost_filter_ratio
+edge_stats.gap_lt_required_ratio
+interpretation.primary_issue
 ```
 
-Future target shape:
+If no local/dev DB is available, state that clearly. Do not fabricate runtime observations.
 
-```python
-@dataclass(frozen=True)
-class SmaStrategyConfig:
-    short_n: int
-    long_n: int
-    entry_edge_buffer_ratio: float
-    strategy_min_expected_edge_ratio: float
-    slippage_bps: float
-    live_fee_rate_estimate: float
-    exit_rule_names: tuple[str, ...]
-    exit_max_holding_min: int
-    exit_min_take_profit_ratio: float
-    exit_small_loss_tolerance_ratio: float
-```
+## Explicit non-goals
 
-Do not implement this unless the attribution alignment work is complete and the change is trivial. The boundary to preserve is:
+Do not implement:
 
 ```text
-command/runtime layer:
-  settings -> SmaStrategyConfig
-
-strategy layer:
-  SmaStrategyConfig only
-
-replay/sweep layer:
-  many SmaStrategyConfig values -> comparable attribution summaries
+strategy-sweep CLI
+full backtest engine
+lot-native lifecycle replay
+broker reconciliation replay
+cash drift/accounting repair replay
+max drawdown calculation
+net PnL reporting
+fee drag reporting
 ```
+
+Those come after `SmaStrategyConfig` and candle-based decision replay.
 
 ## Final report format
 
@@ -527,28 +524,31 @@ Verification
 - command: result
 - command: result
 
-Decision-contract alignment
-- Explain how all_block_reasons is normalized.
-- Explain how primary block selection uses BLOCK_LAYER_PRIORITY.
-- Explain how blocked_by_* fields are now contract-first.
-- Explain what legacy fallbacks remain and why.
+Attribution hardening
+- Explain how cost/edge canonical reason variants are now classified.
+- Explain why matching is layer-scoped and not broad string matching.
+- Confirm exact block reason strings remain preserved in block_reason_counts.
+
+SmaStrategyConfig boundary
+- Explain the new config type and factory.
+- Explain how existing runtime settings flow into config.
+- Explain how entry intent now uses config buy_fraction/max_order_krw.
+- Explain what settings reads remain and why, especially runtime-only live gates.
 
 Safety / recovery
-- Confirm this is read-only.
-- Confirm trading behavior was not changed.
-- Confirm malformed or legacy contexts do not crash.
-- Confirm missing/empty DB behavior.
+- Confirm no trading behavior or live gates changed.
+- Confirm attribution remains read-only.
+- Confirm old contexts and old constructor/call sites still work.
 
 Findings
 - State whether the hypothesis was confirmed, partially confirmed, or not confirmed.
-- Mention whether any stronger structural issue was discovered.
+- Mention any stronger structural issue discovered.
 
 Next steps
-- PR 1: extract SmaStrategyConfig
-- PR 2: add candle-based decision replay
-- PR 3: add strategy-sweep using replay + attribution summary
-- PR 4: only later add lightweight portfolio/PnL simulation
+- PR 1: add candle-based decision replay using SmaStrategyConfig and DecisionAttribution
+- PR 2: add strategy-sweep using replay attribution summary
+- PR 3: only later add lightweight portfolio/PnL simulation
 ```
 
-Keep the core priority intact: **attribution hardening and decision-contract alignment first; replay/sweep second; PnL/backtest later.**
+Keep the core priority intact: **finish attribution hardening, then extract replayable SMA config; do not skip into sweep/backtest yet.**
 
