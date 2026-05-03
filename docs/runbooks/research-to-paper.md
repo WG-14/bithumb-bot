@@ -64,15 +64,17 @@ Review every window date range, test return, fail reason, `window_count`, `pass_
 uv run bithumb-bot research-promote-candidate --experiment-id sma_filter_v1_2026_05 --candidate-id <candidate_id>
 ```
 
-Promotion refuses candidates with missing validation evidence, failed gates, missing walk-forward evidence, failed walk-forward evidence, or `candidate_profile_hash_mismatch`.
+Promotion requires backtest/OOS evidence. If walk-forward is required, promotion also requires walk-forward evidence for the same experiment, strategy, parameters, cost model, and manifest.
+Promotion refuses candidates with missing validation evidence, failed backtest gates, missing or failed walk-forward evidence, mismatched walk-forward candidates, or tampered candidate profile hashes.
+Both evidence sources are hash-verified and bound into the promotion artifact.
 
 8. Review the promotion artifact.
 
 ```bash
-jq '{profile: .strategy_profile_id, hash: .verified_candidate_profile_hash, gate: .gate_result, next: .operator_next_step}' "$DATA_ROOT/paper/reports/research/sma_filter_v1_2026_05/promotion_<candidate_id>.json"
+jq '{profile: .strategy_profile_id, hash: .verified_candidate_profile_hash, gate: .gate_result, backtest_hash: .backtest_candidate_profile_hash, backtest_verified: .backtest_candidate_profile_verified, wf_required: .walk_forward_required, wf_hash: .walk_forward_candidate_profile_hash, wf_verified: .walk_forward_candidate_profile_verified, next: .operator_next_step}' "$DATA_ROOT/paper/reports/research/sma_filter_v1_2026_05/promotion_<candidate_id>.json"
 ```
 
-Verify the profile hash, candidate parameter values, dataset fingerprint, manifest hash, and content hash. Promotion does not edit `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
+Verify the profile hash, candidate parameter values, dataset fingerprint, manifest hash, content hash, backtest evidence source, and walk-forward evidence source when required. Promotion does not edit `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
 
 9. Manually prepare paper env/profile consideration.
 

@@ -36,13 +36,49 @@ def _candidate(**overrides):
         "acceptance_gate_result": "PASS",
         "walk_forward_required": False,
     }
-    payload["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(payload))
     payload.update(overrides)
+    explicit_hash = payload.pop("candidate_profile_hash", None)
+    payload["candidate_profile_hash"] = explicit_hash or sha256_prefixed(build_candidate_profile(payload))
     return payload
 
 
 def _write_report(manager: PathManager, candidate: dict[str, object]) -> None:
     path = manager.data_dir() / "reports" / "research" / "promo_exp" / "backtest_report.json"
+    write_json_atomic(
+        path,
+        {
+            "experiment_id": "promo_exp",
+            "manifest_hash": "sha256:manifest",
+            "candidates": [candidate],
+        },
+    )
+
+
+def _walk_forward_candidate(backtest_candidate: dict[str, object], **overrides) -> dict[str, object]:
+    payload = dict(backtest_candidate)
+    payload.update(
+        {
+            "walk_forward_metrics": {
+                "window_count": 3,
+                "pass_window_count": 3,
+                "fail_window_count": 0,
+                "mean_test_return_pct": 1.0,
+                "median_test_return_pct": 1.0,
+                "worst_test_return_pct": 0.5,
+                "return_consistency_pass": True,
+            },
+            "walk_forward_gate_result": "PASS",
+        }
+    )
+    payload.pop("candidate_profile_hash", None)
+    payload.update(overrides)
+    explicit_hash = payload.pop("candidate_profile_hash", None)
+    payload["candidate_profile_hash"] = explicit_hash or sha256_prefixed(build_candidate_profile(payload))
+    return payload
+
+
+def _write_walk_forward_report(manager: PathManager, candidate: dict[str, object]) -> None:
+    path = manager.data_dir() / "reports" / "research" / "promo_exp" / "walk_forward_report.json"
     write_json_atomic(
         path,
         {
@@ -103,6 +139,49 @@ def test_promotion_refuses_candidate_profile_hash_mismatch(tmp_path, monkeypatch
     assert not (manager.data_dir() / "reports" / "research" / "promo_exp" / "promotion_candidate_001.json").exists()
 
 
+def test_promotion_refuses_backtest_candidate_hash_mismatch_even_when_walk_forward_exists(
+    tmp_path, monkeypatch
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    backtest_candidate = _candidate(walk_forward_required=True)
+    walk_forward_candidate = _walk_forward_candidate(backtest_candidate)
+    backtest_candidate["candidate_profile_hash"] = "sha256:tampered"
+    _write_report(manager, backtest_candidate)
+    _write_walk_forward_report(manager, walk_forward_candidate)
+
+    with pytest.raises(PromotionGateError, match="backtest_candidate_profile_hash_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert not (manager.data_dir() / "reports" / "research" / "promo_exp" / "promotion_candidate_001.json").exists()
+
+
+def test_promotion_refuses_backtest_gate_failure_even_when_walk_forward_passes(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    backtest_candidate = _candidate(
+        acceptance_gate_result="FAIL",
+        gate_fail_reasons=["min_trade_count_failed"],
+        walk_forward_required=True,
+    )
+    _write_report(manager, backtest_candidate)
+    _write_walk_forward_report(manager, _walk_forward_candidate(backtest_candidate))
+
+    with pytest.raises(PromotionGateError, match="backtest_acceptance_gate_not_passed"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_walk_forward_candidate_profile_hash_mismatch(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    backtest_candidate = _candidate(walk_forward_required=True)
+    _write_report(manager, backtest_candidate)
+    _write_walk_forward_report(
+        manager,
+        _walk_forward_candidate(backtest_candidate, candidate_profile_hash="sha256:tampered"),
+    )
+
+    with pytest.raises(PromotionGateError, match="walk_forward_candidate_profile_hash_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
 def test_promotion_artifact_uses_verified_candidate_profile_hash(tmp_path, monkeypatch) -> None:
     manager = _manager(tmp_path, monkeypatch)
     candidate = _candidate()
@@ -114,3 +193,37 @@ def test_promotion_artifact_uses_verified_candidate_profile_hash(tmp_path, monke
     assert result.artifact["candidate_profile_hash"] == expected_hash
     assert result.artifact["verified_candidate_profile_hash"] == expected_hash
     assert result.artifact["strategy_profile_hash"] == expected_hash
+
+
+def test_promotion_artifact_records_backtest_and_walk_forward_evidence_hashes(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    backtest_candidate = _candidate(walk_forward_required=True)
+    walk_forward_candidate = _walk_forward_candidate(backtest_candidate)
+    _write_report(manager, backtest_candidate)
+    _write_walk_forward_report(manager, walk_forward_candidate)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert result.artifact["validation_evidence_source"] == "backtest_report.json"
+    assert result.artifact["backtest_candidate_profile_hash"] == backtest_candidate["candidate_profile_hash"]
+    assert result.artifact["backtest_candidate_profile_verified"] is True
+    assert result.artifact["walk_forward_required"] is True
+    assert result.artifact["walk_forward_evidence_source"] == "walk_forward_report.json"
+    assert result.artifact["walk_forward_candidate_profile_hash"] == walk_forward_candidate["candidate_profile_hash"]
+    assert result.artifact["walk_forward_candidate_profile_verified"] is True
+
+
+def test_promotion_artifact_records_no_walk_forward_evidence_when_not_required(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    backtest_candidate = _candidate(walk_forward_required=False)
+    _write_report(manager, backtest_candidate)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert result.artifact["validation_evidence_source"] == "backtest_report.json"
+    assert result.artifact["backtest_candidate_profile_hash"] == backtest_candidate["candidate_profile_hash"]
+    assert result.artifact["backtest_candidate_profile_verified"] is True
+    assert result.artifact["walk_forward_required"] is False
+    assert result.artifact["walk_forward_evidence_source"] is None
+    assert result.artifact["walk_forward_candidate_profile_hash"] is None
+    assert result.artifact["walk_forward_candidate_profile_verified"] is False

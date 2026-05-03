@@ -91,10 +91,15 @@ If fewer than `walk_forward.min_windows` complete windows exist, the command fai
 ## Promotion
 
 `research-promote-candidate` generates an operator-reviewable promotion artifact.
-It verifies that the candidate exists, has validation evidence, passed the acceptance gate, and has a candidate profile hash.
-It recomputes `sha256_prefixed(build_candidate_profile(candidate))` and refuses promotion with `candidate_profile_hash_mismatch` if the report was tampered with after generation.
+It verifies that the backtest/OOS candidate exists, has validation evidence, passed the acceptance gate, and has a candidate profile hash.
+It recomputes `sha256_prefixed(build_candidate_profile(candidate))` for the backtest/OOS candidate and refuses promotion with `backtest_candidate_profile_hash_mismatch` if the report was tampered with after generation.
 
-When walk-forward evidence is required, promotion also requires the matching candidate in `walk_forward_report.json` to pass real rolling walk-forward validation. Missing or failed evidence is reported as `walk_forward_missing`, `walk_forward_insufficient_windows`, or `walk_forward_failed`.
+When walk-forward evidence is required, promotion also requires the matching candidate in `walk_forward_report.json` to pass real rolling walk-forward validation.
+The walk-forward candidate must match the backtest/OOS candidate's experiment, strategy name, parameter candidate id, parameter values, cost model, and manifest hash, and its candidate profile hash is independently recomputed.
+Missing, mismatched, failed, or tampered walk-forward evidence is reported with source-specific reasons such as `walk_forward_missing`, `walk_forward_candidate_mismatch`, `walk_forward_gate_not_passed`, `walk_forward_metrics_missing`, or `walk_forward_candidate_profile_hash_mismatch`.
+
+The promotion artifact binds the evidence sources by recording `validation_evidence_source`, `backtest_candidate_profile_hash`, `backtest_candidate_profile_verified`, `walk_forward_required`, `walk_forward_evidence_source`, `walk_forward_candidate_profile_hash`, and `walk_forward_candidate_profile_verified`.
+If walk-forward is not required, the promotion artifact explicitly records `walk_forward_required=false` and null walk-forward evidence hash/source fields.
 
 Promotion writes an operator-reviewable artifact only after these checks pass. It does not edit `.env`, `BITHUMB_ENV_FILE_LIVE`, `BITHUMB_ENV_FILE_PAPER`, or live secrets.
 
