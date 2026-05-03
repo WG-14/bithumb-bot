@@ -6,11 +6,18 @@ from dataclasses import replace
 import pytest
 
 from bithumb_bot.config import settings
-from bithumb_bot.decision_attribution import DecisionAttributionSummary
+from bithumb_bot.decision_attribution import (
+    DecisionAttributionSummary,
+    normalize_decision_attribution_from_context,
+    summarize_decision_attributions,
+)
 from bithumb_bot.strategy_config import sma_strategy_config_from_settings
 from bithumb_bot.strategy_replay import (
     CandleReplayDataset,
     StrategyReplayConfig,
+    _replay_decision_context,
+    _sma,
+    build_strategy_replay_config_id,
     load_replay_candles,
     replay_sma_strategy_decisions,
     replay_sma_strategy_decisions_from_candles,
@@ -206,6 +213,48 @@ def test_replay_is_deterministic_for_same_candles_and_config() -> None:
     assert first.config_id == second.config_id
     assert first.decision_count == second.decision_count
     assert first.attribution_summary.as_dict() == second.attribution_summary.as_dict()
+
+
+def test_replay_direct_attribution_matches_context_normalization_path() -> None:
+    dataset = CandleReplayDataset(
+        pair="BTC_KRW",
+        interval="1m",
+        candles=tuple(
+            (1_700_000_000_000 + idx * 60_000, close)
+            for idx, close in enumerate([10.0, 10.0, 10.0, 10.0, 11.0, 10.0])
+        ),
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        max_candles=None,
+    )
+    config = StrategyReplayConfig(
+        strategy_config=_base_config(entry_edge_buffer_ratio=0.02)
+    )
+    config_id = build_strategy_replay_config_id(config)
+    closes = [close for _ts, close in dataset.candles]
+    old_path_attributions = []
+    for index in range(int(config.strategy_config.long_n) + 1, len(dataset.candles)):
+        candle_ts = dataset.candles[index][0]
+        old_path_attributions.append(
+            normalize_decision_attribution_from_context(
+                _replay_decision_context(
+                    replay_config=config,
+                    config_id=config_id,
+                    candle_ts=candle_ts,
+                    close=closes[index],
+                    prev_s=_sma(closes, int(config.strategy_config.short_n), index),
+                    prev_l=_sma(closes, int(config.strategy_config.long_n), index),
+                    curr_s=_sma(closes, int(config.strategy_config.short_n), index + 1),
+                    curr_l=_sma(closes, int(config.strategy_config.long_n), index + 1),
+                )
+            )
+        )
+    result = replay_sma_strategy_decisions_from_candles(dataset, config)
+
+    assert result.attribution_summary.as_dict() == summarize_decision_attributions(
+        old_path_attributions
+    ).as_dict()
 
 
 def test_replay_uses_decision_attribution_summary() -> None:

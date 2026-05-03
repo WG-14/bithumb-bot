@@ -112,6 +112,9 @@ def test_strategy_sweep_cli_json_returns_deterministic_attribution_rows(
     assert payload["plan"]["grid_count"] == 2
     assert payload["plan"]["candle_count"] == 5
     assert payload["plan"]["full_history"] is True
+    assert payload["plan"]["estimated_operations"] == 10
+    assert payload["plan"]["max_operations"] == 300_000
+    assert payload["plan"]["allow_large_sweep"] is False
     assert len(rows) == 2
     required = {
         "config_id",
@@ -139,6 +142,8 @@ def test_strategy_sweep_cli_human_output_includes_operator_fields(
     assert "mode=decision_attribution_only" in out
     assert "grid_count=2" in out
     assert "candle_count=5" in out
+    assert "estimated_operations=10" in out
+    assert "max_operations=300000" in out
     assert "raw_BUY" in out
     assert "final_BUY" in out
     assert "cost_block" in out
@@ -306,6 +311,71 @@ def test_strategy_sweep_cli_live_max_candles_allows_execution(
     assert payload["plan"]["max_candles"] == 5000
     assert payload["plan"]["full_history"] is False
     assert len(payload["rows"]) == 2
+
+
+def test_strategy_sweep_cli_live_large_operations_fail_before_replay(
+    configured_db, monkeypatch, capsys
+) -> None:
+    _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
+    object.__setattr__(settings, "MODE", "live")
+    called = False
+
+    def fail_if_called(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("sweep replay should not execute")
+
+    monkeypatch.setattr(
+        "bithumb_bot.app.run_sma_strategy_sweep_from_candles",
+        fail_if_called,
+    )
+    args = _sweep_args(as_json=True) + ["--max-candles", "5000", "--max-operations", "9"]
+
+    with pytest.raises(SystemExit):
+        main(args)
+    out = capsys.readouterr().out
+
+    assert called is False
+    assert "estimated_operations exceeds max_operations" in out
+
+
+def test_strategy_sweep_cli_allow_large_sweep_permits_budget_exceedance(
+    configured_db, capsys
+) -> None:
+    _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
+    object.__setattr__(settings, "MODE", "live")
+    args = _sweep_args(as_json=True) + [
+        "--max-candles",
+        "5000",
+        "--max-operations",
+        "9",
+        "--allow-large-sweep",
+    ]
+
+    rc = main(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["plan"]["estimated_operations"] == 10
+    assert payload["plan"]["max_operations"] == 9
+    assert payload["plan"]["allow_large_sweep"] is True
+    assert payload["plan"]["allowed"] is True
+
+
+def test_strategy_sweep_cli_max_operations_changes_threshold(
+    configured_db, capsys
+) -> None:
+    _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
+    object.__setattr__(settings, "MODE", "live")
+    args = _sweep_args(as_json=True) + ["--max-candles", "5000", "--max-operations", "10"]
+
+    rc = main(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["plan"]["estimated_operations"] == 10
+    assert payload["plan"]["max_operations"] == 10
+    assert payload["plan"]["allow_large_sweep"] is False
 
 
 def test_strategy_sweep_cli_invalid_max_candles_fails_cleanly(

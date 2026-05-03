@@ -14,6 +14,9 @@ from .strategy_replay import (
 )
 
 
+DEFAULT_STRATEGY_SWEEP_MAX_OPERATIONS = 300_000
+
+
 @dataclass(frozen=True)
 class StrategySweepGrid:
     short_values: tuple[int, ...]
@@ -55,6 +58,8 @@ class StrategySweepExecutionPlan:
     candle_count: int
     estimated_operations: int
     max_candles: int | None
+    max_operations: int | None
+    allow_large_sweep: bool
     full_history: bool
     allowed: bool
     block_reason: str | None
@@ -88,6 +93,14 @@ def _valid_grid_configs(
     return tuple(configs)
 
 
+def build_strategy_sweep_configs(
+    *,
+    base_config: SmaStrategyConfig,
+    grid: StrategySweepGrid,
+) -> tuple[SmaStrategyConfig, ...]:
+    return _valid_grid_configs(base_config=base_config, grid=grid)
+
+
 def build_strategy_sweep_execution_plan(
     *,
     grid: StrategySweepGrid,
@@ -98,6 +111,8 @@ def build_strategy_sweep_execution_plan(
     through_ts_ms: int | None,
     mode: str,
     allow_full_history: bool,
+    max_operations: int | None = None,
+    allow_large_sweep: bool = False,
 ) -> StrategySweepExecutionPlan:
     grid_count = sum(
         1
@@ -116,14 +131,24 @@ def build_strategy_sweep_execution_plan(
         and through_ts_ms is None
         and max_candles is None
     )
+    estimated_operations = int(grid_count) * int(candle_count)
     block_reason = None
     if str(mode) == "live" and full_history and not bool(allow_full_history):
         block_reason = "live_full_history_requires_window_or_max_candles"
+    elif (
+        max_operations is not None
+        and int(max_operations) >= 0
+        and estimated_operations > int(max_operations)
+        and not bool(allow_large_sweep)
+    ):
+        block_reason = "estimated_operations_exceeds_max_operations"
     return StrategySweepExecutionPlan(
         grid_count=int(grid_count),
         candle_count=int(candle_count),
-        estimated_operations=int(grid_count) * int(candle_count),
+        estimated_operations=estimated_operations,
         max_candles=None if max_candles is None else int(max_candles),
+        max_operations=None if max_operations is None else int(max_operations),
+        allow_large_sweep=bool(allow_large_sweep),
         full_history=bool(full_history),
         allowed=block_reason is None,
         block_reason=block_reason,
@@ -140,7 +165,7 @@ def run_sma_strategy_sweep(
     through_ts_ms: int | None = None,
     max_candles: int | None = None,
 ) -> list[StrategySweepResult]:
-    configs = _valid_grid_configs(base_config=base_config, grid=grid)
+    configs = build_strategy_sweep_configs(base_config=base_config, grid=grid)
     dataset = load_replay_candles(
         conn,
         pair=base_config.pair,

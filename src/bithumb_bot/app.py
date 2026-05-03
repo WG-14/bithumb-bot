@@ -133,11 +133,14 @@ from .decision_attribution import (
 )
 from .strategy_config import sma_strategy_config_from_settings
 from .strategy_sweep import (
+    DEFAULT_STRATEGY_SWEEP_MAX_OPERATIONS,
     StrategySweepGrid,
+    build_strategy_sweep_configs,
     build_strategy_sweep_execution_plan,
-    run_sma_strategy_sweep,
+    run_sma_strategy_sweep_from_candles,
     summarize_strategy_sweep_results,
 )
+from .strategy_replay import load_replay_candles
 from .storage_io import write_json_atomic
 from .bootstrap import get_last_explicit_env_load_summary
 
@@ -6550,6 +6553,7 @@ def _format_strategy_sweep_rows(*, plan: object, rows: list[object]) -> str:
             f"grid_count={int(getattr(plan, 'grid_count'))} "
             f"candle_count={int(getattr(plan, 'candle_count'))} "
             f"estimated_operations={int(getattr(plan, 'estimated_operations'))} "
+            f"max_operations={getattr(plan, 'max_operations')} "
             f"full_history={1 if bool(getattr(plan, 'full_history')) else 0} "
             f"max_candles={getattr(plan, 'max_candles')}"
         ),
@@ -6599,6 +6603,8 @@ def cmd_strategy_sweep(
     through_ts_ms: int | None,
     max_candles: int | None,
     allow_full_history: bool,
+    max_operations: int | None,
+    allow_large_sweep: bool,
     as_json: bool,
 ) -> None:
     base_config = sma_strategy_config_from_settings()
@@ -6628,20 +6634,54 @@ def cmd_strategy_sweep(
         through_ts_ms=through_ts_ms,
         mode=settings.MODE,
         allow_full_history=allow_full_history,
+        max_operations=max_operations,
+        allow_large_sweep=allow_large_sweep,
     )
     if not preflight_plan.allowed:
-        print(
-            "strategy-sweep in live mode requires "
-            "--from/--to/--through/--max-candles or --allow-full-history"
-        )
+        if preflight_plan.block_reason == "live_full_history_requires_window_or_max_candles":
+            print(
+                "strategy-sweep in live mode requires "
+                "--from/--to/--through/--max-candles or --allow-full-history"
+            )
+        else:
+            print(f"strategy-sweep blocked: {preflight_plan.block_reason}")
         raise SystemExit(1)
 
     conn = _connect_readonly_or_empty_candles()
     try:
-        results = run_sma_strategy_sweep(
+        dataset = load_replay_candles(
             conn,
-            base_config=base_config,
+            pair=base_config.pair,
+            interval=base_config.interval,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            through_ts_ms=through_ts_ms,
+            max_candles=max_candles,
+        )
+        plan = build_strategy_sweep_execution_plan(
             grid=grid,
+            candle_count=len(dataset.candles),
+            max_candles=max_candles,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            through_ts_ms=through_ts_ms,
+            mode=settings.MODE,
+            allow_full_history=allow_full_history,
+            max_operations=max_operations,
+            allow_large_sweep=allow_large_sweep,
+        )
+        if not plan.allowed:
+            if plan.block_reason == "estimated_operations_exceeds_max_operations":
+                print(
+                    "strategy-sweep estimated_operations exceeds max_operations; "
+                    "raise --max-operations or pass --allow-large-sweep"
+                )
+            else:
+                print(f"strategy-sweep blocked: {plan.block_reason}")
+            raise SystemExit(1)
+        results = run_sma_strategy_sweep_from_candles(
+            dataset,
+            configs=build_strategy_sweep_configs(base_config=base_config, grid=grid),
             from_ts_ms=from_ts_ms,
             to_ts_ms=to_ts_ms,
             through_ts_ms=through_ts_ms,
@@ -6651,17 +6691,6 @@ def cmd_strategy_sweep(
         conn.close()
 
     rows = summarize_strategy_sweep_results(results)
-    candle_count = results[0].replay_result.candle_count if results else 0
-    plan = build_strategy_sweep_execution_plan(
-        grid=grid,
-        candle_count=candle_count,
-        max_candles=max_candles,
-        from_ts_ms=from_ts_ms,
-        to_ts_ms=to_ts_ms,
-        through_ts_ms=through_ts_ms,
-        mode=settings.MODE,
-        allow_full_history=allow_full_history,
-    )
     if as_json:
         print(
             json.dumps(
@@ -6890,6 +6919,12 @@ def main(argv: list[str] | None = None) -> int:
     strategy_sweep.add_argument("--through", dest="through_date", help="KST date (YYYY-MM-DD)")
     strategy_sweep.add_argument("--max-candles", type=_positive_int_arg)
     strategy_sweep.add_argument("--allow-full-history", action="store_true")
+    strategy_sweep.add_argument(
+        "--max-operations",
+        type=_positive_int_arg,
+        default=DEFAULT_STRATEGY_SWEEP_MAX_OPERATIONS,
+    )
+    strategy_sweep.add_argument("--allow-large-sweep", action="store_true")
     strategy_sweep.add_argument("--json", action="store_true")
 
     fee_diag = sub.add_parser(
@@ -7169,6 +7204,8 @@ def main(argv: list[str] | None = None) -> int:
             through_ts_ms=through_ts_ms,
             max_candles=args.max_candles,
             allow_full_history=bool(args.allow_full_history),
+            max_operations=args.max_operations,
+            allow_large_sweep=bool(args.allow_large_sweep),
             as_json=bool(args.json),
         )
     elif args.cmd == "fee-diagnostics":

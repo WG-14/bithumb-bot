@@ -8,6 +8,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.decision_contract import BLOCK_LAYER_PRIORITY
 from bithumb_bot.decision_attribution import (
+    DecisionAttributionAccumulator,
     build_decision_attribution_summary_from_db,
     decision_attribution_summary_json,
     normalize_decision_attribution_from_context,
@@ -336,6 +337,80 @@ def test_decision_attribution_json_output_shape_is_deterministic() -> None:
         "primary_all_block_conflict_count": 0,
         "primary_block_present_count": 0,
     }
+
+
+def test_accumulator_summary_matches_summarize_for_mixed_rows() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        malformed_row = conn.execute(
+            "SELECT ? AS signal, ? AS context_json",
+            ("BUY", "{bad json"),
+        ).fetchone()
+        missing_row = conn.execute(
+            "SELECT ? AS signal, ? AS context_json",
+            ("HOLD", ""),
+        ).fetchone()
+    finally:
+        conn.close()
+    rows = [
+        normalize_decision_attribution_from_context(
+            {
+                "raw_signal": "BUY",
+                "final_signal": "HOLD",
+                "decision_type": "BLOCKED_ENTRY",
+                "entry_reason": "filtered entry: cost_edge",
+                "entry_block_reason": "filtered entry: cost_edge",
+                "all_block_reasons": ["strategy_filters.cost_edge"],
+                "gap_ratio": 0.001,
+                "required_edge_ratio": 0.003,
+                "signal_strength_label": "weak",
+            }
+        ),
+        normalize_decision_attribution_from_context(
+            {
+                "raw_signal": "SELL",
+                "final_signal": "SELL",
+                "decision_type": "SELL",
+                "entry_reason": "sma death cross",
+                "submit_expected": True,
+                "gap_ratio": 0.004,
+                "required_edge_ratio": 0.002,
+                "signal_strength_label": "tradable",
+            }
+        ),
+        normalize_decision_attribution_from_row(malformed_row),
+        normalize_decision_attribution_from_row(missing_row),
+    ]
+    accumulator = DecisionAttributionAccumulator()
+    for row in rows:
+        accumulator.add(row)
+
+    assert accumulator.summary().as_dict() == summarize_decision_attributions(rows).as_dict()
+    assert accumulator.summary().malformed_context_count == 1
+    assert accumulator.summary().context_missing_count == 1
+    assert accumulator.summary().candidate_funnel["raw_BUY"] == 2
+    assert accumulator.summary().candidate_funnel["raw_SELL"] == 1
+    assert accumulator.summary().filter_ratios["blocked_by_cost_filter_ratio"] == 0.25
+    assert accumulator.summary().edge_stats["gap_lt_required_ratio"] == 0.5
+
+
+def test_all_block_reasons_parse_once_classifies_cost_filter_and_order_rule() -> None:
+    attribution = normalize_decision_attribution_from_context(
+        {
+            "raw_signal": "BUY",
+            "final_signal": "HOLD",
+            "all_block_reasons": [
+                "strategy_filters.cost_edge",
+                "execution_order_rule.min_notional",
+            ],
+        }
+    )
+
+    assert attribution.blocked_by_cost_filter is True
+    assert attribution.blocked_by_order_rule is True
+    assert attribution.primary_block_layer == "strategy_filters"
+    assert attribution.primary_block_reason == "cost_edge"
 
 
 def test_decision_attribution_cli_json_reads_strategy_decisions_context(tmp_path, monkeypatch, capsys) -> None:

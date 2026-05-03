@@ -7,8 +7,9 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .decision_attribution import (
+    DecisionAttribution,
+    DecisionAttributionAccumulator,
     DecisionAttributionSummary,
-    normalize_decision_attribution_from_context,
     summarize_decision_attributions,
 )
 from .decision_contract import apply_decision_contract, build_replay_fingerprint
@@ -298,6 +299,73 @@ def _replay_decision_context(
     )
 
 
+def _replay_decision_attribution(
+    *,
+    replay_config: StrategyReplayConfig,
+    config_id: str,
+    candle_ts: int,
+    close: float,
+    prev_s: float,
+    prev_l: float,
+    curr_s: float,
+    curr_l: float,
+) -> DecisionAttribution:
+    del candle_ts, close
+    strategy_config = replay_config.strategy_config
+    raw_signal, base_reason = _base_signal(
+        prev_s=prev_s,
+        prev_l=prev_l,
+        curr_s=curr_s,
+        curr_l=curr_l,
+    )
+    gap_ratio = _compute_gap_ratio(curr_s=curr_s, curr_l=curr_l)
+    edge_filter_triggered, edge_filter_details = _evaluate_entry_edge_filter(
+        base_signal=raw_signal,
+        gap_ratio=gap_ratio,
+        slippage_bps=float(strategy_config.slippage_bps),
+        live_fee_rate_estimate=float(strategy_config.live_fee_rate_estimate),
+        edge_buffer_ratio=float(strategy_config.entry_edge_buffer_ratio),
+        strategy_min_expected_edge_ratio=float(strategy_config.strategy_min_expected_edge_ratio),
+    )
+    final_signal = "HOLD" if edge_filter_triggered else raw_signal
+    entry_reason = "filtered entry: cost_edge" if edge_filter_triggered else base_reason
+    signal_strength_label = _resolve_signal_strength_label(
+        base_signal=raw_signal,
+        expected_edge_ratio=float(edge_filter_details["expected_edge_ratio"]),
+        required_edge_ratio=float(edge_filter_details["required_edge_ratio"]),
+    )
+    decision_type = (
+        "BLOCKED_ENTRY"
+        if raw_signal == "BUY" and edge_filter_triggered
+        else "BLOCKED_EXIT"
+        if raw_signal == "SELL" and edge_filter_triggered
+        else final_signal
+    )
+    return DecisionAttribution(
+        raw_signal=raw_signal,
+        final_signal=final_signal,
+        decision_type=decision_type,
+        base_reason=base_reason,
+        entry_reason=entry_reason,
+        entry_block_reason=entry_reason if edge_filter_triggered else None,
+        primary_block_layer="strategy_filters" if edge_filter_triggered else "none",
+        primary_block_reason="cost_edge" if edge_filter_triggered else "none",
+        all_block_reasons=("strategy_filters.cost_edge",) if edge_filter_triggered else (),
+        blocked_by_cost_filter=bool(edge_filter_triggered),
+        blocked_by_fee_authority=False,
+        blocked_by_position_gate=False,
+        blocked_by_order_rule=False,
+        blocked_by_performance_gate=False,
+        gap_ratio=float(gap_ratio),
+        required_edge_ratio=float(edge_filter_details["required_edge_ratio"]),
+        signal_strength_label=signal_strength_label,
+        submit_expected=None,
+        execution_block_reason=None,
+        target_block_reason=None,
+        experiment_fingerprint=config_id,
+    )
+
+
 def replay_sma_strategy_decisions(
     conn: sqlite3.Connection,
     config: StrategyReplayConfig,
@@ -327,7 +395,7 @@ def replay_sma_strategy_decisions_from_candles(
         raise ValueError("dataset interval does not match strategy config")
 
     config_id = build_strategy_replay_config_id(config)
-    candles = list(dataset.candles)
+    candles = dataset.candles
     replay_start_index = int(strategy_config.long_n) + 1
     if len(candles) < replay_start_index + 1:
         return StrategyReplayResult(
@@ -340,15 +408,16 @@ def replay_sma_strategy_decisions_from_candles(
 
     timestamps = [ts for ts, _close in candles]
     closes = [close for _ts, close in candles]
-    contexts: list[dict[str, Any]] = []
+    accumulator = DecisionAttributionAccumulator()
+    decision_count = 0
     for index in range(replay_start_index, len(candles)):
         candle_ts = timestamps[index]
         if config.from_ts_ms is not None and candle_ts < int(config.from_ts_ms):
             continue
         end_prev = index
         end_curr = index + 1
-        contexts.append(
-            _replay_decision_context(
+        accumulator.add(
+            _replay_decision_attribution(
                 replay_config=config,
                 config_id=config_id,
                 candle_ts=candle_ts,
@@ -359,12 +428,12 @@ def replay_sma_strategy_decisions_from_candles(
                 curr_l=_sma(closes, int(strategy_config.long_n), end_curr),
             )
         )
+        decision_count += 1
 
-    attributions = [normalize_decision_attribution_from_context(context) for context in contexts]
     return StrategyReplayResult(
         config_id=config_id,
-        attribution_summary=summarize_decision_attributions(attributions),
-        decision_count=len(attributions),
+        attribution_summary=accumulator.summary(),
+        decision_count=decision_count,
         insufficient_candle_count=0,
         candle_count=len(candles),
     )

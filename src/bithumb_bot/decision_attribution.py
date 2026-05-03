@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Iterable, Sequence
 
@@ -216,27 +216,23 @@ def _reason_pairs(all_block_reasons: Sequence[str]) -> set[tuple[str, str]]:
     return {parsed for parsed in (split_block_reason(reason) for reason in all_block_reasons) if parsed}
 
 
-def _has_layer(all_block_reasons: Sequence[str], layer: str) -> bool:
-    return any(parsed_layer == layer for parsed_layer, _reason in _reason_pairs(all_block_reasons))
+def _has_layer(reason_pairs: set[tuple[str, str]], layer: str) -> bool:
+    return any(parsed_layer == layer for parsed_layer, _reason in reason_pairs)
 
 
-def _has_reason(all_block_reasons: Sequence[str], layer: str, reason: str) -> bool:
-    return (layer, reason) in _reason_pairs(all_block_reasons)
+def _has_reason(reason_pairs: set[tuple[str, str]], layer: str, reason: str) -> bool:
+    return (layer, reason) in reason_pairs
 
 
 def _has_layer_reason_containing(
-    all_block_reasons: Sequence[str],
+    reason_pairs: set[tuple[str, str]],
     layer: str,
     *needles: str,
 ) -> bool:
     needle_values = tuple(str(needle).strip().lower() for needle in needles if str(needle).strip())
     if not needle_values:
         return False
-    for raw_reason in all_block_reasons:
-        parsed = split_block_reason(raw_reason)
-        if parsed is None:
-            continue
-        parsed_layer, parsed_reason = parsed
+    for parsed_layer, parsed_reason in reason_pairs:
         if parsed_layer != layer:
             continue
         reason_text = parsed_reason.lower()
@@ -353,29 +349,30 @@ def normalize_decision_attribution_from_context(context: dict[str, Any]) -> Deci
     )
     if not all_block_reasons and primary_block_layer != "none" and primary_block_reason != "none":
         all_block_reasons = (f"{primary_block_layer}.{primary_block_reason}",)
+    reason_pairs = _reason_pairs(all_block_reasons)
 
     entry_allowed = _bool_or_none(position_gate.get("entry_allowed"))
     canonical_cost_filter = (
-        _has_reason(all_block_reasons, "strategy_filters", "cost_edge")
-        or _has_reason(all_block_reasons, "pre_trade_economics", "net_edge_below_minimum")
+        _has_reason(reason_pairs, "strategy_filters", "cost_edge")
+        or _has_reason(reason_pairs, "pre_trade_economics", "net_edge_below_minimum")
         or _has_layer_reason_containing(
-            all_block_reasons,
+            reason_pairs,
             "strategy_filters",
             "cost_edge",
             "edge_below",
         )
         or _has_layer_reason_containing(
-            all_block_reasons,
+            reason_pairs,
             "pre_trade_economics",
             "cost_edge",
             "edge_below",
             "net_edge_below_minimum",
         )
     )
-    canonical_fee_authority = _has_layer(all_block_reasons, "fee_authority")
-    canonical_position_gate = _has_layer(all_block_reasons, "position_gate")
-    canonical_order_rule = _has_layer(all_block_reasons, "execution_order_rule")
-    canonical_performance_gate = _has_layer(all_block_reasons, "performance_gate")
+    canonical_fee_authority = _has_layer(reason_pairs, "fee_authority")
+    canonical_position_gate = _has_layer(reason_pairs, "position_gate")
+    canonical_order_rule = _has_layer(reason_pairs, "execution_order_rule")
+    canonical_performance_gate = _has_layer(reason_pairs, "performance_gate")
 
     explicit_cost_filter = _bool_or_none(context.get("blocked_by_cost_filter"))
     explicit_fee_authority = _bool_or_none(context.get("blocked_by_fee_authority"))
@@ -549,6 +546,146 @@ def _edge_stats(rows: list[DecisionAttribution]) -> dict[str, float | None]:
     }
 
 
+@dataclass
+class DecisionAttributionAccumulator:
+    sample_count: int = 0
+    malformed_context_count: int = 0
+    context_missing_count: int = 0
+    raw_signal_counts: Counter[str] = field(default_factory=Counter)
+    final_signal_counts: Counter[str] = field(default_factory=Counter)
+    decision_type_counts: Counter[str] = field(default_factory=Counter)
+    block_layer_counts: Counter[str] = field(default_factory=Counter)
+    block_reason_counts: Counter[str] = field(default_factory=Counter)
+    entry_reason_counts: Counter[str] = field(default_factory=Counter)
+    entry_block_reason_counts: Counter[str] = field(default_factory=Counter)
+    signal_strength_counts: Counter[str] = field(default_factory=Counter)
+    filter_counts: Counter[str] = field(default_factory=Counter)
+    submit_expected_buy_count: int = 0
+    submit_expected_sell_count: int = 0
+    submit_mismatch_buy_count: int = 0
+    submit_mismatch_sell_count: int = 0
+    all_block_reasons_present_count: int = 0
+    primary_block_present_count: int = 0
+    primary_all_block_conflict_count: int = 0
+    gap_ratios: list[float] = field(default_factory=list)
+    required_edge_ratios: list[float] = field(default_factory=list)
+    comparable_edge_count: int = 0
+    gap_lt_required_count: int = 0
+
+    def add(self, row: DecisionAttribution) -> None:
+        self.sample_count += 1
+        self.raw_signal_counts[row.raw_signal] += 1
+        self.final_signal_counts[row.final_signal] += 1
+        self.decision_type_counts[row.decision_type] += 1
+        if row.primary_block_layer != "none":
+            self.block_layer_counts[row.primary_block_layer] += 1
+        self.block_reason_counts.update(row.all_block_reasons)
+        self.entry_reason_counts[row.entry_reason] += 1
+        self.entry_block_reason_counts[row.entry_block_reason or "none"] += 1
+        self.signal_strength_counts[row.signal_strength_label] += 1
+        if row.context_status == "malformed":
+            self.malformed_context_count += 1
+        if row.context_status == "missing":
+            self.context_missing_count += 1
+        if row.final_signal == "BUY" and row.submit_expected is True:
+            self.submit_expected_buy_count += 1
+        if row.final_signal == "SELL" and row.submit_expected is True:
+            self.submit_expected_sell_count += 1
+        if row.final_signal == "BUY" and row.submit_expected is False:
+            self.submit_mismatch_buy_count += 1
+        if row.final_signal == "SELL" and row.submit_expected is False:
+            self.submit_mismatch_sell_count += 1
+        for key in FILTER_KEYS:
+            if getattr(row, key):
+                self.filter_counts[key] += 1
+        if row.all_block_reasons:
+            self.all_block_reasons_present_count += 1
+        if row.primary_block_layer != "none" and row.primary_block_reason != "none":
+            self.primary_block_present_count += 1
+        if row.primary_all_block_conflict:
+            self.primary_all_block_conflict_count += 1
+        if row.gap_ratio is not None:
+            self.gap_ratios.append(float(row.gap_ratio))
+        if row.required_edge_ratio is not None:
+            self.required_edge_ratios.append(float(row.required_edge_ratio))
+        if row.gap_ratio is not None and row.required_edge_ratio is not None:
+            self.comparable_edge_count += 1
+            if float(row.gap_ratio) < float(row.required_edge_ratio):
+                self.gap_lt_required_count += 1
+
+    def _edge_stats(self) -> dict[str, float | None]:
+        return {
+            "gap_ratio_avg": None if not self.gap_ratios else sum(self.gap_ratios) / float(len(self.gap_ratios)),
+            "gap_ratio_median": None if not self.gap_ratios else float(median(self.gap_ratios)),
+            "gap_ratio_p90": _percentile(self.gap_ratios, 0.9),
+            "required_edge_ratio_avg": (
+                None
+                if not self.required_edge_ratios
+                else sum(self.required_edge_ratios) / float(len(self.required_edge_ratios))
+            ),
+            "required_edge_ratio_median": (
+                None if not self.required_edge_ratios else float(median(self.required_edge_ratios))
+            ),
+            "gap_lt_required_ratio": (
+                None
+                if self.comparable_edge_count <= 0
+                else self.gap_lt_required_count / float(self.comparable_edge_count)
+            ),
+        }
+
+    def summary(self) -> DecisionAttributionSummary:
+        candidate_funnel = {
+            "raw_BUY": self.raw_signal_counts.get("BUY", 0),
+            "final_BUY": self.final_signal_counts.get("BUY", 0),
+            "submit_expected_BUY": self.submit_expected_buy_count,
+            "raw_SELL": self.raw_signal_counts.get("SELL", 0),
+            "final_SELL": self.final_signal_counts.get("SELL", 0),
+            "submit_expected_SELL": self.submit_expected_sell_count,
+        }
+        filter_ratios = {
+            f"{key}_ratio": _ratio(self.filter_counts.get(key, 0), self.sample_count)
+            for key in FILTER_KEYS
+        }
+        submit_mismatch = {
+            "final_BUY_submit_expected_false": self.submit_mismatch_buy_count,
+            "final_SELL_submit_expected_false": self.submit_mismatch_sell_count,
+        }
+        schema_quality = {
+            "all_block_reasons_present_count": self.all_block_reasons_present_count,
+            "primary_block_present_count": self.primary_block_present_count,
+            "primary_all_block_conflict_count": self.primary_all_block_conflict_count,
+        }
+        edge_stats = self._edge_stats()
+        partial = {
+            "sample_count": self.sample_count,
+            "malformed_context_count": self.malformed_context_count,
+            "context_missing_count": self.context_missing_count,
+            "candidate_funnel": candidate_funnel,
+            "filter_ratios": filter_ratios,
+            "edge_stats": edge_stats,
+            "submit_mismatch": submit_mismatch,
+        }
+        return DecisionAttributionSummary(
+            sample_count=self.sample_count,
+            malformed_context_count=self.malformed_context_count,
+            context_missing_count=self.context_missing_count,
+            raw_signal_counts=_sorted_counts(self.raw_signal_counts),
+            final_signal_counts=_sorted_counts(self.final_signal_counts),
+            decision_type_counts=_sorted_counts(self.decision_type_counts),
+            candidate_funnel=candidate_funnel,
+            block_layer_counts=_sorted_counts(self.block_layer_counts),
+            block_reason_counts=_sorted_counts(self.block_reason_counts),
+            entry_reason_counts=_sorted_counts(self.entry_reason_counts),
+            entry_block_reason_counts=_sorted_counts(self.entry_block_reason_counts),
+            filter_ratios=filter_ratios,
+            edge_stats=edge_stats,
+            signal_strength_counts=_sorted_counts(self.signal_strength_counts),
+            submit_mismatch=submit_mismatch,
+            schema_quality=schema_quality,
+            interpretation=_interpret(partial),
+        )
+
+
 def _interpret(summary: dict[str, Any]) -> dict[str, str]:
     sample_count = int(summary["sample_count"])
     if sample_count <= 0:
@@ -596,79 +733,10 @@ def _interpret(summary: dict[str, Any]) -> dict[str, str]:
 def summarize_decision_attributions(
     rows: Iterable[DecisionAttribution],
 ) -> DecisionAttributionSummary:
-    items = list(rows)
-    sample_count = len(items)
-    raw_counts = Counter(row.raw_signal for row in items)
-    final_counts = Counter(row.final_signal for row in items)
-    decision_type_counts = Counter(row.decision_type for row in items)
-    block_layer_counts = Counter(row.primary_block_layer for row in items if row.primary_block_layer != "none")
-    block_reason_counts = Counter(
-        reason
-        for row in items
-        for reason in row.all_block_reasons
-    )
-    entry_reason_counts = Counter(row.entry_reason for row in items)
-    entry_block_reason_counts = Counter(row.entry_block_reason or "none" for row in items)
-    signal_strength_counts = Counter(row.signal_strength_label for row in items)
-    malformed_context_count = sum(1 for row in items if row.context_status == "malformed")
-    context_missing_count = sum(1 for row in items if row.context_status == "missing")
-    candidate_funnel = {
-        "raw_BUY": raw_counts.get("BUY", 0),
-        "final_BUY": final_counts.get("BUY", 0),
-        "submit_expected_BUY": sum(1 for row in items if row.final_signal == "BUY" and row.submit_expected is True),
-        "raw_SELL": raw_counts.get("SELL", 0),
-        "final_SELL": final_counts.get("SELL", 0),
-        "submit_expected_SELL": sum(1 for row in items if row.final_signal == "SELL" and row.submit_expected is True),
-    }
-    filter_ratios = {
-        f"{key}_ratio": _ratio(sum(1 for row in items if getattr(row, key)), sample_count)
-        for key in FILTER_KEYS
-    }
-    submit_mismatch = {
-        "final_BUY_submit_expected_false": sum(
-            1 for row in items if row.final_signal == "BUY" and row.submit_expected is False
-        ),
-        "final_SELL_submit_expected_false": sum(
-            1 for row in items if row.final_signal == "SELL" and row.submit_expected is False
-        ),
-    }
-    schema_quality = {
-        "all_block_reasons_present_count": sum(1 for row in items if row.all_block_reasons),
-        "primary_block_present_count": sum(
-            1
-            for row in items
-            if row.primary_block_layer != "none" and row.primary_block_reason != "none"
-        ),
-        "primary_all_block_conflict_count": sum(1 for row in items if row.primary_all_block_conflict),
-    }
-    partial = {
-        "sample_count": sample_count,
-        "malformed_context_count": malformed_context_count,
-        "context_missing_count": context_missing_count,
-        "candidate_funnel": candidate_funnel,
-        "filter_ratios": filter_ratios,
-        "edge_stats": _edge_stats(items),
-        "submit_mismatch": submit_mismatch,
-    }
-    return DecisionAttributionSummary(
-        sample_count=sample_count,
-        malformed_context_count=malformed_context_count,
-        context_missing_count=context_missing_count,
-        raw_signal_counts=_sorted_counts(raw_counts),
-        final_signal_counts=_sorted_counts(final_counts),
-        decision_type_counts=_sorted_counts(decision_type_counts),
-        candidate_funnel=candidate_funnel,
-        block_layer_counts=_sorted_counts(block_layer_counts),
-        block_reason_counts=_sorted_counts(block_reason_counts),
-        entry_reason_counts=_sorted_counts(entry_reason_counts),
-        entry_block_reason_counts=_sorted_counts(entry_block_reason_counts),
-        filter_ratios=filter_ratios,
-        edge_stats=partial["edge_stats"],
-        signal_strength_counts=_sorted_counts(signal_strength_counts),
-        submit_mismatch=submit_mismatch,
-        schema_quality=schema_quality,
-        interpretation=_interpret(partial),
-    )
+    accumulator = DecisionAttributionAccumulator()
+    for row in rows:
+        accumulator.add(row)
+    return accumulator.summary()
 
 
 def fetch_decision_attribution_rows(

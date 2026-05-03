@@ -315,8 +315,57 @@ def test_sweep_execution_plan_counts_valid_grid_and_operations() -> None:
 
     assert plan.grid_count == 3
     assert plan.estimated_operations == 15_000
+    assert plan.max_operations is None
+    assert plan.allow_large_sweep is False
     assert plan.full_history is False
     assert plan.allowed is True
+
+
+def test_sweep_execution_plan_blocks_operations_over_budget() -> None:
+    plan = build_strategy_sweep_execution_plan(
+        grid=_single_cross_grid(
+            short_values=(2, 3),
+            long_values=(3, 4),
+            entry_edge_buffer_values=(0.0, 0.01),
+        ),
+        candle_count=100,
+        max_candles=100,
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        mode="live",
+        allow_full_history=False,
+        max_operations=500,
+        allow_large_sweep=False,
+    )
+
+    assert plan.estimated_operations == 600
+    assert plan.allowed is False
+    assert plan.block_reason == "estimated_operations_exceeds_max_operations"
+    assert plan.max_operations == 500
+
+
+def test_sweep_execution_plan_allow_large_sweep_overrides_operation_budget() -> None:
+    plan = build_strategy_sweep_execution_plan(
+        grid=_single_cross_grid(
+            short_values=(2, 3),
+            long_values=(3, 4),
+            entry_edge_buffer_values=(0.0, 0.01),
+        ),
+        candle_count=100,
+        max_candles=100,
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        mode="live",
+        allow_full_history=False,
+        max_operations=500,
+        allow_large_sweep=True,
+    )
+
+    assert plan.estimated_operations == 600
+    assert plan.allowed is True
+    assert plan.allow_large_sweep is True
 
 
 def test_sweep_execution_plan_blocks_live_unbounded_full_history() -> None:
