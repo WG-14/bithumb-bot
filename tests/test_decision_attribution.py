@@ -15,6 +15,7 @@ from bithumb_bot.decision_attribution import (
     normalize_decision_attribution_from_row,
     summarize_decision_attributions,
 )
+from bithumb_bot.observability import configure_runtime_logging
 
 
 def _memory_conn() -> sqlite3.Connection:
@@ -456,3 +457,57 @@ def test_decision_attribution_cli_json_reads_strategy_decisions_context(tmp_path
     assert payload["block_reason_counts"] == {"strategy_filters.cost_edge": 1}
     assert payload["filter_ratios"]["blocked_by_cost_filter_ratio"] == 1.0
     assert payload["schema_quality"]["all_block_reasons_present_count"] == 1
+
+
+def test_decision_attribution_cli_json_stdout_is_parseable_when_live_contract_logs(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    original = {
+        "DB_PATH": settings.DB_PATH,
+        "MODE": settings.MODE,
+        "PAIR": settings.PAIR,
+        "INTERVAL": settings.INTERVAL,
+    }
+    db_path = str((tmp_path / "decision-attribution-live.sqlite").resolve())
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "INTERVAL", "1m")
+
+    conn = ensure_db()
+    try:
+        _insert_context(
+            conn,
+            signal="HOLD",
+            context={
+                "pair": "KRW-BTC",
+                "interval": "1m",
+                "raw_signal": "BUY",
+                "final_signal": "HOLD",
+                "decision_type": "BLOCKED_ENTRY",
+                "all_block_reasons": ["strategy_filters.cost_edge"],
+                "signal_flow": {
+                    "primary_block_layer": "strategy_filters",
+                    "primary_block_reason": "cost_edge",
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        configure_runtime_logging()
+        rc = main(["decision-attribution", "--limit", "5", "--json"])
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+    finally:
+        for name, value in original.items():
+            object.__setattr__(settings, name, value)
+
+    assert rc == 0
+    assert captured.out.lstrip().startswith("{")
+    assert "LIVE_EXECUTION_CONTRACT" not in captured.out
+    assert "LIVE_EXECUTION_CONTRACT" in captured.err
+    assert payload["sample_count"] == 1

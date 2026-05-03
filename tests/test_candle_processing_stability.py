@@ -193,7 +193,7 @@ def test_select_latest_closed_candle_consistent_with_to_exclusive_snapshot_cutof
     assert incomplete_ts == 120_000
 
 
-def test_run_loop_logs_duplicate_and_incomplete_candle_and_skips_reprocessing(monkeypatch, capsys):
+def test_run_loop_logs_duplicate_and_incomplete_candle_and_skips_reprocessing(monkeypatch, caplog):
     closed_ts = 0
     open_ts = 60_000
     _insert_candle(closed_ts, 100.0)
@@ -218,9 +218,10 @@ def test_run_loop_logs_duplicate_and_incomplete_candle_and_skips_reprocessing(mo
 
     monkeypatch.setattr("bithumb_bot.engine.time.sleep", _sleep)
 
-    run_loop(5, 20)
+    with caplog.at_level("INFO", logger="bithumb_bot.run"):
+        run_loop(5, 20)
 
-    output = capsys.readouterr().out
+    output = caplog.text
     assert "[SKIP] incomplete/open candle" in output
     assert f"candle_ts={open_ts}" in output
     assert "[SKIP] duplicate candle" in output
@@ -228,7 +229,7 @@ def test_run_loop_logs_duplicate_and_incomplete_candle_and_skips_reprocessing(mo
     assert runtime_state.snapshot().last_processed_candle_ts_ms == closed_ts
 
 
-def test_run_loop_processes_latest_closed_candle_and_persists_it(monkeypatch, capsys):
+def test_run_loop_processes_latest_closed_candle_and_persists_it(monkeypatch, caplog):
     closed_ts = 0
     open_ts = 60_000
     _insert_candle(closed_ts, 100.0)
@@ -259,15 +260,16 @@ def test_run_loop_processes_latest_closed_candle_and_persists_it(monkeypatch, ca
     monkeypatch.setattr("bithumb_bot.engine.time.sleep", _sleep)
     monkeypatch.setattr("bithumb_bot.engine.paper_execute", lambda *_args, **_kwargs: pytest.fail("HOLD should not execute"))
 
-    run_loop(5, 20)
+    with caplog.at_level("INFO", logger="bithumb_bot.run"):
+        run_loop(5, 20)
 
-    output = capsys.readouterr().out
+    output = caplog.text
     assert "[RUN] processed closed candle" in output
     assert f"candle_ts={closed_ts}" in output
     assert runtime_state.snapshot().last_processed_candle_ts_ms == closed_ts
 
 
-def test_run_loop_uses_closed_candle_for_signal_and_trade_log_correlation(monkeypatch, capsys):
+def test_run_loop_uses_closed_candle_for_signal_and_trade_log_correlation(monkeypatch, caplog):
     closed_ts = 0
     open_ts = 60_000
     _insert_candle(closed_ts, 100.0)
@@ -319,9 +321,10 @@ def test_run_loop_uses_closed_candle_for_signal_and_trade_log_correlation(monkey
 
     monkeypatch.setattr("bithumb_bot.engine.time.sleep", _sleep)
 
-    run_loop(5, 20)
+    with caplog.at_level("INFO", logger="bithumb_bot.run"):
+        run_loop(5, 20)
 
-    output = capsys.readouterr().out
+    output = caplog.text
     assert "[RUN] processed closed candle" in output
     assert "[RUN] trade_applied" in output
     assert "client_order_id=paper-closed-log" in output

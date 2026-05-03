@@ -12,6 +12,7 @@ from .config import (
 from .risk import evaluate_buy_guardrails
 from .broker.paper import paper_execute
 import os
+import sys
 import time
 import argparse
 import sqlite3
@@ -6641,10 +6642,11 @@ def cmd_strategy_sweep(
         if preflight_plan.block_reason == "live_full_history_requires_window_or_max_candles":
             print(
                 "strategy-sweep in live mode requires "
-                "--from/--to/--through/--max-candles or --allow-full-history"
+                "--from/--to/--through/--max-candles or --allow-full-history",
+                file=sys.stderr,
             )
         else:
-            print(f"strategy-sweep blocked: {preflight_plan.block_reason}")
+            print(f"strategy-sweep blocked: {preflight_plan.block_reason}", file=sys.stderr)
         raise SystemExit(1)
 
     conn = _connect_readonly_or_empty_candles()
@@ -6674,10 +6676,11 @@ def cmd_strategy_sweep(
             if plan.block_reason == "estimated_operations_exceeds_max_operations":
                 print(
                     "strategy-sweep estimated_operations exceeds max_operations; "
-                    "raise --max-operations or pass --allow-large-sweep"
+                    "raise --max-operations or pass --allow-large-sweep",
+                    file=sys.stderr,
                 )
             else:
-                print(f"strategy-sweep blocked: {plan.block_reason}")
+                print(f"strategy-sweep blocked: {plan.block_reason}", file=sys.stderr)
             raise SystemExit(1)
         results = run_sma_strategy_sweep_from_candles(
             dataset,

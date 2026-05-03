@@ -12,7 +12,8 @@ from .markets import canonical_market_with_raw
 from .notifier import AlertSeverity, format_event, notify
 
 
-_STDOUT_HANDLER_NAME = "bithumb_bot_stdout"
+_LOG_HANDLER_NAME = "bithumb_bot_stderr"
+_LEGACY_STDOUT_HANDLER_NAME = "bithumb_bot_stdout"
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 _LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
@@ -100,26 +101,29 @@ def configure_runtime_logging(level: int = logging.INFO) -> None:
     _reconfigure_text_stream(sys.stderr)
 
     root_logger = logging.getLogger()
+    for existing in list(root_logger.handlers):
+        if getattr(existing, "name", "") == _LEGACY_STDOUT_HANDLER_NAME:
+            root_logger.removeHandler(existing)
     handler = next(
         (
             existing
             for existing in root_logger.handlers
-            if getattr(existing, "name", "") == _STDOUT_HANDLER_NAME
+            if getattr(existing, "name", "") == _LOG_HANDLER_NAME
         ),
         None,
     )
     if handler is None:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.set_name(_STDOUT_HANDLER_NAME)
+        handler = logging.StreamHandler(sys.stderr)
+        handler.set_name(_LOG_HANDLER_NAME)
         handler.setFormatter(logging.Formatter(_LOG_FORMAT, _LOG_DATE_FORMAT))
         root_logger.addHandler(handler)
     else:
         try:
-            handler.setStream(sys.stdout)
+            handler.setStream(sys.stderr)
         except ValueError:
             root_logger.removeHandler(handler)
-            handler = logging.StreamHandler(sys.stdout)
-            handler.set_name(_STDOUT_HANDLER_NAME)
+            handler = logging.StreamHandler(sys.stderr)
+            handler.set_name(_LOG_HANDLER_NAME)
             handler.setFormatter(logging.Formatter(_LOG_FORMAT, _LOG_DATE_FORMAT))
             root_logger.addHandler(handler)
     root_logger.setLevel(level)

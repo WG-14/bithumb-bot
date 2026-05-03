@@ -1,435 +1,306 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The EC2 validation has moved the bottleneck inward. Earlier problems around unbounded candle fetch, missing index, repeated candle reload, and live full-history guard are mostly addressed. The new issue is that large bounded sweeps still become operationally impractical because replay generates per-decision contexts, runs the generic live-context attribution normalizer, and materializes intermediate lists.
+The latest EC2 validation confirms that the large attribution-based `strategy-sweep` computation itself now succeeds. The remaining issue is not performance, not replay correctness, and not operation-budget enforcement. The remaining issue is **machine-readable JSON stdout pollution**: `--json` output is being mixed with `LIVE_EXECUTION_CONTRACT` log lines on stdout, so redirecting stdout to a file creates invalid JSON.
 
-Use the prior analysis context as guidance, but verify every claim directly in the repo before editing. 
+Use the EC2 observation as a starting point, but verify the exact logging/output path directly in the repo before editing.
 
-## Core observed facts from EC2
+## Observed EC2 fact
 
-Treat these as observed facts from the EC2 logs, not guesses:
+This command completed and wrote rows:
 
-```text
-Small bounded sweep succeeded:
-  --max-candles 5000
-  grid_count=2
-  candle_count=5000
-  estimated_operations=10000
-  completed successfully
-
-Large bounded sweep was interrupted:
-  --max-candles 5000
-  large grid around 216 configs
-  interruption occurred inside replay attribution normalization, not DB fetch
-
-Traceback location:
-  replay_sma_strategy_decisions_from_candles
-  → attributions = [normalize_decision_attribution_from_context(context) for context in contexts]
-  → decision_attribution._has_reason
-  → decision_attribution._reason_pairs
+```bash
+uv run bithumb-bot strategy-sweep \
+  --short 5,7,10 \
+  --long 20,30,50 \
+  --edge-buffer 0,0.0005,0.001,0.002 \
+  --min-expected-edge 0,0.0005,0.001 \
+  --slippage-bps 0,5 \
+  --max-candles 5000 \
+  --max-operations 1500000 \
+  --allow-large-sweep \
+  --json > /tmp/strategy-sweep-5000.json
 ```
 
-The important shift:
+But the redirected file begins with a log line:
 
 ```text
-DB I/O boundary: mostly fixed
-CPU/object/allocation attribution path: now the bottleneck
+2026-05-03T04:18:26+0000 INFO [LIVE_EXECUTION_CONTRACT] ...
+```
+
+Then the actual JSON starts on the next line:
+
+```json
+{"plan": {"allow_large_sweep": true, "allowed": true, ...}, "rows": [...]}
+```
+
+Therefore:
+
+```python
+json.load(open("/tmp/strategy-sweep-5000.json"))
+```
+
+fails with `JSONDecodeError: Extra data`.
+
+This proves:
+
+```text
+large sweep computation: successful
+operation guard / allow-large-sweep: successful
+remaining defect: --json stdout is not machine-readable
 ```
 
 ## Core hypothesis to verify
 
-The current root cause is likely:
+The likely root cause is:
 
 ```text
-Replay/sweep still routes simple replay decisions through the generic live-context attribution pipeline.
-That generic path is correct for historical/live stored contexts, but too expensive for large synthetic replay grids.
+log_live_execution_contract or related live-command diagnostics are emitted to stdout before the JSON payload.
 ```
+
+This is a CLI channel separation bug, not a strategy/replay/sweep computation bug.
 
 Keep this as a hypothesis until you inspect the code.
 
-Concrete hypotheses to verify:
-
-```text
-H1: replay_sma_strategy_decisions_from_candles builds a list of context dicts, then normalizes them.
-H2: replay uses normalize_decision_attribution_from_context() for every synthetic replay decision.
-H3: summarize_decision_attributions() materializes the iterable into a list internally.
-H4: normalize_decision_attribution_from_context() reparses all_block_reasons multiple times per decision.
-H5: strategy-sweep has max_candles/full-history guard, but no max_operations / allow-large-sweep guard.
-```
-
-Do not assume all are true. Inspect first.
-
----
-
-# Required investigation before editing
+## Required investigation before editing
 
 Inspect at least:
 
 ```text
-src/bithumb_bot/strategy_replay.py
-src/bithumb_bot/strategy_sweep.py
-src/bithumb_bot/decision_attribution.py
 src/bithumb_bot/app.py
-tests/test_strategy_replay.py
-tests/test_strategy_sweep.py
+src/bithumb_bot/config.py
+src/bithumb_bot/bootstrap.py
+src/bithumb_bot/cli.py
 tests/test_strategy_sweep_cli.py
 tests/test_decision_attribution.py
+tests/test_operator_commands.py
+tests/test_live_preflight.py
 ```
 
 Verify:
 
-* whether `CandleReplayDataset` exists
-* whether `replay_sma_strategy_decisions_from_candles()` exists
-* whether it still creates `contexts: list[dict]`
-* whether replay still calls `normalize_decision_attribution_from_context()` for each synthetic decision
-* whether `summarize_decision_attributions()` converts rows to `list(rows)`
-* whether `DecisionAttribution` can be constructed directly without breaking external behavior
-* whether `StrategySweepExecutionPlan` already has `estimated_operations`
-* whether CLI already has `--max-operations` / `--allow-large-sweep`
-* how CLI errors are raised in `app.py`
+* where `log_live_execution_contract()` is called
+* whether it prints directly, uses `logging`, or otherwise writes to stdout
+* whether the logging configuration sends INFO logs to stdout
+* whether `strategy-sweep --json` currently prints JSON to stdout after live contract logging
+* whether `decision-attribution --json` has the same stdout pollution risk
+* whether other machine-readable commands exist and need the same policy
+* how current tests capture stdout/stderr with `capsys`
 
-Adapt to the actual repo state. Preserve existing public APIs where reasonable.
+Do not assume the issue is limited to `strategy-sweep`; verify it.
 
 ---
 
 # Primary objective
 
-Make large attribution-based replay/sweep operationally viable without changing its meaning.
+Make machine-readable CLI modes actually machine-readable.
 
-This patch should prioritize:
+The rule is:
 
 ```text
-1. replay direct DecisionAttribution construction
-2. streaming DecisionAttribution summary accumulation
-3. removal of unnecessary context list materialization in replay
-4. max-operations / allow-large-sweep guard
-5. optional all_block_reasons parse caching in generic normalizer
+When a command is invoked with --json, stdout must contain only the JSON payload.
+Logs, diagnostics, live execution contract messages, warnings, and human-readable status lines must go to stderr or a log file.
 ```
 
-Do **not** add PnL/backtest/fill simulation.
-
-Do **not** change trading behavior.
-
-Do **not** make sweep recommend a “best config.”
+This patch should prioritize channel separation, not more strategy logic.
 
 ---
 
-# Part 1: Add a streaming DecisionAttributionAccumulator
+# Required design principle
 
-In `src/bithumb_bot/decision_attribution.py`, add an accumulator that can build `DecisionAttributionSummary` without materializing all `DecisionAttribution` rows as a list.
-
-Suggested shape:
-
-```python
-@dataclass
-class DecisionAttributionAccumulator:
-    ...
-
-    def add(self, row: DecisionAttribution) -> None:
-        ...
-
-    def summary(self) -> DecisionAttributionSummary:
-        ...
-```
-
-It should preserve the current summary semantics:
+Adopt this repo-level CLI output contract:
 
 ```text
-sample_count
-malformed_context_count
-context_missing_count
-raw_signal_counts
-final_signal_counts
-decision_type_counts
-candidate_funnel
-block_layer_counts
-block_reason_counts
-entry_reason_counts
-entry_block_reason_counts
-filter_ratios
-edge_stats
-signal_strength_counts
-submit_mismatch
-schema_quality
-interpretation
+stdout:
+  command result data
+
+stderr:
+  logs, diagnostics, warnings, live execution contract, progress/status messages
+
+--json stdout:
+  valid JSON only
 ```
 
-For edge stats, it is acceptable to keep lists of numeric `gap_ratio` and `required_edge_ratio` values for median/p90. The point is to avoid holding full attribution objects and context dicts in memory.
+This is not cosmetic. It is required so operators can safely do:
 
-Update:
+```bash
+uv run bithumb-bot strategy-sweep ... --json > result.json
+python3 -c 'import json; json.load(open("result.json"))'
+```
+
+---
+
+# Part 1: Fix JSON stdout purity for strategy-sweep
+
+For:
+
+```bash
+uv run bithumb-bot strategy-sweep ... --json
+```
+
+ensure:
+
+```text
+stdout starts with "{" and contains exactly one JSON object
+json.loads(stdout) succeeds
+LIVE_EXECUTION_CONTRACT is not present in stdout
+```
+
+`LIVE_EXECUTION_CONTRACT` may still be emitted to stderr, provided tests expect that.
+
+If the existing implementation calls `log_live_execution_contract()` before command dispatch, modify the logging path or add a command-level JSON-output guard so that logs do not go to stdout when `--json` is requested.
+
+Do not suppress critical logs entirely unless unavoidable. Prefer moving them to stderr.
+
+---
+
+# Part 2: Check and fix decision-attribution JSON too
+
+The earlier EC2 `decision-attribution --json` output also displayed the live contract log before JSON in the terminal. Verify whether redirecting it to a file produces polluted JSON.
+
+For:
+
+```bash
+uv run bithumb-bot decision-attribution --limit 500 --json
+```
+
+ensure:
+
+```text
+stdout is valid JSON
+LIVE_EXECUTION_CONTRACT is not present in stdout
+```
+
+Again, stderr may contain logs.
+
+---
+
+# Part 3: Use a general solution, not a one-off sweep hack
+
+Do not patch only `cmd_strategy_sweep()` if the root cause is logging configuration or global live contract logging.
+
+Prefer one of these approaches, depending on repo structure:
+
+## Option A: Logging goes to stderr globally
+
+Configure Python logging so command diagnostics go to stderr, not stdout. This is the cleanest if compatible with existing tests.
+
+## Option B: Machine-readable mode redirects diagnostics to stderr
+
+Add a CLI-level mechanism such as:
 
 ```python
-def summarize_decision_attributions(rows: Iterable[DecisionAttribution]) -> DecisionAttributionSummary:
-    ...
+machine_readable_output = command_has_json_flag(args)
 ```
 
-to use the accumulator internally while preserving the public function signature and output.
+and ensure live contract diagnostics/logging use stderr for those commands.
 
-Do not break existing tests.
+## Option C: Command-specific safe wrapper
+
+If global logging changes would break many tests, add a minimal wrapper around machine-readable commands, but document it as the CLI JSON contract.
+
+Do not silently drop logs. Do not mix logs into JSON stdout.
+
+---
+
+# Part 4: Tests
+
+Add or update tests.
+
+Prefer extending:
+
+```text
+tests/test_strategy_sweep_cli.py
+tests/test_decision_attribution.py
+tests/test_operator_commands.py
+```
+
+or create a focused file:
+
+```text
+tests/test_cli_json_stdout_purity.py
+```
 
 ## Required tests
 
-Update `tests/test_decision_attribution.py`:
+### Test 1: strategy-sweep JSON stdout is parseable
 
-1. Existing summary tests must still pass.
-2. Add a test comparing accumulator summary with `summarize_decision_attributions()` for a mixed fixture.
-3. Add malformed/missing context rows to ensure counts are unchanged.
-4. Add BUY/SELL/cost-filter rows to ensure candidate funnel and ratios are unchanged.
-
----
-
-# Part 2: Add replay direct DecisionAttribution builder
-
-In `src/bithumb_bot/strategy_replay.py`, add a replay-specific builder that constructs `DecisionAttribution` directly from known replay values.
-
-Suggested function:
+Set up a temp DB with candle fixture, set mode to live or simulate live mode if existing tests support it, then call:
 
 ```python
-def _replay_decision_attribution(
-    *,
-    replay_config: StrategyReplayConfig,
-    config_id: str,
-    candle_ts: int,
-    close: float,
-    prev_s: float,
-    prev_l: float,
-    curr_s: float,
-    curr_l: float,
-) -> DecisionAttribution:
-    ...
+rc = main([
+    "strategy-sweep",
+    "--short", "2",
+    "--long", "3",
+    "--edge-buffer", "0,0.02",
+    "--min-expected-edge", "0",
+    "--slippage-bps", "0",
+    "--pair", "BTC_KRW",
+    "--interval", "1m",
+    "--max-candles", "5000",
+    "--json",
+])
 ```
 
-It should compute the same replay decision values currently produced by `_replay_decision_context()`:
+Expected:
 
 ```text
-raw_signal
-final_signal
-decision_type
-base_reason
-entry_reason
-entry_block_reason
-primary_block_layer
-primary_block_reason
-all_block_reasons
-blocked_by_cost_filter
-gap_ratio
-required_edge_ratio
-signal_strength_label
-submit_expected=None
-experiment_fingerprint=config_id
+rc == 0
+stdout starts with "{"
+json.loads(stdout) succeeds
+"LIVE_EXECUTION_CONTRACT" not in stdout
 ```
 
-For cost-filtered decisions:
+If stderr contains `LIVE_EXECUTION_CONTRACT`, that is acceptable.
 
-```text
-primary_block_layer="strategy_filters"
-primary_block_reason="cost_edge"
-all_block_reasons=("strategy_filters.cost_edge",)
-blocked_by_cost_filter=True
-```
+### Test 2: strategy-sweep redirected JSON has no log prefix equivalent
 
-For non-blocked replay decisions:
+You do not need actual shell redirection. Captured stdout is enough. Assert the first non-whitespace character is `{`.
 
-```text
-primary_block_layer="none"
-primary_block_reason="none"
-all_block_reasons=()
-blocked_by_cost_filter=False
-```
+### Test 3: decision-attribution JSON stdout is parseable
 
-Other blocker booleans should remain false unless replay explicitly models them. Replay currently does not model position gate, execution order rule, fee authority, or performance gate.
+Set up a temp DB with at least one `strategy_decisions` row or use existing fixture style.
 
-Important: this is **not** a new metric system. It must still return `DecisionAttribution`, and summaries must still be `DecisionAttributionSummary`.
-
-## Preserve context path for diagnostics
-
-Keep `_replay_decision_context()` available for tests/debugging, but do not use it in the hot path by default.
-
-If useful, add a flag:
+Call:
 
 ```python
-materialize_contexts: bool = False
+rc = main([
+    "decision-attribution",
+    "--limit", "5",
+    "--json",
+])
 ```
 
-But keep the public surface minimal unless necessary.
-
----
-
-# Part 3: Remove context list materialization in replay hot path
-
-Change `replay_sma_strategy_decisions_from_candles()` so it no longer does this in the normal path:
-
-```python
-contexts = []
-for candle:
-    contexts.append(_replay_decision_context(...))
-
-attributions = [normalize_decision_attribution_from_context(context) for context in contexts]
-summary = summarize_decision_attributions(attributions)
-```
-
-Preferred structure:
-
-```python
-acc = DecisionAttributionAccumulator()
-decision_count = 0
-
-for candle:
-    attribution = _replay_decision_attribution(...)
-    acc.add(attribution)
-    decision_count += 1
-
-summary = acc.summary()
-```
-
-If you do not introduce the accumulator in replay directly, at least avoid the `contexts` list and build attributions one by one. But the target is streaming accumulation.
-
-Keep the existing `StrategyReplayResult` shape unless you have a strong reason to change it.
-
-## Required replay tests
-
-Update `tests/test_strategy_replay.py`:
-
-1. Existing tests must pass.
-2. Add a small fixture test proving direct replay attribution summary matches the old context-normalization path for the same candles/config.
-
-   * Use `_replay_decision_context()` and `normalize_decision_attribution_from_context()` only in the test or a helper.
-   * Compare `DecisionAttributionSummary.as_dict()`.
-3. Verify `replay_sma_strategy_decisions_from_candles()` still returns `DecisionAttributionSummary`.
-4. Verify no DB mutation.
-5. Verify deterministic result for same dataset/config.
-
----
-
-# Part 4: Optional generic normalizer parse caching
-
-If the change is small and safe, optimize `normalize_decision_attribution_from_context()` so `all_block_reasons` are parsed once.
-
-Current likely pattern:
-
-```python
-_has_reason(all_block_reasons, ...)
-_has_layer(all_block_reasons, ...)
-_has_layer_reason_containing(all_block_reasons, ...)
-```
-
-where each helper reparses `all_block_reasons`.
-
-Refactor carefully:
-
-```python
-reason_pairs = _reason_pairs(all_block_reasons)
-```
-
-Then helper functions can either accept parsed pairs or use small internal helpers to avoid repeated parsing.
-
-Do not destabilize legacy context support. This is secondary to the replay direct builder.
-
-## Required tests
-
-Existing attribution tests should cover this. Add one targeted test if you change helper behavior:
+Expected:
 
 ```text
-all_block_reasons with strategy_filters.cost_edge and execution_order_rule.min_notional
-still classify cost filter and order rule correctly
+rc == 0
+stdout starts with "{"
+json.loads(stdout) succeeds
+"LIVE_EXECUTION_CONTRACT" not in stdout
 ```
 
----
+### Test 4: human output still remains human-readable
 
-# Part 5: Add max-operations / allow-large-sweep guard
+For non-JSON `strategy-sweep`, human output may still contain report text on stdout. Do not require JSON.
 
-`max_candles` prevents full-history DB scans, but it does not prevent large bounded grids.
+### Test 5: errors still go to stderr
 
-Add CLI and plan support for operation budget.
-
-## Update StrategySweepExecutionPlan
-
-In `src/bithumb_bot/strategy_sweep.py`, extend `StrategySweepExecutionPlan` with:
-
-```python
-max_operations: int | None
-allow_large_sweep: bool
-```
-
-Update `build_strategy_sweep_execution_plan()` to accept:
-
-```python
-max_operations: int | None
-allow_large_sweep: bool
-```
-
-Guard behavior:
+For invalid JSON-mode command arguments, assert:
 
 ```text
-if estimated_operations > max_operations and not allow_large_sweep:
-    block
+stdout is empty or contains no partial JSON
+stderr contains useful error
 ```
 
-For live mode, this should be enforced by default.
+### Test 6: existing live contract observability is not lost
 
-Recommended default:
-
-```text
-max_operations = 300000
-```
-
-You may apply the default only in CLI, not necessarily in the library function, if that fits the repo style better.
-
-Block reason example:
-
-```text
-estimated_operations_exceeds_max_operations
-```
-
-## CLI options
-
-In `app.py`, add:
-
-```text
---max-operations
---allow-large-sweep
-```
-
-Expected behavior:
-
-* In live mode, if estimated operations exceed max operations and `--allow-large-sweep` is not provided, fail before replay execution.
-* `--allow-large-sweep` permits execution and should be reflected in the plan.
-* JSON output should include `max_operations` and `allow_large_sweep`.
-* Human output should show estimated operations and max operations.
-
-Do not confuse this with `--allow-full-history`; they solve different problems:
-
-```text
---allow-full-history
-  permits unbounded candle history
-
---allow-large-sweep
-  permits high grid_count × candle_count operation count
-```
-
-## Required CLI tests
-
-Update `tests/test_strategy_sweep_cli.py`:
-
-1. Large estimated operations in live mode fails before sweep execution.
-2. `--allow-large-sweep` permits it.
-3. `--max-operations` changes the threshold.
-4. JSON plan includes:
-
-   * estimated_operations
-   * max_operations
-   * allow_large_sweep
-5. Human output includes:
-
-   * estimated_operations
-   * max_operations
-6. Existing full-history guard tests still pass.
-7. No PnL/drawdown fields appear.
+If the repo currently tests `LIVE_EXECUTION_CONTRACT` visibility, update tests so it is expected on stderr/log capture instead of stdout.
 
 ---
 
 # Safety requirements
 
-This patch must remain read-only for replay/sweep.
+This patch must not change trading behavior.
 
 It must not:
 
@@ -441,15 +312,14 @@ write orders
 write fills
 write portfolio
 write open_position_lots
-call broker APIs
-call recovery/repair functions
-change runtime state
-perform PnL/backtest/fill simulation
+change live/dry-run gates
+change strategy logic
+change replay/sweep calculations
+change operation budget behavior
+add PnL/backtest/fill simulation
 ```
 
-It must not change live trading decisions.
-
-It must not change stored decision attribution semantics.
+This is an output-channel patch.
 
 ---
 
@@ -458,60 +328,28 @@ It must not change stored decision attribution semantics.
 Do not implement:
 
 ```text
-net PnL
-gross PnL
-max drawdown
+new sweep logic
+new replay logic
+PnL
+drawdown
 fee drag
 fill simulation
-broker reconciliation replay
-cash drift replay
-accounting repair replay
-lot-native lifecycle replay
-performance gate replay
-automatic env tuning
 best config recommendation
+automatic env tuning
 ```
 
-Do not add a timeout as the main fix. Timeouts hide the design problem.
+Do not “fix” the JSON by telling users to `tail -n +2`. That is only a temporary workaround. The command itself must produce valid JSON on stdout.
 
 ---
 
-# Performance validation expectations
-
-After the patch, this should be feasible on EC2 with explicit large-sweep permission:
-
-```bash
-uv run bithumb-bot strategy-sweep \
-  --short 5,7,10 \
-  --long 20,30,50 \
-  --edge-buffer 0,0.0005,0.001,0.002 \
-  --min-expected-edge 0,0.0005,0.001 \
-  --slippage-bps 0,5 \
-  --max-candles 5000 \
-  --max-operations 1500000 \
-  --allow-large-sweep \
-  --json
-```
-
-Without `--allow-large-sweep`, the same command should fail fast if default max operations is lower than the plan estimate.
-
----
-
-# Validation commands
+# Verification commands
 
 Run targeted tests:
 
 ```bash
-uv run pytest tests/test_decision_attribution.py
-uv run pytest tests/test_strategy_replay.py
-uv run pytest tests/test_strategy_sweep.py
 uv run pytest tests/test_strategy_sweep_cli.py
-```
-
-Run related tests:
-
-```bash
-uv run pytest tests/test_decision_telemetry.py tests/test_strategy_decision_persistence.py tests/test_operator_commands.py
+uv run pytest tests/test_decision_attribution.py
+uv run pytest tests/test_operator_commands.py
 ```
 
 Run full suite if feasible:
@@ -520,26 +358,7 @@ Run full suite if feasible:
 uv run pytest
 ```
 
-If EC2 is available after merge/deploy, run:
-
-```bash
-uv run bithumb-bot strategy-sweep \
-  --short 5,7,10 \
-  --long 20,30,50 \
-  --edge-buffer 0,0.0005,0.001,0.002 \
-  --min-expected-edge 0,0.0005,0.001 \
-  --slippage-bps 0,5 \
-  --max-candles 5000 \
-  --json
-```
-
-Expected:
-
-```text
-fails fast if estimated_operations exceeds default max_operations
-```
-
-Then:
+After deployment to EC2, verify:
 
 ```bash
 uv run bithumb-bot strategy-sweep \
@@ -551,17 +370,46 @@ uv run bithumb-bot strategy-sweep \
   --max-candles 5000 \
   --max-operations 1500000 \
   --allow-large-sweep \
-  --json
+  --json > /tmp/strategy-sweep-5000.json
+```
+
+Then:
+
+```bash
+python3 - <<'PY'
+import json
+p = json.load(open('/tmp/strategy-sweep-5000.json'))
+print(p["plan"])
+print(len(p["rows"]))
+PY
 ```
 
 Expected:
 
 ```text
-completes without manual interrupt
-JSON includes plan
-plan.estimated_operations around grid_count * candle_count
-rows remain attribution-only
-no PnL fields
+json.load succeeds
+plan.allow_large_sweep == True
+plan.candle_count == 5000
+plan.grid_count == 216
+rows length == 216
+```
+
+Also verify:
+
+```bash
+uv run bithumb-bot decision-attribution --limit 500 --json > /tmp/decision-attribution.json
+python3 - <<'PY'
+import json
+p = json.load(open('/tmp/decision-attribution.json'))
+print(p["sample_count"])
+print(p["candidate_funnel"])
+PY
+```
+
+Expected:
+
+```text
+json.load succeeds
 ```
 
 ---
@@ -582,32 +430,26 @@ Verification
 - command: result
 
 Root-cause hypotheses
-- H1 generic replay attribution normalizer overhead: confirmed / partially confirmed / not confirmed
-- H2 context + attribution list materialization: confirmed / partially confirmed / not confirmed
-- H3 summary list materialization: confirmed / partially confirmed / not confirmed
-- H4 repeated all_block_reasons parsing: confirmed / partially confirmed / not confirmed
-- H5 missing operation budget guard: confirmed / partially confirmed / not confirmed
+- H1 LIVE_EXECUTION_CONTRACT emitted to stdout before JSON: confirmed / partially confirmed / not confirmed
+- H2 logging configured to stdout for CLI diagnostics: confirmed / partially confirmed / not confirmed
+- H3 issue affects strategy-sweep only: confirmed / not confirmed
+- H4 issue affects other --json commands such as decision-attribution: confirmed / partially confirmed / not confirmed
 
-Replay attribution optimization
-- Explain direct DecisionAttribution builder.
-- Explain whether context materialization remains and when.
-- Explain accumulator/streaming summary behavior.
-- Explain equivalence tests against old context-normalization path.
-
-Sweep execution budget
-- Explain max_operations and allow_large_sweep.
-- Explain difference between allow_full_history and allow_large_sweep.
-- Explain JSON/human plan changes.
+JSON stdout contract
+- Explain how --json stdout is now kept machine-readable.
+- Explain where live execution contract logs go.
+- Explain whether the fix is global or command-specific.
+- Explain how human output is preserved.
 
 Safety / recovery
-- Confirm replay/sweep remain read-only.
-- Confirm no trading behavior or live gates changed.
+- Confirm no trading behavior changed.
+- Confirm no replay/sweep computation changed.
+- Confirm no operation-budget behavior changed.
 - Confirm no PnL/backtest/fill simulation was added.
 
 Operational notes
-- Explain recommended EC2 commands after deployment.
-- Explain how to interpret operation guard failures.
-- Explain why sweep remains attribution-only, not profitability analysis.
+- Explain the EC2 verification commands.
+- Explain that previous large-sweep performance issue is resolved and this patch only fixes output-channel correctness.
 
 Next steps
 - PR 1: replay-vs-live attribution comparison report
@@ -615,5 +457,5 @@ Next steps
 - PR 3: only later add lightweight portfolio/PnL simulation
 ```
 
-Keep the priority strict: **make large bounded sweeps computationally viable and explicitly budgeted; do not add PnL/backtest yet.**
+Keep the priority strict: **machine-readable CLI output must be valid machine-readable output; do not change strategy/replay/sweep semantics.**
 

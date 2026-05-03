@@ -7,6 +7,7 @@ import pytest
 from bithumb_bot.app import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
+from bithumb_bot.observability import configure_runtime_logging
 
 
 FORBIDDEN_RESULT_KEY_PARTS = ("pnl", "drawdown", "fee_drag", "profit", "loss")
@@ -129,6 +130,25 @@ def test_strategy_sweep_cli_json_returns_deterministic_attribution_rows(
     _assert_no_forbidden_keys(payload)
 
 
+def test_strategy_sweep_cli_json_stdout_is_parseable_when_live_contract_logs(
+    configured_db, capsys
+) -> None:
+    _insert_candles([10.0, 10.0, 10.0, 10.0, 11.0])
+    object.__setattr__(settings, "MODE", "live")
+    configure_runtime_logging()
+
+    rc = main(_sweep_args(as_json=True) + ["--max-candles", "5000"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert rc == 0
+    assert captured.out.lstrip().startswith("{")
+    assert "LIVE_EXECUTION_CONTRACT" not in captured.out
+    assert "LIVE_EXECUTION_CONTRACT" in captured.err
+    assert payload["plan"]["allowed"] is True
+    assert len(payload["rows"]) == 2
+
+
 def test_strategy_sweep_cli_human_output_includes_operator_fields(
     configured_db, capsys
 ) -> None:
@@ -166,9 +186,10 @@ def test_strategy_sweep_cli_invalid_list_arguments_fail_cleanly(
 
     with pytest.raises(SystemExit):
         main(args)
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
 
-    assert expected in err
+    assert captured.out == ""
+    assert expected in captured.err
 
 
 def test_strategy_sweep_cli_does_not_mutate_settings(configured_db, capsys) -> None:
@@ -333,10 +354,11 @@ def test_strategy_sweep_cli_live_large_operations_fail_before_replay(
 
     with pytest.raises(SystemExit):
         main(args)
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
 
     assert called is False
-    assert "estimated_operations exceeds max_operations" in out
+    assert captured.out == ""
+    assert "estimated_operations exceeds max_operations" in captured.err
 
 
 def test_strategy_sweep_cli_allow_large_sweep_permits_budget_exceedance(
