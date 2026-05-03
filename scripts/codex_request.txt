@@ -1,461 +1,527 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The latest EC2 validation confirms that the large attribution-based `strategy-sweep` computation itself now succeeds. The remaining issue is not performance, not replay correctness, and not operation-budget enforcement. The remaining issue is **machine-readable JSON stdout pollution**: `--json` output is being mixed with `LIVE_EXECUTION_CONTRACT` log lines on stdout, so redirecting stdout to a file creates invalid JSON.
+Your task is not to add a small backtest patch. Treat this as a structural evolution of the repository from a mostly safe execution bot into a reproducible automated-trading research and validation system where only verified strategy candidates can later be promoted toward paper/live operation.
 
-Use the EC2 observation as a starting point, but verify the exact logging/output path directly in the repo before editing.
+The repository already appears relatively mature on live-order safety, state integrity, restart/recovery, run locks, live/paper separation, risk gates, and observability. Do not weaken those contracts. The suspected structural gap is that research/backtesting/parameter exploration/out-of-sample validation/walk-forward validation/promotion into runtime env are not modeled as one reproducible pipeline.
 
-## Observed EC2 fact
+Work directly in `WG-14/bithumb-bot`. Inspect the current files before changing anything, especially:
 
-This command completed and wrote rows:
+* `README.md`
+* `AGENTS.md`
+* `pyproject.toml`
+* `backtest2.py`
+* `src/bithumb_bot/bootstrap.py`
+* `src/bithumb_bot/config.py`
+* `src/bithumb_bot/app.py`
+* existing reporting, strategy, sweep, replay, path, settings, and test modules
+
+Preserve the existing canonical CLI style:
 
 ```bash
-uv run bithumb-bot strategy-sweep \
-  --short 5,7,10 \
-  --long 20,30,50 \
-  --edge-buffer 0,0.0005,0.001,0.002 \
-  --min-expected-edge 0,0.0005,0.001 \
-  --slippage-bps 0,5 \
-  --max-candles 5000 \
-  --max-operations 1500000 \
-  --allow-large-sweep \
-  --json > /tmp/strategy-sweep-5000.json
+uv run bithumb-bot <command>
 ```
 
-But the redirected file begins with a log line:
+Do not introduce a parallel command style unless it is only a backward-compatible deprecated wrapper.
+
+## Core problem statement
+
+The repository should be able to execute this validation lifecycle as code:
 
 ```text
-2026-05-03T04:18:26+0000 INFO [LIVE_EXECUTION_CONTRACT] ...
+hypothesis
+→ data collection / dataset snapshot
+→ market regime or segment definition
+→ candidate parameter-space definition
+→ first-pass backtest
+→ parameter exploration
+→ overfitting checks
+→ out-of-sample validation
+→ walk-forward validation
+→ paper / dry-run validation
+→ small live candidate readiness
+→ runtime env/profile promotion
+→ operational log revalidation
 ```
 
-Then the actual JSON starts on the next line:
+The key distinction must be preserved:
+
+```text
+Research-stage env/config values = experimental candidate variables
+Runtime env values = verified output of the validation process
+```
+
+Do not collapse those two concepts into “just edit `.env` until it works”.
+
+## Priority order
+
+Use this priority order throughout the work:
+
+```text
+P0: Safety, correctness, live/paper isolation, wrong-order prevention, duplicate-order prevention, ledger consistency, restart/recovery behavior
+P1: Reproducibility, path policy, deterministic reports, operator visibility, recoverability
+P2: Strategy tuning, profitability, parameter search convenience
+```
+
+Any P2 change that weakens P0 or P1 is unacceptable.
+
+## Hypotheses to keep explicit
+
+Do not silently convert these into generic requirements. Keep them as testable hypotheses in the implementation notes and final report.
+
+### Hypothesis A
+
+The core missing structure is that strategy-performance validation is not represented as an immutable code-level protocol.
+
+Existing commands such as strategy/reporting/telemetry may be useful, but verify whether they already provide all of the following as a single reproducible contract:
+
+* experiment manifest
+* dataset split
+* train / validation / final holdout
+* parameter-space exploration
+* out-of-sample validation
+* walk-forward validation
+* candidate artifact
+* promotion gate
+* deterministic report hash
+
+If this already exists, document the evidence and adjust. If it does not exist, implement the minimal structural layer needed.
+
+### Hypothesis B
+
+The current backtest layer is likely inconsistent with the repository’s explicit env/path/runtime-root policy.
+
+Specifically inspect whether `backtest2.py` still reads repo-root `.env` directly, writes artifacts inside the repository, or bypasses the canonical bootstrap/path policy. If yes, fix the structure rather than only patching the script.
+
+### Hypothesis C
+
+Strategy env values are currently too easy to treat as mutable exploration knobs instead of verified runtime outputs.
+
+Implement or prepare a clear separation between:
+
+```text
+1. Experiment parameter space
+2. Candidate config artifact
+3. Promoted runtime profile/env metadata
+```
+
+A promotion command must not directly rewrite live env files. It should generate an operator-reviewable promotion artifact with provenance and hashes.
+
+### Hypothesis D
+
+Research validation must not be coupled directly to live execution machinery.
+
+The first research engine should be a pure replay/simulation path:
+
+```text
+dataset snapshot
+→ strategy pure function
+→ simulated fill/cost model
+→ metrics
+→ validation gate
+→ report
+```
+
+Do not call live broker, live order lifecycle, run loop, recovery, or lot-native SELL authority logic from the research backtest path unless explicitly required for read-only diagnostics. Existing live safety tests must remain green.
+
+## Required design direction
+
+Add a dedicated research layer, preferably under:
+
+```text
+src/bithumb_bot/research/
+```
+
+Suggested modules:
+
+```text
+src/bithumb_bot/research/
+  __init__.py
+  experiment_manifest.py
+  dataset_snapshot.py
+  parameter_space.py
+  backtest_engine.py
+  metrics.py
+  validation_protocol.py
+  walk_forward.py
+  promotion_gate.py
+  report_writer.py
+  cli.py
+```
+
+Adapt names if the current repository structure suggests better names, but preserve the separation of responsibilities.
+
+## Required commands
+
+Add canonical CLI commands through the existing `bithumb-bot` entrypoint, not through a separate script-only interface.
+
+Minimum target commands:
+
+```bash
+uv run bithumb-bot research-backtest --manifest <path>
+uv run bithumb-bot research-walk-forward --manifest <path>
+uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id>
+```
+
+If the existing CLI parser structure makes exact names expensive, implement equivalent names and document the reason. Prefer exact names.
+
+Optional but desirable command:
+
+```bash
+uv run bithumb-bot research-data-freeze --manifest <path>
+```
+
+## Required manifest concept
+
+Implement an `ExperimentManifest` or equivalent object that can represent at least:
+
+```yaml
+experiment_id: sma_filter_v1_2026_05
+hypothesis: "In an uptrend with sufficient volatility/liquidity, the SMA strategy has positive expectancy after fees and slippage."
+strategy_name: sma_with_filter
+market: KRW-BTC
+interval: 1m
+
+dataset:
+  source: sqlite_candles
+  snapshot_id: candles_krw_btc_2023_2026_v1
+  train:
+    start: "2023-01-01"
+    end: "2024-06-30"
+  validation:
+    start: "2024-07-01"
+    end: "2025-12-31"
+  final_holdout:
+    start: "2026-01-01"
+    end: "2026-05-01"
+
+parameter_space:
+  SMA_SHORT: [5, 7, 10]
+  SMA_LONG: [20, 30, 60]
+  SMA_FILTER_GAP_MIN_RATIO: [0.0008, 0.0012, 0.0018]
+  SMA_FILTER_VOL_MIN_RANGE_RATIO: [0.002, 0.003, 0.005]
+
+cost_model:
+  fee_rate: 0.0025
+  slippage_bps: [5, 10, 20]
+
+acceptance_gate:
+  min_trade_count: 30
+  max_mdd_pct: 15
+  min_profit_factor: 1.1
+  oos_return_must_be_positive: true
+  parameter_stability_required: true
+```
+
+Use JSON if YAML support would require new dependencies. Do not add dependencies unless necessary. If using JSON, provide an example JSON manifest.
+
+## Required artifact model
+
+Research outputs must be deterministic and operator-readable.
+
+At minimum, produce structured JSON artifacts containing:
+
+```text
+experiment_id
+manifest_hash
+dataset_snapshot_id
+dataset_content_hash or deterministic dataset fingerprint
+strategy_name
+parameter_candidate_id
+parameter_values
+cost_model
+train_metrics
+validation_metrics
+final_holdout_metrics if available
+walk_forward_metrics if run
+acceptance_gate_result
+gate_fail_reasons
+candidate_profile_hash
+created_at or deterministic run timestamp policy
+repository_version or git commit if available
+```
+
+Be careful with timestamps: if a timestamp makes the full report hash non-deterministic, either exclude it from the deterministic hash or separate `content_hash` from `generated_at`.
+
+Research artifacts must be written through the repository’s existing path policy. Prefer:
+
+```text
+DATA_ROOT/<mode>/derived/research/...
+DATA_ROOT/<mode>/reports/research/...
+```
+
+Do not write generated research outputs into the repo tree except for committed examples/tests.
+
+## Required metrics
+
+Do not report only total return.
+
+At minimum, implement or surface:
+
+```text
+return_pct
+max_drawdown_pct
+profit_factor
+trade_count
+win_rate
+avg_win
+avg_loss
+fee_total
+slippage_total
+max_consecutive_losses
+single_trade_dependency_score
+parameter_stability_score, if enough neighboring candidates exist
+```
+
+If a metric cannot be computed yet, include an explicit placeholder and explain in the report. Do not silently omit it.
+
+## Required path/env behavior
+
+Research commands must follow the repository’s explicit env model.
+
+Verify and enforce:
+
+1. Research commands must not automatically load repo-root `.env`.
+2. `BITHUMB_ENV_FILE`, `BITHUMB_ENV_FILE_PAPER`, or explicit process env should be respected through the existing bootstrap/config path.
+3. Repo-relative runtime paths such as `DB_PATH=./data/test.sqlite` must fail if the existing project policy rejects them.
+4. Research outputs must not be written into the repository root.
+5. The mode must be explicit enough to avoid accidental live coupling.
+6. Promotion must not mutate live env files.
+
+If the current repository already has helper methods for PathManager/path policy, use them. Do not duplicate policy logic unless unavoidable.
+
+## Required handling of `backtest2.py`
+
+Inspect `backtest2.py`.
+
+If it is a legacy standalone script, do one of the following:
+
+Preferred:
+
+```text
+Turn it into a deprecated compatibility wrapper that delegates to the new research CLI/core.
+```
+
+Acceptable:
+
+```text
+Leave it temporarily intact but remove repo-root `.env` auto-loading and document deprecation.
+```
+
+Unacceptable:
+
+```text
+Keep improving `backtest2.py` as the primary research interface while bypassing canonical CLI/bootstrap/path policy.
+```
+
+## Required promotion behavior
+
+Implement `research-promote-candidate` as an artifact generator, not as a live env mutator.
+
+It should verify or report:
+
+```text
+candidate exists
+candidate was produced from a known manifest
+manifest hash matches
+dataset snapshot/fingerprint matches
+validation gate passed
+walk-forward gate passed if required by manifest
+min trade count passed
+fee/slippage-aware metrics passed
+parameter stability check passed if required
+candidate profile hash generated
+```
+
+It should output a promotion artifact similar to:
 
 ```json
-{"plan": {"allow_large_sweep": true, "allowed": true, ...}, "rows": [...]}
+{
+  "strategy_name": "sma_with_filter",
+  "strategy_profile_id": "sma_filter_v1_2026_05_candidate_003",
+  "strategy_profile_source_experiment": "sma_filter_v1_2026_05",
+  "strategy_profile_hash": "sha256:...",
+  "candidate_id": "candidate_003",
+  "gate_result": "PASS",
+  "operator_next_step": "Review this artifact before copying values into paper/live env."
+}
 ```
 
-Therefore:
-
-```python
-json.load(open("/tmp/strategy-sweep-5000.json"))
-```
-
-fails with `JSONDecodeError: Extra data`.
-
-This proves:
-
-```text
-large sweep computation: successful
-operation guard / allow-large-sweep: successful
-remaining defect: --json stdout is not machine-readable
-```
-
-## Core hypothesis to verify
-
-The likely root cause is:
-
-```text
-log_live_execution_contract or related live-command diagnostics are emitted to stdout before the JSON payload.
-```
-
-This is a CLI channel separation bug, not a strategy/replay/sweep computation bug.
-
-Keep this as a hypothesis until you inspect the code.
-
-## Required investigation before editing
-
-Inspect at least:
-
-```text
-src/bithumb_bot/app.py
-src/bithumb_bot/config.py
-src/bithumb_bot/bootstrap.py
-src/bithumb_bot/cli.py
-tests/test_strategy_sweep_cli.py
-tests/test_decision_attribution.py
-tests/test_operator_commands.py
-tests/test_live_preflight.py
-```
-
-Verify:
-
-* where `log_live_execution_contract()` is called
-* whether it prints directly, uses `logging`, or otherwise writes to stdout
-* whether the logging configuration sends INFO logs to stdout
-* whether `strategy-sweep --json` currently prints JSON to stdout after live contract logging
-* whether `decision-attribution --json` has the same stdout pollution risk
-* whether other machine-readable commands exist and need the same policy
-* how current tests capture stdout/stderr with `capsys`
-
-Do not assume the issue is limited to `strategy-sweep`; verify it.
-
----
-
-# Primary objective
-
-Make machine-readable CLI modes actually machine-readable.
-
-The rule is:
-
-```text
-When a command is invoked with --json, stdout must contain only the JSON payload.
-Logs, diagnostics, live execution contract messages, warnings, and human-readable status lines must go to stderr or a log file.
-```
-
-This patch should prioritize channel separation, not more strategy logic.
-
----
-
-# Required design principle
-
-Adopt this repo-level CLI output contract:
-
-```text
-stdout:
-  command result data
-
-stderr:
-  logs, diagnostics, warnings, live execution contract, progress/status messages
-
---json stdout:
-  valid JSON only
-```
-
-This is not cosmetic. It is required so operators can safely do:
-
-```bash
-uv run bithumb-bot strategy-sweep ... --json > result.json
-python3 -c 'import json; json.load(open("result.json"))'
-```
-
----
-
-# Part 1: Fix JSON stdout purity for strategy-sweep
-
-For:
-
-```bash
-uv run bithumb-bot strategy-sweep ... --json
-```
-
-ensure:
-
-```text
-stdout starts with "{" and contains exactly one JSON object
-json.loads(stdout) succeeds
-LIVE_EXECUTION_CONTRACT is not present in stdout
-```
-
-`LIVE_EXECUTION_CONTRACT` may still be emitted to stderr, provided tests expect that.
-
-If the existing implementation calls `log_live_execution_contract()` before command dispatch, modify the logging path or add a command-level JSON-output guard so that logs do not go to stdout when `--json` is requested.
-
-Do not suppress critical logs entirely unless unavoidable. Prefer moving them to stderr.
-
----
-
-# Part 2: Check and fix decision-attribution JSON too
-
-The earlier EC2 `decision-attribution --json` output also displayed the live contract log before JSON in the terminal. Verify whether redirecting it to a file produces polluted JSON.
-
-For:
-
-```bash
-uv run bithumb-bot decision-attribution --limit 500 --json
-```
-
-ensure:
-
-```text
-stdout is valid JSON
-LIVE_EXECUTION_CONTRACT is not present in stdout
-```
-
-Again, stderr may contain logs.
-
----
-
-# Part 3: Use a general solution, not a one-off sweep hack
-
-Do not patch only `cmd_strategy_sweep()` if the root cause is logging configuration or global live contract logging.
-
-Prefer one of these approaches, depending on repo structure:
-
-## Option A: Logging goes to stderr globally
-
-Configure Python logging so command diagnostics go to stderr, not stdout. This is the cleanest if compatible with existing tests.
-
-## Option B: Machine-readable mode redirects diagnostics to stderr
-
-Add a CLI-level mechanism such as:
-
-```python
-machine_readable_output = command_has_json_flag(args)
-```
-
-and ensure live contract diagnostics/logging use stderr for those commands.
-
-## Option C: Command-specific safe wrapper
-
-If global logging changes would break many tests, add a minimal wrapper around machine-readable commands, but document it as the CLI JSON contract.
-
-Do not silently drop logs. Do not mix logs into JSON stdout.
-
----
-
-# Part 4: Tests
-
-Add or update tests.
-
-Prefer extending:
-
-```text
-tests/test_strategy_sweep_cli.py
-tests/test_decision_attribution.py
-tests/test_operator_commands.py
-```
-
-or create a focused file:
-
-```text
-tests/test_cli_json_stdout_purity.py
-```
+Do not copy values into `.env`. Do not modify `BITHUMB_ENV_FILE_LIVE` or live secrets.
 
 ## Required tests
 
-### Test 1: strategy-sweep JSON stdout is parseable
+Add focused tests. Names may vary, but cover these exact behaviors.
 
-Set up a temp DB with candle fixture, set mode to live or simulate live mode if existing tests support it, then call:
-
-```python
-rc = main([
-    "strategy-sweep",
-    "--short", "2",
-    "--long", "3",
-    "--edge-buffer", "0,0.02",
-    "--min-expected-edge", "0",
-    "--slippage-bps", "0",
-    "--pair", "BTC_KRW",
-    "--interval", "1m",
-    "--max-candles", "5000",
-    "--json",
-])
-```
-
-Expected:
+Suggested test files:
 
 ```text
-rc == 0
-stdout starts with "{"
-json.loads(stdout) succeeds
-"LIVE_EXECUTION_CONTRACT" not in stdout
+tests/test_research_manifest.py
+tests/test_research_path_policy.py
+tests/test_research_backtest_reproducibility.py
+tests/test_research_promotion_gate.py
 ```
 
-If stderr contains `LIVE_EXECUTION_CONTRACT`, that is acceptable.
+Required test coverage:
 
-### Test 2: strategy-sweep redirected JSON has no log prefix equivalent
+1. Manifest parsing/validation rejects missing hypothesis, missing dataset split, empty parameter space, invalid date ranges, and invalid acceptance gate values.
+2. Same manifest + same deterministic dataset produces the same candidate/report content hash across repeated runs.
+3. Research commands do not read repo-root `.env` implicitly.
+4. Research commands reject or avoid repo-internal generated output paths according to existing path policy.
+5. Promotion gate refuses a candidate that lacks validation/OOS evidence.
+6. Promotion gate refuses a candidate that fails min trade count, max drawdown, or profit factor gate.
+7. Promotion artifact is generated without mutating runtime env files.
+8. Existing live safety tests remain green.
 
-You do not need actual shell redirection. Captured stdout is enough. Assert the first non-whitespace character is `{`.
-
-### Test 3: decision-attribution JSON stdout is parseable
-
-Set up a temp DB with at least one `strategy_decisions` row or use existing fixture style.
-
-Call:
-
-```python
-rc = main([
-    "decision-attribution",
-    "--limit", "5",
-    "--json",
-])
-```
-
-Expected:
-
-```text
-rc == 0
-stdout starts with "{"
-json.loads(stdout) succeeds
-"LIVE_EXECUTION_CONTRACT" not in stdout
-```
-
-### Test 4: human output still remains human-readable
-
-For non-JSON `strategy-sweep`, human output may still contain report text on stdout. Do not require JSON.
-
-### Test 5: errors still go to stderr
-
-For invalid JSON-mode command arguments, assert:
-
-```text
-stdout is empty or contains no partial JSON
-stderr contains useful error
-```
-
-### Test 6: existing live contract observability is not lost
-
-If the repo currently tests `LIVE_EXECUTION_CONTRACT` visibility, update tests so it is expected on stderr/log capture instead of stdout.
-
----
-
-# Safety requirements
-
-This patch must not change trading behavior.
-
-It must not:
-
-```text
-submit orders
-cancel orders
-write strategy_decisions
-write orders
-write fills
-write portfolio
-write open_position_lots
-change live/dry-run gates
-change strategy logic
-change replay/sweep calculations
-change operation budget behavior
-add PnL/backtest/fill simulation
-```
-
-This is an output-channel patch.
-
----
-
-# Explicit non-goals
-
-Do not implement:
-
-```text
-new sweep logic
-new replay logic
-PnL
-drawdown
-fee drag
-fill simulation
-best config recommendation
-automatic env tuning
-```
-
-Do not “fix” the JSON by telling users to `tail -n +2`. That is only a temporary workaround. The command itself must produce valid JSON on stdout.
-
----
-
-# Verification commands
-
-Run targeted tests:
+Also run existing relevant tests, at minimum:
 
 ```bash
-uv run pytest tests/test_strategy_sweep_cli.py
-uv run pytest tests/test_decision_attribution.py
-uv run pytest tests/test_operator_commands.py
+uv run pytest -q tests/test_live_preflight.py
+uv run pytest -q tests/test_mode_validation.py
+uv run pytest -q tests/test_run_lock.py
+uv run pytest -q
 ```
 
-Run full suite if feasible:
+If some of these files do not exist, run the closest existing equivalents and report the difference.
 
-```bash
-uv run pytest
-```
+## Observability and recoverability requirements
 
-After deployment to EC2, verify:
+Research commands should produce clear operator output.
 
-```bash
-uv run bithumb-bot strategy-sweep \
-  --short 5,7,10 \
-  --long 20,30,50 \
-  --edge-buffer 0,0.0005,0.001,0.002 \
-  --min-expected-edge 0,0.0005,0.001 \
-  --slippage-bps 0,5 \
-  --max-candles 5000 \
-  --max-operations 1500000 \
-  --allow-large-sweep \
-  --json > /tmp/strategy-sweep-5000.json
-```
-
-Then:
-
-```bash
-python3 - <<'PY'
-import json
-p = json.load(open('/tmp/strategy-sweep-5000.json'))
-print(p["plan"])
-print(len(p["rows"]))
-PY
-```
-
-Expected:
+At minimum, CLI output should state:
 
 ```text
-json.load succeeds
-plan.allow_large_sweep == True
-plan.candle_count == 5000
-plan.grid_count == 216
-rows length == 216
+experiment_id
+manifest_hash
+dataset_snapshot_id or dataset fingerprint
+number of candidates evaluated
+best candidate by gate/rank
+gate result
+artifact paths
+content hash
+warnings
 ```
 
-Also verify:
-
-```bash
-uv run bithumb-bot decision-attribution --limit 500 --json > /tmp/decision-attribution.json
-python3 - <<'PY'
-import json
-p = json.load(open('/tmp/decision-attribution.json'))
-print(p["sample_count"])
-print(p["candidate_funnel"])
-PY
-```
-
-Expected:
+Failure modes must be explicit and actionable:
 
 ```text
-json.load succeeds
+manifest invalid
+dataset unavailable
+not enough candles
+path policy violation
+candidate not found
+gate failed
+promotion refused
 ```
 
----
+No silent fallback to live mode. No silent fallback to repo-root `.env`. No silent writes into the repository.
 
-# Final report format
+## Documentation requirements
 
-When finished, report exactly in this structure:
+Update documentation minimally but concretely.
+
+Add or update docs to explain:
+
+```text
+research lifecycle
+manifest format
+research-backtest command
+research-walk-forward command
+research-promote-candidate command
+artifact locations
+why env values are experimental candidates during research but verified outputs during operation
+why promotion creates an artifact instead of editing live env
+```
+
+Do not oversell profitability. Emphasize reproducibility, safety, and validation.
+
+## Scope boundaries
+
+Do not:
+
+* change live broker behavior
+* weaken live preflight
+* weaken run locks
+* weaken restart/reconcile behavior
+* weaken lot-native SELL authority
+* weaken duplicate-order prevention
+* modify live env files
+* add real trading behavior to research commands
+* write generated artifacts into the repo root
+* introduce hidden `.env` loading
+* optimize only for highest historical return
+
+Do:
+
+* inspect existing strategy sweep/reporting/replay modules and reuse them where appropriate
+* keep the new research layer decoupled from live execution
+* prefer deterministic pure functions
+* add tests before or alongside behavior changes
+* document any hypothesis that is confirmed or refuted by the repository inspection
+
+## Implementation strategy
+
+Proceed in this order:
+
+1. Inspect existing architecture and identify reusable modules.
+2. Write a short internal plan in your work notes before editing.
+3. Add the research manifest/data/result models.
+4. Add deterministic hashing helpers for manifest, dataset fingerprint, candidate profile, and report content.
+5. Add a minimal pure backtest/replay path or adapt existing sweep/replay logic into a pure research engine.
+6. Add canonical CLI commands.
+7. Add promotion gate artifact generation.
+8. Convert or deprecate `backtest2.py`.
+9. Add focused tests.
+10. Run focused tests.
+11. Run full or broad regression tests.
+12. Produce the final report in the required format below.
+
+## Final report format
+
+At the end, report in this exact structure:
 
 ```text
 Summary
-- ...
+- What changed, in concrete repository terms.
 
-Files changed
-- path: what changed
+Hypotheses
+- Hypothesis A: confirmed/refuted/partially confirmed, with evidence.
+- Hypothesis B: confirmed/refuted/partially confirmed, with evidence.
+- Hypothesis C: confirmed/refuted/partially confirmed, with evidence.
+- Hypothesis D: confirmed/refuted/partially confirmed, with evidence.
 
-Verification
-- command: result
-- command: result
+Design Changes
+- New modules/classes/functions.
+- New CLI commands.
+- How research is separated from live/paper execution.
+- How env candidate values are separated from promoted runtime values.
 
-Root-cause hypotheses
-- H1 LIVE_EXECUTION_CONTRACT emitted to stdout before JSON: confirmed / partially confirmed / not confirmed
-- H2 logging configured to stdout for CLI diagnostics: confirmed / partially confirmed / not confirmed
-- H3 issue affects strategy-sweep only: confirmed / not confirmed
-- H4 issue affects other --json commands such as decision-attribution: confirmed / partially confirmed / not confirmed
+Artifacts and Paths
+- Where research outputs are written.
+- How hashes/provenance are computed.
+- How promotion artifacts are generated.
 
-JSON stdout contract
-- Explain how --json stdout is now kept machine-readable.
-- Explain where live execution contract logs go.
-- Explain whether the fix is global or command-specific.
-- Explain how human output is preserved.
+Safety / Recovery / Observability
+- What live safety contracts were intentionally not touched.
+- What failure modes are now explicit.
+- What operator-facing output was added.
 
-Safety / recovery
-- Confirm no trading behavior changed.
-- Confirm no replay/sweep computation changed.
-- Confirm no operation-budget behavior changed.
-- Confirm no PnL/backtest/fill simulation was added.
+Tests
+- Exact commands run.
+- Pass/fail result.
+- If any test failed, include the failure and whether it is pre-existing or introduced.
 
-Operational notes
-- Explain the EC2 verification commands.
-- Explain that previous large-sweep performance issue is resolved and this patch only fixes output-channel correctness.
+Backwards Compatibility
+- What happened to `backtest2.py`.
+- Any migration notes.
 
-Next steps
-- PR 1: replay-vs-live attribution comparison report
-- PR 2: optional sorting/filtering/limit-results for sweep output
-- PR 3: only later add lightweight portfolio/PnL simulation
+Remaining Work
+- What is intentionally left for later, especially paper shadow validation and small-live readiness.
 ```
 
-Keep the priority strict: **machine-readable CLI output must be valid machine-readable output; do not change strategy/replay/sweep semantics.**
+The work is successful only if the repository moves toward this invariant:
+
+```text
+bithumb-bot should not be a repo where operators manually tune env values until a backtest looks good.
+It should be a repo where a strategy hypothesis becomes a reproducible experiment, the experiment creates auditable candidate artifacts, validation gates decide whether a candidate is eligible, and only then can an operator consider promoting that candidate toward paper/live operation.
+```
 

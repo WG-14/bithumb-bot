@@ -92,6 +92,9 @@ uv run bithumb-bot ops-report --limit 20
 uv run bithumb-bot decision-telemetry --limit 200
 uv run bithumb-bot decision-attribution --limit 500
 uv run bithumb-bot strategy-report
+uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
+uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter_manifest.example.json
+uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id>
 uv run bithumb-bot config-dump --masked
 uv run bithumb-bot live-dry-run --short 7 --long 30
 uv run bithumb-bot cash-drift-report --recent-limit 5
@@ -107,6 +110,10 @@ supported way to validate `BITHUMB_ENV_FILE`-loaded runtime configuration.
 Operator reporting reference:
 
 - [`docs/OPERATOR_REPORTING.md`](/docs/OPERATOR_REPORTING.md)
+
+Research validation reference:
+
+- [`docs/research-validation.md`](/docs/research-validation.md)
 
 ## Smoke / Manual DB Validation
 

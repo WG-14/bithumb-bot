@@ -1,0 +1,41 @@
+{
+  "experiment_id": "sma_filter_v1_2026_05",
+  "hypothesis": "In an uptrend with sufficient volatility/liquidity, the SMA strategy has positive expectancy after fees and slippage.",
+  "strategy_name": "sma_with_filter",
+  "market": "KRW-BTC",
+  "interval": "1m",
+  "dataset": {
+    "source": "sqlite_candles",
+    "snapshot_id": "candles_krw_btc_2023_2026_v1",
+    "train": {
+      "start": "2023-01-01",
+      "end": "2024-06-30"
+    },
+    "validation": {
+      "start": "2024-07-01",
+      "end": "2025-12-31"
+    },
+    "final_holdout": {
+      "start": "2026-01-01",
+      "end": "2026-05-01"
+    }
+  },
+  "parameter_space": {
+    "SMA_SHORT": [5, 7, 10],
+    "SMA_LONG": [20, 30, 60],
+    "SMA_FILTER_GAP_MIN_RATIO": [0.0008, 0.0012, 0.0018],
+    "SMA_FILTER_VOL_MIN_RANGE_RATIO": [0.002, 0.003, 0.005]
+  },
+  "cost_model": {
+    "fee_rate": 0.0025,
+    "slippage_bps": [5, 10, 20]
+  },
+  "acceptance_gate": {
+    "min_trade_count": 30,
+    "max_mdd_pct": 15,
+    "min_profit_factor": 1.1,
+    "oos_return_must_be_positive": true,
+    "parameter_stability_required": true,
+    "walk_forward_required": true
+  }
+}

@@ -142,6 +142,11 @@ from .strategy_sweep import (
     summarize_strategy_sweep_results,
 )
 from .strategy_replay import load_replay_candles
+from .research.cli import (
+    cmd_research_backtest,
+    cmd_research_promote_candidate,
+    cmd_research_walk_forward,
+)
 from .storage_io import write_json_atomic
 from .bootstrap import get_last_explicit_env_load_summary
 
@@ -6989,6 +6994,31 @@ def main(argv: list[str] | None = None) -> int:
     experiment_report.add_argument("--regime-pnl-skew-threshold", type=float, default=0.7)
     experiment_report.add_argument("--json", action="store_true")
 
+    research_backtest = sub.add_parser(
+        "research-backtest",
+        help="run a reproducible research backtest from a manifest",
+        description=(
+            "Run pure replay/simulation from a research manifest. Writes deterministic "
+            "candidate and report artifacts under PathManager-managed research paths."
+        ),
+    )
+    research_backtest.add_argument("--manifest", required=True)
+
+    research_walk_forward = sub.add_parser(
+        "research-walk-forward",
+        help="run walk-forward validation from a research manifest",
+        description="Run research walk-forward validation without live broker or order lifecycle coupling.",
+    )
+    research_walk_forward.add_argument("--manifest", required=True)
+
+    research_promote = sub.add_parser(
+        "research-promote-candidate",
+        help="generate an operator-reviewable promotion artifact for a passing research candidate",
+        description="Generate a promotion artifact; this command never rewrites paper/live env files.",
+    )
+    research_promote.add_argument("--experiment-id", required=True)
+    research_promote.add_argument("--candidate-id", required=True)
+
     cash_drift_report = sub.add_parser(
         "cash-drift-report",
         help="audit broker cash versus local ledger and recent external cash adjustments",
@@ -7263,6 +7293,15 @@ def main(argv: list[str] | None = None) -> int:
             regime_skew_warn_threshold=max(0.0, float(args.regime_skew_threshold)),
             regime_pnl_skew_warn_threshold=max(0.0, float(args.regime_pnl_skew_threshold)),
             as_json=bool(args.json),
+        )
+    elif args.cmd == "research-backtest":
+        return cmd_research_backtest(manifest_path=str(args.manifest))
+    elif args.cmd == "research-walk-forward":
+        return cmd_research_walk_forward(manifest_path=str(args.manifest))
+    elif args.cmd == "research-promote-candidate":
+        return cmd_research_promote_candidate(
+            experiment_id=str(args.experiment_id),
+            candidate_id=str(args.candidate_id),
         )
     elif args.cmd == "cash-drift-report":
         cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))
