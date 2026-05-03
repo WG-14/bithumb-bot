@@ -1,52 +1,40 @@
 Continue working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Do not treat this as a generic cleanup, a profitability task, or a new strategy feature. The research system already has the right broad direction: manifest-based research, deterministic artifacts, rolling walk-forward, parameter stability scoring, strategy registry, promotion artifacts, and a research-to-paper runbook.
+Do not treat this as a generic CLI beautification task. The EC2 smoke run showed that the research pipeline correctly generated artifacts, correctly failed all candidates, and correctly prevented promotion. The remaining issue is operator observability: the machine-readable reports contain useful diagnostic evidence, but the immediate CLI summary does not explain why no candidate can be promoted.
 
-Now strengthen the promotion step so a promoted candidate proves both:
+This patch must improve the repository as a reproducible and operable automated-trading research system. It must not change strategy results, gate logic, promotion logic, live execution behavior, broker behavior, path policy, env loading, or artifact hash semantics.
 
-```text
-backtest / OOS validation evidence
-+ rolling walk-forward validation evidence
-```
+## Core problem statement
 
-as one bound validation bundle.
-
-The core invariant is:
+The direct EC2 symptom was:
 
 ```text
-A promoted research candidate must be the same strategy candidate that passed backtest/OOS validation and rolling walk-forward validation, with both evidence artifacts hash-verified and explicitly recorded in the promotion artifact.
+research-backtest and research-walk-forward produced reports
+gate_result=FAIL
+best_candidate_id=null
+operator had to use jq repeatedly to understand why
 ```
 
-## Current concern
-
-Inspect:
+The deeper structural issue is:
 
 ```text
-src/bithumb_bot/research/promotion_gate.py
-tests/test_research_promotion_gate.py
-tests/test_research_walk_forward.py
+Research artifacts are diagnostically rich,
+but operator-facing diagnosis is too weak.
 ```
 
-Current risk:
+The CLI currently prints experiment id, hashes, candidate count, best candidate, gate result, artifact paths, content hash, and warnings, but it does not summarize candidate failure reasons, window failure reasons, promotion eligibility, or next safe action.
+
+This can lead to operator mistakes:
 
 ```text
-promote_candidate finds the candidate in backtest_report.json
-→ if walk_forward_required is true, it calls _walk_forward_candidate_for_promotion(...)
-→ the walk-forward candidate is returned and effectively replaces the backtest candidate
-→ promotion evaluation then happens primarily on the walk-forward candidate
+- lowering gates blindly
+- attempting promotion when best_candidate_id is null
+- inspecting the wrong experiment report
+- confusing backtest failure with walk-forward failure
+- confusing no-trade windows with negative-expectancy strategy failure
 ```
 
-This is not strong enough for auditability.
-
-Promotion must not mean “the walk-forward candidate passed.” It must mean:
-
-```text
-the backtest/OOS candidate passed
-AND its candidate_profile_hash is valid
-AND the walk-forward candidate for the same experiment/manifest/parameters/cost profile passed
-AND its candidate_profile_hash is valid
-AND both evidence sources are bound into the promotion artifact
-```
+Your task is to add an explicit research run summary layer and wire it into the research CLI.
 
 ## Preserve priority order
 
@@ -54,7 +42,7 @@ Use this priority order:
 
 ```text
 P0: Live safety, correctness, live/paper isolation, wrong-order prevention, duplicate-order prevention, ledger consistency, restart/recovery behavior
-P1: Reproducibility, deterministic artifacts, promotion evidence binding, path policy, operator observability, recoverability
+P1: Operator observability, reproducibility, deterministic artifacts, anti-misuse feedback, path policy, promotion safety
 P2: Strategy tuning, profitability, parameter search convenience
 ```
 
@@ -64,235 +52,357 @@ Any P2 change that weakens P0 or P1 is unacceptable.
 
 Do not:
 
-* Modify live broker behavior.
-* Modify live order submission.
-* Modify paper/live run loops.
-* Weaken live preflight.
-* Weaken run locks.
-* Weaken restart/reconcile behavior.
-* Weaken lot-native SELL authority.
-* Weaken duplicate-order prevention.
-* Auto-edit `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
+* Change strategy simulation logic.
+* Change acceptance gate logic.
+* Change promotion logic.
+* Change candidate ranking logic.
+* Change report content hashes unless explicitly and intentionally adding summary data to report artifacts.
+* Change live broker behavior.
+* Change live or paper order submission.
+* Change run locks.
+* Change restart/reconcile behavior.
+* Change lot-native SELL authority.
+* Change duplicate-order prevention.
 * Add new trading behavior.
-* Add a new strategy.
+* Auto-edit `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
 * Reintroduce repo-root `.env` autoloading.
-* Change generated artifact paths into the repository.
-* Replace the canonical CLI.
+* Write generated artifacts into the repository.
+* Make failed candidates look promotable.
+* Put failed candidates into `best_candidate_id`.
 
 Do:
 
-* Strengthen promotion evidence binding.
-* Keep promotion as an operator-reviewed artifact generator only.
-* Preserve deterministic hashes.
-* Add explicit refusal reasons.
+* Add a reusable operator-facing research summary layer.
+* Use existing report fields.
+* Preserve machine-readable artifacts.
+* Preserve deterministic behavior.
+* Print actionable failure summaries.
+* Keep failed-candidate diagnostics separate from promotable-candidate fields.
 * Add focused tests.
-* Keep research separated from live execution.
 
 ## Keep these hypotheses explicit
 
-Keep these as hypotheses in your implementation notes and final report.
+Keep these hypotheses in your implementation notes and final report.
 
 ### Hypothesis A
 
-The current promotion flow can allow the walk-forward candidate to become the primary promoted object before the backtest/OOS candidate’s own gate and hash integrity are explicitly validated.
+The root issue is not missing diagnostic data. The diagnostic data already exists in reports as fields such as `gate_fail_reasons`, `validation_metrics`, `walk_forward_metrics`, and `parameter_stability`.
 
-Confirm or refute by inspecting `promote_candidate()` and `_walk_forward_candidate_for_promotion()`.
+The problem is that CLI summary does not surface those diagnostics.
+
+Confirm or refute by inspecting:
+
+```text
+src/bithumb_bot/research/validation_protocol.py
+src/bithumb_bot/research/cli.py
+```
 
 ### Hypothesis B
 
-Promotion should validate the backtest/OOS candidate and the walk-forward candidate separately, then bind both evidence sources into one promotion artifact.
+The higher-level structural issue is that operator-facing summary and machine-readable report artifacts are not separated into a reusable layer.
 
-Confirm or refute by implementing separated validation paths and tests.
+Currently `_print_report_summary()` directly prints a small subset of report fields. This makes diagnostics harder to test and reuse.
+
+Confirm or refute by inspecting `src/bithumb_bot/research/cli.py`.
 
 ### Hypothesis C
 
-A promotion artifact is currently less auditable than it should be because it records one verified candidate profile hash, but does not explicitly record both backtest and walk-forward evidence hashes/sources when walk-forward is required.
+The EC2 smoke failure was a correct strategy/gate failure, not a research system failure. The system generated reports and correctly produced `gate_result=FAIL`, but operator diagnosis required manual `jq`.
 
-Confirm or refute by inspecting the current promotion artifact structure.
+Confirm or refute by testing a synthetic FAIL report and verifying that the new CLI summary shows the same facts without requiring `jq`.
 
 ### Hypothesis D
 
-This patch should be limited to promotion integrity and should not require touching live execution, strategy simulation, path policy, run locks, broker behavior, or env mutation.
+A simple one-line `top_fail_reasons` patch is not enough. The repository needs a small `ResearchRunSummary` model or equivalent pure summary builder so the same summary logic can be reused and tested independently of CLI printing.
 
-Confirm by keeping the diff scoped.
+Confirm or refute by implementing a pure function and tests.
 
 ## Required design change
 
-Refactor promotion validation into explicit stages.
+Add a new module:
 
-Add or adapt helper functions similar to:
+```text
+src/bithumb_bot/research/run_summary.py
+```
+
+Implement a pure summary builder, for example:
 
 ```python
-validate_backtest_candidate_for_promotion(...)
-validate_walk_forward_candidate_for_promotion(...)
+@dataclass(frozen=True)
+class ResearchRunSummary:
+    candidate_gate_counts: dict[str, int]
+    top_fail_reasons: dict[str, int]
+    top_window_fail_reasons: dict[str, int]
+    walk_forward_window_count: int | None
+    walk_forward_pass_window_count: int | None
+    walk_forward_fail_window_count: int | None
+    promotion_allowed: bool
+    nearest_failed_candidate_id: str | None
+    nearest_failed_candidate_fail_reasons: tuple[str, ...]
+    next_action: str
 ```
 
-The exact names may differ, but the behavior must be clear and tested.
+Exact names may differ, but the resulting behavior must be equivalent and operator-readable.
 
-## Backtest candidate validation requirements
+Add:
 
-The backtest candidate from:
+```python
+def build_research_run_summary(report: dict[str, object]) -> ResearchRunSummary:
+    ...
+```
+
+The function must be defensive:
 
 ```text
-DATA_ROOT/<mode>/reports/research/<experiment_id>/backtest_report.json
+- malformed or missing candidates should not crash
+- candidates missing gate_fail_reasons should be handled safely
+- missing walk_forward_metrics should be handled safely
+- non-list candidates should be handled safely
+- unknown gate labels should be counted rather than crashing
 ```
 
-must pass all of the following before walk-forward evidence can replace or supplement anything:
+## Summary fields to compute
+
+Compute at least:
 
 ```text
-candidate exists
-acceptance_gate_result == "PASS"
-validation_metrics exists and is a dict
-candidate_profile_hash exists
-sha256_prefixed(build_candidate_profile(backtest_candidate)) == backtest_candidate["candidate_profile_hash"]
+candidate_gate_counts
+top_fail_reasons
+promotion_allowed
+nearest_failed_candidate_id
+nearest_failed_candidate_fail_reasons
+walk_forward_window_count
+walk_forward_pass_window_count
+walk_forward_fail_window_count
+top_window_fail_reasons
+next_action
 ```
 
-If any of these fail, refuse promotion before using walk-forward evidence.
+### candidate_gate_counts
 
-Use explicit reasons:
+Count candidate `acceptance_gate_result`.
+
+Example:
 
 ```text
-backtest_candidate_not_found
-backtest_acceptance_gate_not_passed
-backtest_validation_oos_evidence_missing
-backtest_validation_trade_count_missing
-backtest_candidate_profile_hash_missing
-backtest_candidate_profile_hash_mismatch
+PASS:0,FAIL:8
 ```
 
-If existing reason names differ, keep backward compatibility where practical, but make the new source-specific reasons visible.
-
-## Walk-forward candidate validation requirements
-
-If `backtest_candidate["walk_forward_required"]` is true, then the walk-forward candidate from:
+If no candidates exist:
 
 ```text
-DATA_ROOT/<mode>/reports/research/<experiment_id>/walk_forward_report.json
+none
 ```
 
-must pass all of the following:
+### top_fail_reasons
+
+Aggregate every candidate’s `gate_fail_reasons`.
+
+Example:
 
 ```text
-walk_forward_report.json exists
-walk_forward report experiment_id matches
-walk_forward report contains candidates
-candidate exists
-strategy_name matches backtest candidate
-parameter_candidate_id matches backtest candidate
-parameter_values matches backtest candidate
-cost_model matches backtest candidate
-manifest_hash matches backtest candidate
-walk_forward_gate_result == "PASS"
-walk_forward_metrics exists and is a dict
-candidate_profile_hash exists
-sha256_prefixed(build_candidate_profile(walk_forward_candidate)) == walk_forward_candidate["candidate_profile_hash"]
+profit_factor_failed:8,walk_forward_failed:8,min_trade_count_failed:4
 ```
 
-Use explicit refusal reasons:
+### promotion_allowed
+
+Must be true only when the report itself indicates there is a promotable candidate.
+
+Suggested rule:
 
 ```text
-walk_forward_missing
-walk_forward_report_experiment_id_mismatch
-walk_forward_report_candidates_missing
-walk_forward_candidate_mismatch
-walk_forward_gate_not_passed
-walk_forward_metrics_missing
-walk_forward_candidate_profile_hash_missing
-walk_forward_candidate_profile_hash_mismatch
+promotion_allowed = bool(report.best_candidate_id) and report.gate_result == "PASS"
 ```
 
-Do not let a passing walk-forward candidate rescue a failed or tampered backtest candidate.
+Do not infer promotion allowed from a failed or nearest candidate.
 
-## Promotion artifact requirements
-
-When promotion succeeds, the artifact must explicitly record both evidence sources.
-
-At minimum include:
-
-```json
-{
-  "strategy_name": "...",
-  "strategy_profile_id": "...",
-  "strategy_profile_source_experiment": "...",
-  "strategy_profile_hash": "sha256:...",
-  "candidate_id": "...",
-  "manifest_hash": "sha256:...",
-  "dataset_snapshot_id": "...",
-  "dataset_content_hash": "sha256:...",
-  "candidate_profile": {},
-  "gate_result": "PASS",
-
-  "validation_evidence_source": "backtest_report.json",
-  "backtest_candidate_profile_hash": "sha256:...",
-  "backtest_candidate_profile_verified": true,
-
-  "walk_forward_required": true,
-  "walk_forward_evidence_source": "walk_forward_report.json",
-  "walk_forward_candidate_profile_hash": "sha256:...",
-  "walk_forward_candidate_profile_verified": true,
-
-  "operator_next_step": "Review this artifact before manual paper env/profile consideration."
-}
-```
-
-If walk-forward is not required, include:
-
-```json
-{
-  "walk_forward_required": false,
-  "walk_forward_evidence_source": null,
-  "walk_forward_candidate_profile_hash": null,
-  "walk_forward_candidate_profile_verified": false
-}
-```
-
-Keep deterministic `content_hash` behavior. `generated_at` must not make the deterministic content hash unstable if the existing hash helper excludes it.
-
-Do not write env files. Do not mutate live or paper runtime config.
-
-## Required tests
-
-Add or update focused tests in:
+Print as:
 
 ```text
-tests/test_research_promotion_gate.py
+promotion_allowed=1
 ```
 
-Required test cases:
+or:
 
 ```text
-test_promotion_refuses_backtest_candidate_hash_mismatch_even_when_walk_forward_exists
-test_promotion_refuses_backtest_gate_failure_even_when_walk_forward_passes
-test_promotion_refuses_walk_forward_candidate_profile_hash_mismatch
-test_promotion_artifact_records_backtest_and_walk_forward_evidence_hashes
-test_promotion_artifact_records_no_walk_forward_evidence_when_not_required
+promotion_allowed=0
 ```
 
-Test expectations:
+### nearest_failed_candidate_id
 
-1. If the backtest candidate hash is tampered but the walk-forward report has a passing matching candidate, promotion must fail with `backtest_candidate_profile_hash_mismatch`.
+When no PASS candidate exists, show a separate diagnostic candidate id.
 
-2. If the backtest candidate has `acceptance_gate_result="FAIL"` but the walk-forward candidate passes, promotion must fail with `backtest_acceptance_gate_not_passed`.
+This must not replace `best_candidate_id`.
 
-3. If the walk-forward candidate hash is tampered, promotion must fail with `walk_forward_candidate_profile_hash_mismatch`.
+Use the first candidate in the sorted report list if it exists, since reports are already sorted by candidate rank.
 
-4. If both backtest and walk-forward evidence pass, the promotion artifact must include:
+Example:
 
-   * `validation_evidence_source`
-   * `backtest_candidate_profile_hash`
-   * `backtest_candidate_profile_verified`
-   * `walk_forward_required`
-   * `walk_forward_evidence_source`
-   * `walk_forward_candidate_profile_hash`
-   * `walk_forward_candidate_profile_verified`
+```text
+best_candidate_id=none
+nearest_failed_candidate_id=candidate_004_1e322c70
+nearest_failed_candidate_fail_reasons=profit_factor_failed,walk_forward_missing
+```
 
-5. If walk-forward is not required, promotion should still pass for a valid backtest candidate and explicitly record that walk-forward evidence was not required.
+Important invariant:
 
-## Existing tests to preserve
+```text
+best_candidate_id remains none when all candidates fail.
+nearest_failed_candidate_id is diagnostic only and must never be used as a promotion candidate.
+```
+
+### walk_forward_window_summary
+
+If any candidate has `walk_forward_metrics`, compute aggregate window counts from the first available candidate’s walk-forward metrics.
+
+Example:
+
+```text
+walk_forward_window_summary=window_count:5,pass:0,fail:5
+```
+
+### top_window_fail_reasons
+
+Aggregate window-level `fail_reasons` across all candidates and all walk-forward windows.
+
+Example:
+
+```text
+top_window_fail_reasons=test_metrics_gate_incompatible:40
+```
+
+### next_action
+
+Add a simple deterministic next action.
+
+Suggested mapping:
+
+```text
+promotion_allowed=1
+→ next_action=review_promotion_candidate
+
+no candidates
+→ next_action=inspect_dataset_or_manifest
+
+top_fail_reasons includes walk_forward_missing
+→ next_action=run_walk_forward_before_promotion
+
+top_fail_reasons includes walk_forward_failed
+→ next_action=do_not_promote_review_walk_forward_windows
+
+top_fail_reasons includes profit_factor_failed or min_trade_count_failed
+→ next_action=do_not_promote_revise_strategy_hypothesis
+
+otherwise gate_result=FAIL
+→ next_action=inspect_report_or_adjust_hypothesis_not_promote
+```
+
+Keep this conservative. Do not suggest lowering gates.
+
+## CLI output requirements
+
+Update:
+
+```text
+src/bithumb_bot/research/cli.py
+```
+
+Modify `_print_report_summary()` to use the new summary builder.
+
+Keep existing output lines. Add new lines after `gate_result` or near the end:
+
+```text
+candidate_gate_counts=PASS:0,FAIL:8
+top_fail_reasons=profit_factor_failed:8,walk_forward_failed:8,min_trade_count_failed:4
+promotion_allowed=0
+nearest_failed_candidate_id=candidate_004_1e322c70
+nearest_failed_candidate_fail_reasons=profit_factor_failed,walk_forward_missing
+walk_forward_window_summary=window_count:5,pass:0,fail:5
+top_window_fail_reasons=test_metrics_gate_incompatible:40
+next_action=do_not_promote_revise_strategy_hypothesis
+```
+
+If a field is not applicable, print a stable safe value:
+
+```text
+top_fail_reasons=none
+nearest_failed_candidate_id=none
+nearest_failed_candidate_fail_reasons=none
+walk_forward_window_summary=none
+top_window_fail_reasons=none
+```
+
+Do not remove existing lines:
+
+```text
+experiment_id
+manifest_hash
+dataset_snapshot_id
+dataset_content_hash
+candidates_evaluated
+best_candidate_id
+gate_result
+report_path
+derived_path
+content_hash
+warnings
+```
+
+## Artifact behavior
+
+Default requirement:
+
+```text
+Do not modify persisted report payloads.
+Do not change content_hash behavior.
+Do not add summary fields to report artifacts in this patch unless absolutely necessary.
+```
+
+This patch should primarily improve CLI/operator output and testable summary logic.
+
+If you decide to add summary data to report artifacts, explain why and preserve deterministic hashing behavior.
+
+## Tests
+
+Add:
+
+```text
+tests/test_research_cli_summary.py
+```
+
+or another appropriately named focused test file.
+
+Required tests:
+
+```text
+1. FAIL report summary includes top_fail_reasons.
+2. PASS report summary sets promotion_allowed=1.
+3. FAIL report summary sets promotion_allowed=0.
+4. Candidate gate counts are computed correctly.
+5. Walk-forward report summary includes walk_forward_window_summary.
+6. Walk-forward report summary includes top_window_fail_reasons.
+7. Empty or malformed candidate sections do not crash.
+8. best_candidate_id remains none when all candidates fail.
+9. nearest_failed_candidate_id is separate from best_candidate_id.
+10. next_action is conservative and does not suggest promotion for failed reports.
+```
+
+Also test CLI rendering if practical:
+
+```text
+- _print_report_summary() prints candidate_gate_counts
+- _print_report_summary() prints top_fail_reasons
+- _print_report_summary() prints next_action
+```
+
+If `_print_report_summary()` is private, either test the pure summary builder directly and minimally test CLI output using `capsys`, or keep rendering helpers small and testable.
+
+## Existing tests to run
 
 Run at least:
 
 ```bash
+uv run pytest -q tests/test_research_cli_summary.py
 uv run pytest -q tests/test_research_promotion_gate.py
 uv run pytest -q tests/test_research_walk_forward.py
 uv run pytest -q tests/test_research_parameter_stability.py
@@ -303,7 +413,7 @@ uv run pytest -q tests/test_research_path_policy.py
 uv run pytest -q
 ```
 
-Also run existing safety tests if present:
+Also run safety tests if present:
 
 ```bash
 uv run pytest -q tests/test_live_preflight.py
@@ -311,35 +421,32 @@ uv run pytest -q tests/test_mode_validation.py
 uv run pytest -q tests/test_run_lock.py
 ```
 
-If any requested test file does not exist, state that explicitly and run the closest equivalent.
+If any requested test file does not exist, report that explicitly and run the closest equivalent.
 
-## Optional smoke verification
+## Optional EC2 smoke verification
 
-If a real candle DB is available in the environment, run:
+If you have access to the live smoke manifest and runtime DB, rerun:
 
 ```bash
-uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
-uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter_manifest.example.json
+uv run bithumb-bot research-backtest --manifest /tmp/sma_live_smoke_manifest_short.json
+uv run bithumb-bot research-walk-forward --manifest /tmp/sma_live_smoke_manifest_short.json
 ```
 
-Then attempt promotion only if there is a passing candidate.
-
-Do not fake this. If DB/data/env is unavailable, report exactly why the smoke path was not run.
-
-The goal of the smoke path is not profitability. It is to verify:
+Expected improved CLI output should include something like:
 
 ```text
-backtest_report.json is generated
-walk_forward_report.json is generated
-candidate hashes are present
-promotion refusal/pass reasons are explicit
-promotion artifact binds evidence sources
-artifacts are written outside the repository
+candidate_gate_counts=PASS:0,FAIL:8
+top_fail_reasons=profit_factor_failed:8,walk_forward_failed:8,min_trade_count_failed:4
+promotion_allowed=0
+nearest_failed_candidate_id=...
+next_action=...
 ```
+
+Do not fake this run. If the runtime DB or manifest is unavailable, state that.
 
 ## Documentation
 
-Update documentation only if needed.
+Update documentation only if useful.
 
 Likely files:
 
@@ -348,34 +455,43 @@ docs/research-validation.md
 docs/runbooks/research-to-paper.md
 ```
 
-Make sure the runbook states:
+Add a short note that research CLI summaries now show:
 
 ```text
-Promotion requires backtest/OOS evidence.
-If walk-forward is required, promotion also requires walk-forward evidence.
-Both evidence sources are bound into the promotion artifact.
-Promotion still does not edit env files.
-Promotion still does not imply live readiness.
+candidate_gate_counts
+top_fail_reasons
+walk_forward_window_summary
+top_window_fail_reasons
+promotion_allowed
+nearest_failed_candidate_id
+next_action
+```
+
+Emphasize:
+
+```text
+nearest_failed_candidate_id is diagnostic only and must not be promoted.
+promotion_allowed=0 means do not run research-promote-candidate.
 ```
 
 Do not write generic trading advice.
 
 ## Backwards compatibility
 
-Keep `backtest2.py` as a deprecated wrapper delegating to canonical research CLI.
-
-Do not reintroduce:
-
-```python
-load_dotenv(Path(__file__).with_name(".env"))
-```
-
-Keep the canonical interface:
+Keep existing canonical commands:
 
 ```bash
 uv run bithumb-bot research-backtest --manifest <path>
 uv run bithumb-bot research-walk-forward --manifest <path>
 uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id>
+```
+
+Keep `backtest2.py` as a deprecated wrapper if it already exists.
+
+Do not reintroduce:
+
+```python
+load_dotenv(Path(__file__).with_name(".env"))
 ```
 
 ## Final report format
@@ -393,46 +509,48 @@ Hypotheses
 - Hypothesis D: confirmed/refuted/partially confirmed, with evidence.
 
 Design Changes
-- Backtest candidate validation changes.
-- Walk-forward candidate validation changes.
-- Promotion artifact evidence-binding changes.
+- New run summary module/model.
+- CLI summary changes.
 - Any documentation changes.
+- Any behavior explicitly left unchanged.
 
-Artifacts and Paths
-- Where promotion artifacts are written.
-- Which evidence source fields are now recorded.
-- Whether deterministic hashes are preserved.
-- Whether env files remain untouched.
+Artifacts and Hashes
+- Whether report artifacts changed.
+- Whether content_hash behavior changed.
+- Whether output paths changed.
 
 Safety / Recovery / Observability
 - Existing live safety contracts intentionally not touched.
-- New explicit promotion refusal reasons.
-- Operator-facing evidence fields added.
+- New operator-facing diagnostics.
+- How this reduces promotion misuse risk.
+- How malformed reports are handled.
 
 Tests
 - Exact commands run.
 - Pass/fail results.
 - If any test failed, state whether it appears introduced or pre-existing.
-- If the optional smoke run was not feasible, explain why.
+- If optional EC2 smoke was not feasible, explain why.
 
 Backwards Compatibility
-- State what happened to backtest2.py.
-- State whether canonical CLI remains the primary interface.
+- Canonical CLI status.
+- backtest2.py status if relevant.
 
 Remaining Work
-- Real DB end-to-end research run, if not completed.
+- Failure class in persisted artifacts, if not implemented.
 - Paper shadow validation.
 - Optional env fragment renderer.
 - Small-live readiness checklist.
 ```
 
-The patch is successful only if promotion now proves this stronger invariant:
+The patch is successful only if a failed research run no longer requires immediate `jq` inspection to answer:
 
 ```text
-backtest/OOS PASS
-+ backtest candidate hash verified
-+ rolling walk-forward PASS when required
-+ walk-forward candidate hash verified when required
-+ both evidence sources recorded in the promotion artifact
-= promotion artifact allowed
+Why did no candidate pass?
+Can anything be promoted?
+Which failed candidate was closest?
+Was walk-forward the blocker?
+What should the operator do next?
 ```
+
+And the answer must be conservative: failed candidates must remain non-promotable.
+

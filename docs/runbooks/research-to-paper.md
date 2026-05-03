@@ -31,7 +31,8 @@ Review the hypothesis, dataset split dates, `snapshot_id`, parameter grid, cost 
 uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
 ```
 
-Review the printed `manifest_hash`, `dataset_content_hash`, `content_hash`, report path, derived path, candidate count, and `gate_result`.
+Review the printed `manifest_hash`, `dataset_content_hash`, `content_hash`, report path, derived path, candidate count, `gate_result`, `candidate_gate_counts`, `top_fail_reasons`, `promotion_allowed`, `nearest_failed_candidate_id`, and `next_action`.
+If `promotion_allowed=0`, do not run `research-promote-candidate`. `nearest_failed_candidate_id` is diagnostic only and must not be promoted.
 
 4. Inspect the report artifact and hashes.
 
@@ -49,6 +50,7 @@ uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter
 ```
 
 This command must produce real rolling train/test window evidence when `walk_forward_required=true`.
+Review the printed `walk_forward_window_summary` and `top_window_fail_reasons` before inspecting the full artifact.
 
 6. Inspect rolling walk-forward evidence.
 
