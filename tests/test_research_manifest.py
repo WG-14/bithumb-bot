@@ -43,6 +43,21 @@ def test_manifest_parses_required_contract() -> None:
     assert manifest.manifest_hash().startswith("sha256:")
 
 
+def test_manifest_parses_valid_walk_forward_config() -> None:
+    payload = _manifest()
+    payload["walk_forward"] = {
+        "train_window_days": 2,
+        "test_window_days": 1,
+        "step_days": 1,
+        "min_windows": 1,
+    }
+
+    manifest = parse_manifest(payload)
+
+    assert manifest.walk_forward is not None
+    assert manifest.walk_forward.train_window_days == 2
+
+
 @pytest.mark.parametrize(
     "mutate,expected",
     [
@@ -56,6 +71,20 @@ def test_manifest_parses_required_contract() -> None:
         (
             lambda payload: payload["acceptance_gate"].__setitem__("min_trade_count", 0),
             "acceptance_gate.min_trade_count",
+        ),
+        (
+            lambda payload: payload.__setitem__(
+                "walk_forward",
+                {"train_window_days": 0, "test_window_days": 1, "step_days": 1, "min_windows": 1},
+            ),
+            "walk_forward.train_window_days",
+        ),
+        (
+            lambda payload: (
+                payload["acceptance_gate"].__setitem__("walk_forward_required", True),
+                payload.pop("walk_forward", None),
+            ),
+            "walk_forward is required",
         ),
     ],
 )

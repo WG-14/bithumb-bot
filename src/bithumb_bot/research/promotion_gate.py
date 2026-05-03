@@ -52,6 +52,8 @@ def evaluate_candidate_for_promotion(candidate: dict[str, Any]) -> tuple[bool, l
     profile_hash = candidate.get("candidate_profile_hash")
     if not profile_hash:
         reasons.append("candidate_profile_hash_missing")
+    elif sha256_prefixed(build_candidate_profile(candidate)) != profile_hash:
+        reasons.append("candidate_profile_hash_mismatch")
     return not reasons, reasons
 
 
@@ -62,7 +64,8 @@ def promote_candidate(
     manager: PathManager,
     generated_at: str | None = None,
 ) -> PromotionResult:
-    candidate_report_path = manager.data_dir() / "reports" / "research" / experiment_id / "backtest_report.json"
+    research_report_dir = manager.data_dir() / "reports" / "research" / experiment_id
+    candidate_report_path = research_report_dir / "backtest_report.json"
     if not candidate_report_path.exists():
         raise PromotionGateError(f"candidate report not found: {candidate_report_path}")
     import json
@@ -78,25 +81,36 @@ def promote_candidate(
         (item for item in candidates if item.get("parameter_candidate_id") == candidate_id),
         None,
     )
+    if candidate and candidate.get("walk_forward_required"):
+        candidate = _walk_forward_candidate_for_promotion(
+            report_dir=research_report_dir,
+            experiment_id=experiment_id,
+            candidate_id=candidate_id,
+            backtest_candidate=candidate,
+        )
     allowed, reasons = evaluate_candidate_for_promotion(candidate or {})
     if not allowed:
         raise PromotionGateError(f"promotion refused: {','.join(reasons)}")
 
     profile = build_candidate_profile(candidate)
-    profile_hash = sha256_prefixed(profile)
+    verified_profile_hash = sha256_prefixed(profile)
+    stored_profile_hash = candidate["candidate_profile_hash"]
+    if verified_profile_hash != stored_profile_hash:
+        raise PromotionGateError("promotion refused: candidate_profile_hash_mismatch")
     artifact = {
         "strategy_name": candidate["strategy_name"],
         "strategy_profile_id": f"{experiment_id}_{candidate_id}",
         "strategy_profile_source_experiment": experiment_id,
-        "strategy_profile_hash": profile_hash,
+        "strategy_profile_hash": verified_profile_hash,
         "candidate_id": candidate_id,
         "manifest_hash": candidate["manifest_hash"],
         "dataset_snapshot_id": candidate["dataset_snapshot_id"],
         "dataset_content_hash": candidate["dataset_content_hash"],
         "candidate_profile": profile,
-        "candidate_profile_hash": candidate["candidate_profile_hash"],
+        "candidate_profile_hash": verified_profile_hash,
+        "verified_candidate_profile_hash": verified_profile_hash,
         "gate_result": "PASS",
-        "operator_next_step": "Review this artifact before copying values into paper/live env.",
+        "operator_next_step": "Review this artifact before manual paper env/profile consideration.",
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
     }
     content_hash = sha256_prefixed(content_hash_payload(artifact))
@@ -105,6 +119,37 @@ def promote_candidate(
     _ensure_research_output_path_allowed(manager, path)
     write_json_atomic(path, artifact)
     return PromotionResult(artifact=artifact, artifact_path=path, content_hash=content_hash)
+
+
+def _walk_forward_candidate_for_promotion(
+    *,
+    report_dir: Path,
+    experiment_id: str,
+    candidate_id: str,
+    backtest_candidate: dict[str, Any],
+) -> dict[str, Any]:
+    path = report_dir / "walk_forward_report.json"
+    if not path.exists():
+        raise PromotionGateError("promotion refused: walk_forward_missing")
+    import json
+
+    with path.open("r", encoding="utf-8") as handle:
+        report = json.load(handle)
+    if report.get("experiment_id") != experiment_id:
+        raise PromotionGateError("promotion refused: walk_forward_report_experiment_id_mismatch")
+    candidates = report.get("candidates")
+    if not isinstance(candidates, list):
+        raise PromotionGateError("promotion refused: walk_forward_report_candidates_missing")
+    candidate = next((item for item in candidates if item.get("parameter_candidate_id") == candidate_id), None)
+    if not candidate:
+        raise PromotionGateError("promotion refused: walk_forward_missing")
+    for key in ("strategy_name", "parameter_candidate_id", "parameter_values", "cost_model", "manifest_hash"):
+        if candidate.get(key) != backtest_candidate.get(key):
+            raise PromotionGateError("promotion refused: walk_forward_candidate_mismatch")
+    if candidate.get("walk_forward_gate_result") != "PASS":
+        reason = (candidate.get("walk_forward_metrics") or {}).get("failure_reason") or "walk_forward_failed"
+        raise PromotionGateError(f"promotion refused: {reason}")
+    return candidate
 
 
 def _ensure_research_output_path_allowed(manager: PathManager, path: Path) -> None:

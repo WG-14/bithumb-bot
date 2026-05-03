@@ -91,6 +91,22 @@ class AcceptanceGate:
 
 
 @dataclass(frozen=True)
+class WalkForwardConfig:
+    train_window_days: int
+    test_window_days: int
+    step_days: int
+    min_windows: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "train_window_days": self.train_window_days,
+            "test_window_days": self.test_window_days,
+            "step_days": self.step_days,
+            "min_windows": self.min_windows,
+        }
+
+
+@dataclass(frozen=True)
 class ExperimentManifest:
     experiment_id: str
     hypothesis: str
@@ -101,6 +117,7 @@ class ExperimentManifest:
     parameter_space: dict[str, tuple[object, ...]]
     cost_model: CostModel
     acceptance_gate: AcceptanceGate
+    walk_forward: WalkForwardConfig | None
     raw: dict[str, Any]
 
     def canonical_payload(self) -> dict[str, Any]:
@@ -114,6 +131,7 @@ class ExperimentManifest:
             "parameter_space": {key: list(value) for key, value in sorted(self.parameter_space.items())},
             "cost_model": self.cost_model.as_dict(),
             "acceptance_gate": self.acceptance_gate.as_dict(),
+            "walk_forward": self.walk_forward.as_dict() if self.walk_forward is not None else None,
         }
 
     def manifest_hash(self) -> str:
@@ -141,6 +159,9 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
     parameter_space = _parse_parameter_space(payload.get("parameter_space"))
     cost_model = _parse_cost_model(_required_dict(payload, "cost_model"))
     acceptance_gate = _parse_acceptance_gate(_required_dict(payload, "acceptance_gate"))
+    walk_forward = _parse_walk_forward(payload.get("walk_forward"))
+    if acceptance_gate.walk_forward_required and walk_forward is None:
+        raise ManifestValidationError("walk_forward is required when acceptance_gate.walk_forward_required=true")
 
     _validate_split_order(dataset.split)
 
@@ -154,6 +175,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
         parameter_space=parameter_space,
         cost_model=cost_model,
         acceptance_gate=acceptance_gate,
+        walk_forward=walk_forward,
         raw=dict(payload),
     )
 
@@ -241,6 +263,19 @@ def _parse_acceptance_gate(payload: dict[str, Any]) -> AcceptanceGate:
         oos_return_must_be_positive=bool(payload.get("oos_return_must_be_positive", True)),
         parameter_stability_required=bool(payload.get("parameter_stability_required", False)),
         walk_forward_required=bool(payload.get("walk_forward_required", False)),
+    )
+
+
+def _parse_walk_forward(value: Any) -> WalkForwardConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ManifestValidationError("walk_forward must be an object")
+    return WalkForwardConfig(
+        train_window_days=_positive_int(value.get("train_window_days"), "walk_forward.train_window_days"),
+        test_window_days=_positive_int(value.get("test_window_days"), "walk_forward.test_window_days"),
+        step_days=_positive_int(value.get("step_days"), "walk_forward.step_days"),
+        min_windows=_positive_int(value.get("min_windows"), "walk_forward.min_windows"),
     )
 
 

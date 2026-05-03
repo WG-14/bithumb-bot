@@ -1,479 +1,482 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+Continue working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is not to add a small backtest patch. Treat this as a structural evolution of the repository from a mostly safe execution bot into a reproducible automated-trading research and validation system where only verified strategy candidates can later be promoted toward paper/live operation.
+Do not treat this as a feature expansion or a strategy-profitability task. The previous patch created the first structural research layer: manifest parsing, research backtest/walk-forward/promotion commands, deterministic artifacts, path-policy tests, a deprecated `backtest2.py` wrapper, and basic documentation.
 
-The repository already appears relatively mature on live-order safety, state integrity, restart/recovery, run locks, live/paper separation, risk gates, and observability. Do not weaken those contracts. The suspected structural gap is that research/backtesting/parameter exploration/out-of-sample validation/walk-forward validation/promotion into runtime env are not modeled as one reproducible pipeline.
+Now strengthen the system so it actually resists overfitted parameter hunting and becomes auditable enough to support the next stage: research candidate → operator-reviewed promotion artifact → paper validation consideration.
 
-Work directly in `WG-14/bithumb-bot`. Inspect the current files before changing anything, especially:
-
-* `README.md`
-* `AGENTS.md`
-* `pyproject.toml`
-* `backtest2.py`
-* `src/bithumb_bot/bootstrap.py`
-* `src/bithumb_bot/config.py`
-* `src/bithumb_bot/app.py`
-* existing reporting, strategy, sweep, replay, path, settings, and test modules
-
-Preserve the existing canonical CLI style:
-
-```bash
-uv run bithumb-bot <command>
-```
-
-Do not introduce a parallel command style unless it is only a backward-compatible deprecated wrapper.
+Do not add new live trading behavior. Do not weaken existing live safety, run-lock, recovery, ledger, lot-native SELL authority, duplicate-order prevention, or live/paper separation behavior.
 
 ## Core problem statement
 
-The repository should be able to execute this validation lifecycle as code:
+The repository should not become a system where operators manually tune env values until a backtest looks good.
+
+It should become a system where:
 
 ```text
 hypothesis
-→ data collection / dataset snapshot
-→ market regime or segment definition
-→ candidate parameter-space definition
-→ first-pass backtest
-→ parameter exploration
-→ overfitting checks
+→ manifest
+→ deterministic dataset fingerprint
+→ parameter-space evaluation
 → out-of-sample validation
-→ walk-forward validation
-→ paper / dry-run validation
-→ small live candidate readiness
-→ runtime env/profile promotion
-→ operational log revalidation
+→ real rolling walk-forward validation
+→ stability checks
+→ candidate profile hash
+→ promotion integrity check
+→ operator-reviewed artifact
+→ paper validation consideration
 ```
 
-The key distinction must be preserved:
+The next patch must improve the research system’s validation power, auditability, recoverability, and operator visibility.
+
+## Preserve priority order
+
+Use this priority order throughout:
 
 ```text
-Research-stage env/config values = experimental candidate variables
-Runtime env values = verified output of the validation process
-```
-
-Do not collapse those two concepts into “just edit `.env` until it works”.
-
-## Priority order
-
-Use this priority order throughout the work:
-
-```text
-P0: Safety, correctness, live/paper isolation, wrong-order prevention, duplicate-order prevention, ledger consistency, restart/recovery behavior
-P1: Reproducibility, path policy, deterministic reports, operator visibility, recoverability
-P2: Strategy tuning, profitability, parameter search convenience
+P0: Live safety, correctness, live/paper isolation, wrong-order prevention, duplicate-order prevention, ledger consistency, restart/recovery behavior
+P1: Reproducibility, deterministic artifacts, path policy, promotion integrity, operator observability, recoverability
+P2: Strategy tuning, parameter search convenience, profitability
 ```
 
 Any P2 change that weakens P0 or P1 is unacceptable.
 
-## Hypotheses to keep explicit
+## Keep these hypotheses explicit
 
-Do not silently convert these into generic requirements. Keep them as testable hypotheses in the implementation notes and final report.
+Do not silently convert these into generic tasks. Keep them as hypotheses in your implementation notes and final report.
 
 ### Hypothesis A
 
-The core missing structure is that strategy-performance validation is not represented as an immutable code-level protocol.
+The initial research patch added the correct structural layer, but the current promotion gate is still audit-weak because it does not fully prove that the candidate profile being promoted is identical to the candidate profile evaluated in the report.
 
-Existing commands such as strategy/reporting/telemetry may be useful, but verify whether they already provide all of the following as a single reproducible contract:
+Test this by inspecting `src/bithumb_bot/research/promotion_gate.py`.
 
-* experiment manifest
-* dataset split
-* train / validation / final holdout
-* parameter-space exploration
-* out-of-sample validation
-* walk-forward validation
-* candidate artifact
-* promotion gate
-* deterministic report hash
+Expected structural fix:
 
-If this already exists, document the evidence and adjust. If it does not exist, implement the minimal structural layer needed.
+* Recompute `sha256_prefixed(build_candidate_profile(candidate))` inside promotion.
+* Refuse promotion if the recomputed hash does not equal the candidate’s stored `candidate_profile_hash`.
+* Report the refusal reason as `candidate_profile_hash_mismatch`.
 
 ### Hypothesis B
 
-The current backtest layer is likely inconsistent with the repository’s explicit env/path/runtime-root policy.
+The current walk-forward command is only a scaffold, not real rolling walk-forward validation.
 
-Specifically inspect whether `backtest2.py` still reads repo-root `.env` directly, writes artifacts inside the repository, or bypasses the canonical bootstrap/path policy. If yes, fix the structure rather than only patching the script.
+Test this by inspecting `src/bithumb_bot/research/validation_protocol.py`.
+
+Expected structural fix:
+
+* Add optional `manifest.walk_forward` configuration.
+* Generate rolling train/test windows.
+* Evaluate candidates across multiple windows.
+* Report per-window and aggregate walk-forward evidence.
+* If `walk_forward_required=true`, promotion must not pass without real walk-forward evidence.
 
 ### Hypothesis C
 
-Strategy env values are currently too easy to treat as mutable exploration knobs instead of verified runtime outputs.
+The current parameter stability score is placeholder logic and can allow candidates to pass stability merely because the parameter grid has enough candidates.
 
-Implement or prepare a clear separation between:
+Test this by inspecting `_parameter_stability_scores`.
 
-```text
-1. Experiment parameter space
-2. Candidate config artifact
-3. Promoted runtime profile/env metadata
-```
+Expected structural fix:
 
-A promotion command must not directly rewrite live env files. It should generate an operator-reviewable promotion artifact with provenance and hashes.
+* Replace placeholder scoring with a real neighbor-based stability metric.
+* A single isolated spike should get a low stability score.
+* A stable plateau of neighboring candidates should get a higher score.
+* `parameter_stability_required=true` must have real meaning.
 
 ### Hypothesis D
 
-Research validation must not be coupled directly to live execution machinery.
+The research backtest path is still too tightly coupled to `run_sma_backtest`, making future strategies require editing the validation protocol itself.
 
-The first research engine should be a pure replay/simulation path:
+Test this by inspecting how `strategy_name` is handled.
 
-```text
-dataset snapshot
-→ strategy pure function
-→ simulated fill/cost model
-→ metrics
-→ validation gate
-→ report
-```
+Expected structural fix:
 
-Do not call live broker, live order lifecycle, run loop, recovery, or lot-native SELL authority logic from the research backtest path unless explicitly required for read-only diagnostics. Existing live safety tests must remain green.
+* Add a minimal research strategy registry.
+* Keep `sma_with_filter` as the only supported strategy for now.
+* Resolve strategy execution through the registry.
+* Unknown strategy names must fail clearly.
+* Do not add new live trading strategies.
 
-## Required design direction
+### Hypothesis E
 
-Add a dedicated research layer, preferably under:
+The repo has documentation for research validation, but it still lacks an operator runbook that explains the practical route from research artifact to paper validation consideration.
 
-```text
-src/bithumb_bot/research/
-```
+Expected structural fix:
 
-Suggested modules:
-
-```text
-src/bithumb_bot/research/
-  __init__.py
-  experiment_manifest.py
-  dataset_snapshot.py
-  parameter_space.py
-  backtest_engine.py
-  metrics.py
-  validation_protocol.py
-  walk_forward.py
-  promotion_gate.py
-  report_writer.py
-  cli.py
-```
-
-Adapt names if the current repository structure suggests better names, but preserve the separation of responsibilities.
-
-## Required commands
-
-Add canonical CLI commands through the existing `bithumb-bot` entrypoint, not through a separate script-only interface.
-
-Minimum target commands:
-
-```bash
-uv run bithumb-bot research-backtest --manifest <path>
-uv run bithumb-bot research-walk-forward --manifest <path>
-uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id>
-```
-
-If the existing CLI parser structure makes exact names expensive, implement equivalent names and document the reason. Prefer exact names.
-
-Optional but desirable command:
-
-```bash
-uv run bithumb-bot research-data-freeze --manifest <path>
-```
-
-## Required manifest concept
-
-Implement an `ExperimentManifest` or equivalent object that can represent at least:
-
-```yaml
-experiment_id: sma_filter_v1_2026_05
-hypothesis: "In an uptrend with sufficient volatility/liquidity, the SMA strategy has positive expectancy after fees and slippage."
-strategy_name: sma_with_filter
-market: KRW-BTC
-interval: 1m
-
-dataset:
-  source: sqlite_candles
-  snapshot_id: candles_krw_btc_2023_2026_v1
-  train:
-    start: "2023-01-01"
-    end: "2024-06-30"
-  validation:
-    start: "2024-07-01"
-    end: "2025-12-31"
-  final_holdout:
-    start: "2026-01-01"
-    end: "2026-05-01"
-
-parameter_space:
-  SMA_SHORT: [5, 7, 10]
-  SMA_LONG: [20, 30, 60]
-  SMA_FILTER_GAP_MIN_RATIO: [0.0008, 0.0012, 0.0018]
-  SMA_FILTER_VOL_MIN_RANGE_RATIO: [0.002, 0.003, 0.005]
-
-cost_model:
-  fee_rate: 0.0025
-  slippage_bps: [5, 10, 20]
-
-acceptance_gate:
-  min_trade_count: 30
-  max_mdd_pct: 15
-  min_profit_factor: 1.1
-  oos_return_must_be_positive: true
-  parameter_stability_required: true
-```
-
-Use JSON if YAML support would require new dependencies. Do not add dependencies unless necessary. If using JSON, provide an example JSON manifest.
-
-## Required artifact model
-
-Research outputs must be deterministic and operator-readable.
-
-At minimum, produce structured JSON artifacts containing:
-
-```text
-experiment_id
-manifest_hash
-dataset_snapshot_id
-dataset_content_hash or deterministic dataset fingerprint
-strategy_name
-parameter_candidate_id
-parameter_values
-cost_model
-train_metrics
-validation_metrics
-final_holdout_metrics if available
-walk_forward_metrics if run
-acceptance_gate_result
-gate_fail_reasons
-candidate_profile_hash
-created_at or deterministic run timestamp policy
-repository_version or git commit if available
-```
-
-Be careful with timestamps: if a timestamp makes the full report hash non-deterministic, either exclude it from the deterministic hash or separate `content_hash` from `generated_at`.
-
-Research artifacts must be written through the repository’s existing path policy. Prefer:
-
-```text
-DATA_ROOT/<mode>/derived/research/...
-DATA_ROOT/<mode>/reports/research/...
-```
-
-Do not write generated research outputs into the repo tree except for committed examples/tests.
-
-## Required metrics
-
-Do not report only total return.
-
-At minimum, implement or surface:
-
-```text
-return_pct
-max_drawdown_pct
-profit_factor
-trade_count
-win_rate
-avg_win
-avg_loss
-fee_total
-slippage_total
-max_consecutive_losses
-single_trade_dependency_score
-parameter_stability_score, if enough neighboring candidates exist
-```
-
-If a metric cannot be computed yet, include an explicit placeholder and explain in the report. Do not silently omit it.
-
-## Required path/env behavior
-
-Research commands must follow the repository’s explicit env model.
-
-Verify and enforce:
-
-1. Research commands must not automatically load repo-root `.env`.
-2. `BITHUMB_ENV_FILE`, `BITHUMB_ENV_FILE_PAPER`, or explicit process env should be respected through the existing bootstrap/config path.
-3. Repo-relative runtime paths such as `DB_PATH=./data/test.sqlite` must fail if the existing project policy rejects them.
-4. Research outputs must not be written into the repository root.
-5. The mode must be explicit enough to avoid accidental live coupling.
-6. Promotion must not mutate live env files.
-
-If the current repository already has helper methods for PathManager/path policy, use them. Do not duplicate policy logic unless unavoidable.
-
-## Required handling of `backtest2.py`
-
-Inspect `backtest2.py`.
-
-If it is a legacy standalone script, do one of the following:
-
-Preferred:
-
-```text
-Turn it into a deprecated compatibility wrapper that delegates to the new research CLI/core.
-```
-
-Acceptable:
-
-```text
-Leave it temporarily intact but remove repo-root `.env` auto-loading and document deprecation.
-```
-
-Unacceptable:
-
-```text
-Keep improving `backtest2.py` as the primary research interface while bypassing canonical CLI/bootstrap/path policy.
-```
-
-## Required promotion behavior
-
-Implement `research-promote-candidate` as an artifact generator, not as a live env mutator.
-
-It should verify or report:
-
-```text
-candidate exists
-candidate was produced from a known manifest
-manifest hash matches
-dataset snapshot/fingerprint matches
-validation gate passed
-walk-forward gate passed if required by manifest
-min trade count passed
-fee/slippage-aware metrics passed
-parameter stability check passed if required
-candidate profile hash generated
-```
-
-It should output a promotion artifact similar to:
-
-```json
-{
-  "strategy_name": "sma_with_filter",
-  "strategy_profile_id": "sma_filter_v1_2026_05_candidate_003",
-  "strategy_profile_source_experiment": "sma_filter_v1_2026_05",
-  "strategy_profile_hash": "sha256:...",
-  "candidate_id": "candidate_003",
-  "gate_result": "PASS",
-  "operator_next_step": "Review this artifact before copying values into paper/live env."
-}
-```
-
-Do not copy values into `.env`. Do not modify `BITHUMB_ENV_FILE_LIVE` or live secrets.
-
-## Required tests
-
-Add focused tests. Names may vary, but cover these exact behaviors.
-
-Suggested test files:
-
-```text
-tests/test_research_manifest.py
-tests/test_research_path_policy.py
-tests/test_research_backtest_reproducibility.py
-tests/test_research_promotion_gate.py
-```
-
-Required test coverage:
-
-1. Manifest parsing/validation rejects missing hypothesis, missing dataset split, empty parameter space, invalid date ranges, and invalid acceptance gate values.
-2. Same manifest + same deterministic dataset produces the same candidate/report content hash across repeated runs.
-3. Research commands do not read repo-root `.env` implicitly.
-4. Research commands reject or avoid repo-internal generated output paths according to existing path policy.
-5. Promotion gate refuses a candidate that lacks validation/OOS evidence.
-6. Promotion gate refuses a candidate that fails min trade count, max drawdown, or profit factor gate.
-7. Promotion artifact is generated without mutating runtime env files.
-8. Existing live safety tests remain green.
-
-Also run existing relevant tests, at minimum:
-
-```bash
-uv run pytest -q tests/test_live_preflight.py
-uv run pytest -q tests/test_mode_validation.py
-uv run pytest -q tests/test_run_lock.py
-uv run pytest -q
-```
-
-If some of these files do not exist, run the closest existing equivalents and report the difference.
-
-## Observability and recoverability requirements
-
-Research commands should produce clear operator output.
-
-At minimum, CLI output should state:
-
-```text
-experiment_id
-manifest_hash
-dataset_snapshot_id or dataset fingerprint
-number of candidates evaluated
-best candidate by gate/rank
-gate result
-artifact paths
-content hash
-warnings
-```
-
-Failure modes must be explicit and actionable:
-
-```text
-manifest invalid
-dataset unavailable
-not enough candles
-path policy violation
-candidate not found
-gate failed
-promotion refused
-```
-
-No silent fallback to live mode. No silent fallback to repo-root `.env`. No silent writes into the repository.
-
-## Documentation requirements
-
-Update documentation minimally but concretely.
-
-Add or update docs to explain:
-
-```text
-research lifecycle
-manifest format
-research-backtest command
-research-walk-forward command
-research-promote-candidate command
-artifact locations
-why env values are experimental candidates during research but verified outputs during operation
-why promotion creates an artifact instead of editing live env
-```
-
-Do not oversell profitability. Emphasize reproducibility, safety, and validation.
+* Add `docs/runbooks/research-to-paper.md`.
+* Explain exact commands, artifact review, manual env/profile consideration, paper/dry-run observation, and what must not be automated.
 
 ## Scope boundaries
 
 Do not:
 
-* change live broker behavior
-* weaken live preflight
-* weaken run locks
-* weaken restart/reconcile behavior
-* weaken lot-native SELL authority
-* weaken duplicate-order prevention
-* modify live env files
-* add real trading behavior to research commands
-* write generated artifacts into the repo root
-* introduce hidden `.env` loading
-* optimize only for highest historical return
+* Modify live broker behavior.
+* Modify live order submission.
+* Weaken live preflight.
+* Weaken run locks.
+* Weaken restart/reconcile behavior.
+* Weaken lot-native SELL authority.
+* Weaken duplicate-order prevention.
+* Auto-edit `.env`, live env files, `BITHUMB_ENV_FILE_LIVE`, or secrets.
+* Add real trading behavior to research commands.
+* Write generated research artifacts into the repo root.
+* Reintroduce repo-root `.env` auto-loading.
+* Optimize for the single best historical-return parameter.
+* Treat walk-forward as only train/validation return comparison.
 
 Do:
 
-* inspect existing strategy sweep/reporting/replay modules and reuse them where appropriate
-* keep the new research layer decoupled from live execution
-* prefer deterministic pure functions
-* add tests before or alongside behavior changes
-* document any hypothesis that is confirmed or refuted by the repository inspection
+* Strengthen promotion integrity.
+* Replace placeholder parameter stability.
+* Implement real rolling walk-forward evidence.
+* Add a strategy registry.
+* Improve operator-facing runbook documentation.
+* Add focused tests.
+* Preserve deterministic hashing and path-policy behavior.
+* Keep research execution pure/simulated and separated from live execution.
 
-## Implementation strategy
+## Task 1: Strengthen promotion hash integrity
 
-Proceed in this order:
+Inspect:
 
-1. Inspect existing architecture and identify reusable modules.
-2. Write a short internal plan in your work notes before editing.
-3. Add the research manifest/data/result models.
-4. Add deterministic hashing helpers for manifest, dataset fingerprint, candidate profile, and report content.
-5. Add a minimal pure backtest/replay path or adapt existing sweep/replay logic into a pure research engine.
-6. Add canonical CLI commands.
-7. Add promotion gate artifact generation.
-8. Convert or deprecate `backtest2.py`.
-9. Add focused tests.
-10. Run focused tests.
-11. Run full or broad regression tests.
-12. Produce the final report in the required format below.
+```text
+src/bithumb_bot/research/promotion_gate.py
+tests/test_research_promotion_gate.py
+```
+
+Implement:
+
+```text
+recomputed_profile_hash = sha256_prefixed(build_candidate_profile(candidate))
+stored_profile_hash = candidate["candidate_profile_hash"]
+
+if recomputed_profile_hash != stored_profile_hash:
+    promotion refused: candidate_profile_hash_mismatch
+```
+
+Requirements:
+
+* Promotion must fail if the candidate report was tampered with after backtest generation.
+* Promotion artifact must include the verified profile hash.
+* Promotion artifact must not be generated on mismatch.
+* Error text must be operator-actionable.
+* Do not mutate env files.
+
+Add tests:
+
+```text
+test_promotion_refuses_candidate_profile_hash_mismatch
+test_promotion_artifact_uses_verified_candidate_profile_hash
+```
+
+## Task 2: Replace placeholder parameter stability scoring
+
+Inspect:
+
+```text
+src/bithumb_bot/research/validation_protocol.py
+src/bithumb_bot/research/parameter_space.py
+tests/test_research_backtest_reproducibility.py
+```
+
+Current suspected weakness:
+
+```text
+_parameter_stability_scores returns 1.0 for all candidate sets with len >= 3.
+```
+
+Replace this with a real neighbor-based scoring method.
+
+Design guidance:
+
+* Define neighboring candidates as candidates differing by one parameter-grid step where possible.
+* Score should reflect whether nearby candidates also perform acceptably.
+* A candidate that only wins as an isolated spike must receive a low score.
+* A candidate in a broad stable plateau must receive a higher score.
+* Use validation or OOS metrics for stability, not train-only performance.
+* If stability cannot be computed, report `None` and fail when `parameter_stability_required=true`.
+
+Acceptable scoring model:
+
+```text
+neighbor_score = number_of_neighbors_with_positive_validation_return_and_gate_compatible_metrics / total_neighbors
+```
+
+or a better deterministic equivalent.
+
+Requirements:
+
+* Keep the score deterministic.
+* Include score in candidate artifacts.
+* Include enough diagnostic fields to understand why the score passed or failed.
+* Do not let `parameter_stability_required=true` pass simply because the candidate count is >= 3.
+
+Add tests covering:
+
+```text
+stable plateau → high stability score / can pass
+isolated spike → low stability score / fails when parameter_stability_required=true
+too few neighbors → None or low score / fails when required
+```
+
+Suggested test file:
+
+```text
+tests/test_research_parameter_stability.py
+```
+
+## Task 3: Upgrade walk-forward to rolling windows
+
+Inspect:
+
+```text
+src/bithumb_bot/research/experiment_manifest.py
+src/bithumb_bot/research/validation_protocol.py
+src/bithumb_bot/research/dataset_snapshot.py
+examples/research/sma_filter_manifest.example.json
+docs/research-validation.md
+```
+
+Add optional manifest config:
+
+```json
+"walk_forward": {
+  "train_window_days": 180,
+  "test_window_days": 30,
+  "step_days": 30,
+  "min_windows": 6
+}
+```
+
+Validation requirements:
+
+* All values must be positive integers.
+* `min_windows` must be > 0.
+* Invalid config must fail manifest validation.
+* If `walk_forward_required=true`, missing `walk_forward` config should fail validation or fail the walk-forward gate with an explicit reason.
+
+Implement rolling windows:
+
+```text
+window_001:
+  train: start → start + train_window_days
+  test: train_end + 1 → train_end + test_window_days
+
+window_002:
+  train/test shifted by step_days
+
+repeat until no complete test window remains
+```
+
+Requirements:
+
+* Use available manifest date ranges deterministically.
+* Report each window’s train/test date ranges.
+* Report candidate metrics per window.
+* Report aggregate metrics:
+
+  * window_count
+  * pass_window_count
+  * fail_window_count
+  * mean_test_return_pct
+  * median_test_return_pct if easy without new dependencies
+  * worst_test_return_pct
+  * return_consistency_pass
+* If fewer than `min_windows` are available, fail with `walk_forward_insufficient_windows`.
+* If `walk_forward_required=true`, candidate promotion must require real walk-forward evidence, not just train/validation consistency.
+
+Add tests covering:
+
+```text
+valid walk_forward config parses
+invalid walk_forward config is rejected
+rolling windows are generated deterministically
+walk_forward_required refuses missing evidence
+insufficient windows fails clearly
+candidate with repeated positive test windows passes aggregate walk-forward
+candidate with inconsistent windows fails aggregate walk-forward
+```
+
+Suggested test file:
+
+```text
+tests/test_research_walk_forward.py
+```
+
+## Task 4: Add a research strategy registry
+
+Inspect current use of `run_sma_backtest`.
+
+Add a small registry, for example:
+
+```text
+src/bithumb_bot/research/strategy_registry.py
+```
+
+Expected behavior:
+
+```text
+strategy_name=sma_with_filter
+→ resolve pure research strategy runner
+→ validate required parameter keys if practical
+→ run strategy simulation
+```
+
+Requirements:
+
+* Keep `sma_with_filter` as the only supported research strategy for now.
+* Unknown `strategy_name` must fail with a clear error such as `unsupported research strategy`.
+* `validation_protocol.py` should not hard-wire `run_sma_backtest` directly.
+* Do not connect registry to live execution.
+* Do not add a new live strategy.
+
+Add tests:
+
+```text
+test_research_strategy_registry_resolves_sma_with_filter
+test_research_strategy_registry_rejects_unknown_strategy
+```
+
+Suggested test file:
+
+```text
+tests/test_research_strategy_registry.py
+```
+
+## Task 5: Add operator runbook for research-to-paper flow
+
+Add:
+
+```text
+docs/runbooks/research-to-paper.md
+```
+
+It must explain the exact operational path:
+
+```text
+1. Verify candle sync / DB readiness.
+2. Create or review manifest.
+3. Run research-backtest.
+4. Inspect report artifact and hashes.
+5. Run research-walk-forward.
+6. Inspect rolling walk-forward evidence.
+7. Run research-promote-candidate.
+8. Review promotion artifact.
+9. Manually prepare paper env/profile consideration.
+10. Run paper or live-dry-run observation.
+11. Inspect decision telemetry / experiment-report / strategy-report.
+12. Only then consider small-live readiness.
+```
+
+It must explicitly state:
+
+* Promotion does not edit env files.
+* Promotion does not imply live readiness.
+* Research artifacts are evidence, not authorization.
+* Paper validation is still required.
+* Live execution remains protected by existing live safety gates.
+
+## Task 6: Perform one local end-to-end research smoke path if feasible
+
+If a real candle DB is available in the current environment, run:
+
+```bash
+uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
+uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter_manifest.example.json
+```
+
+If not feasible, do not fake it. Report exactly why it was not run.
+
+The goal is not to find a profitable candidate. The goal is to verify:
+
+```text
+manifest loads
+dataset split loads
+candidates evaluate
+artifacts write outside repo
+content_hash is produced
+dataset_content_hash is produced
+operator summary is readable
+```
+
+## Required tests
+
+Add or update focused tests, then run at least:
+
+```bash
+uv run pytest -q tests/test_research_manifest.py
+uv run pytest -q tests/test_research_backtest_reproducibility.py
+uv run pytest -q tests/test_research_path_policy.py
+uv run pytest -q tests/test_research_promotion_gate.py
+uv run pytest -q tests/test_research_parameter_stability.py
+uv run pytest -q tests/test_research_walk_forward.py
+uv run pytest -q tests/test_research_strategy_registry.py
+uv run pytest -q
+```
+
+If any of these files do not exist because names differ, run the closest equivalent and report the mapping.
+
+Also ensure existing safety tests still pass where present:
+
+```bash
+uv run pytest -q tests/test_live_preflight.py
+uv run pytest -q tests/test_mode_validation.py
+uv run pytest -q tests/test_run_lock.py
+```
+
+If any are absent, report that explicitly.
+
+## Observability and failure messages
+
+Research CLI output and errors must remain operator-readable.
+
+Ensure failure modes are explicit:
+
+```text
+manifest invalid
+unsupported strategy
+dataset unavailable
+not enough candles
+path policy violation
+candidate not found
+candidate_profile_hash_mismatch
+walk_forward_missing
+walk_forward_insufficient_windows
+walk_forward_failed
+parameter_stability_failed
+promotion refused
+```
+
+Promotion refusal should say why. Do not silently fall back to simpler validation.
+
+## Backwards compatibility
+
+`backtest2.py` should remain deprecated and should continue delegating to canonical `research-backtest`.
+
+Do not reintroduce:
+
+```text
+load_dotenv(Path(__file__).with_name(".env"))
+```
+
+Do not make `backtest2.py` a primary interface again.
+
+## Documentation updates
+
+Update existing docs if needed:
+
+```text
+docs/research-validation.md
+examples/research/sma_filter_manifest.example.json
+```
+
+Add:
+
+```text
+docs/runbooks/research-to-paper.md
+```
+
+Docs must be concrete and command-oriented. Do not write generic trading advice.
 
 ## Final report format
 
@@ -481,47 +484,47 @@ At the end, report in this exact structure:
 
 ```text
 Summary
-- What changed, in concrete repository terms.
+- Concrete repository changes.
 
 Hypotheses
 - Hypothesis A: confirmed/refuted/partially confirmed, with evidence.
 - Hypothesis B: confirmed/refuted/partially confirmed, with evidence.
 - Hypothesis C: confirmed/refuted/partially confirmed, with evidence.
 - Hypothesis D: confirmed/refuted/partially confirmed, with evidence.
+- Hypothesis E: confirmed/refuted/partially confirmed, with evidence.
 
 Design Changes
-- New modules/classes/functions.
-- New CLI commands.
-- How research is separated from live/paper execution.
-- How env candidate values are separated from promoted runtime values.
+- Promotion integrity changes.
+- Walk-forward changes.
+- Parameter stability changes.
+- Strategy registry changes.
+- Documentation/runbook changes.
 
 Artifacts and Paths
-- Where research outputs are written.
-- How hashes/provenance are computed.
-- How promotion artifacts are generated.
+- Where reports/promotions are written.
+- Whether deterministic hashes are preserved.
+- Whether env files are untouched.
 
 Safety / Recovery / Observability
-- What live safety contracts were intentionally not touched.
-- What failure modes are now explicit.
-- What operator-facing output was added.
+- Existing live safety contracts intentionally not touched.
+- New explicit failure modes.
+- New operator-facing outputs.
 
 Tests
 - Exact commands run.
 - Pass/fail result.
-- If any test failed, include the failure and whether it is pre-existing or introduced.
+- If any test failed, state whether it appears introduced or pre-existing.
+- If any requested smoke run was not feasible, explain why.
 
 Backwards Compatibility
-- What happened to `backtest2.py`.
-- Any migration notes.
+- State what happened to backtest2.py.
+- State whether canonical CLI remains the primary interface.
 
 Remaining Work
-- What is intentionally left for later, especially paper shadow validation and small-live readiness.
+- Paper shadow validation.
+- Optional env fragment renderer.
+- Small-live readiness checklist.
+- Any remaining limitations in the research metrics.
 ```
 
-The work is successful only if the repository moves toward this invariant:
-
-```text
-bithumb-bot should not be a repo where operators manually tune env values until a backtest looks good.
-It should be a repo where a strategy hypothesis becomes a reproducible experiment, the experiment creates auditable candidate artifacts, validation gates decide whether a candidate is eligible, and only then can an operator consider promoting that candidate toward paper/live operation.
-```
-
+The patch is successful only if the repository moves from “research scaffold exists” to “research candidates are harder to promote unless they survive integrity checks, real rolling walk-forward evidence, and non-placeholder stability checks.”

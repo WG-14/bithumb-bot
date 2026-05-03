@@ -37,5 +37,11 @@
     "oos_return_must_be_positive": true,
     "parameter_stability_required": true,
     "walk_forward_required": true
+  },
+  "walk_forward": {
+    "train_window_days": 180,
+    "test_window_days": 30,
+    "step_days": 30,
+    "min_windows": 6
   }
 }

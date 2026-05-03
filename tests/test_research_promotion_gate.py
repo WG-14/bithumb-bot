@@ -6,7 +6,7 @@ import pytest
 
 from bithumb_bot.paths import PathManager
 from bithumb_bot.research.hashing import sha256_prefixed
-from bithumb_bot.research.promotion_gate import PromotionGateError, promote_candidate
+from bithumb_bot.research.promotion_gate import PromotionGateError, build_candidate_profile, promote_candidate
 from bithumb_bot.storage_io import write_json_atomic
 
 
@@ -36,7 +36,7 @@ def _candidate(**overrides):
         "acceptance_gate_result": "PASS",
         "walk_forward_required": False,
     }
-    payload["candidate_profile_hash"] = sha256_prefixed(payload)
+    payload["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(payload))
     payload.update(overrides)
     return payload
 
@@ -90,3 +90,27 @@ def test_promotion_artifact_does_not_mutate_env_file(tmp_path, monkeypatch) -> N
     assert result.artifact_path.exists()
     assert env_file.read_text(encoding="utf-8") == before
     assert result.artifact["operator_next_step"].startswith("Review this artifact")
+
+
+def test_promotion_refuses_candidate_profile_hash_mismatch(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _candidate(candidate_profile_hash="sha256:tampered")
+    _write_report(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="candidate_profile_hash_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert not (manager.data_dir() / "reports" / "research" / "promo_exp" / "promotion_candidate_001.json").exists()
+
+
+def test_promotion_artifact_uses_verified_candidate_profile_hash(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _candidate()
+    expected_hash = sha256_prefixed(build_candidate_profile(candidate))
+    _write_report(manager, candidate)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert result.artifact["candidate_profile_hash"] == expected_hash
+    assert result.artifact["verified_candidate_profile_hash"] == expected_hash
+    assert result.artifact["strategy_profile_hash"] == expected_hash

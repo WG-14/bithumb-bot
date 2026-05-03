@@ -13,10 +13,11 @@ hypothesis
 -> parameter-space exploration
 -> fee/slippage-aware backtest
 -> out-of-sample validation
--> walk-forward validation
+-> rolling walk-forward validation
+-> parameter stability evidence
 -> candidate artifact
 -> operator-reviewed promotion artifact
--> paper/live env consideration
+-> paper validation consideration
 ```
 
 The research engine is a pure replay/simulation path. It does not call the live broker, order lifecycle, run loop, recovery commands, or lot-native SELL authority code.
@@ -48,6 +49,18 @@ Required sections:
 - `cost_model.fee_rate`, `cost_model.slippage_bps`
 - `acceptance_gate`
 
+Optional section:
+
+- `walk_forward.train_window_days`, `test_window_days`, `step_days`, `min_windows`
+
+When `acceptance_gate.walk_forward_required=true`, the `walk_forward` section is required. All values must be positive integers.
+
+Currently supported research strategies:
+
+- `sma_with_filter`
+
+Unknown research strategy names fail before simulation with an operator-readable unsupported strategy error. The research registry is not connected to live strategy execution.
+
 ## Artifacts
 
 Research outputs are runtime artifacts and must not be written into the repository.
@@ -61,15 +74,37 @@ DATA_ROOT/<mode>/reports/research/<experiment_id>/...
 Reports include manifest hash, dataset fingerprint, candidate profile hash, content hash, repository version, metrics, gate results, and artifact paths.
 `generated_at` is included for operator context but excluded from the deterministic `content_hash`.
 
+Candidate artifacts include parameter stability diagnostics. The stability score is based on one-grid-step neighboring candidates whose validation metrics remain gate-compatible. Isolated spikes do not satisfy `parameter_stability_required=true` merely because the grid has enough candidates.
+
+Walk-forward reports include rolling train/test windows, per-window metrics, pass/fail reasons, and aggregate evidence:
+
+- `window_count`
+- `pass_window_count`
+- `fail_window_count`
+- `mean_test_return_pct`
+- `median_test_return_pct`
+- `worst_test_return_pct`
+- `return_consistency_pass`
+
+If fewer than `walk_forward.min_windows` complete windows exist, the command fails with `walk_forward_insufficient_windows`.
+
 ## Promotion
 
 `research-promote-candidate` generates an operator-reviewable promotion artifact.
 It verifies that the candidate exists, has validation evidence, passed the acceptance gate, and has a candidate profile hash.
-It does not edit `.env`, `BITHUMB_ENV_FILE_LIVE`, or live secrets.
+It recomputes `sha256_prefixed(build_candidate_profile(candidate))` and refuses promotion with `candidate_profile_hash_mismatch` if the report was tampered with after generation.
 
-The operator next step is review. Copying values into paper or live runtime env remains an explicit human action after validation evidence is accepted.
+When walk-forward evidence is required, promotion also requires the matching candidate in `walk_forward_report.json` to pass real rolling walk-forward validation. Missing or failed evidence is reported as `walk_forward_missing`, `walk_forward_insufficient_windows`, or `walk_forward_failed`.
+
+Promotion writes an operator-reviewable artifact only after these checks pass. It does not edit `.env`, `BITHUMB_ENV_FILE_LIVE`, `BITHUMB_ENV_FILE_PAPER`, or live secrets.
+
+The operator next step is review. Copying values into paper runtime env/profile remains an explicit human action after validation evidence is accepted. Promotion evidence does not imply live readiness.
 
 ## Current Scope
 
-The initial engine supports SQLite candle snapshots and a pure SMA-style simulation with fee/slippage costs.
+The engine supports SQLite candle snapshots and a pure SMA-style simulation with fee/slippage costs.
 Paper shadow validation, small-live readiness checks, and operational log revalidation are intentionally later stages.
+
+Operator route:
+
+- [`docs/runbooks/research-to-paper.md`](/docs/runbooks/research-to-paper.md)

@@ -53,6 +53,16 @@ def load_dataset_split(
     split_name: str,
 ) -> DatasetSnapshot:
     date_range = _split_range(manifest, split_name)
+    return load_dataset_range(db_path=db_path, manifest=manifest, split_name=split_name, date_range=date_range)
+
+
+def load_dataset_range(
+    *,
+    db_path: str | Path,
+    manifest: ExperimentManifest,
+    split_name: str,
+    date_range: DateRange,
+) -> DatasetSnapshot:
     conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
     try:
         rows = conn.execute(
