@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ APPROVED_PROFILE_SCHEMA_VERSION = 1
 APPROVED_PROFILE_MODES = {"paper", "live_dry_run", "small_live"}
 LIVE_COMPATIBLE_PROFILE_MODES = {"live_dry_run", "small_live"}
 PROFILE_HASH_FIELD = "profile_content_hash"
+PROFILE_HASH_EXCLUDED_FIELDS = frozenset({PROFILE_HASH_FIELD, "generated_at"})
 LEGACY_PROFILE_SELECTOR_ENV = "STRATEGY_CANDIDATE_PROFILE_PATH"
 APPROVED_PROFILE_SELECTOR_ENV = "APPROVED_STRATEGY_PROFILE_PATH"
 
@@ -68,16 +70,22 @@ class ProfileVerificationResult:
     profile: dict[str, Any] | None = None
 
     def audit_fields(self) -> dict[str, object]:
+        profile = self.profile if isinstance(self.profile, dict) else {}
         return {
             "approved_profile_path": self.profile_path,
             "approved_profile_hash": self.profile_hash,
             "approved_profile_mode": self.mode,
             "approved_profile_verification_ok": self.ok,
             "approved_profile_block_reason": self.reason,
+            "source_promotion_artifact_path": profile.get("source_promotion_artifact_path"),
             "promotion_content_hash": self.promotion_hash,
             "candidate_profile_hash": self.candidate_profile_hash,
             "manifest_hash": self.manifest_hash,
             "dataset_content_hash": self.dataset_content_hash,
+            "paper_validation_evidence_path": profile.get("paper_validation_evidence_path"),
+            "paper_validation_evidence_content_hash": profile.get("paper_validation_evidence_content_hash"),
+            "live_readiness_evidence_path": profile.get("live_readiness_evidence_path"),
+            "live_readiness_evidence_content_hash": profile.get("live_readiness_evidence_content_hash"),
             "approved_profile_mismatch_count": len(self.mismatches),
             "approved_profile_mismatches": [dict(item) for item in self.mismatches],
         }
@@ -111,6 +119,92 @@ def _verify_payload_hash(payload: dict[str, Any], *, field: str, label: str) -> 
     if actual != expected:
         raise ApprovedProfileError(f"{label}_hash_mismatch")
     return actual
+
+
+def approved_profile_hash_payload(profile: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in profile.items() if k not in PROFILE_HASH_EXCLUDED_FIELDS}
+
+
+def compute_approved_profile_hash(profile: dict[str, Any]) -> str:
+    return sha256_prefixed(content_hash_payload(approved_profile_hash_payload(profile)))
+
+
+def compute_file_content_hash(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).expanduser().open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def resolve_runtime_artifact_path(
+    path: str | Path,
+    *,
+    manager: PathManager | None = None,
+    label: str,
+    must_exist: bool = True,
+) -> Path:
+    raw = str(path or "").strip()
+    if not raw:
+        raise ApprovedProfileError(f"{label}_path_missing")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        if manager is None:
+            raise ApprovedProfileError(f"{label}_path_must_be_absolute")
+        candidate = manager.project_root / candidate
+    resolved = candidate.resolve()
+    project_root = (manager.project_root if manager is not None else Path.cwd()).resolve()
+    if PathManager._is_within(resolved, project_root):
+        raise ApprovedProfileError(f"{label}_path_repo_local_not_allowed")
+    if must_exist and not resolved.exists():
+        raise ApprovedProfileError(f"{label}_path_not_found")
+    if must_exist and not resolved.is_file():
+        raise ApprovedProfileError(f"{label}_path_not_file")
+    return resolved
+
+
+def _resolved_profile_selector_path(raw_path: object) -> str:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return ""
+    return str(Path(raw).expanduser().resolve())
+
+
+def _verify_selector_matches_profile(
+    mismatches: list[dict[str, object]],
+    *,
+    profile_path: str | Path | None,
+    runtime: dict[str, Any],
+) -> None:
+    if profile_path is None:
+        return
+    expected = _resolved_profile_selector_path(profile_path)
+    actual = _resolved_profile_selector_path(runtime.get("profile_selector"))
+    if actual != expected:
+        mismatches.append(
+            {
+                "field": "approved_profile_selector",
+                "expected": expected,
+                "actual": actual or None,
+            }
+        )
+
+
+def expected_profile_modes_for_runtime(runtime: dict[str, Any]) -> tuple[set[str] | None, str | None]:
+    mode = str(runtime.get("mode") or "").strip().lower()
+    if mode == "paper":
+        return {"paper"}, None
+    if mode != "live":
+        return None, None
+    live_dry_run = _bool_value(runtime.get("live_dry_run"))
+    live_real_order_armed = _bool_value(runtime.get("live_real_order_armed"))
+    if live_dry_run and live_real_order_armed:
+        return set(), "live_mode_arming_flags_ambiguous"
+    if not live_dry_run and not live_real_order_armed:
+        return set(), "live_mode_not_dry_run_or_armed"
+    if live_dry_run:
+        return {"live_dry_run"}, None
+    return {"small_live"}, None
 
 
 def verify_promotion_artifact(payload: dict[str, Any]) -> dict[str, Any]:
@@ -175,6 +269,7 @@ def build_approved_profile(
     paper_validation_evidence: str | None = None,
     live_readiness_evidence: str | None = None,
     repository_version: str | None = None,
+    manager: PathManager | None = None,
 ) -> dict[str, Any]:
     verified_promotion = verify_promotion_artifact(dict(promotion))
     normalized_mode = str(mode or "").strip().lower()
@@ -188,10 +283,18 @@ def build_approved_profile(
     live_policy = verified_promotion.get("live_regime_policy")
     if not isinstance(live_policy, dict):
         raise ApprovedProfileError("regime_policy_missing")
+    resolved_source_path = resolve_runtime_artifact_path(
+        source_promotion_path,
+        manager=manager,
+        label="source_promotion_artifact",
+    )
+    source_promotion = verify_promotion_artifact(_load_json(resolved_source_path))
+    if str(source_promotion.get("content_hash") or "") != source_hash:
+        raise ApprovedProfileError("source_promotion_content_hash_mismatch")
     payload: dict[str, Any] = {
         "profile_schema_version": APPROVED_PROFILE_SCHEMA_VERSION,
         "profile_mode": normalized_mode,
-        "source_promotion_artifact_path": str(source_promotion_path),
+        "source_promotion_artifact_path": str(resolved_source_path),
         "source_promotion_content_hash": source_hash,
         "candidate_profile_hash": verified_promotion.get("candidate_profile_hash"),
         "manifest_hash": verified_promotion.get("manifest_hash"),
@@ -205,11 +308,35 @@ def build_approved_profile(
         "regime_policy": dict(live_policy),
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
         "parent_profile_hash": parent_hash,
-        "paper_validation_evidence": paper_validation_evidence,
-        "live_readiness_evidence": live_readiness_evidence,
     }
-    payload[PROFILE_HASH_FIELD] = sha256_prefixed(content_hash_payload(payload))
+    if paper_validation_evidence:
+        path, content_hash = verified_evidence_artifact(
+            paper_validation_evidence,
+            manager=manager,
+            label="paper_validation_evidence",
+        )
+        payload["paper_validation_evidence_path"] = str(path)
+        payload["paper_validation_evidence_content_hash"] = content_hash
+    if live_readiness_evidence:
+        path, content_hash = verified_evidence_artifact(
+            live_readiness_evidence,
+            manager=manager,
+            label="live_readiness_evidence",
+        )
+        payload["live_readiness_evidence_path"] = str(path)
+        payload["live_readiness_evidence_content_hash"] = content_hash
+    payload[PROFILE_HASH_FIELD] = compute_approved_profile_hash(payload)
     return payload
+
+
+def verified_evidence_artifact(
+    path: str | Path,
+    *,
+    manager: PathManager | None = None,
+    label: str,
+) -> tuple[Path, str]:
+    resolved = resolve_runtime_artifact_path(path, manager=manager, label=label)
+    return resolved, compute_file_content_hash(resolved)
 
 
 def validate_approved_profile(profile: dict[str, Any]) -> dict[str, Any]:
@@ -242,7 +369,12 @@ def validate_approved_profile(profile: dict[str, Any]) -> dict[str, Any]:
         raise ApprovedProfileError("regime_policy_missing_allowed_regimes")
     if not isinstance(regime_policy.get("blocked_regimes"), list):
         raise ApprovedProfileError("regime_policy_missing_blocked_regimes")
-    _verify_payload_hash(profile, field=PROFILE_HASH_FIELD, label="profile_content")
+    expected = profile.get(PROFILE_HASH_FIELD)
+    if not isinstance(expected, str) or not expected.startswith("sha256:"):
+        raise ApprovedProfileError("profile_content_hash_missing")
+    actual = compute_approved_profile_hash(profile)
+    if actual != expected:
+        raise ApprovedProfileError("profile_content_hash_mismatch")
     return profile
 
 
@@ -253,9 +385,13 @@ def load_approved_profile(path: str | Path) -> dict[str, Any]:
 def verify_profile_source_promotion(profile: dict[str, Any]) -> dict[str, Any]:
     validated = validate_approved_profile(profile)
     source_path = str(validated.get("source_promotion_artifact_path") or "").strip()
-    if not source_path:
-        raise ApprovedProfileError("source_promotion_artifact_path_missing")
-    promotion = verify_promotion_artifact(_load_json(source_path))
+    resolved_source_path = resolve_runtime_artifact_path(
+        source_path,
+        label="source_promotion_artifact",
+    )
+    if str(resolved_source_path) != source_path:
+        raise ApprovedProfileError("source_promotion_artifact_path_policy_mismatch")
+    promotion = verify_promotion_artifact(_load_json(resolved_source_path))
     expected_hash = str(validated.get("source_promotion_content_hash") or "")
     actual_hash = str(promotion.get("content_hash") or "")
     if actual_hash != expected_hash:
@@ -263,7 +399,28 @@ def verify_profile_source_promotion(profile: dict[str, Any]) -> dict[str, Any]:
     for key in ("candidate_profile_hash", "manifest_hash", "dataset_content_hash", "strategy_name"):
         if not _values_equal(validated.get(key), promotion.get(key)):
             raise ApprovedProfileError(f"source_promotion_{key}_mismatch")
+    verify_profile_evidence_artifacts(validated)
     return promotion
+
+
+def verify_profile_evidence_artifacts(profile: dict[str, Any]) -> None:
+    for label in ("paper_validation_evidence", "live_readiness_evidence"):
+        path_key = f"{label}_path"
+        hash_key = f"{label}_content_hash"
+        path = str(profile.get(path_key) or "").strip()
+        expected_hash = str(profile.get(hash_key) or "").strip()
+        if not path and not expected_hash:
+            continue
+        if not path:
+            raise ApprovedProfileError(f"{path_key}_missing")
+        if not expected_hash.startswith("sha256:"):
+            raise ApprovedProfileError(f"{hash_key}_missing")
+        resolved = resolve_runtime_artifact_path(path, label=label)
+        if str(resolved) != path:
+            raise ApprovedProfileError(f"{label}_path_policy_mismatch")
+        actual_hash = compute_file_content_hash(resolved)
+        if actual_hash != expected_hash:
+            raise ApprovedProfileError(f"{hash_key}_mismatch")
 
 
 def load_profile_or_promotion_regime_policy(path: str | Path | None) -> dict[str, object] | None:
@@ -292,10 +449,18 @@ def load_profile_or_promotion_regime_policy(path: str | Path | None) -> dict[str
                 "strategy_profile_id": profile.get("profile_id") or profile.get(PROFILE_HASH_FIELD),
                 "strategy_profile_hash": profile.get(PROFILE_HASH_FIELD),
                 "content_hash": profile.get(PROFILE_HASH_FIELD),
+                "approved_profile_mode": profile.get("profile_mode"),
+                "approved_profile_verification_ok": True,
+                "approved_profile_block_reason": "ok",
                 "source_promotion_content_hash": profile.get("source_promotion_content_hash"),
+                "source_promotion_artifact_path": profile.get("source_promotion_artifact_path"),
                 "candidate_profile_hash": profile.get("candidate_profile_hash"),
                 "manifest_hash": profile.get("manifest_hash"),
                 "dataset_content_hash": profile.get("dataset_content_hash"),
+                "paper_validation_evidence_path": profile.get("paper_validation_evidence_path"),
+                "paper_validation_evidence_content_hash": profile.get("paper_validation_evidence_content_hash"),
+                "live_readiness_evidence_path": profile.get("live_readiness_evidence_path"),
+                "live_readiness_evidence_content_hash": profile.get("live_readiness_evidence_content_hash"),
             }
     return payload
 
@@ -429,9 +594,15 @@ def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
     }
 
 
-def diff_profile_to_runtime(profile: dict[str, Any], runtime: dict[str, Any]) -> tuple[dict[str, object], ...]:
+def diff_profile_to_runtime(
+    profile: dict[str, Any],
+    runtime: dict[str, Any],
+    *,
+    profile_path: str | Path | None = None,
+) -> tuple[dict[str, object], ...]:
     validate_approved_profile(profile)
     mismatches: list[dict[str, object]] = []
+    _verify_selector_matches_profile(mismatches, profile_path=profile_path, runtime=runtime)
     _compare_profile_mode(mismatches, profile, runtime)
     _compare_scalar(mismatches, "strategy_name", profile.get("strategy_name"), runtime.get("strategy_name"))
     _compare_scalar(mismatches, "market", profile.get("market"), runtime.get("market"))
@@ -512,13 +683,16 @@ def verify_profile_against_runtime(
         reason = "approved_profile_missing" if require_profile else "approved_profile_not_configured"
         return _verification_result(False, reason, None, None, tuple(), None)
     try:
+        if expected_profile_modes is not None and len(expected_profile_modes) == 0:
+            _, reason = expected_profile_modes_for_runtime(runtime)
+            return _verification_result(False, reason or "profile_expected_mode_unavailable", raw_path, None, tuple(), runtime)
         profile = load_approved_profile(raw_path)
         if verify_source_promotion:
             verify_profile_source_promotion(profile)
         mode = str(profile.get("profile_mode"))
         if expected_profile_modes is not None and mode not in expected_profile_modes:
             raise ApprovedProfileError(f"profile_mode_mismatch: expected={sorted(expected_profile_modes)} actual={mode}")
-        mismatches = diff_profile_to_runtime(profile, runtime)
+        mismatches = diff_profile_to_runtime(profile, runtime, profile_path=raw_path)
         if mismatches:
             return _verification_result(False, "approved_profile_runtime_mismatch", raw_path, profile, mismatches, runtime)
         return _verification_result(True, "ok", raw_path, profile, tuple(), runtime)
@@ -537,7 +711,7 @@ def _verification_result(
     return ProfileVerificationResult(
         ok=bool(ok),
         reason=str(reason),
-        profile_path=path,
+        profile_path=None if path is None else str(Path(path).expanduser().resolve()),
         profile_hash=None if profile is None else str(profile.get(PROFILE_HASH_FIELD) or ""),
         promotion_hash=None if profile is None else str(profile.get("source_promotion_content_hash") or ""),
         candidate_profile_hash=None if profile is None else str(profile.get("candidate_profile_hash") or ""),
@@ -557,8 +731,10 @@ def promote_profile_mode(
     paper_validation_evidence: str | None = None,
     live_readiness_evidence: str | None = None,
     generated_at: str | None = None,
+    manager: PathManager | None = None,
 ) -> dict[str, Any]:
     parent = validate_approved_profile(dict(parent_profile))
+    verify_profile_source_promotion(parent)
     parent_mode = str(parent["profile_mode"])
     target = str(target_mode or "").strip().lower()
     if target == "live_dry_run":
@@ -576,9 +752,30 @@ def promote_profile_mode(
     child = dict(parent)
     child["profile_mode"] = target
     child["parent_profile_hash"] = parent[PROFILE_HASH_FIELD]
-    child["paper_validation_evidence"] = paper_validation_evidence or parent.get("paper_validation_evidence")
-    child["live_readiness_evidence"] = live_readiness_evidence
+    child.pop("paper_validation_evidence", None)
+    child.pop("live_readiness_evidence", None)
+    if target == "live_dry_run":
+        evidence_path, evidence_hash = verified_evidence_artifact(
+            paper_validation_evidence or "",
+            manager=manager,
+            label="paper_validation_evidence",
+        )
+        child["paper_validation_evidence_path"] = str(evidence_path)
+        child["paper_validation_evidence_content_hash"] = evidence_hash
+        child.pop("live_readiness_evidence_path", None)
+        child.pop("live_readiness_evidence_content_hash", None)
+    else:
+        if not str(parent.get("paper_validation_evidence_path") or "").strip():
+            raise ApprovedProfileError("paper_validation_evidence_path_missing")
+        verify_profile_evidence_artifacts(parent)
+        evidence_path, evidence_hash = verified_evidence_artifact(
+            live_readiness_evidence or "",
+            manager=manager,
+            label="live_readiness_evidence",
+        )
+        child["live_readiness_evidence_path"] = str(evidence_path)
+        child["live_readiness_evidence_content_hash"] = evidence_hash
     child["generated_at"] = generated_at or datetime.now(timezone.utc).isoformat()
     child.pop(PROFILE_HASH_FIELD, None)
-    child[PROFILE_HASH_FIELD] = sha256_prefixed(content_hash_payload(child))
+    child[PROFILE_HASH_FIELD] = compute_approved_profile_hash(child)
     return validate_approved_profile(child)

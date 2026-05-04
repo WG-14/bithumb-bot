@@ -206,9 +206,13 @@ def test_decision_context_includes_approved_profile_audit_fields() -> None:
         "live_regime_policy": _allowing_policy(),
         "strategy_profile_hash": "sha256:profile",
         "source_promotion_content_hash": "sha256:promotion",
+        "source_promotion_artifact_path": "/runtime/reports/promotion.json",
         "candidate_profile_hash": "sha256:candidate",
         "manifest_hash": "sha256:manifest",
         "dataset_content_hash": "sha256:dataset",
+        "approved_profile_mode": "small_live",
+        "approved_profile_verification_ok": True,
+        "approved_profile_block_reason": "ok",
     }
     original = settings.APPROVED_STRATEGY_PROFILE_PATH
     try:
@@ -220,6 +224,10 @@ def test_decision_context_includes_approved_profile_audit_fields() -> None:
     assert decision is not None
     assert decision.context["approved_profile_hash"] == "sha256:profile"
     assert decision.context["approved_profile_path"] == "/runtime/profiles/small_live.json"
+    assert decision.context["approved_profile_mode"] == "small_live"
+    assert decision.context["approved_profile_verification_ok"] is True
+    assert decision.context["approved_profile_block_reason"] == "ok"
+    assert decision.context["source_promotion_artifact_path"] == "/runtime/reports/promotion.json"
     assert decision.context["promotion_content_hash"] == "sha256:promotion"
     assert decision.context["candidate_profile_hash"] == "sha256:candidate"
     assert decision.context["manifest_hash"] == "sha256:manifest"

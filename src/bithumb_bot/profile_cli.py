@@ -8,15 +8,16 @@ from .approved_profile import (
     build_approved_profile,
     default_profile_output_path,
     diff_profile_to_runtime,
+    expected_profile_modes_for_runtime,
     load_approved_profile,
     parse_env_file,
     promote_profile_mode,
     runtime_contract_from_env_values,
     verify_profile_against_runtime,
+    write_approved_profile_atomic,
 )
 from .config import PATH_MANAGER, settings
 from .research.promotion_gate import PromotionGateError
-from .storage_io import write_json_atomic
 
 
 def _load_json(path: str) -> dict[str, object]:
@@ -55,16 +56,13 @@ def cmd_profile_generate(
             source_promotion_path=promotion_path,
             market=profile_market,
             interval=profile_interval,
+            manager=PATH_MANAGER,
         )
         resolved_out = Path(out_path).expanduser() if out_path else default_profile_output_path(
             manager=PATH_MANAGER,
             profile=profile,
         )
-        if not resolved_out.is_absolute():
-            resolved_out = (PATH_MANAGER.project_root / resolved_out).resolve()
-        if resolved_out.resolve().is_relative_to(PATH_MANAGER.project_root.resolve()):
-            raise ApprovedProfileError(f"profile output path must be outside repository: {resolved_out.resolve()}")
-        write_json_atomic(resolved_out.resolve(), profile)
+        resolved_out = write_approved_profile_atomic(resolved_out, profile, manager=PATH_MANAGER)
     except (ApprovedProfileError, PromotionGateError, OSError, ValueError) as exc:
         _print_json({"ok": False, "error": str(exc), "command": "profile-generate"})
         return 1
@@ -89,7 +87,7 @@ def cmd_profile_diff(*, profile_path: str, target_env: str, as_json: bool) -> in
     try:
         profile = load_approved_profile(profile_path)
         runtime = runtime_contract_from_env_values(parse_env_file(target_env))
-        mismatches = diff_profile_to_runtime(profile, runtime)
+        mismatches = diff_profile_to_runtime(profile, runtime, profile_path=profile_path)
     except (ApprovedProfileError, OSError, ValueError) as exc:
         payload = {"ok": False, "error": str(exc), "command": "profile-diff"}
         _print_json(payload) if as_json else print(f"[PROFILE-DIFF] error={exc}")
@@ -123,7 +121,7 @@ def cmd_profile_verify(*, profile_path: str, env_path: str) -> int:
             profile_path=profile_path,
             runtime=runtime,
             require_profile=True,
-            expected_profile_modes=_expected_profile_modes_for_runtime(runtime),
+            expected_profile_modes=expected_profile_modes_for_runtime(runtime)[0],
             verify_source_promotion=True,
         )
     except (ApprovedProfileError, OSError, ValueError) as exc:
@@ -137,27 +135,6 @@ def cmd_profile_verify(*, profile_path: str, env_path: str) -> int:
     }
     _print_json(payload)
     return 0 if result.ok else 1
-
-
-def _expected_profile_modes_for_runtime(runtime: dict[str, object]) -> set[str] | None:
-    mode = str(runtime.get("mode") or "").strip().lower()
-    if mode == "paper":
-        return {"paper"}
-    if mode != "live":
-        return None
-    live_dry_run = str(runtime.get("live_dry_run", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
-    live_real_order_armed = str(runtime.get("live_real_order_armed", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-    }
-    if live_dry_run and not live_real_order_armed:
-        return {"live_dry_run"}
-    if not live_dry_run and live_real_order_armed:
-        return {"small_live"}
-    return set()
 
 
 def cmd_profile_promote(
@@ -175,16 +152,13 @@ def cmd_profile_promote(
             target_mode=mode,
             paper_validation_evidence=paper_validation_evidence,
             live_readiness_evidence=live_readiness_evidence,
+            manager=PATH_MANAGER,
         )
         resolved_out = Path(out_path).expanduser() if out_path else default_profile_output_path(
             manager=PATH_MANAGER,
             profile=child,
         )
-        if not resolved_out.is_absolute():
-            resolved_out = (PATH_MANAGER.project_root / resolved_out).resolve()
-        if resolved_out.resolve().is_relative_to(PATH_MANAGER.project_root.resolve()):
-            raise ApprovedProfileError(f"profile output path must be outside repository: {resolved_out.resolve()}")
-        write_json_atomic(resolved_out.resolve(), child)
+        resolved_out = write_approved_profile_atomic(resolved_out, child, manager=PATH_MANAGER)
     except (ApprovedProfileError, OSError, ValueError) as exc:
         _print_json({"ok": False, "error": str(exc), "command": "profile-promote"})
         return 1

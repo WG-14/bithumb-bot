@@ -194,7 +194,7 @@ def _set_valid_live_defaults(
                 },
             ),
         )
-    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="small_live")
+    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="live_dry_run")
     object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
 
 
@@ -274,6 +274,11 @@ def _write_live_profile(tmp_path: Path, *, mode: str = "small_live", sma_short: 
     path = tmp_path / f"{mode}_profile.json"
     write_json_atomic(path, profile)
     return path
+
+
+def _select_small_live_profile(tmp_path: Path) -> None:
+    profile_path = _write_live_profile(tmp_path, mode="small_live")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
 
 
 
@@ -508,12 +513,14 @@ def test_live_preflight_requires_explicit_arming_for_real_live_orders(
 
 def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(tmp_path)
 
     config.validate_live_mode_preflight(settings)
 
@@ -613,12 +620,13 @@ def test_live_preflight_rejects_shared_runtime_roots(monkeypatch: pytest.MonkeyP
     assert "runtime roots must not overlap or share parent/child paths when MODE=live" in str(exc.value)
 
 
-def test_live_preflight_accepts_valid_live_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_preflight_accepts_valid_live_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(tmp_path)
 
     config.validate_live_mode_preflight(settings)
 
@@ -1195,12 +1203,14 @@ def test_accounts_preflight_diagnostics_are_warning_only_in_non_live_modes(
 
 def test_live_preflight_runs_market_and_accounts_contracts_together(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(tmp_path)
     calls: list[str] = []
 
     def _market_registry(**_kwargs):
@@ -1363,12 +1373,14 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
 def test_accounts_preflight_allows_missing_base_currency_in_live_armed_flat_start(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(tmp_path)
     monkeypatch.setattr(config, "_flat_start_safety_for_accounts_preflight", lambda: (True, "flat_start_safe"))
     monkeypatch.setattr(
         config,
@@ -1452,12 +1464,14 @@ def test_accounts_preflight_still_requires_quote_currency_in_live_dry_run_unarme
 def test_live_preflight_allows_missing_price_unit_sources_with_warning(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(tmp_path)
     monkeypatch.setattr(
         order_rules,
         "get_effective_order_rules",

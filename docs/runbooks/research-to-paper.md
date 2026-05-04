@@ -96,7 +96,7 @@ uv run bithumb-bot profile-verify \
   --env "$BITHUMB_ENV_FILE_PAPER"
 ```
 
-Set `APPROVED_STRATEGY_PROFILE_PATH` in the paper env file only after operator review. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate. The profile verification chain checks strategy name, market, interval, strategy parameters, cost model, source promotion content hash, candidate profile hash, manifest hash, dataset content hash, profile mode, and regime policy.
+Set `APPROVED_STRATEGY_PROFILE_PATH` in the paper env file only after operator review. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate. The profile verification chain checks that the env selector resolves to the exact `--profile` path, then checks strategy name, market, interval, strategy parameters, cost model, source promotion artifact path and content hash, candidate profile hash, manifest hash, dataset content hash, profile mode, and regime policy.
 
 10. Run paper observation.
 
@@ -119,6 +119,8 @@ Review paper behavior, suppressed decisions, order intent evidence, and operator
 12. Consider small-live readiness only after paper evidence.
 
 Research promotion, paper validation, and live readiness are separate gates. Live execution still requires existing live safety configuration, explicit arming, notifier requirements, loss limits, order count limits, preflight checks, run locks, reconciliation, and operator intervention when consistency is unclear.
+
+`profile-promote` verifies evidence artifacts by path policy, existence, and byte content hash. It stores resolved evidence path and `sha256:` content hash in the child profile, and those fields are included in the child profile hash. This is not semantic validation of observation metrics; operator review must still confirm paper/live readiness metrics until a dedicated evidence schema is implemented.
 
 To promote beyond paper, use explicit profile transitions. `profile-generate` creates paper profiles only; live-compatible profiles must be created with `profile-promote`.
 
@@ -146,4 +148,4 @@ uv run bithumb-bot profile-promote \
   --out "$DATA_ROOT/live/reports/profiles/<small_live_profile>.json"
 ```
 
-Live dry-run startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `live_dry_run` profile. Live armed startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `small_live` profile whose runtime contract matches the effective settings.
+Live dry-run startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `live_dry_run` profile. Live armed startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `small_live` profile whose runtime contract matches the effective settings. Roll back by editing only `APPROVED_STRATEGY_PROFILE_PATH` to a previous approved profile and rerunning `profile-verify`; no profile CLI mutates env files.

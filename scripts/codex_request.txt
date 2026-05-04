@@ -1,340 +1,418 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is to verify and improve the repository’s research-to-runtime promotion flow so that it becomes a more robust, reproducible, and operable automated trading experiment system. Do not treat the initial diagnosis as proven. Start from the hypotheses below, verify or falsify them directly against the repo, and implement design-level improvements where the code confirms the gap.
+The previous patch appears to be directionally correct: `approved_profile.py` exists, profile schema/hash/transition/verification is implemented, CLI commands such as `profile-generate`, `profile-diff`, `profile-verify`, and `profile-promote` exist, docs were updated, and tests reportedly pass.
 
-## Core problem statement
+Do **not** treat the current implementation as complete. Your task is to directly inspect the repo, verify the hypotheses below, and apply the additional patches needed so that “profile verification” actually means:
 
-The repository intentionally keeps research separated from live strategy execution. This is good and must be preserved. Do **not** implement automatic propagation from research results into live trading.
+> The env selects this exact approved profile, the profile’s parent/source/evidence chain is intact, deterministic hashing is explicit and reproducible, runtime audit/decision telemetry records the active artifact chain, and live paths fail closed on dangerous drift.
 
-The suspected structural issue is different:
+Do not weaken the core design. The system must remain a verified manual approval flow, not an automatic research-to-live propagation mechanism.
 
-> The approved configuration contract between `research → promotion artifact → paper profile → live profile → runtime execution` may not yet be a first-class, fully verifiable artifact chain.
+## Core safety objective
 
-The risk is that backtested and promoted candidate values are manually copied into paper/live runtime configuration, creating room for parameter drift, hash mismatch, missing regime policy, wrong market/interval, wrong cost assumptions, or paper/live profile confusion.
-
-Your goal is to replace fragile manual copying with a verified manual approval flow:
+Preserve this model:
 
 ```text
-research registry / reports
-  ↓ evidence only
+research evidence
+  ↓
 promotion artifact
   ↓ operator review
 approved paper profile
-  ↓ profile/env diff + paper observation
+  ↓ paper validation evidence
 approved live-dry-run profile
-  ↓ live readiness + explicit arming
-small-live profile
+  ↓ live readiness evidence
+approved small-live profile
 ```
 
-The fix must **not** weaken existing live safety boundaries, arming checks, ledger/reconciliation protections, SELL authority behavior, or research/live separation.
-
-## Hypotheses to verify or falsify
-
-Treat these as hypotheses, not facts.
-
-### Hypothesis A
-
-There is no complete approved diff/apply contract between research promotion artifacts and paper/live runtime configuration.
-
-Verify whether the repo already has a mechanism that compares promotion/candidate profile values against the actual runtime strategy settings, including:
-
-* strategy name
-* market
-* interval
-* all strategy parameters
-* cost model / fee / slippage assumptions
-* manifest hash
-* dataset content hash
-* candidate profile hash
-* regime policy presence and validity
-* profile mode compatibility: paper vs live
-
-Falsify this hypothesis if startup/preflight already reads the promoted artifact/profile, recomputes relevant hashes, compares the complete runtime configuration, and fails closed on mismatch with tests.
-
-### Hypothesis B
-
-Runtime strategy parameter authority may still be env-centered, while the promotion artifact is only evidence.
-
-Check whether env variables such as `STRATEGY_NAME`, `SMA_SHORT`, `SMA_LONG`, `SMA_FILTER_*`, `SMA_COST_EDGE_*`, `ENTRY_EDGE_BUFFER_RATIO`, `STRATEGY_MIN_EXPECTED_EDGE_RATIO`, and `STRATEGY_EXIT_*` can diverge from the promoted candidate/profile without startup failure or BUY fail-closed behavior.
-
-Falsify this if the existing profile loader already makes the approved profile the authoritative source for runtime strategy construction and prevents mismatching env overrides.
-
-### Hypothesis C
-
-The research/live separation is intentional and correct, but the manual approval lifecycle lacks explicit state objects and transition rules.
-
-Check whether the following are represented as distinct schemas/artifacts with enforced transitions:
-
-* research candidate
-* promotion artifact
-* approved paper profile
-* paper observation/validation report
-* approved live-dry-run profile
-* live readiness report
-* small-live/live-armed profile
-
-Falsify this if the repo already has enforced schemas and CLI flows for these transitions.
-
-### Hypothesis D
-
-Regime policy may have started moving toward a fail-closed runtime gate, but the same pattern may not yet cover the full candidate/profile contract.
-
-Check whether missing/invalid regime policy is blocked in live/replay BUY entry paths, and then verify whether the same level of verification exists for the rest of the promoted candidate contract.
-
-Falsify this if all promoted candidate fields, not only regime policy, are already verified before paper/live runtime execution.
-
-## Required design direction
-
-Prioritize structural prevention over small patches.
-
-Implement a verified manual approval flow, not automatic live updates.
-
-### 1. Add or strengthen an approved profile schema
-
-Introduce or extend an immutable approved profile artifact that can represent at least:
-
-* profile schema version
-* profile mode: `paper`, `live_dry_run`, `small_live`, or equivalent existing terminology
-* source promotion artifact path or source id
-* source promotion content hash
-* candidate profile hash
-* manifest hash
-* dataset content hash
-* repository version / commit
-* strategy name
-* market
-* interval
-* strategy parameter values
-* cost model / fee / slippage assumptions
-* regime policy, including classifier/version compatibility where available
-* generated_at for operator context
-* parent profile hash, if promoted from a previous profile
-* profile content hash
-
-Follow the repo’s existing deterministic hashing conventions. If existing research reports exclude `generated_at` from deterministic `content_hash`, keep that principle for approved profiles as well.
-
-### 2. Add CLI support for profile generation, diff, and verification
-
-Add commands using the repo’s existing CLI style. Names can be adjusted to match the codebase, but the functionality must exist.
-
-Target commands:
-
-```bash
-uv run bithumb-bot profile-generate \
-  --promotion DATA_ROOT/paper/reports/research/<experiment>/promotion_<candidate>.json \
-  --mode paper \
-  --out DATA_ROOT/paper/profiles/<profile_id>.json
-```
-
-```bash
-uv run bithumb-bot profile-diff \
-  --profile DATA_ROOT/paper/profiles/<profile_id>.json \
-  --target-env BITHUMB_ENV_FILE_PAPER
-```
-
-```bash
-uv run bithumb-bot profile-verify \
-  --profile DATA_ROOT/paper/profiles/<profile_id>.json \
-  --env BITHUMB_ENV_FILE_PAPER
-```
-
-Requirements:
-
-* `profile-generate` must not modify `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
-* `profile-diff` must emit both operator-readable output and machine-readable JSON, if the repo has an established JSON output convention.
-* `profile-verify` must fail non-zero on hash mismatch, schema mismatch, missing required fields, profile mode mismatch, or strategy/runtime-relevant env mismatch.
-* The CLI must be safe to run in CI without exchange credentials.
-
-### 3. Make the approved profile the runtime verification anchor
-
-Do not necessarily remove existing env support immediately, but change the model so env selects an approved profile rather than silently becoming the strategy parameter authority.
-
-At runtime/preflight, when a strategy candidate/profile path is configured:
-
-* load the approved profile or promotion artifact
-* validate schema
-* recompute content/profile hashes
-* compare runtime strategy settings against profile values
-* verify market and interval
-* verify cost model assumptions
-* verify regime policy presence and compatibility where applicable
-* record profile hash, promotion hash, manifest hash, and dataset hash in startup audit/decision telemetry
-* fail closed on live armed mismatch
-
-For live armed mode:
-
-* missing approved live-compatible profile must prevent live BUY submission
-* profile/env mismatch must fail startup or fail closed before BUY submission
-* paper profile must not be accepted as a live armed profile unless an explicit promotion step exists and records parent hash
-* invalid or missing regime policy must fail closed for BUY
-* SELL/exit authority must not be blocked solely because candidate regime policy is missing or invalid, unless existing repo safety rules already require that
-
-For paper/replay mode:
-
-* prefer the same verification path for reproducibility
-* if the repo intentionally allows warnings instead of hard failure, document that policy and ensure mismatch appears in decision context/audit output
-
-### 4. Add transition rules instead of direct auto-apply
-
-Implement explicit state transitions where missing.
-
-Examples:
-
-```text
-promotion artifact → approved paper profile
-approved paper profile + paper validation evidence → live-dry-run profile
-live-dry-run profile + live readiness evidence → small-live profile
-```
-
-Each transition should:
-
-* preserve parent hash
-* recompute child profile hash
-* verify parent schema and mode
-* reject mode skipping unless explicitly allowed by existing runbook policy
-* require paper validation evidence before live profile creation, if compatible with current repo design
-* produce an operator-reviewable artifact
-
-Do not automatically arm live trading.
-
-## Required tests
-
-Add unit/integration tests consistent with the repo’s test style. At minimum, cover:
-
-1. Tampering with `candidate_profile_hash` causes profile generation or verification to fail.
-2. Promotion artifact with mismatched backtest/walk-forward parameter values is rejected, if this path exists.
-3. `profile-diff` detects env drift, e.g. profile has one `SMA_SHORT` and env has another.
-4. `profile-verify` exits/fails on strategy parameter mismatch.
-5. Live armed startup or BUY preflight fails closed when approved profile is missing.
-6. Live armed startup or BUY preflight fails closed when profile/env mismatch exists.
-7. Missing or invalid regime policy fails closed for BUY where the repo’s policy requires it.
-8. SELL/exit behavior is not blocked solely by candidate regime policy failure.
-9. Paper profile cannot be used directly as a live armed profile without explicit promotion.
-10. Live profile creation requires paper validation evidence or an explicit documented exception.
-11. Startup audit or decision telemetry includes profile hash, promotion hash, manifest hash, and dataset hash.
-12. Existing live preflight, arming, run lock, reconciliation, duplicate order, ledger, and storage-root safety tests still pass.
-
-Also add regression tests for old artifacts if the repo supports historical artifact formats:
-
-* old artifact missing regime policy
-* old artifact missing profile hash
-* old artifact with `generated_at` changed but deterministic hash unchanged
-* corrupted artifact content hash
-
-## Observability requirements
-
-Add or strengthen audit/telemetry output so an operator can answer:
-
-* Which approved profile is the runtime using?
-* Which promotion artifact produced it?
-* Which candidate profile hash is active?
-* Which manifest hash and dataset content hash are active?
-* Which strategy parameters are active?
-* Did runtime env match the approved profile?
-* If not, which fields differ?
-* Was BUY blocked because of profile mismatch, mode mismatch, hash mismatch, missing regime policy, or another reason?
-
-Use the repo’s existing logging and decision-context conventions. Avoid leaking secrets.
-
-## Recovery and rollback requirements
-
-Provide a safe recovery path:
-
-* If profile verification fails, runtime must stop before live BUY or enter existing safe no-buy mode.
-* Operators must be able to revert to the previous approved profile by changing only the profile path or equivalent non-secret selector.
-* Failed profile generation must leave no partial approved artifact, or must write atomically.
-* CLI errors must be deterministic and machine-readable enough for CI.
-* The implementation must not mutate live env files automatically.
-
-## Scope constraints
-
-Do not:
+Do **not**:
 
 * connect the research registry directly to live execution
-* auto-copy research parameters into live env files
+* auto-copy research parameters into env files
 * auto-arm live trading
 * weaken live arming checks
 * weaken DB/storage-root isolation
-* weaken lot-native SELL authority or ledger/reconciliation protections
-* require exchange credentials for profile diff/generation/verification tests
-* introduce nondeterministic hashes that include timestamps unless explicitly separated from content hash
+* weaken lot-native SELL authority
+* weaken ledger/reconciliation protections
+* require exchange credentials for profile CLI/tests
+* make deterministic hashes depend on timestamps
 
-Do:
+## Hypotheses to verify or falsify
 
-* preserve the research/live separation
-* make promotion artifacts and approved profiles first-class verification anchors
-* prefer fail-closed behavior for live armed paths
-* keep paper/replay reproducible
-* update docs/runbooks to describe the new workflow exactly
+Treat each item below as a hypothesis. Inspect the repo before modifying code. In the final report, state whether each was verified, partially verified, falsified, or inconclusive.
 
-## Suggested implementation order
+### Hypothesis A — Approved profile hashing may rely on implicit global behavior
 
-1. Inventory existing research promotion, candidate profile, strategy config, env parsing, runtime preflight, regime policy, and live BUY/SELL paths.
-2. Write down which hypotheses are confirmed or falsified by code.
-3. Add approved profile schema and deterministic hashing utilities, reusing existing research hash conventions.
-4. Add `profile-generate`.
-5. Add `profile-diff`.
-6. Add `profile-verify`.
-7. Wire runtime/preflight to verify approved profile against actual runtime config.
-8. Add live armed fail-closed behavior for missing/mismatched profile.
-9. Add observability/audit fields.
-10. Add tests and regression fixtures.
-11. Update docs/runbooks.
-12. Run the full relevant test suite.
+The docs say `generated_at` is excluded from deterministic `profile_content_hash`, but the implementation may compute the profile hash from the full payload after inserting `generated_at`.
+
+Verify whether `generated_at` is explicitly excluded by profile-specific hashing code, or whether this currently depends on implicit behavior inside a shared hashing helper.
+
+Required design if verified:
+
+* Add profile-specific hash payload functions.
+* Make exclusion of `generated_at` and `profile_content_hash` explicit in approved profile code.
+* Use the profile-specific hash function consistently in profile build, validate, promote, verify, and tests.
+
+Suggested shape:
+
+```python
+PROFILE_HASH_EXCLUDED_FIELDS = {"profile_content_hash", "generated_at"}
+
+def approved_profile_hash_payload(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k: v
+        for k, v in profile.items()
+        if k not in PROFILE_HASH_EXCLUDED_FIELDS
+    }
+
+def compute_approved_profile_hash(profile: dict[str, Any]) -> str:
+    return sha256_prefixed(content_hash_payload(approved_profile_hash_payload(profile)))
+```
+
+Adapt names to existing code style.
+
+### Hypothesis B — `profile-promote` evidence may be only a non-empty string
+
+The current transition logic may accept `paper_validation_evidence` or `live_readiness_evidence` if the string is non-empty, even if the path does not exist, points inside the repo, or cannot be hashed.
+
+Required design if verified:
+
+* Treat evidence as a verifiable artifact, not a free-text string.
+* Evidence path must exist.
+* Evidence path must be resolved to an absolute path before storing.
+* Evidence path must pass the repo’s runtime-artifact path policy.
+* Evidence file content hash must be computed and stored in the child profile.
+* Evidence path and evidence content hash must be included in the child profile’s deterministic hash.
+* If the repo already has report/data-root path helpers, reuse them.
+* If semantic evidence validation is out of scope, explicitly document that only existence/path/hash are verified for now.
+
+Expected fields, adjusted to existing naming conventions:
+
+```json
+{
+  "paper_validation_evidence_path": "/abs/path/...",
+  "paper_validation_evidence_content_hash": "sha256:...",
+  "live_readiness_evidence_path": "/abs/path/...",
+  "live_readiness_evidence_content_hash": "sha256:..."
+}
+```
+
+### Hypothesis C — Source promotion path policy may be weaker than profile output path policy
+
+The implementation may verify source promotion content hash but allow source promotion paths that are relative, repo-local, or outside the intended reports/data-root area.
+
+Required design if verified:
+
+* Store `source_promotion_artifact_path` as a resolved absolute path.
+* Reject repo-local source promotion artifacts.
+* Prefer allowing only PathManager/data-root reports paths, if compatible with current repo design.
+* Add a distinct failure reason for source promotion path policy mismatch, not just generic hash mismatch.
+* Continue verifying source promotion content hash.
+
+### Hypothesis D — `profile-diff` / `profile-verify` may not check that the env selects the same profile being verified
+
+The CLI may compare profile values against env values, but not verify that the env’s approved profile selector points to the exact `--profile` path.
+
+This can allow:
+
+```bash
+uv run bithumb-bot profile-verify --profile A.json --env live.env
+```
+
+to pass even though `live.env` actually points to `B.json`.
+
+Required design if verified:
+
+* Parse the env profile selector, e.g. `APPROVED_STRATEGY_PROFILE_PATH` or existing canonical variable.
+* Compare the resolved selector path against the resolved `--profile` path.
+* Add a mismatch field such as:
+
+```json
+{
+  "field": "approved_profile_selector",
+  "expected": "/abs/path/profile_A.json",
+  "actual": "/abs/path/profile_B.json"
+}
+```
+
+* In live modes this must fail.
+* For paper mode, fail by default unless the repo has an explicit documented reason to allow warning-only behavior.
+* If multiple legacy selector names exist, document precedence and include the chosen selector in output/audit.
+
+### Hypothesis E — Live arming flag ambiguity may surface as an unclear `expected=[]` profile mode error
+
+The current mode inference may return an empty expected profile mode set when live flags are ambiguous, for example:
+
+* `LIVE_DRY_RUN=true` and `LIVE_REAL_ORDER_ARMED=true`
+* both false in live mode
+
+Required design if verified:
+
+* Replace ambiguous empty expected-mode behavior with explicit failure reasons:
+
+  * `live_mode_arming_flags_ambiguous`
+  * `live_mode_not_dry_run_or_armed`
+* Ensure CLI and runtime/preflight output surfaces these reason codes.
+* Add tests for both ambiguous combinations.
+
+### Hypothesis F — Legacy `STRATEGY_CANDIDATE_PROFILE_PATH` may dilute the approved profile contract
+
+The repo may still allow legacy `STRATEGY_CANDIDATE_PROFILE_PATH` to act as a regime-policy-only source while `APPROVED_STRATEGY_PROFILE_PATH` is absent.
+
+Required design if verified:
+
+* In live mode, reject configurations where only the legacy candidate profile path is set and no approved profile selector is present.
+* In paper/replay, either:
+
+  * preserve legacy behavior only as a compatibility path, and record audit fields such as `legacy_candidate_profile_path_used=true` and `legacy_profile_contract_scope=regime_policy_only`, or
+  * migrate to approved profile only if compatible with the repo.
+* Update README/env docs to make the approved profile selector canonical.
+* Ensure legacy path cannot silently satisfy live approved profile requirements.
+
+### Hypothesis G — Profile promotion may not re-check source promotion drift
+
+`profile-verify` may verify source promotion drift, but `profile-promote` may only validate the parent profile and not re-open/re-hash the source promotion artifact before creating the child profile.
+
+Required design if verified:
+
+* `profile-promote` must verify the parent profile’s source promotion artifact before creating live-dry-run or small-live child profiles.
+* If the source promotion artifact has drifted, promotion must fail.
+* Add a test: generate a paper profile, mutate the source promotion artifact, then attempt `profile-promote`; it must fail.
+
+### Hypothesis H — Audit fields may exist but not reach startup audit / decision telemetry consistently
+
+`ProfileVerificationResult.audit_fields()` may exist, but successful verification fields may not consistently reach startup logs, preflight output, and decision context.
+
+Required design if verified:
+
+* On successful runtime/preflight verification, log or emit:
+
+  * approved profile path
+  * approved profile mode
+  * approved profile content hash
+  * source promotion content hash
+  * candidate profile hash
+  * manifest hash
+  * dataset content hash
+  * profile verification status
+* On failure, emit reason-coded block fields, for example:
+
+  * `approved_profile_runtime_mismatch`
+  * `profile_mode_mismatch`
+  * `source_promotion_content_hash_mismatch`
+  * `approved_profile_selector_mismatch`
+  * `live_mode_arming_flags_ambiguous`
+* Ensure decision context or equivalent runtime telemetry contains the active artifact chain for both successful and blocked BUY decisions.
+* Avoid leaking secrets.
+
+### Hypothesis I — CLI output path validation may be duplicated instead of centralized
+
+The repo may have `write_approved_profile_atomic()` and a path-policy helper, while `profile_cli.py` duplicates output path checks.
+
+Required design if verified:
+
+* Centralize path validation and atomic writes in approved profile utilities.
+* Make `profile-generate` and `profile-promote` use the same helper.
+* Keep error reason strings stable and testable.
+
+### Hypothesis J — Docs may overstate evidence semantics
+
+Docs may say paper validation or live readiness evidence is required, while the implementation only verifies a reference string or path/hash and does not semantically validate metrics.
+
+Required design if verified:
+
+* Update docs/runbooks to state exactly what is currently verified:
+
+  * evidence file existence
+  * allowed path policy
+  * evidence content hash
+  * parent/source/profile hash chain
+* Explicitly mark semantic validation of paper observation metrics or live readiness metrics as future work unless implemented now.
+* If implementing a minimal evidence schema is practical, add:
+
+  * `evidence_type`
+  * `profile_hash`
+  * `observation_start`
+  * `observation_end`
+  * `decision_count`
+  * `blocked_count`
+  * `operator_approved`
+  * `content_hash`
+
+## Required implementation priorities
+
+Implement in this order unless repo inspection shows a stronger safety issue:
+
+1. `profile-diff` / `profile-verify` must check that the env selector path matches the `--profile` path.
+2. `profile-promote` must re-verify parent source promotion drift before transition.
+3. Evidence must become a verifiable artifact: existing path, allowed path, content hash, stored in profile, included in profile hash.
+4. Approved profile hash computation must explicitly exclude `generated_at`.
+5. Successful runtime/preflight and decision telemetry must include profile/source/promotion/hash audit fields.
+6. Legacy `STRATEGY_CANDIDATE_PROFILE_PATH` must not satisfy live approved profile requirements.
+7. Ambiguous live arming flag combinations must produce explicit reason-coded failures.
+8. CLI path validation and atomic writes should be centralized.
+9. Docs must accurately describe evidence semantics and remaining future work.
+
+## Required tests
+
+Add or update tests in the repo’s existing style. At minimum, cover:
+
+### Hashing
+
+* Changing `generated_at` does not change `profile_content_hash`.
+* Changing any strategy/runtime-relevant field does change `profile_content_hash`.
+* `profile_content_hash` itself is excluded from its own hash payload.
+
+### Evidence artifacts
+
+* `profile-promote` fails when paper validation evidence path does not exist.
+* `profile-promote` fails when live readiness evidence path does not exist.
+* `profile-promote` rejects repo-local evidence paths, or otherwise enforces the repo’s artifact path policy.
+* Generated child profile stores resolved evidence path and evidence content hash.
+* Changing evidence content changes the resulting child profile hash.
+* If verification checks evidence drift, mutating evidence after promotion causes verification failure; if not, document why and add a test for the intended behavior.
+
+### Source promotion path / drift
+
+* Profile generation stores source promotion path as resolved absolute path.
+* Repo-local source promotion artifacts are rejected, unless the repo has an explicit allowed-fixture exception for tests.
+* `profile-verify` fails if source promotion artifact content changes.
+* `profile-promote` fails if parent source promotion artifact content changed after parent profile creation.
+
+### Env selector matching
+
+* `profile-verify --profile A --env env-pointing-to-A` passes when all values match.
+* `profile-verify --profile A --env env-pointing-to-B` fails with `approved_profile_selector_mismatch`.
+* Missing approved profile selector fails in live mode.
+* Missing approved profile selector fails or warns in paper mode according to documented policy.
+* If both approved and legacy selector env vars are set, precedence is deterministic and tested.
+
+### Runtime mode
+
+* live dry-run expects `live_dry_run` profile.
+* live armed / small-live expects `small_live` profile.
+* paper profile is rejected for live armed.
+* `LIVE_DRY_RUN=true` and `LIVE_REAL_ORDER_ARMED=true` fails with `live_mode_arming_flags_ambiguous`.
+* both false in live mode fails with `live_mode_not_dry_run_or_armed`.
+
+### Legacy path behavior
+
+* live mode with only `STRATEGY_CANDIDATE_PROFILE_PATH` and no approved profile selector fails.
+* paper/replay legacy usage emits explicit audit fields if still supported.
+
+### Observability
+
+* Successful startup/preflight includes approved profile hash, promotion hash, candidate profile hash, manifest hash, and dataset content hash.
+* Blocked BUY decision includes reason-coded profile failure fields.
+* No secrets are emitted.
+
+### Existing safety regression
+
+Ensure all existing tests still pass for:
+
+* live preflight
+* arming
+* run lock
+* reconciliation
+* duplicate-order prevention
+* ledger behavior
+* storage-root isolation
+* lot-native SELL authority
+
+## Recovery / rollback requirements
+
+Implement or document the operator recovery path:
+
+* If verification fails, live BUY must be blocked before order submission.
+* Operator can roll back by changing only the approved profile selector to a previous approved profile.
+* Failed profile generation or promotion must not leave partial artifacts; writes must be atomic.
+* CLI errors should be deterministic and machine-readable where the repo already supports JSON output.
+* No CLI should mutate live env files automatically.
+
+## Documentation updates
+
+Update README, research validation docs, runbooks, and env examples as appropriate.
+
+Docs must clearly state:
+
+* `APPROVED_STRATEGY_PROFILE_PATH` or the repo’s canonical approved profile selector is the runtime profile selector.
+* `STRATEGY_CANDIDATE_PROFILE_PATH` is legacy / compatibility / regime-policy-only if still supported.
+* `profile-generate` and `profile-promote` do not mutate env files.
+* `profile-diff` and `profile-verify` check env selector path equality.
+* Evidence artifacts are verified by path policy and content hash.
+* Semantic validation of paper/live readiness metrics is implemented or explicitly future work.
+* Live mode fails closed on missing/mismatched approved profile.
+* SELL/exit authority is not blocked solely because candidate regime policy is missing or invalid, unless existing repo safety rules already say otherwise.
 
 ## Final report format
 
-When finished, produce a concise final report with these sections:
+When finished, produce this exact report structure:
 
 ```markdown
 ## Summary
 
 ## Hypotheses Verified / Falsified
 
-For each hypothesis:
-- status: verified, falsified, partially verified, or inconclusive
-- evidence from repo
+For each hypothesis A–J:
+- status: verified, partially verified, falsified, or inconclusive
+- repo evidence
 - implemented change or reason no change was needed
 
 ## Design Changes
 
+## CLI Behavior
+
+Include exact commands and expected pass/fail behavior:
+- profile-generate
+- profile-diff
+- profile-verify
+- profile-promote
+
 ## Runtime Safety Behavior
 
-Explain exact behavior for:
+Explain behavior for:
 - paper
 - replay
-- live dry run
-- live armed / small live
+- live dry-run
+- live armed / small-live
+- SELL/exit paths
 
-## CLI Added or Changed
+## Evidence Artifact Handling
 
-Include example commands and expected exit behavior.
-
-## Tests Added
-
-List test files and what each verifies.
+Explain:
+- path policy
+- content hash
+- stored fields
+- whether semantic validation is implemented or future work
 
 ## Observability / Audit Fields
 
-List fields added to logs, decision context, reports, or startup audit output.
+List the fields emitted on success and failure.
 
 ## Recovery / Rollback
 
-Explain how an operator recovers from failed verification or rolls back to a previous approved profile.
+Explain how an operator recovers from failed verification or rolls back to a previous profile.
+
+## Tests Added or Updated
+
+List test files and test intent.
 
 ## Backward Compatibility
 
-Explain old artifact/profile behavior.
-
-## Risks and Follow-ups
-
-Include remaining risks, intentionally deferred work, and any hypothesis that could not be conclusively verified.
+Explain behavior for:
+- old promotion artifacts
+- old approved profiles
+- legacy `STRATEGY_CANDIDATE_PROFILE_PATH`
 
 ## Validation
 
 Include exact commands run and results.
+
+## Remaining Risks / Follow-ups
+
+Only list items that are truly out of scope or intentionally deferred.
 ```
 
-Focus on making the system more robust, reproducible, and operable. The success criterion is not “research automatically updates live.” The success criterion is:
+Success criterion:
 
-> A human can manually approve promotion from research to paper/live, while the system cryptographically and semantically verifies that runtime execution matches the approved artifact chain, fails closed on dangerous drift, and leaves enough audit evidence to reproduce what happened.
+> A human can still manually approve promotion from research to paper/live, but the repo now verifies that env selection, runtime settings, parent profile, source promotion artifact, evidence artifacts, and runtime telemetry all point to the same approved artifact chain. Live execution fails closed on dangerous drift, and the operator can reproduce and audit exactly what happened.
+

@@ -1063,6 +1063,27 @@ class SmaWithFilterStrategy:
                 else None
             ),
             "approved_profile_path": settings.APPROVED_STRATEGY_PROFILE_PATH or None,
+            "approved_profile_mode": (
+                self.candidate_regime_policy.get("approved_profile_mode")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "approved_profile_verification_ok": (
+                self.candidate_regime_policy.get("approved_profile_verification_ok")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "approved_profile_block_reason": (
+                self.candidate_regime_policy.get("approved_profile_block_reason")
+                or self.candidate_regime_policy.get("_policy_load_error")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "source_promotion_artifact_path": (
+                self.candidate_regime_policy.get("source_promotion_artifact_path")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
             "promotion_content_hash": (
                 self.candidate_regime_policy.get("source_promotion_content_hash")
                 if isinstance(self.candidate_regime_policy, dict)
@@ -1080,6 +1101,26 @@ class SmaWithFilterStrategy:
             ),
             "dataset_content_hash": (
                 self.candidate_regime_policy.get("dataset_content_hash")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "paper_validation_evidence_path": (
+                self.candidate_regime_policy.get("paper_validation_evidence_path")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "paper_validation_evidence_content_hash": (
+                self.candidate_regime_policy.get("paper_validation_evidence_content_hash")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "live_readiness_evidence_path": (
+                self.candidate_regime_policy.get("live_readiness_evidence_path")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "live_readiness_evidence_content_hash": (
+                self.candidate_regime_policy.get("live_readiness_evidence_content_hash")
                 if isinstance(self.candidate_regime_policy, dict)
                 else None
             ),

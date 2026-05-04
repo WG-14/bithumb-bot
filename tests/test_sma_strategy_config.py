@@ -200,6 +200,21 @@ def test_approved_profile_runtime_mismatch_becomes_fail_closed_policy_error(
     assert config.candidate_regime_policy["approved_profile_path"] == str(profile_path)
 
 
+def test_live_mode_legacy_candidate_path_does_not_satisfy_approved_profile_contract(
+    settings_guard,
+) -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+    object.__setattr__(settings, "STRATEGY_CANDIDATE_PROFILE_PATH", "/runtime/reports/candidate.json")
+
+    config = sma_strategy_config_from_settings()
+
+    assert config.candidate_regime_policy is not None
+    assert config.candidate_regime_policy["_policy_load_error"] == "approved_profile_missing"
+    assert config.candidate_regime_policy["legacy_candidate_profile_path_used"] is True
+    assert config.candidate_regime_policy["legacy_profile_contract_scope"] == "regime_policy_only"
+
+
 def test_existing_sma_constructor_behavior_is_preserved() -> None:
     strategy = SmaCrossStrategy(short_n=2, long_n=3)
 

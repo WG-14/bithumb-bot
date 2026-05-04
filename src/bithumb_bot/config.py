@@ -24,8 +24,8 @@ from .market_catalog_snapshot import record_market_catalog_snapshot
 from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError, validate_runtime_root_separation
 from .approved_profile import (
-    LIVE_COMPATIBLE_PROFILE_MODES,
     approved_profile_path_from_env,
+    expected_profile_modes_for_runtime,
     runtime_contract_from_settings,
     verify_profile_against_runtime,
 )
@@ -1037,11 +1037,13 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
     if not cfg.LIVE_DRY_RUN:
         if not cfg.LIVE_REAL_ORDER_ARMED:
             issues.append(
+                "live_mode_not_dry_run_or_armed: "
                 "LIVE_REAL_ORDER_ARMED=true is required to place real live orders "
                 "(MODE=live and LIVE_DRY_RUN=false)"
             )
     elif bool(cfg.LIVE_REAL_ORDER_ARMED):
         issues.append(
+            "live_mode_arming_flags_ambiguous: "
             "LIVE_DRY_RUN=true and LIVE_REAL_ORDER_ARMED=true is ambiguous; "
             "use LIVE_DRY_RUN=true with LIVE_REAL_ORDER_ARMED=false for diagnostics, "
             "or LIVE_DRY_RUN=false with LIVE_REAL_ORDER_ARMED=true for real-order execution"
@@ -1109,10 +1111,11 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         profile_required = bool(not cfg.LIVE_DRY_RUN and cfg.LIVE_REAL_ORDER_ARMED)
         configured_profile_path = str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
         if profile_required or configured_profile_path:
-            expected_profile_modes = {"small_live"} if profile_required else set(LIVE_COMPATIBLE_PROFILE_MODES)
+            runtime_contract = runtime_contract_from_settings(cfg)
+            expected_profile_modes = {"small_live"} if profile_required else expected_profile_modes_for_runtime(runtime_contract)[0]
             profile_result = verify_profile_against_runtime(
                 profile_path=configured_profile_path,
-                runtime=runtime_contract_from_settings(cfg),
+                runtime=runtime_contract,
                 require_profile=profile_required,
                 expected_profile_modes=expected_profile_modes,
                 verify_source_promotion=True,
@@ -1313,10 +1316,15 @@ def log_live_execution_contract(
             approved_profile_mode=approved_profile.get("approved_profile_mode"),
             approved_profile_verification_ok=approved_profile.get("approved_profile_verification_ok"),
             approved_profile_block_reason=approved_profile.get("approved_profile_block_reason"),
+            source_promotion_artifact_path=approved_profile.get("source_promotion_artifact_path"),
             promotion_content_hash=approved_profile.get("promotion_content_hash"),
             candidate_profile_hash=approved_profile.get("candidate_profile_hash"),
             manifest_hash=approved_profile.get("manifest_hash"),
             dataset_content_hash=approved_profile.get("dataset_content_hash"),
+            paper_validation_evidence_path=approved_profile.get("paper_validation_evidence_path"),
+            paper_validation_evidence_content_hash=approved_profile.get("paper_validation_evidence_content_hash"),
+            live_readiness_evidence_path=approved_profile.get("live_readiness_evidence_path"),
+            live_readiness_evidence_content_hash=approved_profile.get("live_readiness_evidence_content_hash"),
             env_source_key=explicit_env.get("source_key"),
             env_file=explicit_env.get("env_file"),
             env_loaded=explicit_env.get("loaded"),

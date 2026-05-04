@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .approved_profile import (
+    LEGACY_PROFILE_SELECTOR_ENV,
+    expected_profile_modes_for_runtime,
     load_profile_or_promotion_regime_policy,
     runtime_contract_from_settings,
     verify_profile_against_runtime,
@@ -72,12 +74,21 @@ def _candidate_regime_policy_from_configured_profile(path: str) -> dict[str, obj
     if not raw_path:
         return None
     approved_profile_path = str(settings.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
+    if str(settings.MODE or "").strip().lower() == "live" and not approved_profile_path:
+        return {
+            "_policy_load_error": "approved_profile_missing",
+            "_policy_source": raw_path,
+            "legacy_candidate_profile_path_used": True,
+            "legacy_profile_contract_scope": "regime_policy_only",
+            "legacy_profile_selector_env": LEGACY_PROFILE_SELECTOR_ENV,
+        }
     if raw_path == approved_profile_path:
+        runtime = runtime_contract_from_settings(settings)
         result = verify_profile_against_runtime(
             profile_path=raw_path,
-            runtime=runtime_contract_from_settings(settings),
+            runtime=runtime,
             require_profile=True,
-            expected_profile_modes=_expected_profile_modes_for_settings(),
+            expected_profile_modes=expected_profile_modes_for_runtime(runtime)[0],
             verify_source_promotion=True,
         )
         if not result.ok:
@@ -86,17 +97,12 @@ def _candidate_regime_policy_from_configured_profile(path: str) -> dict[str, obj
                 "_policy_source": raw_path,
                 **result.audit_fields(),
             }
-    return load_profile_or_promotion_regime_policy(raw_path)
-
-
-def _expected_profile_modes_for_settings() -> set[str] | None:
-    mode = str(settings.MODE or "").strip().lower()
-    if mode == "paper":
-        return {"paper"}
-    if mode != "live":
-        return None
-    if bool(settings.LIVE_DRY_RUN) and not bool(settings.LIVE_REAL_ORDER_ARMED):
-        return {"live_dry_run"}
-    if not bool(settings.LIVE_DRY_RUN) and bool(settings.LIVE_REAL_ORDER_ARMED):
-        return {"small_live"}
-    return set()
+    policy = load_profile_or_promotion_regime_policy(raw_path)
+    if policy is not None:
+        policy = {
+            **policy,
+            "legacy_candidate_profile_path_used": True,
+            "legacy_profile_contract_scope": "regime_policy_only",
+            "legacy_profile_selector_env": LEGACY_PROFILE_SELECTOR_ENV,
+        }
+    return policy

@@ -112,7 +112,7 @@ The operator next step is review. Promotion evidence does not imply live readine
 
 ## Approved Profiles
 
-Approved profiles are the manual approval contract between research evidence and runtime configuration. They are operator-reviewable `reports` artifacts and are written atomically. The deterministic `profile_content_hash` excludes `generated_at`, matching the research report hashing convention.
+Approved profiles are the manual approval contract between research evidence and runtime configuration. They are operator-reviewable `reports` artifacts and are written atomically. The deterministic `profile_content_hash` explicitly excludes `generated_at` and `profile_content_hash` from the profile hash payload.
 
 Generate a paper profile from a reviewed promotion artifact:
 
@@ -138,7 +138,7 @@ uv run bithumb-bot profile-verify \
   --env "$BITHUMB_ENV_FILE_PAPER"
 ```
 
-Both commands are credential-free. `profile-verify` exits non-zero on schema errors, hash mismatch, source promotion content-hash drift, mode mismatch, missing required fields, strategy parameter drift, market/interval drift, or cost model drift.
+Both commands are credential-free. `profile-diff` and `profile-verify` require the env selector `APPROVED_STRATEGY_PROFILE_PATH` to resolve to the exact same path as `--profile`; the legacy `STRATEGY_APPROVED_PROFILE_PATH` is considered only as an older approved-profile alias after the canonical selector. `STRATEGY_CANDIDATE_PROFILE_PATH` is not an approved-profile selector. `profile-verify` exits non-zero on schema errors, hash mismatch, env selector mismatch, source promotion path-policy failure, source promotion content-hash drift, evidence content-hash drift, mode mismatch, missing required fields, strategy parameter drift, market/interval drift, or cost model drift.
 
 Promotion between runtime approval states is explicit:
 
@@ -156,7 +156,7 @@ uv run bithumb-bot profile-promote \
   --out "$DATA_ROOT/live/reports/profiles/<small_live_profile>.json"
 ```
 
-Each transition verifies the parent profile, records `parent_profile_hash`, and refuses mode skipping. `profile-generate` creates paper profiles only; live-compatible profiles must come from `profile-promote`. Live dry-run startup accepts only a verified `live_dry_run` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`. Live armed execution accepts only a verified `small_live` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`.
+Each transition verifies the parent profile, reopens and rehashes the parent source promotion artifact, records `parent_profile_hash`, and refuses mode skipping. Evidence is treated as a runtime `reports` artifact: the path must exist, resolve outside the repository, and its byte content hash is stored in the child profile as `paper_validation_evidence_path` / `paper_validation_evidence_content_hash` or `live_readiness_evidence_path` / `live_readiness_evidence_content_hash`. Those fields are included in the child profile hash. Current evidence validation is artifact validation only; semantic validation of observation windows, decision counts, blocked counts, or readiness metrics is future work unless an operator performs that review manually. `profile-generate` creates paper profiles only; live-compatible profiles must come from `profile-promote`. Live dry-run startup accepts only a verified `live_dry_run` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`. Live armed execution accepts only a verified `small_live` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`.
 
 Runtime still keeps research separated from live execution: profiles verify approved values; they do not auto-apply values to env files and do not arm live trading.
 
