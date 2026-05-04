@@ -19,6 +19,15 @@ GATE_PASS = "PASS"
 GATE_WARN = "WARN"
 GATE_FAIL = "FAIL"
 GATE_INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+ORDER_TYPE_COST_DELTA_INSUFFICIENT = "insufficient_order_type_samples"
+ORDER_TYPE_COST_DELTA_MARKET_FAST_COSTLY = "market_fills_faster_but_costs_more"
+ORDER_TYPE_COST_DELTA_MARKET_FAST_CHEAPER = "market_fills_faster_and_costs_less"
+ORDER_TYPE_COST_DELTA_LIMIT_FAST_COSTLY = "limit_fills_faster_but_costs_more"
+ORDER_TYPE_COST_DELTA_LIMIT_FAST_CHEAPER = "limit_fills_faster_and_costs_less"
+ORDER_TYPE_COST_DELTA_MARKET_COSTS_MORE = "market_costs_more"
+ORDER_TYPE_COST_DELTA_LIMIT_COSTS_MORE = "limit_costs_more"
+ORDER_TYPE_COST_DELTA_NO_MATERIAL_DIFFERENCE = "no_material_order_type_difference"
+ORDER_TYPE_COST_DELTA_ONE_TYPE_ONLY = "one_order_type_only"
 
 
 @dataclass(frozen=True)
@@ -169,6 +178,71 @@ def percentile(values: list[float], pct: float) -> float | None:
         return clean[lower]
     weight = rank - lower
     return clean[lower] + ((clean[upper] - clean[lower]) * weight)
+
+
+def _normalized_order_type(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"market", "limit"}:
+        return normalized
+    return "unknown"
+
+
+def _order_type_metrics(records: list[ExecutionQualityRecord], order_type: str) -> dict[str, object]:
+    typed = [row for row in records if _normalized_order_type(row.order_type) == order_type]
+    count = len(typed)
+    slippage = [float(row.slippage_vs_signal_bps) for row in typed if row.slippage_vs_signal_bps is not None]
+    latency = [float(row.full_fill_latency_ms) for row in typed if row.full_fill_latency_ms is not None]
+    prefix = f"{order_type}_"
+    return {
+        f"{prefix}order_count": count,
+        f"{prefix}median_slippage_bps": percentile(slippage, 50),
+        f"{prefix}p90_slippage_bps": percentile(slippage, 90),
+        f"{prefix}p95_slippage_bps": percentile(slippage, 95),
+        f"{prefix}median_submit_to_fill_ms": percentile(latency, 50),
+        f"{prefix}p90_submit_to_fill_ms": percentile(latency, 90),
+        f"{prefix}p95_submit_to_fill_ms": percentile(latency, 95),
+        f"{prefix}partial_fill_rate": (sum(1 for row in typed if row.partial_fill_flag) / count if count else 0.0),
+        f"{prefix}unfilled_rate": (sum(1 for row in typed if row.unfilled_flag) / count if count else 0.0),
+    }
+
+
+def _classify_order_type_cost_delta(summary: dict[str, object]) -> str:
+    market_count = int(summary.get("market_order_count") or 0)
+    limit_count = int(summary.get("limit_order_count") or 0)
+    if (market_count > 0) != (limit_count > 0):
+        return ORDER_TYPE_COST_DELTA_ONE_TYPE_ONLY
+    if market_count == 0 and limit_count == 0:
+        return ORDER_TYPE_COST_DELTA_INSUFFICIENT
+
+    market_slippage = summary.get("market_p90_slippage_bps")
+    limit_slippage = summary.get("limit_p90_slippage_bps")
+    market_latency = summary.get("market_p95_submit_to_fill_ms")
+    limit_latency = summary.get("limit_p95_submit_to_fill_ms")
+    if not all(isinstance(value, (int, float)) for value in (market_slippage, limit_slippage, market_latency, limit_latency)):
+        return ORDER_TYPE_COST_DELTA_INSUFFICIENT
+
+    slippage_delta = float(market_slippage) - float(limit_slippage)
+    latency_delta = float(market_latency) - float(limit_latency)
+    slippage_epsilon_bps = 0.1
+    latency_epsilon_ms = 1.0
+    market_costs_more = slippage_delta > slippage_epsilon_bps
+    limit_costs_more = slippage_delta < -slippage_epsilon_bps
+    market_faster = latency_delta < -latency_epsilon_ms
+    limit_faster = latency_delta > latency_epsilon_ms
+
+    if market_faster and market_costs_more:
+        return ORDER_TYPE_COST_DELTA_MARKET_FAST_COSTLY
+    if market_faster and limit_costs_more:
+        return ORDER_TYPE_COST_DELTA_MARKET_FAST_CHEAPER
+    if limit_faster and limit_costs_more:
+        return ORDER_TYPE_COST_DELTA_LIMIT_FAST_COSTLY
+    if limit_faster and market_costs_more:
+        return ORDER_TYPE_COST_DELTA_LIMIT_FAST_CHEAPER
+    if market_costs_more:
+        return ORDER_TYPE_COST_DELTA_MARKET_COSTS_MORE
+    if limit_costs_more:
+        return ORDER_TYPE_COST_DELTA_LIMIT_COSTS_MORE
+    return ORDER_TYPE_COST_DELTA_NO_MATERIAL_DIFFERENCE
 
 
 def load_manifest_max_slippage_bps(path: str | Path | None) -> float | None:
@@ -507,8 +581,9 @@ def summarize_execution_quality(
     backtest_slippage_bps_max: float | None = None,
 ) -> dict[str, object]:
     sample_count = len(records)
-    market_order_count = sum(1 for row in records if str(row.order_type or "").lower() == "market")
-    limit_order_count = sum(1 for row in records if str(row.order_type or "").lower() == "limit")
+    market_order_count = sum(1 for row in records if _normalized_order_type(row.order_type) == "market")
+    limit_order_count = sum(1 for row in records if _normalized_order_type(row.order_type) == "limit")
+    unknown_order_type_count = sum(1 for row in records if _normalized_order_type(row.order_type) == "unknown")
     partial_count = sum(1 for row in records if row.partial_fill_flag)
     unfilled_count = sum(1 for row in records if row.unfilled_flag)
     insufficient_count = sum(1 for row in records if row.quality_status == QUALITY_INSUFFICIENT_EVIDENCE)
@@ -555,10 +630,11 @@ def summarize_execution_quality(
         primary_issue = "p90_slippage_exceeds_backtest_model"
         next_action = "reduce_live_to_dry_run_or_update_research_cost_model"
 
-    return {
+    summary = {
         "sample_count": sample_count,
         "market_order_count": market_order_count,
         "limit_order_count": limit_order_count,
+        "unknown_order_type_count": unknown_order_type_count,
         "median_submit_to_fill_ms": percentile(submit_to_fill, 50),
         "p90_submit_to_fill_ms": percentile(submit_to_fill, 90),
         "p95_submit_to_fill_ms": p95_latency,
@@ -577,6 +653,10 @@ def summarize_execution_quality(
         "primary_issue": primary_issue,
         "next_action": next_action,
     }
+    summary.update(_order_type_metrics(records, "market"))
+    summary.update(_order_type_metrics(records, "limit"))
+    summary["order_type_cost_delta"] = _classify_order_type_cost_delta(summary)
+    return summary
 
 
 def format_execution_quality_text(summary: dict[str, object]) -> str:
@@ -585,6 +665,7 @@ def format_execution_quality_text(summary: dict[str, object]) -> str:
         "sample_count",
         "market_order_count",
         "limit_order_count",
+        "unknown_order_type_count",
         "median_submit_to_fill_ms",
         "p90_submit_to_fill_ms",
         "p95_submit_to_fill_ms",
@@ -599,6 +680,23 @@ def format_execution_quality_text(summary: dict[str, object]) -> str:
         "backtest_slippage_bps_max",
         "model_breach_count",
         "model_breach_rate",
+        "market_median_slippage_bps",
+        "market_p90_slippage_bps",
+        "market_p95_slippage_bps",
+        "market_median_submit_to_fill_ms",
+        "market_p90_submit_to_fill_ms",
+        "market_p95_submit_to_fill_ms",
+        "market_partial_fill_rate",
+        "market_unfilled_rate",
+        "limit_median_slippage_bps",
+        "limit_p90_slippage_bps",
+        "limit_p95_slippage_bps",
+        "limit_median_submit_to_fill_ms",
+        "limit_p90_submit_to_fill_ms",
+        "limit_p95_submit_to_fill_ms",
+        "limit_partial_fill_rate",
+        "limit_unfilled_rate",
+        "order_type_cost_delta",
         "quality_gate_status",
         "primary_issue",
         "next_action",

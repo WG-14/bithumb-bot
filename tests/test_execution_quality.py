@@ -10,6 +10,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.execution_quality import (
     ExecutionQualityThresholds,
     build_execution_quality_record,
+    format_execution_quality_text,
     latency_ms,
     refresh_execution_quality_records,
     side_aware_slippage_bps,
@@ -397,6 +398,97 @@ def test_manifest_comparison_summary_classifies_breaches(tmp_path) -> None:
     assert summary["quality_gate_status"] == "FAIL"
 
 
+def test_summary_reports_market_limit_cost_latency_and_fill_comparison(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "execution-quality-order-type.sqlite"))
+    try:
+        _seed_quality_order(
+            conn,
+            client_order_id="quality_market_fast_costly",
+            order_type="MaRkEt",
+            decision_price=100.0,
+            fill_prices=(101.0,),
+            fill_qtys=(1.0,),
+            qty_req=1.0,
+            request_ts=1_700_000_000_100,
+            response_ts=1_700_000_000_120,
+        )
+        _seed_quality_order(
+            conn,
+            client_order_id="quality_limit_partial",
+            order_type="LIMIT",
+            decision_price=100.0,
+            fill_prices=(100.1,),
+            fill_qtys=(0.5,),
+            qty_req=1.0,
+            request_ts=1_700_000_000_000,
+            response_ts=1_700_000_000_020,
+        )
+        _seed_quality_order(
+            conn,
+            client_order_id="quality_limit_unfilled",
+            order_type="limit",
+            decision_price=100.0,
+            fill_prices=(),
+            fill_qtys=(),
+            qty_req=1.0,
+            request_ts=1_700_000_000_000,
+            response_ts=1_700_000_000_020,
+        )
+        records = [
+            build_execution_quality_record(conn, client_order_id="quality_market_fast_costly"),
+            build_execution_quality_record(conn, client_order_id="quality_limit_partial"),
+            build_execution_quality_record(conn, client_order_id="quality_limit_unfilled"),
+        ]
+    finally:
+        conn.close()
+
+    assert all(record is not None for record in records)
+    summary = summarize_execution_quality(
+        [record for record in records if record is not None],
+        thresholds=ExecutionQualityThresholds(min_sample=1),
+    )
+
+    assert summary["market_order_count"] == 1
+    assert summary["limit_order_count"] == 2
+    assert summary["market_p90_slippage_bps"] == pytest.approx(100.0)
+    assert summary["limit_p90_slippage_bps"] == pytest.approx(10.0)
+    assert summary["market_p95_submit_to_fill_ms"] == pytest.approx(101.0)
+    assert summary["limit_p95_submit_to_fill_ms"] == pytest.approx(201.0)
+    assert summary["limit_partial_fill_rate"] == pytest.approx(0.5)
+    assert summary["limit_unfilled_rate"] == pytest.approx(0.5)
+    assert summary["order_type_cost_delta"] == "market_fills_faster_but_costs_more"
+
+    text = format_execution_quality_text(summary)
+    assert "market_p90_slippage_bps=100" in text
+    assert "limit_p95_submit_to_fill_ms=201" in text
+    assert "order_type_cost_delta=market_fills_faster_but_costs_more" in text
+
+
+def test_summary_order_type_comparison_handles_one_side_only_and_unknown_type(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "execution-quality-one-side.sqlite"))
+    try:
+        _seed_quality_order(conn, client_order_id="quality_market_only", order_type="market", fill_prices=(100.2,), fill_qtys=(1.0,))
+        _seed_quality_order(conn, client_order_id="quality_unknown_type", order_type="post_only", fill_prices=(100.1,), fill_qtys=(1.0,))
+        market_only = build_execution_quality_record(conn, client_order_id="quality_market_only")
+        unknown = build_execution_quality_record(conn, client_order_id="quality_unknown_type")
+    finally:
+        conn.close()
+
+    assert market_only is not None
+    assert unknown is not None
+    summary = summarize_execution_quality(
+        [market_only, unknown],
+        thresholds=ExecutionQualityThresholds(min_sample=1),
+    )
+
+    assert summary["market_order_count"] == 1
+    assert summary["limit_order_count"] == 0
+    assert summary["unknown_order_type_count"] == 1
+    assert summary["limit_p90_slippage_bps"] is None
+    assert summary["order_type_cost_delta"] == "one_order_type_only"
+    assert "limit_p90_slippage_bps=NA" in format_execution_quality_text(summary)
+
+
 def test_execution_quality_report_cli_no_records(tmp_path, monkeypatch, capsys) -> None:
     db_path = tmp_path / "execution-quality-empty.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
@@ -427,6 +519,10 @@ def test_execution_quality_report_cli_json_and_persistence(tmp_path, monkeypatch
 
     assert rc == 0
     assert payload["sample_count"] == 1
+    assert "median_slippage_vs_signal_bps" in payload
+    assert "market_p90_slippage_bps" in payload
+    assert "limit_p90_slippage_bps" in payload
+    assert payload["order_type_cost_delta"] == "one_order_type_only"
     assert payload["quality_gate_status"] == "FAIL"
 
     conn = ensure_db(str(db_path))

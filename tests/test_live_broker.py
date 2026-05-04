@@ -35,6 +35,7 @@ from bithumb_bot.broker.live_submit_orchestrator import (
 )
 from bithumb_bot.broker.order_submit import plan_place_order
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.execution_quality import build_execution_quality_record
 from bithumb_bot.fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
@@ -2413,6 +2414,7 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
         """,
         (row["client_order_id"],),
     ).fetchone()
+    quality_record = build_execution_quality_record(conn, client_order_id=str(row["client_order_id"]))
     preflight = conn.execute(
         """
         SELECT submit_attempt_id, symbol, side, qty, submit_ts, payload_fingerprint, order_status
@@ -2449,6 +2451,13 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert submit_evidence["request_ts"] is not None
     assert int(submit_evidence["response_ts"]) >= int(submit_evidence["request_ts"])
     assert submit_evidence["submit_elapsed_ms"] is not None
+    assert quality_record is not None
+    assert quality_record.submit_sent_ts_ms == int(submit_evidence["request_ts"])
+    assert quality_record.submit_response_ts_ms == int(submit_evidence["response_ts"])
+    assert quality_record.avg_fill_price is None
+    assert quality_record.full_fill_latency_ms is None
+    assert quality_record.slippage_vs_signal_bps is None
+    assert quality_record.unfilled_flag is True
     assert preflight is not None
     assert preflight["submit_attempt_id"] == submit_attempt["submit_attempt_id"]
     assert preflight["order_status"] == "PENDING_SUBMIT"
@@ -2459,6 +2468,58 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert "to=SUBMIT_UNKNOWN" in str(transition["message"])
     assert any("event=order_submit_started" in msg for msg in notifications)
     assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg and "state_to=SUBMIT_UNKNOWN" in msg for msg in notifications)
+
+
+def test_live_transport_error_preserves_sent_evidence_and_submit_unknown(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "transport_submit_unknown.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    _stub_live_reference_quote(monkeypatch)
+    _stub_live_effective_order_rules(monkeypatch)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
+    trade = live_execute_signal(_TransportErrorBroker(), "BUY", 1000, 100000000.0)
+    assert trade is None
+
+    conn = ensure_db(str(tmp_path / "transport_submit_unknown.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT submission_reason_code, exception_class, timeout_flag, submit_evidence, exchange_order_id_obtained, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    quality_record = build_execution_quality_record(conn, client_order_id=str(row["client_order_id"]))
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "SUBMIT_UNKNOWN"
+    assert "submit unknown" in str(row["last_error"])
+    assert submit_attempt is not None
+    assert submit_attempt["submission_reason_code"] == "sent_but_transport_error"
+    assert submit_attempt["exception_class"] == "BrokerTemporaryError"
+    assert submit_attempt["timeout_flag"] == 0
+    assert submit_attempt["exchange_order_id_obtained"] == 0
+    assert submit_attempt["order_status"] == "SUBMIT_UNKNOWN"
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["execution_state"] == "dispatch_attempted"
+    assert submit_evidence["request_ts"] is not None
+    assert int(submit_evidence["response_ts"]) >= int(submit_evidence["request_ts"])
+    assert submit_evidence["submit_elapsed_ms"] is not None
+    assert quality_record is not None
+    assert quality_record.submit_sent_ts_ms == int(submit_evidence["request_ts"])
+    assert quality_record.submit_response_ts_ms == int(submit_evidence["response_ts"])
+    assert quality_record.avg_fill_price is None
+    assert quality_record.full_fill_latency_ms is None
+    assert quality_record.slippage_vs_submit_ref_bps is None
+    assert any("event=order_submit_unknown" in msg and "state_to=SUBMIT_UNKNOWN" in msg for msg in notifications)
 
 
 def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contract(monkeypatch, tmp_path):
@@ -4064,6 +4125,10 @@ def test_live_submit_without_exchange_id_marks_submit_unknown(monkeypatch, tmp_p
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["error_summary"] == "missing exchange_order_id"
     assert submit_evidence["submit_path"] == "live_standard_market"
+    assert submit_evidence["execution_state"] == "broker_response_received"
+    assert submit_evidence["request_ts"] is not None
+    assert int(submit_evidence["response_ts"]) >= int(submit_evidence["request_ts"])
+    assert submit_evidence["submit_elapsed_ms"] is not None
     assert submit_attempt["exchange_order_id_obtained"] == 0
     assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg for msg in notifications)
 
@@ -7351,6 +7416,9 @@ def test_live_execute_signal_buy_planning_failure_stays_pre_submit_not_submit_re
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["submit_phase"] == "planning"
     assert submit_evidence["execution_state"] == "planning_failed"
+    assert submit_evidence["request_ts"] is None
+    assert submit_evidence["response_ts"] is None
+    assert submit_evidence["submit_elapsed_ms"] is None
     assert submit_evidence["requested_qty"] == pytest.approx(0.00065)
     assert submit_evidence["submitted_qty"] is None
     assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0)

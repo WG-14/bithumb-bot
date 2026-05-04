@@ -106,6 +106,40 @@ broker dispatch evidence in `submit_evidence.request_ts` and
 reconstructed from order-event timestamps and should be treated as weaker
 latency evidence.
 
+The report answers these execution-quality questions:
+
+- Signal-time price, submit-time reference price, and actual average fill price.
+- Submit-to-fill latency from broker request evidence to observed fills.
+- Realized slippage versus signal price and submit reference price.
+- Partial-fill and unfilled rates.
+- Market-vs-limit cost, latency, partial-fill, and unfilled behavior.
+- Live observed cost versus manifest/backtest assumptions when
+  `--compare-manifest` is supplied.
+
+The market-vs-limit block is printed in text output and included in JSON output
+with fields such as:
+
+```text
+market_order_count=42
+market_p90_slippage_bps=18.5
+market_p95_submit_to_fill_ms=2400
+market_partial_fill_rate=0
+market_unfilled_rate=0
+limit_order_count=17
+limit_p90_slippage_bps=4.2
+limit_p95_submit_to_fill_ms=5100
+limit_partial_fill_rate=0.23
+limit_unfilled_rate=0.11
+order_type_cost_delta=market_fills_faster_but_costs_more
+```
+
+`order_type_cost_delta` compares market and limit p90 signal slippage and p95
+submit-to-fill latency when both sides have evidence. `one_order_type_only`
+means the sample has only market or only limit orders.
+`insufficient_order_type_samples` means one or both sides lack cost or latency
+evidence. Unknown order types are counted separately and are not mixed into the
+market/limit comparison.
+
 Status interpretation:
 
 - `PASS`: enough samples are present and observed slippage/latency are within
@@ -115,7 +149,8 @@ Status interpretation:
 - `FAIL`: observed slippage or model-breach rate exceeds configured thresholds
   or the compared research manifest.
 - `INSUFFICIENT_EVIDENCE`: there are too few rows or missing evidence. Do not
-  treat this as proof that live execution is healthy.
+  treat this as proof that live execution is healthy; collect more live samples
+  or repair missing signal, submit, or fill links.
 
 `ops-report` also prints a telemetry-only `[EXECUTION-QUALITY]` block:
 
