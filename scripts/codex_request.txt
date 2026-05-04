@@ -1,208 +1,56 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+You are working in GitHub repository `WG-14/bithumb-bot`.
 
-Your task is to directly inspect, modify, and test the repository so that the SMA research/backtest/live pipeline evolves from “overall backtest return is enough” into a reproducible, regime-aware automated trading experiment system.
+The previous regime-aware research/backtest patch is already on `main` and pytest reportedly passes. Do not redo that work. Your job is to inspect the current repository, verify the remaining live-operability gap, and implement the next structural patch if the gap is confirmed.
 
-Do not reduce this to a cosmetic report-table patch. The core problem to investigate is:
+Core problem:
 
-> Overall-period profitability is not sufficient. Strategy candidates must be verified, approved, promoted, and operated under explicitly defined market-regime conditions.
+> The repo now has regime-aware research attribution, reporting, and acceptance gating, but the live SMA decision path may still not be fully wired to the promoted candidate’s allowed/blocked regime policy. If so, the system can approve candidates by regime evidence but still operate live without enforcing that evidence.
 
-The attached Korean analysis says the current likely issue is not merely “SMA gets whipsawed in sideways markets,” but a higher-level structural weakness: the research verification unit and the live operation decision unit may not yet speak the same regime language. Treat this as a hypothesis, not a proven fact. Verify it in the repo.
+Treat this as a hypothesis, not a fact. Verify it directly in the repo before changing code.
 
-## Primary objective
+## Current known state to verify
 
-Implement a design-oriented change that makes market-regime attribution and regime-aware acceptance a first-class part of the SMA experiment pipeline.
-
-The final system should support this chain:
-
-```text
-shared MarketRegimeClassifier
-→ per-candle/per-trade regime attribution in research backtests
-→ regime-specific performance and coverage tables
-→ regime-aware acceptance gate
-→ promoted candidate artifact containing allowed/blocked live regimes
-→ live strategy on/off decision based on current regime and promoted evidence
-```
-
-## Do not assume these hypotheses are true
-
-Investigate and either support or refute each hypothesis with code evidence and tests.
-
-### Hypothesis 1: Overall performance is hiding regime concentration
-
-The SMA backtest may show acceptable total return, MDD, profit factor, or win rate while most gains come from a narrow subset of regimes, and losses accumulate in `chop`, `sideways`, `low_vol`, `downtrend`, or `volume_down` regimes.
-
-Verification or refutation method:
-
-Add regime attribution to trades and compute, at minimum:
-
-```text
-trade_count
-gross_pnl
-net_pnl
-return_pct
-profit_factor
-win_rate
-expectancy
-max_drawdown
-max_consecutive_losses
-fee_drag
-slippage_drag
-single_trade_dependency_score
-```
-
-Refute this only if validation/final_holdout/walk-forward results show stable expectancy across relevant regimes and no excessive PnL or loss concentration.
-
-### Hypothesis 2: Research backtest and live strategy use different regime definitions or different decision contracts
-
-The live strategy may already have a function like `classify_sma_market_regime`, while the research backtest may rely directly on `gap_ratio`, `range_ratio`, or similar filters instead of the same versioned regime contract.
-
-Verification or refutation method:
-
-For the same candle sequence and SMA parameters, compare research decisions and live/replay decisions by logging or testing:
-
-```text
-base_signal
-gap_ratio
-volatility_ratio
-price_regime
-volatility_bucket
-volume_bucket
-composite_regime
-allows_sma_entry
-final_signal
-block_reason
-regime_classifier_version
-```
-
-Refute this only if the same input candles produce the same regime snapshot, same allow/block decision, and same final signal under the same classifier version.
-
-### Hypothesis 3: Existing regime classification may be too SMA-self-referential
-
-If the only regime classifier is based almost entirely on SMA relationships, it may be repackaging “SMA signal strength” as “market regime.” That can make the research look more robust than it is.
-
-Verification or refutation method:
-
-Introduce or support independent market-regime axes that are not only SMA-cross/spacing based:
-
-```text
-price_regime: uptrend / downtrend / sideways
-trend_strength_bucket: weak / normal / strong
-volatility_bucket: low / normal / high
-volume_bucket: decreasing / normal / increasing
-liquidity_bucket: thin / normal / thick
-composite_regime: e.g. uptrend_high_vol_volume_increasing
-```
-
-Compare SMA-specific regime outcomes against independent regime buckets where feasible. Do not remove useful SMA-specific checks, but separate “market regime” from “strategy entry permission.”
-
-### Hypothesis 4: Walk-forward validation checks time stability but not regime coverage stability
-
-The existing walk-forward result may pass because windows are favorable or dominated by uptrend periods. It may not prove that the strategy was tested across enough relevant market regimes.
-
-Verification or refutation method:
-
-Add walk-forward regime exposure and per-window regime metrics, for example:
-
-```text
-window_id
-start_ts
-end_ts
-trade_count_by_regime
-candle_count_by_regime
-worst_regime_profit_factor
-worst_regime_net_pnl
-missing_required_regimes
-blocked_regime_trade_count
-regime_gate_passed
-```
-
-Refute only if walk-forward windows have adequate regime coverage and regime-specific results remain stable.
-
-### Hypothesis 5: Volume and liquidity states are under-modeled
-
-The requested analysis explicitly requires:
-
-```text
-rising market
-falling market
-sideways market
-high volatility
-low volatility
-volume increasing
-volume decreasing
-```
-
-If the repo currently models trend and volatility but not volume/liquidity as first-class regime dimensions, that is a structural gap.
-
-Verification or refutation method:
-
-Add or expose volume bucket calculations using defensible, deterministic rules such as moving-average volume ratio, quote-volume/turnover if available, or volume z-score. Add tests covering volume increasing, normal, decreasing, and missing/zero-volume edge cases.
-
-## Design requirements
-
-### 1. Create or refactor a shared market-regime module
-
-Prefer a shared module such as:
+The latest `main` appears to already include:
 
 ```text
 src/bithumb_bot/market_regime/
-  __init__.py
   schema.py
   classifier.py
   thresholds.py
   metrics.py
+  policy.py
 ```
 
-Adjust the exact path to fit the repo’s existing layout.
-
-The output must be a versioned structured snapshot, not only a string.
-
-Example shape:
-
-```python
-@dataclass(frozen=True)
-class MarketRegimeSnapshot:
-    version: str
-    price_regime: str
-    trend_strength_bucket: str
-    volatility_bucket: str
-    volume_bucket: str
-    liquidity_bucket: str
-    composite_regime: str
-    allows_sma_entry: bool
-    block_reason: str
-```
-
-Use enums or literal constants if the repo style prefers them.
-
-The classifier must be deterministic, testable, and reusable by both research/backtest code and live/replay strategy code.
-
-### 2. Preserve compatibility while replacing duplicated logic
-
-If the repo already has `classify_sma_market_regime`, do not blindly delete it. Refactor it into the shared classifier or make it a thin compatibility wrapper around the shared classifier.
-
-Add tests proving the wrapper produces the expected historical labels or intentionally document changed semantics.
-
-### 3. Add regime attribution to the research SMA backtest
-
-The SMA backtest result should include first-class regime outputs.
-
-Target shape, adjusted to repo style:
-
-```python
-@dataclass(frozen=True)
-class BacktestRun:
-    metrics: ResearchMetrics
-    trades: tuple[dict[str, object], ...]
-    candle_count: int
-    warnings: tuple[str, ...]
-    regime_performance: tuple[RegimePerformanceRow, ...]
-    regime_coverage: tuple[RegimeCoverageRow, ...]
-```
-
-Each closed trade should include at least:
+`MarketRegimeSnapshot` is versioned as `market_regime_v2` and includes:
 
 ```text
+price_regime
+trend_strength_bucket
+volatility_bucket
+volume_bucket
+liquidity_bucket
+composite_regime
+allows_sma_entry
+block_reason
+regime_classifier_version
+compatibility fields such as regime / allows_entry / volatility_state
+```
+
+`classify_market_regime` appears to classify:
+
+```text
+uptrend / downtrend / sideways
+low_vol / normal_vol / high_vol
+volume_decreasing / volume_normal / volume_increasing
+thin / normal / thick liquidity
+composite_regime
+```
+
+`run_sma_backtest` appears to attach regime snapshots to trades and return:
+
+```text
+regime_performance
+regime_coverage
 entry_regime
 exit_regime
 entry_regime_snapshot
@@ -212,266 +60,365 @@ fee_total
 slippage_total
 ```
 
-If feasible without excessive complexity, also include:
+The research report/candidate payload appears to include:
 
 ```text
-holding_regime_mix
-```
-
-If holding-regime attribution is too large for this pass, implement entry/exit attribution now and leave a clear follow-up note in the final report.
-
-### 4. Add regime performance aggregation
-
-Implement aggregation over trades and candle coverage.
-
-At minimum, produce rows by:
-
-```text
-price_regime
-volatility_bucket
-volume_bucket
-composite_regime
-```
-
-Metrics should include:
-
-```text
-trade_count
-candle_count
-candle_share
-gross_pnl
-net_pnl
-return_pct
-profit_factor
-win_rate
-expectancy
-max_drawdown
-max_consecutive_losses
-fee_drag
-slippage_drag
-single_trade_dependency_score
-```
-
-Handle zero-trade and zero-loss regimes explicitly. Do not produce misleading infinite values without a clear representation.
-
-### 5. Extend experiment/report artifacts
-
-Backtest or experiment report JSON should include:
-
-```text
-overall_metrics
-train_metrics
-validation_metrics
-final_holdout_metrics
-walk_forward_metrics
 regime_classifier_version
 market_regime_bucket_performance
 market_regime_coverage
-walk_forward_regime_coverage
+train_market_regime_bucket_performance
+train_market_regime_coverage
+final_holdout_market_regime_bucket_performance
+final_holdout_market_regime_coverage
 regime_gate_result
 allowed_live_regimes
 blocked_live_regimes
+regime_evidence
 ```
 
-Use existing artifact/report structure if present. Do not create a parallel reporting system unless necessary.
+`evaluate_live_regime_policy` appears to already exist and should fail closed when candidate regime policy is missing.
 
-### 6. Add regime-aware acceptance gate
+Do not assume these are correct. Confirm them.
 
-Extend the existing acceptance gate instead of creating a disconnected checker.
+## Primary hypothesis to verify
 
-Add config support for something like:
+### Hypothesis A: Live SMA entry gating is not actually enforcing promoted candidate regime policy
 
-```json
-"regime_acceptance_gate": {
-  "required": true,
-  "min_trade_count_per_required_regime": 10,
-  "required_regimes": ["uptrend", "high_vol", "volume_increasing"],
-  "blocked_regimes": ["sideways_low_vol", "downtrend", "low_vol_volume_decreasing"],
-  "blocked_regime_max_trade_count": 0,
-  "blocked_regime_max_net_pnl_loss_krw": 0,
-  "min_profit_factor_by_regime": {
-    "uptrend": 1.2
-  },
-  "max_loss_share_by_single_regime": 0.4,
-  "max_pnl_dependency_by_single_regime": 0.5
-}
-```
+There may be a function such as `evaluate_live_regime_policy`, and `src/bithumb_bot/strategy/sma.py` may import it, but `SmaCrossStrategy.decide()` may not actually load a promoted candidate artifact/profile and apply the allowed/blocked regime policy to block new BUY entries.
 
-The exact schema may differ, but the behavior must support:
+Verify whether the live/replay decision path actually does all of the following:
 
 ```text
-required regime coverage
-minimum trade count for required regimes
-minimum PF or expectancy for expected-positive regimes
-blocked regimes where new entries should not occur
-maximum loss concentration by regime
-maximum profit dependency by regime
-clear pass/fail reasons
+1. Builds current_market_regime_snapshot at decision time.
+2. Loads the currently promoted candidate policy, candidate profile, or equivalent artifact.
+3. Reads regime_classifier_version.
+4. Reads allowed_live_regimes or allowed_regimes.
+5. Reads blocked_live_regimes or blocked_regimes.
+6. Calls evaluate_live_regime_policy(...).
+7. If base_signal or entry_signal is BUY and the current regime is not allowed, returns HOLD.
+8. If current regime is explicitly blocked, returns HOLD.
+9. If the candidate artifact has no regime policy, fails closed for live use.
+10. Emits decision context/logging fields that make the block auditable.
 ```
 
-Failure reasons should become specific, for example:
+If this is already fully implemented and tested, do not duplicate it. Instead, add only missing tests or documentation if needed.
+
+If it is not fully implemented, implement it.
+
+## Required design direction
+
+This must be a structural live-operability patch, not another report-only patch.
+
+The desired chain is:
 
 ```text
-regime_gate_failed: sideways_low_vol profit_factor=0.62
-regime_coverage_failed: downtrend trade_count=2 < min=10
-blocked_regime_leakage: low_vol_volume_decreasing produced 7 BUY decisions
-current_live_regime_not_allowed: chop_low_vol
+research regime attribution
+→ regime acceptance gate
+→ promoted candidate artifact with allowed/blocked regimes
+→ live/replay current regime classification
+→ live/replay BUY blocked unless current regime is explicitly allowed
+→ auditable decision context explaining why
 ```
 
-### 7. Make promoted candidates carry live regime policy
+The system must not silently treat missing regime policy as “allowed everywhere.”
 
-A promoted candidate artifact must include regime evidence and policy, for example:
+For live use, missing regime policy must fail closed unless there is an explicit, documented, tested override. Prefer no override unless the repo already has a standard safe-override pattern.
 
-```json
-{
-  "candidate_id": "...",
-  "regime_classifier_version": "market_regime_v2",
-  "allowed_regimes": ["uptrend_normal_vol", "uptrend_high_vol_volume_increasing"],
-  "blocked_regimes": ["sideways_low_vol", "downtrend", "low_vol_volume_decreasing"],
-  "regime_evidence": {
-    "uptrend_normal_vol": {
-      "trade_count": 42,
-      "profit_factor": 1.45,
-      "expectancy": 123.4
-    },
-    "sideways_low_vol": {
-      "trade_count": 0,
-      "policy": "blocked"
-    }
-  }
-}
-```
+## Scope
 
-The live strategy should be able to answer:
+Focus on live/replay enforcement of promoted regime policy.
+
+Do not rework the whole research pipeline unless you find a direct integration bug.
+
+Do not optimize SMA parameters.
+
+Do not change exchange order execution semantics except to block or annotate strategy entry decisions before execution.
+
+Do not make financial claims. Keep claims as code-verified behavior.
+
+## Files and areas to inspect
+
+Inspect at least:
 
 ```text
-current regime = sideways_low_vol_volume_decreasing
-promoted candidate allowed_regimes = [uptrend_normal_vol, uptrend_high_vol_volume_increasing]
-decision = OFF / block new entry
-reason = current_regime_not_in_candidate_allowed_regimes
+src/bithumb_bot/strategy/sma.py
+src/bithumb_bot/strategy_replay.py
+src/bithumb_bot/strategy_config.py
+src/bithumb_bot/config.py
+src/bithumb_bot/research/promotion_gate.py
+src/bithumb_bot/research/validation_protocol.py
+src/bithumb_bot/market_regime/policy.py
+src/bithumb_bot/market_regime/classifier.py
+tests/
+docs/
+.env.example
 ```
 
-Do not rely only on environment variables or ad hoc live thresholds for this decision if candidate artifacts already exist or can be extended.
-
-### 8. Observability requirements
-
-Add structured logs, report fields, or diagnostics so that a live/replay decision can be audited.
-
-At minimum, expose:
+Also search for:
 
 ```text
+evaluate_live_regime_policy
+allowed_live_regimes
+blocked_live_regimes
+regime_policy_missing
+candidate_profile
+candidate_profile_hash
+promoted
+promotion
+CURRENT_CANDIDATE
+STRATEGY
+```
+
+## Implementation requirements if Hypothesis A is supported
+
+### 1. Add a clear promoted regime policy loading path
+
+Find how the repo currently represents promoted candidates or candidate profiles.
+
+If there is already a promoted candidate artifact path/config, use it.
+
+If there is not, add the smallest explicit, testable configuration surface, for example:
+
+```text
+STRATEGY_CANDIDATE_PROFILE_PATH
+```
+
+or a repo-consistent equivalent.
+
+The loaded policy should normalize both naming variants:
+
+```text
+allowed_live_regimes OR allowed_regimes
+blocked_live_regimes OR blocked_regimes
 regime_classifier_version
+regime_evidence
+```
+
+The normalized policy object should be deterministic and testable.
+
+### 2. Fail closed for missing or invalid live regime policy
+
+For live/replay entry gating, missing candidate policy must result in:
+
+```text
+entry_signal = HOLD
+regime_decision = OFF
+regime_block_reason = regime_policy_missing
+```
+
+Invalid JSON, missing allowed list, missing classifier version, or unsupported policy shape must also fail closed with a specific reason such as:
+
+```text
+regime_policy_invalid
+regime_policy_missing_allowed_regimes
+regime_policy_version_mismatch
+```
+
+Use the repo’s existing error/warning style.
+
+### 3. Apply the policy only to new entries
+
+This patch should block new BUY entries.
+
+It should not block exits. A SELL needed for risk reduction should not be prevented just because the current regime is not allowed.
+
+If the strategy has an existing position and an exit rule fires, keep exit behavior intact.
+
+### 4. Make research/live classifier version mismatches explicit
+
+If the candidate artifact has `regime_classifier_version` different from the current classifier version, fail closed for live entry unless the repo already has a safe compatibility policy.
+
+Decision context should include both:
+
+```text
+current_regime_classifier_version
+candidate_regime_classifier_version
+```
+
+### 5. Add auditable decision context
+
+Every decision where regime policy is evaluated should include at least:
+
+```text
 current_market_regime_snapshot
+current_regime
+current_regime_classifier_version
+candidate_regime_classifier_version
 candidate_allowed_regimes
 candidate_blocked_regimes
 regime_decision
 regime_block_reason
-regime_gate_result
+regime_policy_source
+regime_policy_present
+regime_policy_valid
 ```
 
-For blocked entries, logs should clearly say whether the block came from:
+If entry is blocked, the final reason should make the cause clear, for example:
 
 ```text
-classifier says strategy entry not allowed
-candidate artifact does not allow current regime
-acceptance gate evidence missing
-missing/invalid candle data
+current_regime_not_in_candidate_allowed_regimes
+current_regime_in_candidate_blocked_regimes
+regime_policy_missing
+regime_policy_version_mismatch
 ```
 
-### 9. Recovery and compatibility requirements
+### 6. Preserve existing gates
 
-Avoid making existing reports unreadable unless migration is unavoidable.
-
-If old candidate artifacts lack regime policy, choose a safe behavior and test it. Prefer one of:
+Do not remove or weaken existing gates:
 
 ```text
-fail closed for live promotion/use
-allow research-only evaluation but mark regime_policy_missing
-require explicit override for live use
+cost edge filter
+fee authority live entry block
+position/dust gate
+decision contract
+exit rules
+closed candle cutoff
 ```
 
-Do not silently treat missing regime policy as “allowed everywhere.”
+Regime policy should be one more entry gate in the chain. The final context should make it clear which gate blocked the entry.
 
-Add compatibility handling for:
+### 7. Replay behavior
+
+If `strategy_replay.py` reuses `SmaCrossStrategy.decide()`, ensure regime policy appears in replay context.
+
+If replay has its own strategy construction or config path, wire the candidate policy there too.
+
+Tests must cover whichever path is used.
+
+### 8. Recovery and compatibility behavior
+
+Old candidate artifacts without regime policy must not be silently allowed for live trading.
+
+Required behavior:
 
 ```text
-old reports without regime fields
-old manifests without regime_acceptance_gate
-missing volume data
-short candle histories insufficient for regime classification
-zero-trade backtests
-zero-loss regimes
-unknown regimes
+research-only/report reading: allowed with warning or neutral behavior
+live/replay entry use: fail closed with regime_policy_missing
 ```
 
-### 10. Scope boundaries
+If the repo has a “dry run” or replay mode, decide deliberately whether it should fail closed too. Prefer fail closed in replay as well, because replay is used to validate live behavior. If a test fixture needs no policy, make the fixture explicit.
 
-Do not attempt to create a perfect market-regime theory.
+## Secondary improvements to consider only after the live gate is wired
 
-Do not optimize SMA parameters as the main deliverable.
+Do not let these distract from the primary patch.
 
-Do not add a superficial “regime” column only to the final report while leaving acceptance and live operation unchanged.
+### Secondary B: zero-loss profit factor state
 
-Do not change exchange execution behavior unless required to pass the regime policy into live entry gating.
+Current regime aggregation may use:
 
-Do not invent undocumented financial claims. Keep claims as hypotheses unless backed by repo tests or backtest output.
+```text
+profit_factor = None
+```
+
+for zero-loss winner regimes to avoid misleading infinity. That is acceptable, but gate behavior may then fail a regime with wins and no losses when `min_profit_factor_by_regime` is configured.
+
+If quick and low-risk, add an explicit field such as:
+
+```text
+profit_factor_state = "zero_loss_with_wins" | "zero_loss_no_wins" | "finite"
+```
+
+or document the current conservative behavior.
+
+### Secondary C: walk-forward regime gate in window pass/fail
+
+Walk-forward windows now expose regime coverage/performance, but the window `gate_result` may still be based mostly on generic validation metrics.
+
+If quick and low-risk, add:
+
+```text
+window_regime_gate_result
+missing_required_regimes
+blocked_regime_trade_count
+```
+
+and make walk-forward failure include regime window failures when regime gate is required.
+
+### Secondary D: research/live entry rule alignment
+
+Research backtest currently appears to use regime snapshots for attribution/gating evidence, while actual action rules may still be SMA cross plus gap/range filters.
+
+This can be acceptable if explicitly documented as:
+
+```text
+research trade rule = SMA signal rule
+regime = attribution and acceptance/promotion gate
+live entry = SMA signal rule + promoted regime policy
+```
+
+If live uses `allows_sma_entry` directly but research does not, document or test the intended difference. Do not silently create a new mismatch.
 
 ## Testing requirements
 
-Add or update tests covering at least:
+Add or update tests to cover the primary live policy integration.
+
+At minimum:
 
 ```text
-shared classifier deterministic output
-uptrend / downtrend / sideways classification
-high-vol / low-vol classification
-volume increasing / volume decreasing classification
-missing or insufficient candle history
-research backtest attaches entry and exit regime snapshots to trades
-regime performance aggregation handles zero-trade and zero-loss cases
-acceptance gate passes when required regimes are covered and profitable
-acceptance gate fails when required regime coverage is missing
-acceptance gate fails when blocked regimes produce trades
-acceptance gate fails when single-regime profit dependency is too high
-walk-forward output includes regime exposure
-promoted candidate artifact includes allowed/blocked regimes and evidence
-live or replay entry is blocked when current regime is not allowed
-old artifact or manifest compatibility behavior is explicit and tested
+1. Missing candidate regime policy blocks BUY with regime_policy_missing.
+2. Old artifact without allowed/blocked regimes blocks BUY.
+3. Invalid candidate policy blocks BUY with a specific invalid reason.
+4. Candidate classifier version mismatch blocks BUY.
+5. Current regime not in allowed list blocks BUY.
+6. Current regime in blocked list blocks BUY.
+7. Current regime in allowed list permits BUY when all other gates permit.
+8. SELL/exit decision is not blocked by regime entry policy.
+9. Decision context contains current_market_regime_snapshot.
+10. Decision context contains candidate_allowed_regimes and candidate_blocked_regimes.
+11. Decision context contains regime_decision and regime_block_reason.
+12. Replay path includes the same regime policy fields, or a test proves replay uses the same strategy decision path.
 ```
 
-Run the repo’s relevant test suite. If there is a standard command in the repo, use it. Otherwise run the narrow tests you changed plus a reasonable broader test command such as:
+Also keep or add tests for:
+
+```text
+evaluate_live_regime_policy fail-closed behavior
+policy normalization from allowed_live_regimes / blocked_live_regimes
+policy normalization from allowed_regimes / blocked_regimes
+```
+
+Run:
 
 ```bash
 pytest
 ```
 
-If tests fail for unrelated pre-existing reasons, isolate them and report clearly.
+If the full suite is too slow or fails for unrelated pre-existing reasons, run the relevant narrow tests first and report both narrow and full-suite results clearly.
+
+## Observability requirements
+
+Add logs or decision context fields sufficient for an operator to answer:
+
+```text
+Why was this BUY blocked?
+Which current regime was detected?
+Which candidate policy was loaded?
+Was the policy missing, invalid, or version mismatched?
+Was the current regime blocked or merely not allowed?
+Did another gate block first?
+```
+
+Do not emit secrets or full filesystem paths if the repo avoids that elsewhere. It is acceptable to emit a safe basename or policy source label.
 
 ## Final report format
 
-When finished, provide a concise but complete final report with these sections:
+When finished, provide the final report in this exact structure:
 
 ```text
 1. Summary
-2. Files changed
-3. What I verified in the repo
-4. Hypotheses: supported / refuted / still unknown
+2. What I verified before changing code
+3. Hypotheses
+   - Hypothesis A: supported / refuted / partially supported / still unknown
+   - Secondary B/C/D: supported / refuted / partially supported / still unknown, if inspected
+4. Files changed
 5. Design changes implemented
-6. New or changed artifact/report fields
-7. Acceptance gate behavior
-8. Live/replay gating behavior
-9. Observability and recovery behavior
+6. Live/replay regime gate behavior
+7. Recovery and compatibility behavior
+8. Observability fields added
+9. Tests added or changed
 10. Tests run and results
 11. Remaining risks or follow-up work
 ```
 
-In the hypothesis section, do not say a hypothesis is proven unless the repository changes and tests actually support it. Use:
-
-```text
-supported
-refuted
-partially supported
-still unknown
-```
-
-The expected outcome is not just a patch that suppresses sideways-market losses. The expected outcome is a repo-level structural improvement that makes SMA strategy experiments more reproducible, auditable, regime-aware, and safer to operate live.
+Use precise language. Do not say “fully safe” or “proven profitable.” The goal is not to claim trading performance. The goal is to make the repository structurally more reproducible, auditable, regime-aware, and safer to operate live.
 

@@ -7,6 +7,7 @@ import pytest
 from bithumb_bot.app import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
+from bithumb_bot.market_regime import MARKET_REGIME_VERSION
 from bithumb_bot.observability import configure_runtime_logging
 
 
@@ -22,14 +23,29 @@ def configured_db(tmp_path, monkeypatch):
         "INTERVAL": settings.INTERVAL,
         "ENTRY_EDGE_BUFFER_RATIO": settings.ENTRY_EDGE_BUFFER_RATIO,
         "STRATEGY_ENTRY_SLIPPAGE_BPS": settings.STRATEGY_ENTRY_SLIPPAGE_BPS,
+        "STRATEGY_CANDIDATE_PROFILE_PATH": settings.STRATEGY_CANDIDATE_PROFILE_PATH,
     }
     db_path = str((tmp_path / "strategy-sweep.sqlite").resolve())
+    candidate_path = tmp_path / "promotion_candidate.json"
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "regime_classifier_version": MARKET_REGIME_VERSION,
+                "allowed_regimes": ["uptrend_high_vol_unknown"],
+                "blocked_regimes": [],
+                "regime_evidence": {},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("MODE", "paper")
     monkeypatch.setenv("DB_PATH", db_path)
     object.__setattr__(settings, "MODE", "paper")
     object.__setattr__(settings, "DB_PATH", db_path)
     object.__setattr__(settings, "PAIR", "BTC_KRW")
     object.__setattr__(settings, "INTERVAL", "1m")
+    object.__setattr__(settings, "STRATEGY_CANDIDATE_PROFILE_PATH", str(candidate_path))
     try:
         yield db_path
     finally:

@@ -52,6 +52,7 @@ def settings_guard():
         "STRATEGY_MIN_EXPECTED_EDGE_RATIO",
         "BUY_FRACTION",
         "MAX_ORDER_KRW",
+        "STRATEGY_CANDIDATE_PROFILE_PATH",
     )
     original = {name: getattr(settings, name) for name in names}
     try:
@@ -76,6 +77,7 @@ def test_sma_strategy_config_factory_preserves_settings_defaults(settings_guard)
     object.__setattr__(settings, "STRATEGY_MIN_EXPECTED_EDGE_RATIO", 0.002)
     object.__setattr__(settings, "BUY_FRACTION", 0.42)
     object.__setattr__(settings, "MAX_ORDER_KRW", 55_000.0)
+    object.__setattr__(settings, "STRATEGY_CANDIDATE_PROFILE_PATH", "")
 
     config = sma_strategy_config_from_settings()
 
@@ -93,6 +95,7 @@ def test_sma_strategy_config_factory_preserves_settings_defaults(settings_guard)
     assert config.strategy_min_expected_edge_ratio == pytest.approx(0.002)
     assert config.buy_fraction == pytest.approx(0.42)
     assert config.max_order_krw == pytest.approx(55_000.0)
+    assert config.candidate_regime_policy is None
 
 
 def test_existing_sma_constructor_behavior_is_preserved() -> None:

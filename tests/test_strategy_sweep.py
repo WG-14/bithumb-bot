@@ -7,6 +7,7 @@ import pytest
 
 from bithumb_bot.config import settings
 from bithumb_bot.decision_attribution import DecisionAttributionSummary
+from bithumb_bot.market_regime import MARKET_REGIME_VERSION
 from bithumb_bot.strategy_config import sma_strategy_config_from_settings
 from bithumb_bot.strategy_replay import CandleReplayDataset, StrategyReplayResult
 from bithumb_bot.strategy_sweep import (
@@ -52,6 +53,12 @@ def _base_config(**overrides):
         strategy_min_expected_edge_ratio=0.0,
         buy_fraction=0.25,
         max_order_krw=50_000.0,
+        candidate_regime_policy={
+            "regime_classifier_version": MARKET_REGIME_VERSION,
+            "allowed_regimes": ["uptrend_high_vol_unknown"],
+            "blocked_regimes": [],
+            "regime_evidence": {},
+        },
     )
     return replace(config, **overrides)
 

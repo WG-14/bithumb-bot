@@ -8,6 +8,7 @@ import pytest
 
 from bithumb_bot.config import settings
 from bithumb_bot.dust import classify_dust_residual, dust_qty_gap_tolerance
+from bithumb_bot.market_regime import MARKET_REGIME_VERSION
 from bithumb_bot.strategy.sma import create_sma_strategy, create_sma_with_filter_strategy
 
 
@@ -31,6 +32,41 @@ def _build_candle_db(closes: list[float]) -> sqlite3.Connection:
         )
     conn.commit()
     return conn
+
+
+def _allowing_policy() -> dict[str, object]:
+    return {
+        "regime_classifier_version": MARKET_REGIME_VERSION,
+        "allowed_regimes": [
+            "uptrend_high_vol_unknown",
+            "uptrend_normal_vol_unknown",
+            "uptrend_low_vol_unknown",
+        ],
+        "blocked_regimes": [],
+        "regime_evidence": {},
+    }
+
+
+def _buy_decision_with_policy(candidate_regime_policy: dict[str, object] | None):
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        return create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.001,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.0,
+            live_fee_rate_estimate=0.0001,
+            candidate_regime_policy=candidate_regime_policy,
+        ).decide(conn)
+    finally:
+        conn.close()
 
 
 def _seed_position_and_dust_state(
@@ -115,6 +151,7 @@ def test_filtered_sma_can_change_trade_signal_to_hold() -> None:
             overextended_lookback=1,
             overextended_max_return_ratio=0.0,
             market_regime_enabled=False,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -142,6 +179,7 @@ def test_market_regime_allows_trend_entry_and_records_replay_fingerprint() -> No
             cost_edge_enabled=True,
             cost_edge_min_ratio=0.0,
             live_fee_rate_estimate=0.0001,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -181,6 +219,7 @@ def test_replay_fingerprint_preserves_distinct_through_ts_ms() -> None:
             cost_edge_enabled=True,
             cost_edge_min_ratio=0.0,
             live_fee_rate_estimate=0.0001,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn, through_ts_ms=through_ts_ms)
     finally:
         conn.close()
@@ -208,6 +247,7 @@ def test_market_regime_chop_blocks_buy_candidate_before_strategy_filters() -> No
             overextended_lookback=1,
             overextended_max_return_ratio=0.0,
             cost_edge_enabled=False,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -238,6 +278,7 @@ def test_cost_edge_block_remains_distinguishable_from_market_regime() -> None:
             cost_edge_min_ratio=0.10,
             live_fee_rate_estimate=0.02,
             entry_edge_buffer_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -250,28 +291,14 @@ def test_cost_edge_block_remains_distinguishable_from_market_regime() -> None:
 
 
 def test_candidate_regime_policy_blocks_live_entry_when_current_regime_not_allowed() -> None:
-    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
-    try:
-        decision = create_sma_with_filter_strategy(
-            short_n=2,
-            long_n=3,
-            pair="BTC_KRW",
-            interval="1m",
-            min_gap_ratio=0.001,
-            volatility_window=3,
-            min_volatility_ratio=0.0,
-            overextended_lookback=1,
-            overextended_max_return_ratio=0.0,
-            cost_edge_enabled=True,
-            cost_edge_min_ratio=0.0,
-            live_fee_rate_estimate=0.0001,
-            candidate_regime_policy={
-                "allowed_regimes": ["downtrend_low_vol_volume_decreasing"],
-                "blocked_regimes": ["sideways_low_vol_volume_decreasing"],
-            },
-        ).decide(conn)
-    finally:
-        conn.close()
+    decision = _buy_decision_with_policy(
+        {
+            "regime_classifier_version": MARKET_REGIME_VERSION,
+            "allowed_regimes": ["downtrend_low_vol_volume_decreasing"],
+            "blocked_regimes": ["sideways_low_vol_volume_decreasing"],
+            "regime_evidence": {},
+        }
+    )
 
     assert decision is not None
     assert decision.context["base_signal"] == "BUY"
@@ -279,6 +306,123 @@ def test_candidate_regime_policy_blocks_live_entry_when_current_regime_not_allow
     assert decision.context["candidate_regime_blocked"] is True
     assert decision.context["regime_decision"] == "OFF"
     assert decision.context["regime_block_reason"] == "current_regime_not_in_candidate_allowed_regimes"
+
+
+def test_missing_candidate_regime_policy_blocks_live_entry_with_auditable_context() -> None:
+    decision = _buy_decision_with_policy(None)
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.context["regime_decision"] == "OFF"
+    assert decision.context["regime_block_reason"] == "regime_policy_missing"
+    assert decision.context["regime_policy_present"] is False
+    assert decision.context["regime_policy_valid"] is False
+    assert "current_market_regime_snapshot" in decision.context
+    assert decision.context["candidate_allowed_regimes"] == []
+    assert decision.context["candidate_blocked_regimes"] == []
+    assert decision.context["signal_flow"]["primary_block_layer"] == "candidate_regime"
+
+
+def test_old_candidate_artifact_without_allowed_regimes_blocks_live_entry() -> None:
+    decision = _buy_decision_with_policy(
+        {
+            "regime_classifier_version": MARKET_REGIME_VERSION,
+            "regime_evidence": {},
+        }
+    )
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.context["regime_block_reason"] == "regime_policy_missing_allowed_regimes"
+    assert decision.context["regime_policy_present"] is True
+    assert decision.context["regime_policy_valid"] is False
+
+
+def test_invalid_candidate_policy_blocks_live_entry_with_specific_reason() -> None:
+    decision = _buy_decision_with_policy({"allowed_regimes": "uptrend_high_vol_unknown"})
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.context["regime_block_reason"] == "regime_policy_missing_classifier_version"
+    assert decision.context["regime_policy_valid"] is False
+
+
+def test_candidate_classifier_version_mismatch_blocks_live_entry() -> None:
+    decision = _buy_decision_with_policy(
+        {
+            "regime_classifier_version": "market_regime_v1",
+            "allowed_regimes": ["uptrend_high_vol_unknown"],
+            "blocked_regimes": [],
+            "regime_evidence": {},
+        }
+    )
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.context["regime_block_reason"] == "regime_policy_version_mismatch"
+    assert decision.context["current_regime_classifier_version"] == MARKET_REGIME_VERSION
+    assert decision.context["candidate_regime_classifier_version"] == "market_regime_v1"
+
+
+def test_candidate_policy_explicitly_blocked_regime_blocks_live_entry() -> None:
+    allowed = _allowing_policy()
+    decision = _buy_decision_with_policy(
+        {
+            **allowed,
+            "blocked_regimes": ["uptrend_high_vol_unknown"],
+        }
+    )
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.context["regime_block_reason"] == "current_regime_in_candidate_blocked_regimes"
+
+
+def test_candidate_policy_allowed_regime_permits_buy_when_other_gates_pass() -> None:
+    decision = _buy_decision_with_policy(_allowing_policy())
+
+    assert decision is not None
+    assert decision.signal == "BUY"
+    assert decision.context["regime_decision"] == "ON"
+    assert decision.context["regime_block_reason"] == "none"
+    assert decision.context["regime_policy_present"] is True
+    assert decision.context["regime_policy_valid"] is True
+    assert decision.context["candidate_allowed_regimes"]
+
+
+def test_candidate_regime_policy_does_not_block_sell_exit(relaxed_test_order_rules) -> None:
+    conn = _build_candle_db([11.0, 11.0, 11.0, 11.0, 10.0])
+    try:
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.0002,
+            dust_metadata={},
+            executable_lot_count=2,
+        )
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
+            cost_edge_min_ratio=0.0,
+            candidate_regime_policy=None,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "SELL"
+    assert decision.context["raw_signal"] == "SELL"
+    assert decision.context["regime_decision"] == "OFF"
+    assert decision.context["regime_block_reason"] == "regime_policy_missing"
 
 
 def test_gap_filter_blocks_entry_and_writes_context() -> None:
@@ -294,6 +438,7 @@ def test_gap_filter_blocks_entry_and_writes_context() -> None:
             min_volatility_ratio=0.0,
             overextended_lookback=1,
             overextended_max_return_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -318,6 +463,7 @@ def test_volatility_filter_blocks_low_range_entry() -> None:
             min_volatility_ratio=0.001,
             overextended_lookback=1,
             overextended_max_return_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -341,6 +487,7 @@ def test_overextended_filter_blocks_chasing_entry() -> None:
             min_volatility_ratio=0.0,
             overextended_lookback=2,
             overextended_max_return_ratio=0.1,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -368,6 +515,7 @@ def test_cost_edge_filter_blocks_small_gap_entry_and_records_reason() -> None:
             live_fee_rate_estimate=0.02,
             entry_edge_buffer_ratio=0.005,
             cost_edge_min_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -401,6 +549,7 @@ def test_cost_edge_filter_allows_entry_when_signal_clears_cost_floor() -> None:
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
             cost_edge_min_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -428,6 +577,7 @@ def test_cost_edge_filter_keeps_sell_signal_when_edge_is_sufficient() -> None:
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
             cost_edge_min_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -750,6 +900,7 @@ def test_cost_edge_filter_can_be_disabled_explicitly() -> None:
             entry_edge_buffer_ratio=0.005,
             cost_edge_enabled=False,
             cost_edge_min_ratio=0.05,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -780,6 +931,7 @@ def test_cost_edge_min_ratio_relaxation_unblocks_same_market_case() -> None:
             entry_edge_buffer_ratio=0.0,
             cost_edge_enabled=True,
             cost_edge_min_ratio=0.06,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
         relaxed = create_sma_with_filter_strategy(
             short_n=2,
@@ -796,6 +948,7 @@ def test_cost_edge_min_ratio_relaxation_unblocks_same_market_case() -> None:
             entry_edge_buffer_ratio=0.0,
             cost_edge_enabled=True,
             cost_edge_min_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()
@@ -825,6 +978,7 @@ def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase(
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
             cost_edge_min_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
         conservative = create_sma_with_filter_strategy(
             short_n=2,
@@ -840,6 +994,7 @@ def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase(
             live_fee_rate_estimate=0.01,
             entry_edge_buffer_ratio=0.01,
             cost_edge_min_ratio=0.0,
+            candidate_regime_policy=_allowing_policy(),
         ).decide(conn)
     finally:
         conn.close()

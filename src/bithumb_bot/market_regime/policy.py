@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+from pathlib import Path
 from typing import Any
+
+from .schema import MARKET_REGIME_VERSION
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,138 @@ class RegimeGateResult:
             "blocked_live_regimes": list(self.blocked_live_regimes),
             "evidence": self.evidence,
         }
+
+
+def _safe_source_label(path: str | Path | None) -> str:
+    if path is None:
+        return "none"
+    text = str(path).strip()
+    if not text:
+        return "none"
+    return Path(text).name or "configured_path"
+
+
+def load_candidate_regime_policy_from_path(path: str | Path | None) -> dict[str, object] | None:
+    if path is None or not str(path).strip():
+        return None
+    source = f"file:{_safe_source_label(path)}"
+    try:
+        with Path(path).expanduser().open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError:
+        return {
+            "_policy_source": source,
+            "_policy_load_error": "regime_policy_invalid_json",
+        }
+    except OSError:
+        return {
+            "_policy_source": source,
+            "_policy_load_error": "regime_policy_unreadable",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "_policy_source": source,
+            "_policy_load_error": "regime_policy_invalid",
+        }
+    result = dict(payload)
+    result.setdefault("_policy_source", source)
+    return result
+
+
+def _list_field(payload: dict[str, object], *names: str) -> tuple[bool, list[str]]:
+    for name in names:
+        value = payload.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            return False, []
+        return True, [str(item) for item in value]
+    return False, []
+
+
+def normalize_live_regime_policy(candidate_policy: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(candidate_policy, dict):
+        return {
+            "regime_policy_present": False,
+            "regime_policy_valid": False,
+            "regime_block_reason": "regime_policy_missing",
+            "regime_policy_source": "none",
+            "candidate_regime_classifier_version": None,
+            "candidate_allowed_regimes": [],
+            "candidate_blocked_regimes": [],
+            "regime_evidence": {},
+        }
+
+    source = str(candidate_policy.get("_policy_source") or candidate_policy.get("policy_source") or "injected")
+    load_error = candidate_policy.get("_policy_load_error")
+    if load_error:
+        return {
+            "regime_policy_present": True,
+            "regime_policy_valid": False,
+            "regime_block_reason": str(load_error),
+            "regime_policy_source": source,
+            "candidate_regime_classifier_version": None,
+            "candidate_allowed_regimes": [],
+            "candidate_blocked_regimes": [],
+            "regime_evidence": {},
+        }
+
+    policy_payload = candidate_policy.get("live_regime_policy")
+    if isinstance(policy_payload, dict):
+        payload = {**candidate_policy, **policy_payload}
+    else:
+        payload = dict(candidate_policy)
+
+    version = payload.get("regime_classifier_version")
+    if not isinstance(version, str) or not version.strip():
+        return {
+            "regime_policy_present": True,
+            "regime_policy_valid": False,
+            "regime_block_reason": "regime_policy_missing_classifier_version",
+            "regime_policy_source": source,
+            "candidate_regime_classifier_version": None,
+            "candidate_allowed_regimes": [],
+            "candidate_blocked_regimes": [],
+            "regime_evidence": {},
+        }
+
+    allowed_present, allowed = _list_field(payload, "allowed_live_regimes", "allowed_regimes")
+    if not allowed_present:
+        return {
+            "regime_policy_present": True,
+            "regime_policy_valid": False,
+            "regime_block_reason": "regime_policy_missing_allowed_regimes",
+            "regime_policy_source": source,
+            "candidate_regime_classifier_version": version,
+            "candidate_allowed_regimes": [],
+            "candidate_blocked_regimes": [],
+            "regime_evidence": {},
+        }
+
+    blocked_present, blocked = _list_field(payload, "blocked_live_regimes", "blocked_regimes")
+    if not blocked_present:
+        return {
+            "regime_policy_present": True,
+            "regime_policy_valid": False,
+            "regime_block_reason": "regime_policy_missing_blocked_regimes",
+            "regime_policy_source": source,
+            "candidate_regime_classifier_version": version,
+            "candidate_allowed_regimes": allowed,
+            "candidate_blocked_regimes": [],
+            "regime_evidence": {},
+        }
+
+    evidence = payload.get("regime_evidence")
+    return {
+        "regime_policy_present": True,
+        "regime_policy_valid": True,
+        "regime_block_reason": "none",
+        "regime_policy_source": source,
+        "candidate_regime_classifier_version": version,
+        "candidate_allowed_regimes": allowed,
+        "candidate_blocked_regimes": blocked,
+        "regime_evidence": dict(evidence) if isinstance(evidence, dict) else {},
+    }
 
 
 def _row_regime(row: Any) -> str:
@@ -161,17 +297,46 @@ def evaluate_live_regime_policy(
     current_snapshot: dict[str, object],
     candidate_policy: dict[str, object] | None,
 ) -> dict[str, object]:
-    if not isinstance(candidate_policy, dict):
+    normalized = normalize_live_regime_policy(candidate_policy)
+    current_version = str(
+        current_snapshot.get("version")
+        or current_snapshot.get("regime_classifier_version")
+        or MARKET_REGIME_VERSION
+    )
+    current = str(current_snapshot.get("composite_regime") or "unknown")
+
+    if not bool(normalized["regime_policy_present"]):
         return {
+            **normalized,
             "allowed": False,
             "regime_decision": "OFF",
             "regime_block_reason": "regime_policy_missing",
-            "candidate_allowed_regimes": [],
-            "candidate_blocked_regimes": [],
+            "current_regime": current,
+            "current_regime_classifier_version": current_version,
         }
-    current = str(current_snapshot.get("composite_regime") or "unknown")
-    allowed_regimes = [str(item) for item in candidate_policy.get("allowed_regimes") or ()]
-    blocked_regimes = [str(item) for item in candidate_policy.get("blocked_regimes") or ()]
+    if not bool(normalized["regime_policy_valid"]):
+        return {
+            "allowed": False,
+            "regime_decision": "OFF",
+            "current_regime": current,
+            "current_regime_classifier_version": current_version,
+            **normalized,
+        }
+
+    candidate_version = str(normalized.get("candidate_regime_classifier_version") or "")
+    allowed_regimes = [str(item) for item in normalized.get("candidate_allowed_regimes") or ()]
+    blocked_regimes = [str(item) for item in normalized.get("candidate_blocked_regimes") or ()]
+
+    if candidate_version != current_version:
+        return {
+            **normalized,
+            "allowed": False,
+            "regime_decision": "OFF",
+            "regime_block_reason": "regime_policy_version_mismatch",
+            "current_regime": current,
+            "current_regime_classifier_version": current_version,
+        }
+
     if current in blocked_regimes:
         reason = "current_regime_in_candidate_blocked_regimes"
         allowed = False
@@ -182,11 +347,10 @@ def evaluate_live_regime_policy(
         reason = "none"
         allowed = True
     return {
+        **normalized,
         "allowed": allowed,
         "regime_decision": "ON" if allowed else "OFF",
         "regime_block_reason": reason,
         "current_regime": current,
-        "candidate_allowed_regimes": allowed_regimes,
-        "candidate_blocked_regimes": blocked_regimes,
-        "regime_classifier_version": current_snapshot.get("version") or current_snapshot.get("regime_classifier_version"),
+        "current_regime_classifier_version": current_version,
     }

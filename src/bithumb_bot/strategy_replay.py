@@ -13,6 +13,7 @@ from .decision_attribution import (
     summarize_decision_attributions,
 )
 from .decision_contract import apply_decision_contract, build_replay_fingerprint
+from .market_regime import evaluate_live_regime_policy
 from .strategy.sma import (
     _base_signal,
     _compute_gap_ratio,
@@ -20,6 +21,7 @@ from .strategy.sma import (
     _resolve_signal_strength_label,
     _sma,
 )
+from .strategy.market_regime import classify_sma_market_regime
 from .strategy_config import SmaStrategyConfig
 
 
@@ -158,6 +160,7 @@ def _replay_decision_context(
     prev_l: float,
     curr_s: float,
     curr_l: float,
+    closes: list[float] | None = None,
 ) -> dict[str, Any]:
     strategy_config = replay_config.strategy_config
     raw_signal, base_reason = _base_signal(
@@ -175,8 +178,31 @@ def _replay_decision_context(
         edge_buffer_ratio=float(strategy_config.entry_edge_buffer_ratio),
         strategy_min_expected_edge_ratio=float(strategy_config.strategy_min_expected_edge_ratio),
     )
-    final_signal = "HOLD" if edge_filter_triggered else raw_signal
-    entry_reason = "filtered entry: cost_edge" if edge_filter_triggered else base_reason
+    regime_closes = list(closes or [float(close)])
+    market_regime = classify_sma_market_regime(
+        closes=regime_closes,
+        short_sma=float(curr_s),
+        long_sma=float(curr_l),
+        volatility_window=max(1, min(10, len(regime_closes))),
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        min_trend_strength_ratio=0.0,
+    )
+    candidate_regime_decision = evaluate_live_regime_policy(
+        current_snapshot=market_regime.as_dict(),
+        candidate_policy=strategy_config.candidate_regime_policy,
+    )
+    candidate_regime_triggered = bool(
+        raw_signal == "BUY" and not bool(candidate_regime_decision.get("allowed"))
+    )
+    final_signal = "HOLD" if edge_filter_triggered or candidate_regime_triggered else raw_signal
+    if edge_filter_triggered:
+        entry_reason = "filtered entry: cost_edge"
+    elif candidate_regime_triggered:
+        entry_reason = f"candidate regime blocked: {candidate_regime_decision.get('regime_block_reason')}"
+    else:
+        entry_reason = base_reason
     signal_strength_label = _resolve_signal_strength_label(
         base_signal=raw_signal,
         expected_edge_ratio=float(edge_filter_details["expected_edge_ratio"]),
@@ -185,6 +211,10 @@ def _replay_decision_context(
     extra_block_reasons = (
         [("strategy_filters", "cost_edge")] if edge_filter_triggered else []
     )
+    if candidate_regime_triggered:
+        extra_block_reasons.append(
+            ("candidate_regime", str(candidate_regime_decision.get("regime_block_reason")))
+        )
     context = {
         "strategy": "sma_replay",
         "replay_mode": "decision_attribution_only",
@@ -199,7 +229,7 @@ def _replay_decision_context(
         "final_signal": final_signal,
         "decision_type": (
             "BLOCKED_ENTRY"
-            if raw_signal == "BUY" and edge_filter_triggered
+            if raw_signal == "BUY" and (edge_filter_triggered or candidate_regime_triggered)
             else "BLOCKED_EXIT"
             if raw_signal == "SELL" and edge_filter_triggered
             else final_signal
@@ -217,6 +247,19 @@ def _replay_decision_context(
         "required_edge_ratio": float(edge_filter_details["required_edge_ratio"]),
         "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
         "blocked_by_cost_filter": bool(edge_filter_triggered),
+        "market_regime": market_regime.as_dict(),
+        "current_market_regime_snapshot": market_regime.as_dict(),
+        "current_regime": candidate_regime_decision.get("current_regime"),
+        "current_regime_classifier_version": candidate_regime_decision.get("current_regime_classifier_version"),
+        "candidate_regime_classifier_version": candidate_regime_decision.get("candidate_regime_classifier_version"),
+        "candidate_allowed_regimes": list(candidate_regime_decision.get("candidate_allowed_regimes") or ()),
+        "candidate_blocked_regimes": list(candidate_regime_decision.get("candidate_blocked_regimes") or ()),
+        "regime_decision": candidate_regime_decision.get("regime_decision"),
+        "regime_block_reason": candidate_regime_decision.get("regime_block_reason"),
+        "regime_policy_source": candidate_regime_decision.get("regime_policy_source"),
+        "regime_policy_present": bool(candidate_regime_decision.get("regime_policy_present")),
+        "regime_policy_valid": bool(candidate_regime_decision.get("regime_policy_valid")),
+        "candidate_regime_blocked": bool(candidate_regime_triggered),
         "signal_strength_label": signal_strength_label,
         "submit_expected": None,
         "features": {
@@ -309,8 +352,9 @@ def _replay_decision_attribution(
     prev_l: float,
     curr_s: float,
     curr_l: float,
+    closes: list[float] | None = None,
 ) -> DecisionAttribution:
-    del candle_ts, close
+    del candle_ts
     strategy_config = replay_config.strategy_config
     raw_signal, base_reason = _base_signal(
         prev_s=prev_s,
@@ -327,8 +371,31 @@ def _replay_decision_attribution(
         edge_buffer_ratio=float(strategy_config.entry_edge_buffer_ratio),
         strategy_min_expected_edge_ratio=float(strategy_config.strategy_min_expected_edge_ratio),
     )
-    final_signal = "HOLD" if edge_filter_triggered else raw_signal
-    entry_reason = "filtered entry: cost_edge" if edge_filter_triggered else base_reason
+    regime_closes = list(closes or [float(close)])
+    market_regime = classify_sma_market_regime(
+        closes=regime_closes,
+        short_sma=float(curr_s),
+        long_sma=float(curr_l),
+        volatility_window=max(1, min(10, len(regime_closes))),
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        min_trend_strength_ratio=0.0,
+    )
+    candidate_regime_decision = evaluate_live_regime_policy(
+        current_snapshot=market_regime.as_dict(),
+        candidate_policy=strategy_config.candidate_regime_policy,
+    )
+    candidate_regime_triggered = bool(
+        raw_signal == "BUY" and not bool(candidate_regime_decision.get("allowed"))
+    )
+    final_signal = "HOLD" if edge_filter_triggered or candidate_regime_triggered else raw_signal
+    if edge_filter_triggered:
+        entry_reason = "filtered entry: cost_edge"
+    elif candidate_regime_triggered:
+        entry_reason = f"candidate regime blocked: {candidate_regime_decision.get('regime_block_reason')}"
+    else:
+        entry_reason = base_reason
     signal_strength_label = _resolve_signal_strength_label(
         base_signal=raw_signal,
         expected_edge_ratio=float(edge_filter_details["expected_edge_ratio"]),
@@ -336,11 +403,30 @@ def _replay_decision_attribution(
     )
     decision_type = (
         "BLOCKED_ENTRY"
-        if raw_signal == "BUY" and edge_filter_triggered
+        if raw_signal == "BUY" and (edge_filter_triggered or candidate_regime_triggered)
         else "BLOCKED_EXIT"
         if raw_signal == "SELL" and edge_filter_triggered
         else final_signal
     )
+    primary_layer = (
+        "strategy_filters"
+        if edge_filter_triggered
+        else "candidate_regime"
+        if candidate_regime_triggered
+        else "none"
+    )
+    primary_reason = (
+        "cost_edge"
+        if edge_filter_triggered
+        else str(candidate_regime_decision.get("regime_block_reason"))
+        if candidate_regime_triggered
+        else "none"
+    )
+    all_block_reasons = []
+    if edge_filter_triggered:
+        all_block_reasons.append("strategy_filters.cost_edge")
+    if candidate_regime_triggered:
+        all_block_reasons.append(f"candidate_regime.{candidate_regime_decision.get('regime_block_reason')}")
     return DecisionAttribution(
         raw_signal=raw_signal,
         final_signal=final_signal,
@@ -348,9 +434,9 @@ def _replay_decision_attribution(
         base_reason=base_reason,
         entry_reason=entry_reason,
         entry_block_reason=entry_reason if edge_filter_triggered else None,
-        primary_block_layer="strategy_filters" if edge_filter_triggered else "none",
-        primary_block_reason="cost_edge" if edge_filter_triggered else "none",
-        all_block_reasons=("strategy_filters.cost_edge",) if edge_filter_triggered else (),
+        primary_block_layer=primary_layer,
+        primary_block_reason=primary_reason,
+        all_block_reasons=tuple(all_block_reasons),
         blocked_by_cost_filter=bool(edge_filter_triggered),
         blocked_by_fee_authority=False,
         blocked_by_position_gate=False,
@@ -426,6 +512,7 @@ def replay_sma_strategy_decisions_from_candles(
                 prev_l=_sma(closes, int(strategy_config.long_n), end_prev),
                 curr_s=_sma(closes, int(strategy_config.short_n), end_curr),
                 curr_l=_sma(closes, int(strategy_config.long_n), end_curr),
+                closes=closes[: end_curr],
             )
         )
         decision_count += 1

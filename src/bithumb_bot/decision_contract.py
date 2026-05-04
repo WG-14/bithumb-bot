@@ -8,6 +8,7 @@ DECISION_CONTRACT_VERSION = "decision_v2"
 BLOCK_LAYER_PRIORITY = (
     "fee_authority",
     "market_regime",
+    "candidate_regime",
     "position_gate",
     "strategy_filters",
     "pre_trade_economics",
@@ -102,6 +103,9 @@ def build_signal_flow(
     market_regime = _dict(context.get("market_regime"))
     if base_signal == "BUY" and market_regime and not bool(market_regime.get("allows_entry", True)):
         _candidate(reasons, "market_regime", market_regime.get("block_reason", market_regime.get("regime")))
+
+    if base_signal == "BUY" and bool(context.get("candidate_regime_blocked", False)):
+        _candidate(reasons, "candidate_regime", context.get("regime_block_reason"))
 
     position_gate = _dict(context.get("position_gate"))
     if base_signal == "BUY" and not bool(position_gate.get("entry_allowed", context.get("entry_allowed", True))):

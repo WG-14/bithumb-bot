@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bithumb_bot.market_regime import (
+    MARKET_REGIME_VERSION,
     RegimeAcceptanceGate,
     aggregate_regime_coverage,
     aggregate_regime_performance,
@@ -154,6 +155,7 @@ def test_live_regime_policy_fails_closed_when_missing_or_not_allowed() -> None:
     blocked = evaluate_live_regime_policy(
         current_snapshot=snapshot,
         candidate_policy={
+            "regime_classifier_version": MARKET_REGIME_VERSION,
             "allowed_regimes": ["uptrend_normal_vol_volume_increasing"],
             "blocked_regimes": ["sideways_low_vol_volume_decreasing"],
         },
@@ -163,3 +165,60 @@ def test_live_regime_policy_fails_closed_when_missing_or_not_allowed() -> None:
     assert missing["regime_block_reason"] == "regime_policy_missing"
     assert blocked["allowed"] is False
     assert blocked["regime_block_reason"] == "current_regime_in_candidate_blocked_regimes"
+
+
+def test_live_regime_policy_normalizes_live_and_promotion_field_names() -> None:
+    snapshot = {"version": MARKET_REGIME_VERSION, "composite_regime": "uptrend_high_vol_unknown"}
+
+    live_names = evaluate_live_regime_policy(
+        current_snapshot=snapshot,
+        candidate_policy={
+            "regime_classifier_version": MARKET_REGIME_VERSION,
+            "allowed_live_regimes": ["uptrend_high_vol_unknown"],
+            "blocked_live_regimes": [],
+            "regime_evidence": {"uptrend_high_vol_unknown": {"trade_count": 3}},
+        },
+    )
+    promotion_artifact = evaluate_live_regime_policy(
+        current_snapshot=snapshot,
+        candidate_policy={
+            "live_regime_policy": {
+                "regime_classifier_version": MARKET_REGIME_VERSION,
+                "allowed_regimes": ["uptrend_high_vol_unknown"],
+                "blocked_regimes": [],
+            },
+            "regime_evidence": {"uptrend_high_vol_unknown": {"trade_count": 3}},
+        },
+    )
+
+    assert live_names["allowed"] is True
+    assert promotion_artifact["allowed"] is True
+    assert live_names["candidate_allowed_regimes"] == ["uptrend_high_vol_unknown"]
+    assert promotion_artifact["candidate_allowed_regimes"] == ["uptrend_high_vol_unknown"]
+
+
+def test_live_regime_policy_fails_closed_for_invalid_or_version_mismatch() -> None:
+    snapshot = {"version": MARKET_REGIME_VERSION, "composite_regime": "uptrend_high_vol_unknown"}
+
+    missing_allowed = evaluate_live_regime_policy(
+        current_snapshot=snapshot,
+        candidate_policy={
+            "regime_classifier_version": MARKET_REGIME_VERSION,
+            "blocked_regimes": [],
+        },
+    )
+    mismatch = evaluate_live_regime_policy(
+        current_snapshot=snapshot,
+        candidate_policy={
+            "regime_classifier_version": "market_regime_v1",
+            "allowed_regimes": ["uptrend_high_vol_unknown"],
+            "blocked_regimes": [],
+        },
+    )
+
+    assert missing_allowed["allowed"] is False
+    assert missing_allowed["regime_block_reason"] == "regime_policy_missing_allowed_regimes"
+    assert mismatch["allowed"] is False
+    assert mismatch["regime_block_reason"] == "regime_policy_version_mismatch"
+    assert mismatch["current_regime_classifier_version"] == MARKET_REGIME_VERSION
+    assert mismatch["candidate_regime_classifier_version"] == "market_regime_v1"

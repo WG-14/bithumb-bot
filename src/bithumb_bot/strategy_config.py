@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .config import settings
+from .market_regime import load_candidate_regime_policy_from_path
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class SmaStrategyConfig:
     strategy_min_expected_edge_ratio: float
     buy_fraction: float
     max_order_krw: float
+    candidate_regime_policy: dict[str, object] | None = None
 
 
 def normalize_exit_rule_names(raw: str | Iterable[object]) -> tuple[str, ...]:
@@ -52,4 +54,7 @@ def sma_strategy_config_from_settings(
         strategy_min_expected_edge_ratio=float(settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO),
         buy_fraction=float(settings.BUY_FRACTION),
         max_order_krw=float(settings.MAX_ORDER_KRW),
+        candidate_regime_policy=load_candidate_regime_policy_from_path(
+            settings.STRATEGY_CANDIDATE_PROFILE_PATH
+        ),
     )

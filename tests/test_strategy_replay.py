@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from bithumb_bot.config import settings
+from bithumb_bot.market_regime import MARKET_REGIME_VERSION
 from bithumb_bot.decision_attribution import (
     DecisionAttributionSummary,
     normalize_decision_attribution_from_context,
@@ -57,8 +58,23 @@ def _base_config(**overrides):
         strategy_min_expected_edge_ratio=0.0,
         buy_fraction=0.25,
         max_order_krw=50_000.0,
+        candidate_regime_policy={
+            "regime_classifier_version": MARKET_REGIME_VERSION,
+            "allowed_regimes": ["uptrend_high_vol_unknown"],
+            "blocked_regimes": [],
+            "regime_evidence": {},
+        },
     )
     return replace(config, **overrides)
+
+
+def _allowing_policy() -> dict[str, object]:
+    return {
+        "regime_classifier_version": MARKET_REGIME_VERSION,
+        "allowed_regimes": ["uptrend_high_vol_unknown"],
+        "blocked_regimes": [],
+        "regime_evidence": {},
+    }
 
 
 def test_replay_returns_empty_result_for_insufficient_candles() -> None:
@@ -199,6 +215,51 @@ def test_replay_high_edge_buffer_turns_buy_candidate_into_cost_filtered_hold() -
     assert high.attribution_summary.edge_stats["gap_lt_required_ratio"] is not None
 
 
+def test_replay_missing_candidate_regime_policy_blocks_buy_and_context_records_policy_fields() -> None:
+    dataset = CandleReplayDataset(
+        pair="BTC_KRW",
+        interval="1m",
+        candles=tuple(
+            (1_700_000_000_000 + idx * 60_000, close)
+            for idx, close in enumerate([10.0, 10.0, 10.0, 10.0, 11.0])
+        ),
+        from_ts_ms=None,
+        to_ts_ms=None,
+        through_ts_ms=None,
+        max_candles=None,
+    )
+    config = StrategyReplayConfig(
+        strategy_config=_base_config(candidate_regime_policy=None),
+    )
+
+    result = replay_sma_strategy_decisions_from_candles(dataset, config)
+    config_id = build_strategy_replay_config_id(config)
+    closes = [close for _ts, close in dataset.candles]
+    context = _replay_decision_context(
+        replay_config=config,
+        config_id=config_id,
+        candle_ts=dataset.candles[-1][0],
+        close=closes[-1],
+        prev_s=_sma(closes, 2, 4),
+        prev_l=_sma(closes, 3, 4),
+        curr_s=_sma(closes, 2, 5),
+        curr_l=_sma(closes, 3, 5),
+        closes=closes,
+    )
+
+    assert result.decision_count == 1
+    assert result.attribution_summary.candidate_funnel["raw_BUY"] == 1
+    assert result.attribution_summary.candidate_funnel["final_BUY"] == 0
+    assert result.attribution_summary.block_reason_counts["candidate_regime.regime_policy_missing"] == 1
+    assert context["current_market_regime_snapshot"]
+    assert context["candidate_allowed_regimes"] == []
+    assert context["candidate_blocked_regimes"] == []
+    assert context["regime_decision"] == "OFF"
+    assert context["regime_block_reason"] == "regime_policy_missing"
+    assert context["regime_policy_present"] is False
+    assert context["regime_policy_valid"] is False
+
+
 def test_replay_is_deterministic_for_same_candles_and_config() -> None:
     conn_a = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0, 11.0])
     conn_b = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0, 11.0])
@@ -247,6 +308,7 @@ def test_replay_direct_attribution_matches_context_normalization_path() -> None:
                     prev_l=_sma(closes, int(config.strategy_config.long_n), index),
                     curr_s=_sma(closes, int(config.strategy_config.short_n), index + 1),
                     curr_l=_sma(closes, int(config.strategy_config.long_n), index + 1),
+                    closes=closes[: index + 1],
                 )
             )
         )

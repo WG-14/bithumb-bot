@@ -80,7 +80,7 @@ Verify the profile hash, candidate parameter values, dataset fingerprint, manife
 
 9. Manually prepare paper env/profile consideration.
 
-Copying values into a paper env/profile is a manual operator action. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate.
+Copying values into a paper env/profile is a manual operator action. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate. Set `STRATEGY_CANDIDATE_PROFILE_PATH` to the reviewed promotion artifact/profile path before paper or live-dry-run validation; missing or invalid regime policy fails closed for BUY entries.
 
 10. Run paper or live-dry-run observation.
 
