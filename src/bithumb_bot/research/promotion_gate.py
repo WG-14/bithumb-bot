@@ -39,6 +39,9 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "manifest_hash": candidate.get("manifest_hash"),
         "dataset_snapshot_id": candidate.get("dataset_snapshot_id"),
         "dataset_content_hash": candidate.get("dataset_content_hash"),
+        "regime_classifier_version": candidate.get("regime_classifier_version"),
+        "allowed_live_regimes": candidate.get("allowed_live_regimes"),
+        "blocked_live_regimes": candidate.get("blocked_live_regimes"),
     }
 
 
@@ -61,6 +64,8 @@ def evaluate_candidate_for_promotion(candidate: dict[str, Any]) -> tuple[bool, l
         reasons.append("candidate_profile_hash_missing")
     elif sha256_prefixed(build_candidate_profile(candidate)) != profile_hash:
         reasons.append("candidate_profile_hash_mismatch")
+    if not _candidate_has_regime_policy(candidate):
+        reasons.append("regime_policy_missing")
     return not reasons, reasons
 
 
@@ -81,7 +86,19 @@ def validate_backtest_candidate_for_promotion(candidate: dict[str, Any] | None) 
         reasons.extend(["backtest_candidate_profile_hash_missing", "candidate_profile_hash_missing"])
     elif sha256_prefixed(build_candidate_profile(candidate)) != profile_hash:
         reasons.extend(["backtest_candidate_profile_hash_mismatch", "candidate_profile_hash_mismatch"])
+    if not _candidate_has_regime_policy(candidate):
+        reasons.extend(["backtest_regime_policy_missing", "regime_policy_missing"])
     return not reasons, reasons
+
+
+def _candidate_has_regime_policy(candidate: dict[str, Any]) -> bool:
+    return (
+        isinstance(candidate.get("regime_classifier_version"), str)
+        and isinstance(candidate.get("allowed_live_regimes"), list)
+        and isinstance(candidate.get("blocked_live_regimes"), list)
+        and isinstance(candidate.get("regime_evidence"), dict)
+        and isinstance(candidate.get("regime_gate_result"), dict)
+    )
 
 
 def _validated_backtest_candidate(candidate: dict[str, Any] | None) -> ValidatedCandidate:
@@ -151,6 +168,18 @@ def promote_candidate(
         "walk_forward_evidence_source": "walk_forward_report.json" if walk_forward_required else None,
         "walk_forward_candidate_profile_hash": walk_forward.profile_hash if walk_forward else None,
         "walk_forward_candidate_profile_verified": bool(walk_forward),
+        "regime_classifier_version": candidate["regime_classifier_version"],
+        "allowed_regimes": list(candidate["allowed_live_regimes"]),
+        "blocked_regimes": list(candidate["blocked_live_regimes"]),
+        "regime_evidence": dict(candidate["regime_evidence"]),
+        "regime_gate_result": dict(candidate["regime_gate_result"]),
+        "live_regime_policy": {
+            "regime_classifier_version": candidate["regime_classifier_version"],
+            "allowed_regimes": list(candidate["allowed_live_regimes"]),
+            "blocked_regimes": list(candidate["blocked_live_regimes"]),
+            "evidence_source": "backtest_report.json",
+            "missing_policy_behavior": "fail_closed",
+        },
         "operator_next_step": "Review this artifact before manual paper env/profile consideration.",
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
     }

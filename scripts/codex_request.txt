@@ -1,414 +1,477 @@
-k````text id="z7wq8n"
-You are Codex working in the GitHub repository `WG-14/bithumb-bot`.
+You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Task: perform the next focused hardening patch for live execution-quality analysis.
+Your task is to directly inspect, modify, and test the repository so that the SMA research/backtest/live pipeline evolves from “overall backtest return is enough” into a reproducible, regime-aware automated trading experiment system.
 
-Do not dilute this into generic reporting. Do not change strategy thresholds or order policy as a substitute for measurement. The core problem remains:
+Do not reduce this to a cosmetic report-table patch. The core problem to investigate is:
 
-EC2 DB and Bithumb trade-history consistency proves accounting stability. It does not prove profitability validity. Profitability depends on execution quality: whether live fills occur within the assumptions used by research/backtest/paper. The repo already has an execution-quality foundation, but it still needs sharper market-vs-limit cost comparison, stronger sent-but-error tests, and operator-facing documentation.
+> Overall-period profitability is not sufficient. Strategy candidates must be verified, approved, promoted, and operated under explicitly defined market-regime conditions.
 
-Current known context
+The attached Korean analysis says the current likely issue is not merely “SMA gets whipsawed in sideways markets,” but a higher-level structural weakness: the research verification unit and the live operation decision unit may not yet speak the same regime language. Treat this as a hypothesis, not a proven fact. Verify it in the repo.
 
-The repo already appears to have:
-- `execution_quality.py`
-- `ExecutionQualityRecord`
-- side-aware slippage calculations
-- `execution_quality_events` upsert
-- `execution-quality-report`
-- manifest slippage comparison
-- actual broker request/response timestamp evidence for successful/application live submit paths
-- telemetry-first execution-quality config
-- schema/idempotency tests
-- historical fallback tests.
+## Primary objective
 
-This task is not to rewrite those. Build on them.
+Implement a design-oriented change that makes market-regime attribution and regime-aware acceptance a first-class part of the SMA experiment pipeline.
 
-Primary goals
-
-1. Make market-vs-limit execution cost differences explicit in the execution-quality report.
-2. Add tests for sent-but-error / timeout / submit-unknown paths so request timing evidence and recovery semantics are protected.
-3. Add clear operator documentation for running and interpreting execution-quality reports.
-
-Hypotheses to verify or refute
-
-H1: Market-vs-limit cost comparison is currently under-exposed.
-The data model likely has `order_type` and the report likely counts market/limit orders, but the report may not separately summarize slippage, latency, partial-fill rate, and unfilled rate by order type. Without this, operators cannot easily tell whether market orders are faster but more expensive, or limit orders are cheaper but less likely to fill.
-
-Verify:
-- Inspect `src/bithumb_bot/execution_quality.py`.
-- Inspect `execution-quality-report` implementation in `src/bithumb_bot/app.py` or related CLI code.
-- Inspect tests in `tests/test_execution_quality.py`.
-- Determine whether output already includes grouped metrics for `market` vs `limit`.
-- If not present or too weak, implement explicit order-type cost comparison.
-
-H2: Sent-but-error / timeout / ambiguous response / submit-unknown paths are not sufficiently tested.
-Successful live submit timing evidence appears implemented. The dangerous operational paths are failures after dispatch, especially timeout, transport error, ambiguous response, and submit unknown. These must preserve request timing evidence and not weaken existing recovery/unresolved-order semantics.
-
-Verify:
-- Inspect `src/bithumb_bot/broker/live_submit_orchestrator.py`.
-- Inspect `src/bithumb_bot/broker/live_submission_execution.py`.
-- Inspect broker exception classes and existing tests for submit failure paths.
-- Determine whether tests prove:
-  - request timestamp is recorded when dispatch was attempted,
-  - response timestamp semantics are consistent,
-  - timeout/temporary/ambiguous paths preserve existing `SUBMIT_UNKNOWN`, `FAILED`, or recovery behavior,
-  - no fake fill/latency is produced without fills.
-
-H3: Operator documentation for execution-quality workflows is insufficient or hidden.
-The CLI may exist, but operators need explicit commands and interpretation rules. The docs should explain that `INSUFFICIENT_EVIDENCE` is not proof of healthy execution, and that accounting reconciliation is separate from execution-quality validation.
-
-Verify:
-- Inspect README, RUNBOOK, operations docs, or any docs that list live/recovery/reporting commands.
-- Add a concise section if missing.
-
-Scope
-
-In scope:
-- Add order-type grouped execution-quality metrics.
-- Add text and JSON output fields for market/limit cost comparison.
-- Add deterministic tests for grouped metrics.
-- Add sent-but-error/timeout/submit-unknown evidence tests where feasible with existing architecture.
-- Add operator documentation.
-- Preserve historical fallback behavior.
-- Preserve telemetry-first gate behavior.
-- Preserve all existing safety/recovery/accounting semantics.
-
-Out of scope:
-- Rewriting `execution_quality.py` from scratch.
-- Replacing the existing `execution_quality_events` table.
-- Enabling hard live blocking by default.
-- Changing live order policy from market to limit or vice versa.
-- Tightening slippage thresholds.
-- Changing strategy entry/exit logic.
-- Adding heavyweight dependencies.
-- Removing existing accounting/recovery gates.
-
-Implementation requirements
-
-A. Add explicit order-type grouped metrics
-
-Enhance execution-quality summary logic to compute per-order-type metrics for at least:
-- `market_order_count`
-- `market_median_slippage_bps`
-- `market_p90_slippage_bps`
-- `market_p95_slippage_bps`
-- `market_median_submit_to_fill_ms`
-- `market_p90_submit_to_fill_ms`
-- `market_p95_submit_to_fill_ms`
-- `market_partial_fill_rate`
-- `market_unfilled_rate`
-
-and the same for limit:
-- `limit_order_count`
-- `limit_median_slippage_bps`
-- `limit_p90_slippage_bps`
-- `limit_p95_slippage_bps`
-- `limit_median_submit_to_fill_ms`
-- `limit_p90_submit_to_fill_ms`
-- `limit_p95_submit_to_fill_ms`
-- `limit_partial_fill_rate`
-- `limit_unfilled_rate`
-
-Use the existing fields:
-- `order_type`
-- `slippage_vs_signal_bps`
-- `slippage_vs_submit_ref_bps`
-- `full_fill_latency_ms`
-- `partial_fill_flag`
-- `unfilled_flag`
-
-Prefer `slippage_vs_signal_bps` for the primary grouped cost metric unless existing report semantics clearly use another primary slippage field. Keep existing aggregate fields unchanged.
-
-Handle:
-- no market records,
-- no limit records,
-- missing slippage,
-- missing latency,
-- insufficient evidence,
-- mixed case order types,
-- unknown order types.
-
-For unknown order types:
-- do not crash,
-- either exclude from market/limit grouped comparison or expose `unknown_order_type_count`.
-
-B. Add an order-type cost delta classification
-
-Add a concise field such as:
+The final system should support this chain:
 
 ```text
-order_type_cost_delta=market_fills_faster_but_costs_more
-````
+shared MarketRegimeClassifier
+→ per-candle/per-trade regime attribution in research backtests
+→ regime-specific performance and coverage tables
+→ regime-aware acceptance gate
+→ promoted candidate artifact containing allowed/blocked live regimes
+→ live strategy on/off decision based on current regime and promoted evidence
+```
 
-The classification should be deterministic and conservative. Suggested labels:
+## Do not assume these hypotheses are true
 
-* `insufficient_order_type_samples`
-* `market_fills_faster_but_costs_more`
-* `market_fills_faster_and_costs_less`
-* `limit_fills_faster_but_costs_more`
-* `limit_fills_faster_and_costs_less`
-* `market_costs_more`
-* `limit_costs_more`
-* `no_material_order_type_difference`
-* `one_order_type_only`
+Investigate and either support or refute each hypothesis with code evidence and tests.
 
-Do not overfit this. A simple rule is acceptable:
+### Hypothesis 1: Overall performance is hiding regime concentration
 
-* compare market vs limit p90 slippage when both are available,
-* compare market vs limit p95 full-fill latency when both are available,
-* use a small epsilon to avoid noisy differences,
-* if one side lacks enough evidence, return `insufficient_order_type_samples` or `one_order_type_only`.
+The SMA backtest may show acceptable total return, MDD, profit factor, or win rate while most gains come from a narrow subset of regimes, and losses accumulate in `chop`, `sideways`, `low_vol`, `downtrend`, or `volume_down` regimes.
 
-Make the report output directly useful, for example:
+Verification or refutation method:
+
+Add regime attribution to trades and compute, at minimum:
 
 ```text
-market_order_count=42
-market_p90_slippage_bps=18.5
-market_p95_submit_to_fill_ms=2400
-market_partial_fill_rate=0
-market_unfilled_rate=0
-
-limit_order_count=17
-limit_p90_slippage_bps=4.2
-limit_p95_submit_to_fill_ms=5100
-limit_partial_fill_rate=0.23
-limit_unfilled_rate=0.11
-
-order_type_cost_delta=market_fills_faster_but_costs_more
+trade_count
+gross_pnl
+net_pnl
+return_pct
+profit_factor
+win_rate
+expectancy
+max_drawdown
+max_consecutive_losses
+fee_drag
+slippage_drag
+single_trade_dependency_score
 ```
 
-C. Preserve report compatibility
+Refute this only if validation/final_holdout/walk-forward results show stable expectancy across relevant regimes and no excessive PnL or loss concentration.
 
-Existing output keys must not be removed or renamed.
+### Hypothesis 2: Research backtest and live strategy use different regime definitions or different decision contracts
 
-Text output:
+The live strategy may already have a function like `classify_sma_market_regime`, while the research backtest may rely directly on `gap_ratio`, `range_ratio`, or similar filters instead of the same versioned regime contract.
 
-* add grouped fields after existing aggregate fields or in a clear stable location.
-* missing values should print as `NA`, matching existing style.
+Verification or refutation method:
 
-JSON output:
+For the same candle sequence and SMA parameters, compare research decisions and live/replay decisions by logging or testing:
 
-* include the new grouped fields and `order_type_cost_delta`.
-* keep existing JSON keys unchanged.
+```text
+base_signal
+gap_ratio
+volatility_ratio
+price_regime
+volatility_bucket
+volume_bucket
+composite_regime
+allows_sma_entry
+final_signal
+block_reason
+regime_classifier_version
+```
 
-D. Sent-but-error / timeout / submit-unknown tests
+Refute this only if the same input candles produce the same regime snapshot, same allow/block decision, and same final signal under the same classifier version.
 
-Add focused tests around the actual submit pipeline if feasible.
+### Hypothesis 3: Existing regime classification may be too SMA-self-referential
 
-Test the real live submit orchestrator path with a fake broker and a valid request object. Prefer testing the smallest function that dispatches to broker and records submit evidence.
+If the only regime classifier is based almost entirely on SMA relationships, it may be repackaging “SMA signal strength” as “market regime.” That can make the research look more robust than it is.
 
-Required test cases if feasible:
+Verification or refutation method:
 
-1. Successful dispatch timing evidence
+Introduce or support independent market-regime axes that are not only SMA-cross/spacing based:
 
-* fake broker returns an order.
-* assert `request_ts`, `response_ts`, and `submit_elapsed_ms` are present in submit evidence.
-* assert `response_ts >= request_ts`.
-* assert execution-quality reconstruction uses evidence timestamps rather than fallback event timestamps.
+```text
+price_regime: uptrend / downtrend / sideways
+trend_strength_bucket: weak / normal / strong
+volatility_bucket: low / normal / high
+volume_bucket: decreasing / normal / increasing
+liquidity_bucket: thin / normal / thick
+composite_regime: e.g. uptrend_high_vol_volume_increasing
+```
 
-2. Temporary transport error after dispatch
+Compare SMA-specific regime outcomes against independent regime buckets where feasible. Do not remove useful SMA-specific checks, but separate “market regime” from “strategy entry permission.”
 
-* fake broker raises `BrokerTemporaryError`.
-* assert request timing is recorded if dispatch was attempted.
-* assert existing failure/submission reason semantics are preserved.
-* assert no fake fill metrics appear.
+### Hypothesis 4: Walk-forward validation checks time stability but not regime coverage stability
 
-3. Timeout / submission unknown
+The existing walk-forward result may pass because windows are favorable or dominated by uptrend periods. It may not prove that the strategy was tested across enough relevant market regimes.
 
-* fake broker raises the repo’s timeout/submission-unknown exception or the closest existing equivalent.
-* assert status transition and safety semantics remain unchanged.
-* assert request timing evidence exists where a request was attempted.
-* assert `SUBMIT_UNKNOWN` or existing equivalent remains intact.
+Verification or refutation method:
 
-4. Ambiguous response
+Add walk-forward regime exposure and per-window regime metrics, for example:
 
-* if there is a distinct ambiguous response path, test it.
-* if not, document why it is covered by an existing exception path.
+```text
+window_id
+start_ts
+end_ts
+trade_count_by_regime
+candle_count_by_regime
+worst_regime_profit_factor
+worst_regime_net_pnl
+missing_required_regimes
+blocked_regime_trade_count
+regime_gate_passed
+```
 
-5. Planning failure before dispatch
+Refute only if walk-forward windows have adequate regime coverage and regime-specific results remain stable.
 
-* assert `request_ts=None`, `response_ts=None`, `submit_elapsed_ms=None`.
-* assert no request timing is fabricated.
-* assert existing failed-before-send semantics remain intact.
+### Hypothesis 5: Volume and liquidity states are under-modeled
 
-If the architecture makes one of these tests impractical, do not fake meaningless tests. Add the feasible tests and document the gap in the final report.
+The requested analysis explicitly requires:
 
-E. Recovery and safety constraints
+```text
+rising market
+falling market
+sideways market
+high volatility
+low volatility
+volume increasing
+volume decreasing
+```
 
-Do not weaken:
+If the repo currently models trend and volatility but not volume/liquidity as first-class regime dimensions, that is a structural gap.
 
-* unresolved order gate,
-* submit unknown handling,
-* accounting pending handling,
-* recovery required handling,
-* fill fee validation,
-* broker fill observation behavior,
-* idempotent submit attempt/order event recording.
+Verification or refutation method:
 
-Any sent-but-error test must assert existing status/recovery behavior, not just timestamp presence.
+Add or expose volume bucket calculations using defensible, deterministic rules such as moving-average volume ratio, quote-volume/turnover if available, or volume z-score. Add tests covering volume increasing, normal, decreasing, and missing/zero-volume edge cases.
 
-F. Operator documentation
+## Design requirements
 
-Add or update the most appropriate operator-facing doc. Prefer an existing RUNBOOK or operations guide. If there is no clear operations doc, use README.
+### 1. Create or refactor a shared market-regime module
 
-Include this exact workflow, adjusted only if repo command syntax differs:
+Prefer a shared module such as:
+
+```text
+src/bithumb_bot/market_regime/
+  __init__.py
+  schema.py
+  classifier.py
+  thresholds.py
+  metrics.py
+```
+
+Adjust the exact path to fit the repo’s existing layout.
+
+The output must be a versioned structured snapshot, not only a string.
+
+Example shape:
+
+```python
+@dataclass(frozen=True)
+class MarketRegimeSnapshot:
+    version: str
+    price_regime: str
+    trend_strength_bucket: str
+    volatility_bucket: str
+    volume_bucket: str
+    liquidity_bucket: str
+    composite_regime: str
+    allows_sma_entry: bool
+    block_reason: str
+```
+
+Use enums or literal constants if the repo style prefers them.
+
+The classifier must be deterministic, testable, and reusable by both research/backtest code and live/replay strategy code.
+
+### 2. Preserve compatibility while replacing duplicated logic
+
+If the repo already has `classify_sma_market_regime`, do not blindly delete it. Refactor it into the shared classifier or make it a thin compatibility wrapper around the shared classifier.
+
+Add tests proving the wrapper produces the expected historical labels or intentionally document changed semantics.
+
+### 3. Add regime attribution to the research SMA backtest
+
+The SMA backtest result should include first-class regime outputs.
+
+Target shape, adjusted to repo style:
+
+```python
+@dataclass(frozen=True)
+class BacktestRun:
+    metrics: ResearchMetrics
+    trades: tuple[dict[str, object], ...]
+    candle_count: int
+    warnings: tuple[str, ...]
+    regime_performance: tuple[RegimePerformanceRow, ...]
+    regime_coverage: tuple[RegimeCoverageRow, ...]
+```
+
+Each closed trade should include at least:
+
+```text
+entry_regime
+exit_regime
+entry_regime_snapshot
+exit_regime_snapshot
+net_pnl
+fee_total
+slippage_total
+```
+
+If feasible without excessive complexity, also include:
+
+```text
+holding_regime_mix
+```
+
+If holding-regime attribution is too large for this pass, implement entry/exit attribution now and leave a clear follow-up note in the final report.
+
+### 4. Add regime performance aggregation
+
+Implement aggregation over trades and candle coverage.
+
+At minimum, produce rows by:
+
+```text
+price_regime
+volatility_bucket
+volume_bucket
+composite_regime
+```
+
+Metrics should include:
+
+```text
+trade_count
+candle_count
+candle_share
+gross_pnl
+net_pnl
+return_pct
+profit_factor
+win_rate
+expectancy
+max_drawdown
+max_consecutive_losses
+fee_drag
+slippage_drag
+single_trade_dependency_score
+```
+
+Handle zero-trade and zero-loss regimes explicitly. Do not produce misleading infinite values without a clear representation.
+
+### 5. Extend experiment/report artifacts
+
+Backtest or experiment report JSON should include:
+
+```text
+overall_metrics
+train_metrics
+validation_metrics
+final_holdout_metrics
+walk_forward_metrics
+regime_classifier_version
+market_regime_bucket_performance
+market_regime_coverage
+walk_forward_regime_coverage
+regime_gate_result
+allowed_live_regimes
+blocked_live_regimes
+```
+
+Use existing artifact/report structure if present. Do not create a parallel reporting system unless necessary.
+
+### 6. Add regime-aware acceptance gate
+
+Extend the existing acceptance gate instead of creating a disconnected checker.
+
+Add config support for something like:
+
+```json
+"regime_acceptance_gate": {
+  "required": true,
+  "min_trade_count_per_required_regime": 10,
+  "required_regimes": ["uptrend", "high_vol", "volume_increasing"],
+  "blocked_regimes": ["sideways_low_vol", "downtrend", "low_vol_volume_decreasing"],
+  "blocked_regime_max_trade_count": 0,
+  "blocked_regime_max_net_pnl_loss_krw": 0,
+  "min_profit_factor_by_regime": {
+    "uptrend": 1.2
+  },
+  "max_loss_share_by_single_regime": 0.4,
+  "max_pnl_dependency_by_single_regime": 0.5
+}
+```
+
+The exact schema may differ, but the behavior must support:
+
+```text
+required regime coverage
+minimum trade count for required regimes
+minimum PF or expectancy for expected-positive regimes
+blocked regimes where new entries should not occur
+maximum loss concentration by regime
+maximum profit dependency by regime
+clear pass/fail reasons
+```
+
+Failure reasons should become specific, for example:
+
+```text
+regime_gate_failed: sideways_low_vol profit_factor=0.62
+regime_coverage_failed: downtrend trade_count=2 < min=10
+blocked_regime_leakage: low_vol_volume_decreasing produced 7 BUY decisions
+current_live_regime_not_allowed: chop_low_vol
+```
+
+### 7. Make promoted candidates carry live regime policy
+
+A promoted candidate artifact must include regime evidence and policy, for example:
+
+```json
+{
+  "candidate_id": "...",
+  "regime_classifier_version": "market_regime_v2",
+  "allowed_regimes": ["uptrend_normal_vol", "uptrend_high_vol_volume_increasing"],
+  "blocked_regimes": ["sideways_low_vol", "downtrend", "low_vol_volume_decreasing"],
+  "regime_evidence": {
+    "uptrend_normal_vol": {
+      "trade_count": 42,
+      "profit_factor": 1.45,
+      "expectancy": 123.4
+    },
+    "sideways_low_vol": {
+      "trade_count": 0,
+      "policy": "blocked"
+    }
+  }
+}
+```
+
+The live strategy should be able to answer:
+
+```text
+current regime = sideways_low_vol_volume_decreasing
+promoted candidate allowed_regimes = [uptrend_normal_vol, uptrend_high_vol_volume_increasing]
+decision = OFF / block new entry
+reason = current_regime_not_in_candidate_allowed_regimes
+```
+
+Do not rely only on environment variables or ad hoc live thresholds for this decision if candidate artifacts already exist or can be extended.
+
+### 8. Observability requirements
+
+Add structured logs, report fields, or diagnostics so that a live/replay decision can be audited.
+
+At minimum, expose:
+
+```text
+regime_classifier_version
+current_market_regime_snapshot
+candidate_allowed_regimes
+candidate_blocked_regimes
+regime_decision
+regime_block_reason
+regime_gate_result
+```
+
+For blocked entries, logs should clearly say whether the block came from:
+
+```text
+classifier says strategy entry not allowed
+candidate artifact does not allow current regime
+acceptance gate evidence missing
+missing/invalid candle data
+```
+
+### 9. Recovery and compatibility requirements
+
+Avoid making existing reports unreadable unless migration is unavoidable.
+
+If old candidate artifacts lack regime policy, choose a safe behavior and test it. Prefer one of:
+
+```text
+fail closed for live promotion/use
+allow research-only evaluation but mark regime_policy_missing
+require explicit override for live use
+```
+
+Do not silently treat missing regime policy as “allowed everywhere.”
+
+Add compatibility handling for:
+
+```text
+old reports without regime fields
+old manifests without regime_acceptance_gate
+missing volume data
+short candle histories insufficient for regime classification
+zero-trade backtests
+zero-loss regimes
+unknown regimes
+```
+
+### 10. Scope boundaries
+
+Do not attempt to create a perfect market-regime theory.
+
+Do not optimize SMA parameters as the main deliverable.
+
+Do not add a superficial “regime” column only to the final report while leaving acceptance and live operation unchanged.
+
+Do not change exchange execution behavior unless required to pass the regime policy into live entry gating.
+
+Do not invent undocumented financial claims. Keep claims as hypotheses unless backed by repo tests or backtest output.
+
+## Testing requirements
+
+Add or update tests covering at least:
+
+```text
+shared classifier deterministic output
+uptrend / downtrend / sideways classification
+high-vol / low-vol classification
+volume increasing / volume decreasing classification
+missing or insufficient candle history
+research backtest attaches entry and exit regime snapshots to trades
+regime performance aggregation handles zero-trade and zero-loss cases
+acceptance gate passes when required regimes are covered and profitable
+acceptance gate fails when required regime coverage is missing
+acceptance gate fails when blocked regimes produce trades
+acceptance gate fails when single-regime profit dependency is too high
+walk-forward output includes regime exposure
+promoted candidate artifact includes allowed/blocked regimes and evidence
+live or replay entry is blocked when current regime is not allowed
+old artifact or manifest compatibility behavior is explicit and tested
+```
+
+Run the repo’s relevant test suite. If there is a standard command in the repo, use it. Otherwise run the narrow tests you changed plus a reasonable broader test command such as:
 
 ```bash
-uv run bithumb-bot execution-quality-report --limit 100
-uv run bithumb-bot execution-quality-report --format json
-uv run bithumb-bot execution-quality-report --compare-manifest examples/research/sma_filter_manifest.example.json
+pytest
 ```
 
-Also include:
+If tests fail for unrelated pre-existing reasons, isolate them and report clearly.
 
-```bash
-sqlite3 "$DB_PATH" ".schema execution_quality_events"
-```
+## Final report format
 
-Document what the report answers:
+When finished, provide a concise but complete final report with these sections:
 
-* signal-time price vs submit-time price vs actual average fill price,
-* submit-to-fill latency,
-* realized slippage,
-* partial/unfilled rates,
-* market-vs-limit cost and fill behavior,
-* live observed cost vs manifest/backtest assumptions.
-
-Document interpretation:
-
-* `PASS`: enough evidence and live execution is within configured/model assumptions.
-* `WARN`: evidence exists but there are missing links, latency concerns, partial-fill concerns, or similar issues.
-* `FAIL`: live observed cost/model breach exceeds threshold.
-* `INSUFFICIENT_EVIDENCE`: not proof of safety; collect more live samples or repair missing links.
-
-Document the distinction:
-
-* accounting reconciliation proves local/exchange records agree,
-* execution-quality analysis evaluates whether live fills are economically consistent with research/backtest/paper assumptions.
-
-Testing requirements
-
-Add or update tests for:
-
-1. Grouped market/limit metrics
-
-* one market order and one limit order.
-* market has higher slippage but lower latency.
-* limit has lower slippage but higher partial/unfilled rate.
-* assert grouped fields and `order_type_cost_delta`.
-
-2. Grouped metrics with only one order type
-
-* assert no crash.
-* assert missing side fields are `None`/`NA` as appropriate.
-* assert `order_type_cost_delta=one_order_type_only` or equivalent.
-
-3. Unknown order type
-
-* assert no crash.
-* assert unknown count if implemented.
-
-4. JSON output
-
-* assert grouped market/limit keys are included.
-* assert existing keys still exist.
-
-5. Sent-but-error / timeout / submit-unknown
-
-* add feasible tests as described above.
-* assert request timing evidence and existing recovery/status semantics.
-
-6. Planning failure before dispatch
-
-* assert request/response timestamps remain null.
-
-7. Existing tests
-
-* existing `tests/test_execution_quality.py` should still pass.
-* relevant submit/recovery/accounting tests should still pass.
-
-Suggested commands
-
-Run focused tests first:
-
-```bash
-uv run pytest tests/test_execution_quality.py -q
-```
-
-Then run relevant submit/recovery tests. If unsure, run:
-
-```bash
-uv run pytest tests -q
-```
-
-If the repo has formatting/typecheck conventions, run them too.
-
-Acceptance criteria
-
-The patch is acceptable only if:
-
-* `execution-quality-report` explicitly reports market-vs-limit cost and fill behavior.
-* Text and JSON outputs expose grouped metrics.
-* Existing aggregate report fields remain compatible.
-* `order_type_cost_delta` or equivalent is deterministic and tested.
-* sent-but-error/timeout/submit-unknown paths are tested where feasible.
-* successful dispatch timing evidence remains intact.
-* planning failure does not fabricate request timestamps.
-* recovery/accounting/unresolved-order semantics are not weakened.
-* operator documentation includes exact commands and interpretation.
-* pytest passes.
-
-Final response format
-
-When done, report in this exact structure:
-
+```text
 1. Summary
-
-* One paragraph explaining what changed and why it improves live execution-quality analysis beyond accounting reconciliation.
-
 2. Files changed
-
-* List each changed file with one-line purpose.
-
-3. Hypothesis results
-
-* H1: supported/refuted/partially supported, with repo evidence.
-* H2: supported/refuted/partially supported, with repo evidence.
-* H3: supported/refuted/partially supported, with repo evidence.
-
-4. Market vs limit metrics
-
-* List the new output fields.
-* Explain `order_type_cost_delta` semantics.
-
-5. Sent-but-error coverage
-
-* List tested paths.
-* Explain any path not tested and why.
-* State whether existing recovery/status semantics were preserved.
-
-6. Operator workflow
-
-* Exact commands to run.
-* Example output shape.
-* PASS/WARN/FAIL/INSUFFICIENT_EVIDENCE interpretation.
-
-7. Tests
-
-* Exact tests added or updated.
-* Exact commands run.
-* Pass/fail result.
-
-8. Recovery and safety notes
-
-* Explain why the patch does not change live order policy.
-* Explain why hard blocking remains opt-in/telemetry-first.
-* Explain historical fallback behavior remains safe.
-
-9. Remaining risks / follow-up
-
-* Only concrete follow-up items, such as hard gate rollout, paper-live-gap-report, or deeper readiness integration.
-
+3. What I verified in the repo
+4. Hypotheses: supported / refuted / still unknown
+5. Design changes implemented
+6. New or changed artifact/report fields
+7. Acceptance gate behavior
+8. Live/replay gating behavior
+9. Observability and recovery behavior
+10. Tests run and results
+11. Remaining risks or follow-up work
 ```
+
+In the hypothesis section, do not say a hypothesis is proven unless the repository changes and tests actually support it. Use:
+
+```text
+supported
+refuted
+partially supported
+still unknown
 ```
+
+The expected outcome is not just a patch that suppresses sideways-market losses. The expected outcome is a repo-level structural improvement that makes SMA strategy experiments more reproducible, auditable, regime-aware, and safer to operate live.
 

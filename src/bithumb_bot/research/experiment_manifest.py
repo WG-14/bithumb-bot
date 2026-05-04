@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from bithumb_bot.market_regime import RegimeAcceptanceGate
 
 from .hashing import sha256_prefixed
 
@@ -78,6 +80,7 @@ class AcceptanceGate:
     oos_return_must_be_positive: bool
     parameter_stability_required: bool
     walk_forward_required: bool = False
+    regime_acceptance_gate: RegimeAcceptanceGate = field(default_factory=RegimeAcceptanceGate)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -87,6 +90,7 @@ class AcceptanceGate:
             "oos_return_must_be_positive": self.oos_return_must_be_positive,
             "parameter_stability_required": self.parameter_stability_required,
             "walk_forward_required": self.walk_forward_required,
+            "regime_acceptance_gate": self.regime_acceptance_gate.as_dict(),
         }
 
 
@@ -263,7 +267,69 @@ def _parse_acceptance_gate(payload: dict[str, Any]) -> AcceptanceGate:
         oos_return_must_be_positive=bool(payload.get("oos_return_must_be_positive", True)),
         parameter_stability_required=bool(payload.get("parameter_stability_required", False)),
         walk_forward_required=bool(payload.get("walk_forward_required", False)),
+        regime_acceptance_gate=_parse_regime_acceptance_gate(payload.get("regime_acceptance_gate")),
     )
+
+
+def _parse_regime_acceptance_gate(value: Any) -> RegimeAcceptanceGate:
+    if value is None:
+        return RegimeAcceptanceGate(required=False)
+    if not isinstance(value, dict):
+        raise ManifestValidationError("acceptance_gate.regime_acceptance_gate must be an object")
+    min_trade_count = int(value.get("min_trade_count_per_required_regime", 0) or 0)
+    blocked_count = int(value.get("blocked_regime_max_trade_count", 0) or 0)
+    if min_trade_count < 0:
+        raise ManifestValidationError("acceptance_gate.regime_acceptance_gate.min_trade_count_per_required_regime must be >= 0")
+    if blocked_count < 0:
+        raise ManifestValidationError("acceptance_gate.regime_acceptance_gate.blocked_regime_max_trade_count must be >= 0")
+    return RegimeAcceptanceGate(
+        required=bool(value.get("required", False)),
+        min_trade_count_per_required_regime=min_trade_count,
+        required_regimes=tuple(_str_list(value.get("required_regimes"), "required_regimes")),
+        blocked_regimes=tuple(_str_list(value.get("blocked_regimes"), "blocked_regimes")),
+        blocked_regime_max_trade_count=blocked_count,
+        blocked_regime_max_net_pnl_loss_krw=_finite_non_negative_float(
+            value.get("blocked_regime_max_net_pnl_loss_krw", 0.0),
+            "acceptance_gate.regime_acceptance_gate.blocked_regime_max_net_pnl_loss_krw",
+        ),
+        min_profit_factor_by_regime=_float_map(value.get("min_profit_factor_by_regime"), "min_profit_factor_by_regime"),
+        min_expectancy_by_regime=_float_map(value.get("min_expectancy_by_regime"), "min_expectancy_by_regime"),
+        max_loss_share_by_single_regime=(
+            None
+            if value.get("max_loss_share_by_single_regime") is None
+            else _finite_non_negative_float(
+                value.get("max_loss_share_by_single_regime"),
+                "acceptance_gate.regime_acceptance_gate.max_loss_share_by_single_regime",
+            )
+        ),
+        max_pnl_dependency_by_single_regime=(
+            None
+            if value.get("max_pnl_dependency_by_single_regime") is None
+            else _finite_non_negative_float(
+                value.get("max_pnl_dependency_by_single_regime"),
+                "acceptance_gate.regime_acceptance_gate.max_pnl_dependency_by_single_regime",
+            )
+        ),
+    )
+
+
+def _str_list(value: Any, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ManifestValidationError(f"acceptance_gate.regime_acceptance_gate.{field} must be an array")
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _float_map(value: Any, field: str) -> dict[str, float]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ManifestValidationError(f"acceptance_gate.regime_acceptance_gate.{field} must be an object")
+    out: dict[str, float] = {}
+    for key, raw in value.items():
+        out[str(key)] = _finite_non_negative_float(raw, f"acceptance_gate.regime_acceptance_gate.{field}.{key}")
+    return out
 
 
 def _parse_walk_forward(value: Any) -> WalkForwardConfig | None:

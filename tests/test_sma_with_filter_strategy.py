@@ -249,6 +249,38 @@ def test_cost_edge_block_remains_distinguishable_from_market_regime() -> None:
     assert decision.context["signal_flow"]["primary_block_reason"] == "cost_edge"
 
 
+def test_candidate_regime_policy_blocks_live_entry_when_current_regime_not_allowed() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.001,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.0,
+            live_fee_rate_estimate=0.0001,
+            candidate_regime_policy={
+                "allowed_regimes": ["downtrend_low_vol_volume_decreasing"],
+                "blocked_regimes": ["sideways_low_vol_volume_decreasing"],
+            },
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.context["base_signal"] == "BUY"
+    assert decision.signal == "HOLD"
+    assert decision.context["candidate_regime_blocked"] is True
+    assert decision.context["regime_decision"] == "OFF"
+    assert decision.context["regime_block_reason"] == "current_regime_not_in_candidate_allowed_regimes"
+
+
 def test_gap_filter_blocks_entry_and_writes_context() -> None:
     conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
     try:

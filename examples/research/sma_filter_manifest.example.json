@@ -36,7 +36,20 @@
     "min_profit_factor": 1.1,
     "oos_return_must_be_positive": true,
     "parameter_stability_required": true,
-    "walk_forward_required": true
+    "walk_forward_required": true,
+    "regime_acceptance_gate": {
+      "required": true,
+      "min_trade_count_per_required_regime": 10,
+      "required_regimes": ["uptrend"],
+      "blocked_regimes": ["sideways_low_vol_volume_decreasing", "downtrend"],
+      "blocked_regime_max_trade_count": 0,
+      "blocked_regime_max_net_pnl_loss_krw": 0,
+      "min_profit_factor_by_regime": {
+        "uptrend": 1.2
+      },
+      "max_loss_share_by_single_regime": 0.4,
+      "max_pnl_dependency_by_single_regime": 0.5
+    }
   },
   "walk_forward": {
     "train_window_days": 180,

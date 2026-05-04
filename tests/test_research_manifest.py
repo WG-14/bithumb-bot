@@ -58,6 +58,28 @@ def test_manifest_parses_valid_walk_forward_config() -> None:
     assert manifest.walk_forward.train_window_days == 2
 
 
+def test_manifest_parses_regime_acceptance_gate() -> None:
+    payload = _manifest()
+    payload["acceptance_gate"]["regime_acceptance_gate"] = {
+        "required": True,
+        "min_trade_count_per_required_regime": 10,
+        "required_regimes": ["uptrend"],
+        "blocked_regimes": ["sideways_low_vol_volume_decreasing"],
+        "blocked_regime_max_trade_count": 0,
+        "blocked_regime_max_net_pnl_loss_krw": 0,
+        "min_profit_factor_by_regime": {"uptrend": 1.2},
+        "max_loss_share_by_single_regime": 0.4,
+        "max_pnl_dependency_by_single_regime": 0.5,
+    }
+
+    manifest = parse_manifest(payload)
+
+    gate = manifest.acceptance_gate.regime_acceptance_gate
+    assert gate.required is True
+    assert gate.required_regimes == ("uptrend",)
+    assert gate.blocked_regimes == ("sideways_low_vol_volume_decreasing",)
+
+
 @pytest.mark.parametrize(
     "mutate,expected",
     [

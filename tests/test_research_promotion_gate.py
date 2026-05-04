@@ -34,6 +34,21 @@ def _candidate(**overrides):
             "return_pct": 1.0,
         },
         "acceptance_gate_result": "PASS",
+        "regime_classifier_version": "market_regime_v2",
+        "allowed_live_regimes": ["uptrend_normal_vol_volume_increasing"],
+        "blocked_live_regimes": ["sideways_low_vol_volume_decreasing"],
+        "regime_evidence": {
+            "uptrend_normal_vol_volume_increasing": {
+                "trade_count": 12,
+                "profit_factor": 1.4,
+                "expectancy": 100.0,
+            }
+        },
+        "regime_gate_result": {
+            "result": "PASS",
+            "passed": True,
+            "reasons": [],
+        },
         "walk_forward_required": False,
     }
     payload.update(overrides)
@@ -227,3 +242,25 @@ def test_promotion_artifact_records_no_walk_forward_evidence_when_not_required(t
     assert result.artifact["walk_forward_evidence_source"] is None
     assert result.artifact["walk_forward_candidate_profile_hash"] is None
     assert result.artifact["walk_forward_candidate_profile_verified"] is False
+    assert result.artifact["regime_classifier_version"] == "market_regime_v2"
+    assert result.artifact["allowed_regimes"] == ["uptrend_normal_vol_volume_increasing"]
+    assert result.artifact["blocked_regimes"] == ["sideways_low_vol_volume_decreasing"]
+    assert result.artifact["live_regime_policy"]["missing_policy_behavior"] == "fail_closed"
+
+
+def test_promotion_refuses_old_candidate_without_regime_policy(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _candidate()
+    for key in (
+        "regime_classifier_version",
+        "allowed_live_regimes",
+        "blocked_live_regimes",
+        "regime_evidence",
+        "regime_gate_result",
+    ):
+        candidate.pop(key, None)
+    candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
+    _write_report(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="regime_policy_missing"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bithumb_bot.paths import PathManager
+from bithumb_bot.research.backtest_engine import run_sma_backtest
+from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.experiment_manifest import parse_manifest
 from bithumb_bot.research.validation_protocol import run_research_backtest
 
@@ -101,4 +103,48 @@ def test_same_manifest_and_dataset_produce_same_content_hash(tmp_path, monkeypat
 
     assert first["content_hash"] == second["content_hash"]
     assert first["candidates"][0]["candidate_profile_hash"] == second["candidates"][0]["candidate_profile_hash"]
+    assert first["candidates"][0]["regime_classifier_version"] == "market_regime_v2"
+    assert first["candidates"][0]["market_regime_bucket_performance"]
+    assert first["candidates"][0]["market_regime_coverage"]
+    assert "regime_gate_result" in first["candidates"][0]
     assert Path(first["artifact_paths"]["report_path"]).exists()
+
+
+def test_sma_backtest_attaches_entry_and_exit_regime_snapshots() -> None:
+    candles = tuple(
+        Candle(
+            ts=1_700_000_000_000 + index * 60_000,
+            open=float(close),
+            high=float(close) * 1.02,
+            low=float(close) * 0.98,
+            close=float(close),
+            volume=float(100 + index * 10),
+        )
+        for index, close in enumerate([100, 99, 98, 97, 99, 102, 105, 104, 103, 100, 98, 96])
+    )
+    manifest = parse_manifest(_manifest())
+    snapshot = DatasetSnapshot(
+        snapshot_id="unit",
+        source="sqlite_candles",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=manifest.dataset.split.validation,
+        candles=candles,
+    )
+
+    result = run_sma_backtest(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4, "SMA_FILTER_GAP_MIN_RATIO": 0.0, "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+    )
+
+    closed = [trade for trade in result.trades if trade["side"] == "SELL"]
+    assert closed
+    assert closed[0]["entry_regime"]
+    assert closed[0]["exit_regime"]
+    assert isinstance(closed[0]["entry_regime_snapshot"], dict)
+    assert isinstance(closed[0]["exit_regime_snapshot"], dict)
+    assert result.regime_performance
+    assert result.regime_coverage

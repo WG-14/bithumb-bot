@@ -123,6 +123,11 @@ def test_walk_forward_required_refuses_missing_evidence(tmp_path, monkeypatch) -
         "cost_model": {"fee_rate": 0.0, "slippage_bps": 0.0},
         "validation_metrics": {"return_pct": 2.0, "trade_count": 2, "max_drawdown_pct": 1.0, "profit_factor": 2.0},
         "acceptance_gate_result": "PASS",
+        "regime_classifier_version": "market_regime_v2",
+        "allowed_live_regimes": ["uptrend_normal_vol_volume_increasing"],
+        "blocked_live_regimes": ["sideways_low_vol_volume_decreasing"],
+        "regime_evidence": {"uptrend_normal_vol_volume_increasing": {"trade_count": 12}},
+        "regime_gate_result": {"result": "PASS", "passed": True, "reasons": []},
         "walk_forward_required": True,
     }
     candidate["candidate_profile_hash"] = "sha256:placeholder"
@@ -172,6 +177,8 @@ def test_repeated_positive_test_windows_pass_aggregate_walk_forward(monkeypatch)
 
     assert metrics["return_consistency_pass"] is True
     assert metrics["pass_window_count"] == metrics["window_count"]
+    assert "trade_count_by_regime" in metrics["windows"][0]
+    assert "candle_count_by_regime" in metrics["windows"][0]
 
 
 def test_inconsistent_test_windows_fail_aggregate_walk_forward(monkeypatch) -> None:

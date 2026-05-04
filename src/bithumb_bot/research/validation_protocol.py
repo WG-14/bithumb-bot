@@ -7,6 +7,7 @@ from statistics import median
 from typing import Any
 
 from bithumb_bot.paths import PathManager
+from bithumb_bot.market_regime import MARKET_REGIME_VERSION, evaluate_regime_acceptance_gate
 
 from .dataset_snapshot import DatasetSnapshot, combined_dataset_fingerprint, load_dataset_range, load_dataset_split
 from .experiment_manifest import DateRange, ExperimentManifest
@@ -154,7 +155,18 @@ def _evaluate_candidates(
                     "train_metrics": train.metrics.as_dict(),
                     "validation_metrics": validation.metrics.as_dict(),
                     "final_holdout_metrics": final_holdout.metrics.as_dict() if final_holdout else None,
+                    "train_regime_performance": [row.as_dict() for row in train.regime_performance],
+                    "train_regime_coverage": [row.as_dict() for row in train.regime_coverage],
+                    "validation_regime_performance": [row.as_dict() for row in validation.regime_performance],
+                    "validation_regime_coverage": [row.as_dict() for row in validation.regime_coverage],
+                    "final_holdout_regime_performance": (
+                        [row.as_dict() for row in final_holdout.regime_performance] if final_holdout else None
+                    ),
+                    "final_holdout_regime_coverage": (
+                        [row.as_dict() for row in final_holdout.regime_coverage] if final_holdout else None
+                    ),
                     "walk_forward_metrics": walk_forward,
+                    "warnings": sorted(set(train.warnings + validation.warnings + ((final_holdout.warnings if final_holdout else ())))),
                 }
             )
         stability = _parameter_stability_scores(
@@ -177,6 +189,10 @@ def _evaluate_candidates(
             if final_holdout_metrics is not None:
                 final_holdout_metrics["parameter_stability_score"] = stability_score
             walk_forward = base["walk_forward_metrics"]
+            regime_gate = evaluate_regime_acceptance_gate(
+                gate=manifest.acceptance_gate.regime_acceptance_gate,
+                performance_rows=tuple(base.get("validation_regime_performance") or ()),
+            )
             gate_result, fail_reasons = _gate_result(
                 manifest=manifest,
                 validation_metrics=validation_metrics,
@@ -184,6 +200,7 @@ def _evaluate_candidates(
                 walk_forward_metrics=walk_forward,
                 stability_score=stability_score,
                 include_walk_forward=include_walk_forward,
+                regime_gate_result=regime_gate.as_dict(),
             )
             cost_model = {
                 "fee_rate": manifest.cost_model.fee_rate,
@@ -202,11 +219,23 @@ def _evaluate_candidates(
                 "validation_metrics": validation_metrics,
                 "final_holdout_metrics": final_holdout_metrics,
                 "walk_forward_metrics": walk_forward,
+                "regime_classifier_version": MARKET_REGIME_VERSION,
+                "market_regime_bucket_performance": base["validation_regime_performance"],
+                "market_regime_coverage": base["validation_regime_coverage"],
+                "train_market_regime_bucket_performance": base["train_regime_performance"],
+                "train_market_regime_coverage": base["train_regime_coverage"],
+                "final_holdout_market_regime_bucket_performance": base["final_holdout_regime_performance"],
+                "final_holdout_market_regime_coverage": base["final_holdout_regime_coverage"],
+                "regime_gate_result": regime_gate.as_dict(),
+                "allowed_live_regimes": list(regime_gate.allowed_live_regimes),
+                "blocked_live_regimes": list(regime_gate.blocked_live_regimes),
+                "regime_evidence": regime_gate.evidence,
                 "walk_forward_required": manifest.acceptance_gate.walk_forward_required,
                 "walk_forward_gate_result": "PASS" if walk_forward and walk_forward["return_consistency_pass"] else None,
                 "parameter_stability": stability_payload,
                 "acceptance_gate_result": gate_result,
                 "gate_fail_reasons": fail_reasons,
+                "warnings": list(base.get("warnings") or ()),
                 "repository_version": _repository_version(),
             }
             profile_hash = sha256_prefixed(build_candidate_profile(candidate_payload))
@@ -223,6 +252,7 @@ def _gate_result(
     walk_forward_metrics: dict[str, Any] | None,
     stability_score: float | None,
     include_walk_forward: bool,
+    regime_gate_result: dict[str, Any] | None = None,
 ) -> tuple[str, list[str]]:
     gate = manifest.acceptance_gate
     reasons: list[str] = []
@@ -244,6 +274,11 @@ def _gate_result(
             reasons.append("walk_forward_missing")
         elif not bool(walk_forward_metrics.get("return_consistency_pass")):
             reasons.append("walk_forward_failed")
+    if gate.regime_acceptance_gate.required:
+        if not isinstance(regime_gate_result, dict):
+            reasons.append("regime_gate_missing")
+        elif regime_gate_result.get("result") != "PASS":
+            reasons.extend(str(reason) for reason in regime_gate_result.get("reasons") or ["regime_gate_failed"])
     return ("PASS" if not reasons else "FAIL", reasons)
 
 
@@ -371,6 +406,21 @@ def _walk_forward_metrics(
                 "test_candle_count": len(test_snapshot.candles),
                 "train_metrics": train.metrics.as_dict(),
                 "test_metrics": test_metrics,
+                "train_market_regime_coverage": [row.as_dict() for row in train.regime_coverage],
+                "test_market_regime_coverage": [row.as_dict() for row in test.regime_coverage],
+                "test_market_regime_bucket_performance": [row.as_dict() for row in test.regime_performance],
+                "trade_count_by_regime": {
+                    str(row.regime): int(row.trade_count)
+                    for row in test.regime_coverage
+                    if row.dimension == "composite_regime"
+                },
+                "candle_count_by_regime": {
+                    str(row.regime): int(row.candle_count)
+                    for row in test.regime_coverage
+                    if row.dimension == "composite_regime"
+                },
+                "worst_regime_profit_factor": _worst_regime_metric(test.regime_performance, "profit_factor"),
+                "worst_regime_net_pnl": _worst_regime_metric(test.regime_performance, "net_pnl"),
                 "gate_result": "PASS" if not pass_reasons else "FAIL",
                 "fail_reasons": pass_reasons,
             }
@@ -393,6 +443,15 @@ def _walk_forward_metrics(
         "failure_reason": failure_reason,
         "windows": windows,
     }
+
+
+def _worst_regime_metric(rows: Any, key: str) -> float | None:
+    values = [
+        getattr(row, key)
+        for row in rows
+        if getattr(row, "dimension", "") == "composite_regime" and getattr(row, key) is not None
+    ]
+    return min(float(value) for value in values) if values else None
 
 
 def _report_payload(
@@ -421,6 +480,18 @@ def _report_payload(
             for snapshot in snapshots
         },
         "strategy_name": manifest.strategy_name,
+        "regime_classifier_version": MARKET_REGIME_VERSION,
+        "regime_acceptance_gate": manifest.acceptance_gate.regime_acceptance_gate.as_dict(),
+        "market_regime_bucket_performance": (
+            best.get("market_regime_bucket_performance") if best else None
+        ),
+        "market_regime_coverage": best.get("market_regime_coverage") if best else None,
+        "walk_forward_regime_coverage": (
+            best.get("walk_forward_metrics", {}).get("windows") if best and isinstance(best.get("walk_forward_metrics"), dict) else None
+        ),
+        "regime_gate_result": best.get("regime_gate_result") if best else None,
+        "allowed_live_regimes": best.get("allowed_live_regimes") if best else None,
+        "blocked_live_regimes": best.get("blocked_live_regimes") if best else None,
         "candidate_count": len(candidates),
         "best_candidate_id": best.get("parameter_candidate_id") if best else None,
         "gate_result": "PASS" if best else "FAIL",

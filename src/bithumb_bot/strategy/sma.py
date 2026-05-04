@@ -7,6 +7,7 @@ from statistics import fmean
 from typing import Any
 
 from ..config import settings
+from ..market_regime import evaluate_live_regime_policy
 from ..dust import (
     NormalizedExposure,
     build_executable_lot,
@@ -890,6 +891,7 @@ class SmaWithFilterStrategy:
     exit_small_loss_tolerance_ratio: float = settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO
     buy_fraction: float = settings.BUY_FRACTION
     max_order_krw: float = settings.MAX_ORDER_KRW
+    candidate_regime_policy: dict[str, object] | None = None
 
     name: str = "sma_with_filter"
 
@@ -1000,19 +1002,42 @@ class SmaWithFilterStrategy:
             and base_signal == "BUY"
             and not market_regime.allows_entry
         )
+        candidate_regime_decision = (
+            evaluate_live_regime_policy(
+                current_snapshot=market_regime.as_dict(),
+                candidate_policy=self.candidate_regime_policy,
+            )
+            if self.candidate_regime_policy is not None
+            else {
+                "allowed": True,
+                "regime_decision": "ON",
+                "regime_block_reason": "no_candidate_regime_policy_configured",
+                "candidate_allowed_regimes": [],
+                "candidate_blocked_regimes": [],
+            }
+        )
+        candidate_regime_triggered = bool(
+            self.candidate_regime_policy is not None
+            and base_signal == "BUY"
+            and not bool(candidate_regime_decision.get("allowed"))
+        )
 
         should_filter_entry = base_signal in ("BUY", "SELL")
         entry_signal = base_signal
         entry_reason = base_reason
-        if should_filter_entry and (blocked_filters or market_regime_triggered):
+        if should_filter_entry and (blocked_filters or market_regime_triggered or candidate_regime_triggered):
             entry_signal = "HOLD"
             entry_reason = (
                 FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON
                 if "fee_authority_degraded" in blocked_filters
                 else (
+                    f"candidate regime blocked: {candidate_regime_decision.get('regime_block_reason')}"
+                    if candidate_regime_triggered
+                    else (
                     f"market regime blocked: {market_regime.block_reason}"
                     if market_regime_triggered
                     else f"filtered entry: {', '.join(blocked_filters)}"
+                    )
                 )
             )
 
@@ -1068,6 +1093,12 @@ class SmaWithFilterStrategy:
                 "base_reason": base_reason,
             },
             "market_regime": market_regime.as_dict(),
+            "current_market_regime_snapshot": market_regime.as_dict(),
+            "candidate_regime_policy": self.candidate_regime_policy,
+            "candidate_allowed_regimes": list(candidate_regime_decision.get("candidate_allowed_regimes") or ()),
+            "candidate_blocked_regimes": list(candidate_regime_decision.get("candidate_blocked_regimes") or ()),
+            "regime_decision": candidate_regime_decision.get("regime_decision"),
+            "regime_block_reason": candidate_regime_decision.get("regime_block_reason"),
             "position_gate": _build_position_gate_context(position_state.normalized_exposure),
             "position_state": _build_position_state_context(position_state),
             "fee_authority": _fee_authority_context(fee_authority),
@@ -1110,9 +1141,10 @@ class SmaWithFilterStrategy:
             },
             "filter_blocked": bool(should_filter_entry and blocked_filters),
             "market_regime_blocked": bool(market_regime_triggered),
+            "candidate_regime_blocked": bool(candidate_regime_triggered),
             "decision_type": (
                 "BLOCKED_ENTRY"
-                if base_signal == "BUY" and (blocked_filters or market_regime_triggered)
+                if base_signal == "BUY" and (blocked_filters or market_regime_triggered or candidate_regime_triggered)
                 else base_signal
             ),
             "blocked_filters": blocked_filters,
@@ -1147,6 +1179,7 @@ class SmaWithFilterStrategy:
             "sma_cost_edge_min_ratio": float(self.cost_edge_min_ratio),
             "entry_edge_buffer_ratio": float(self.entry_edge_buffer_ratio),
             "market_regime_enabled": bool(self.market_regime_enabled),
+            "candidate_regime_policy_configured": bool(self.candidate_regime_policy is not None),
         }
         base_context["replay_fingerprint"] = build_replay_fingerprint(
             strategy_name=self.name,
@@ -1258,6 +1291,7 @@ def create_sma_with_filter_strategy(
     cost_edge_enabled: bool | None = None,
     cost_edge_min_ratio: float | None = None,
     market_regime_enabled: bool | None = None,
+    candidate_regime_policy: dict[str, object] | None = None,
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
     exit_min_take_profit_ratio: float | None = None,
@@ -1319,6 +1353,7 @@ def create_sma_with_filter_strategy(
             if market_regime_enabled is None
             else bool(market_regime_enabled)
         ),
+        candidate_regime_policy=candidate_regime_policy,
         exit_rule_names=(
             _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
             if exit_rule_names is None
