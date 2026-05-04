@@ -1,295 +1,340 @@
-You are working in GitHub repository `WG-14/bithumb-bot`.
+You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The latest `main` appears to have the regime-aware research pipeline and live `sma_with_filter` regime policy gate implemented. Pytest reportedly passes. Do not redo the already implemented regime research/backtest/report/promotion work. Your job is to directly inspect the repo, verify the remaining operational ambiguity, and apply only the minimal structural patch needed to close it.
+Your task is to verify and improve the repository’s research-to-runtime promotion flow so that it becomes a more robust, reproducible, and operable automated trading experiment system. Do not treat the initial diagnosis as proven. Start from the hypotheses below, verify or falsify them directly against the repo, and implement design-level improvements where the code confirms the gap.
 
-Core issue:
+## Core problem statement
 
-> The regime-aware pipeline now appears to work for `sma_with_filter`, but plain `create_sma_strategy()` / `sma_cross` may still be able to produce live BUY decisions without promoted candidate regime policy. If plain SMA is live-operable, this bypasses the regime-policy safety model. If plain SMA is intentionally research/test/demo-only, that must be explicit, tested, and visible in operator docs/config.
+The repository intentionally keeps research separated from live strategy execution. This is good and must be preserved. Do **not** implement automatic propagation from research results into live trading.
 
-Treat this as a hypothesis. Verify it in the repo before changing code.
+The suspected structural issue is different:
 
-## Current state to verify
+> The approved configuration contract between `research → promotion artifact → paper profile → live profile → runtime execution` may not yet be a first-class, fully verifiable artifact chain.
 
-Recent inspection suggests the repo already has:
+The risk is that backtested and promoted candidate values are manually copied into paper/live runtime configuration, creating room for parameter drift, hash mismatch, missing regime policy, wrong market/interval, wrong cost assumptions, or paper/live profile confusion.
 
-```text
-promotion artifact includes live_regime_policy
-candidate profile requires regime policy before promotion
-strategy_config.py loads candidate_regime_policy from STRATEGY_CANDIDATE_PROFILE_PATH
-market_regime.policy has load_candidate_regime_policy_from_path / normalize_live_regime_policy / evaluate_live_regime_policy
-sma_with_filter tests cover missing policy, invalid policy, old artifact, version mismatch, blocked regime, not-allowed regime, allowed regime, and SELL not being blocked
-```
-
-Do not assume this is complete. Confirm directly.
-
-Inspect at least:
+Your goal is to replace fragile manual copying with a verified manual approval flow:
 
 ```text
-src/bithumb_bot/strategy/sma.py
-src/bithumb_bot/strategy_config.py
-src/bithumb_bot/config.py
-src/bithumb_bot/app.py
-src/bithumb_bot/strategy_replay.py
-src/bithumb_bot/market_regime/policy.py
-src/bithumb_bot/research/promotion_gate.py
-tests/test_sma_with_filter_strategy.py
-tests/test_strategy_config.py or equivalent config tests
-.env.example
-docs/
+research registry / reports
+  ↓ evidence only
+promotion artifact
+  ↓ operator review
+approved paper profile
+  ↓ profile/env diff + paper observation
+approved live-dry-run profile
+  ↓ live readiness + explicit arming
+small-live profile
 ```
 
-Search for:
+The fix must **not** weaken existing live safety boundaries, arming checks, ledger/reconciliation protections, SELL authority behavior, or research/live separation.
+
+## Hypotheses to verify or falsify
+
+Treat these as hypotheses, not facts.
+
+### Hypothesis A
+
+There is no complete approved diff/apply contract between research promotion artifacts and paper/live runtime configuration.
+
+Verify whether the repo already has a mechanism that compares promotion/candidate profile values against the actual runtime strategy settings, including:
+
+* strategy name
+* market
+* interval
+* all strategy parameters
+* cost model / fee / slippage assumptions
+* manifest hash
+* dataset content hash
+* candidate profile hash
+* regime policy presence and validity
+* profile mode compatibility: paper vs live
+
+Falsify this hypothesis if startup/preflight already reads the promoted artifact/profile, recomputes relevant hashes, compares the complete runtime configuration, and fails closed on mismatch with tests.
+
+### Hypothesis B
+
+Runtime strategy parameter authority may still be env-centered, while the promotion artifact is only evidence.
+
+Check whether env variables such as `STRATEGY_NAME`, `SMA_SHORT`, `SMA_LONG`, `SMA_FILTER_*`, `SMA_COST_EDGE_*`, `ENTRY_EDGE_BUFFER_RATIO`, `STRATEGY_MIN_EXPECTED_EDGE_RATIO`, and `STRATEGY_EXIT_*` can diverge from the promoted candidate/profile without startup failure or BUY fail-closed behavior.
+
+Falsify this if the existing profile loader already makes the approved profile the authoritative source for runtime strategy construction and prevents mismatching env overrides.
+
+### Hypothesis C
+
+The research/live separation is intentional and correct, but the manual approval lifecycle lacks explicit state objects and transition rules.
+
+Check whether the following are represented as distinct schemas/artifacts with enforced transitions:
+
+* research candidate
+* promotion artifact
+* approved paper profile
+* paper observation/validation report
+* approved live-dry-run profile
+* live readiness report
+* small-live/live-armed profile
+
+Falsify this if the repo already has enforced schemas and CLI flows for these transitions.
+
+### Hypothesis D
+
+Regime policy may have started moving toward a fail-closed runtime gate, but the same pattern may not yet cover the full candidate/profile contract.
+
+Check whether missing/invalid regime policy is blocked in live/replay BUY entry paths, and then verify whether the same level of verification exists for the rest of the promoted candidate contract.
+
+Falsify this if all promoted candidate fields, not only regime policy, are already verified before paper/live runtime execution.
+
+## Required design direction
+
+Prioritize structural prevention over small patches.
+
+Implement a verified manual approval flow, not automatic live updates.
+
+### 1. Add or strengthen an approved profile schema
+
+Introduce or extend an immutable approved profile artifact that can represent at least:
+
+* profile schema version
+* profile mode: `paper`, `live_dry_run`, `small_live`, or equivalent existing terminology
+* source promotion artifact path or source id
+* source promotion content hash
+* candidate profile hash
+* manifest hash
+* dataset content hash
+* repository version / commit
+* strategy name
+* market
+* interval
+* strategy parameter values
+* cost model / fee / slippage assumptions
+* regime policy, including classifier/version compatibility where available
+* generated_at for operator context
+* parent profile hash, if promoted from a previous profile
+* profile content hash
+
+Follow the repo’s existing deterministic hashing conventions. If existing research reports exclude `generated_at` from deterministic `content_hash`, keep that principle for approved profiles as well.
+
+### 2. Add CLI support for profile generation, diff, and verification
+
+Add commands using the repo’s existing CLI style. Names can be adjusted to match the codebase, but the functionality must exist.
+
+Target commands:
+
+```bash
+uv run bithumb-bot profile-generate \
+  --promotion DATA_ROOT/paper/reports/research/<experiment>/promotion_<candidate>.json \
+  --mode paper \
+  --out DATA_ROOT/paper/profiles/<profile_id>.json
+```
+
+```bash
+uv run bithumb-bot profile-diff \
+  --profile DATA_ROOT/paper/profiles/<profile_id>.json \
+  --target-env BITHUMB_ENV_FILE_PAPER
+```
+
+```bash
+uv run bithumb-bot profile-verify \
+  --profile DATA_ROOT/paper/profiles/<profile_id>.json \
+  --env BITHUMB_ENV_FILE_PAPER
+```
+
+Requirements:
+
+* `profile-generate` must not modify `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
+* `profile-diff` must emit both operator-readable output and machine-readable JSON, if the repo has an established JSON output convention.
+* `profile-verify` must fail non-zero on hash mismatch, schema mismatch, missing required fields, profile mode mismatch, or strategy/runtime-relevant env mismatch.
+* The CLI must be safe to run in CI without exchange credentials.
+
+### 3. Make the approved profile the runtime verification anchor
+
+Do not necessarily remove existing env support immediately, but change the model so env selects an approved profile rather than silently becoming the strategy parameter authority.
+
+At runtime/preflight, when a strategy candidate/profile path is configured:
+
+* load the approved profile or promotion artifact
+* validate schema
+* recompute content/profile hashes
+* compare runtime strategy settings against profile values
+* verify market and interval
+* verify cost model assumptions
+* verify regime policy presence and compatibility where applicable
+* record profile hash, promotion hash, manifest hash, and dataset hash in startup audit/decision telemetry
+* fail closed on live armed mismatch
+
+For live armed mode:
+
+* missing approved live-compatible profile must prevent live BUY submission
+* profile/env mismatch must fail startup or fail closed before BUY submission
+* paper profile must not be accepted as a live armed profile unless an explicit promotion step exists and records parent hash
+* invalid or missing regime policy must fail closed for BUY
+* SELL/exit authority must not be blocked solely because candidate regime policy is missing or invalid, unless existing repo safety rules already require that
+
+For paper/replay mode:
+
+* prefer the same verification path for reproducibility
+* if the repo intentionally allows warnings instead of hard failure, document that policy and ensure mismatch appears in decision context/audit output
+
+### 4. Add transition rules instead of direct auto-apply
+
+Implement explicit state transitions where missing.
+
+Examples:
 
 ```text
-create_sma_strategy
-create_sma_with_filter_strategy
-sma_cross
-sma_with_filter
-STRATEGY_NAME
-STRATEGY_CANDIDATE_PROFILE_PATH
-candidate_regime_policy
-regime_policy_missing
-regime_decision
-current_market_regime_snapshot
+promotion artifact → approved paper profile
+approved paper profile + paper validation evidence → live-dry-run profile
+live-dry-run profile + live readiness evidence → small-live profile
 ```
 
-## Primary hypothesis
+Each transition should:
 
-### Hypothesis A: plain `sma_cross` can still be selected for live operation and bypass candidate regime policy
+* preserve parent hash
+* recompute child profile hash
+* verify parent schema and mode
+* reject mode skipping unless explicitly allowed by existing runbook policy
+* require paper validation evidence before live profile creation, if compatible with current repo design
+* produce an operator-reviewable artifact
 
-The live app may construct strategies through settings such as `STRATEGY_NAME`, `SMA_*`, or factory functions. If plain `create_sma_strategy()` is selectable in live mode and does not require `candidate_regime_policy`, then regime-aware promotion is not a complete live safety boundary.
+Do not automatically arm live trading.
 
-Verify:
+## Required tests
 
-```text
-1. Which strategy factory does the live app use by default?
-2. Can config select plain sma_cross in live mode?
-3. Does plain sma_cross call evaluate_live_regime_policy?
-4. Does plain sma_cross fail closed when STRATEGY_CANDIDATE_PROFILE_PATH is missing?
-5. Are docs/env examples explicit that live regime gating requires sma_with_filter?
-6. Are tests proving that plain SMA cannot bypass live regime policy, or that it is intentionally non-live?
-```
+Add unit/integration tests consistent with the repo’s test style. At minimum, cover:
 
-Possible outcomes:
+1. Tampering with `candidate_profile_hash` causes profile generation or verification to fail.
+2. Promotion artifact with mismatched backtest/walk-forward parameter values is rejected, if this path exists.
+3. `profile-diff` detects env drift, e.g. profile has one `SMA_SHORT` and env has another.
+4. `profile-verify` exits/fails on strategy parameter mismatch.
+5. Live armed startup or BUY preflight fails closed when approved profile is missing.
+6. Live armed startup or BUY preflight fails closed when profile/env mismatch exists.
+7. Missing or invalid regime policy fails closed for BUY where the repo’s policy requires it.
+8. SELL/exit behavior is not blocked solely by candidate regime policy failure.
+9. Paper profile cannot be used directly as a live armed profile without explicit promotion.
+10. Live profile creation requires paper validation evidence or an explicit documented exception.
+11. Startup audit or decision telemetry includes profile hash, promotion hash, manifest hash, and dataset hash.
+12. Existing live preflight, arming, run lock, reconciliation, duplicate order, ledger, and storage-root safety tests still pass.
 
-```text
-A1. plain sma_cross is not live-selectable:
-    Add or update tests/docs proving that.
+Also add regression tests for old artifacts if the repo supports historical artifact formats:
 
-A2. plain sma_cross is live-selectable but intentionally unsafe/dev-only:
-    Make that impossible in live mode, or require an explicit dangerous override with loud docs/tests.
-
-A3. plain sma_cross is live-selectable and should be allowed:
-    Wire candidate regime policy into plain sma_cross too, preserving SELL behavior.
-
-A4. live always uses sma_with_filter:
-    Add tests and docs proving this invariant, especially around settings parsing and factory selection.
-```
-
-Do not leave this ambiguous.
-
-## Required design principle
-
-Regime-aware promotion must be a live safety boundary, not just an optional strategy feature.
-
-If a strategy can submit or intend a live BUY, it must either:
-
-```text
-1. enforce promoted candidate regime policy fail-closed, or
-2. be structurally impossible to use in live trading, with tests and docs proving that.
-```
-
-Do not silently allow old behavior because tests are green.
-
-## Implementation requirements if Hypothesis A is supported
-
-Choose the smallest correct fix based on what the repo reveals.
-
-### Option 1: Make plain `sma_cross` non-live
-
-If plain SMA is intended only for tests, replay, or development, enforce that.
-
-Add a guard in the live strategy construction path such as:
-
-```text
-if MODE == "live" and STRATEGY_NAME == "sma_cross":
-    fail startup or force HOLD with reason plain_sma_live_not_allowed
-```
-
-Prefer failing at startup/config validation over silently changing strategy behavior.
-
-Add tests for:
-
-```text
-live mode refuses plain sma_cross
-paper/dry-run behavior is explicit
-docs explain sma_with_filter is required for promoted regime-gated live operation
-```
-
-### Option 2: Wire regime policy into plain SMA too
-
-If plain SMA is still a valid live strategy, it must enforce the same candidate regime policy on new BUY entries.
-
-Implement:
-
-```text
-SmaCrossStrategy has candidate_regime_policy field
-SmaCrossStrategy.from_config passes config.candidate_regime_policy
-create_sma_strategy accepts candidate_regime_policy or loads from config path consistently
-BUY decision evaluates current_market_regime_snapshot + candidate policy
-missing/invalid policy fails closed
-current regime not allowed fails closed
-current regime blocked fails closed
-version mismatch fails closed
-SELL/exit is not blocked
-decision context includes the same observability fields as sma_with_filter
-```
-
-Do not duplicate policy logic unnecessarily. Reuse `evaluate_live_regime_policy`.
-
-### Option 3: Prove live factory always selects `sma_with_filter`
-
-If app config already guarantees `sma_with_filter`, add tests and docs so this cannot regress.
-
-Tests should cover:
-
-```text
-live app strategy factory defaults to sma_with_filter
-STRATEGY_NAME=sma_cross is rejected in live mode, or impossible
-STRATEGY_CANDIDATE_PROFILE_PATH is required for live sma_with_filter
-missing candidate profile leads to fail-closed BUY behavior
-```
-
-## Recovery and compatibility behavior
-
-Old candidate artifacts without regime policy must remain rejected for promotion and fail closed for live/replay entry use.
-
-Plain SMA compatibility must be explicit:
-
-```text
-research/test use: allowed if intentional
-live use: either impossible or regime-gated
-```
-
-No missing-policy path should mean “allow BUY.”
+* old artifact missing regime policy
+* old artifact missing profile hash
+* old artifact with `generated_at` changed but deterministic hash unchanged
+* corrupted artifact content hash
 
 ## Observability requirements
 
-If any new guard or policy wiring is added, decision context or startup/config error must be specific.
+Add or strengthen audit/telemetry output so an operator can answer:
 
-Use reasons like:
+* Which approved profile is the runtime using?
+* Which promotion artifact produced it?
+* Which candidate profile hash is active?
+* Which manifest hash and dataset content hash are active?
+* Which strategy parameters are active?
+* Did runtime env match the approved profile?
+* If not, which fields differ?
+* Was BUY blocked because of profile mismatch, mode mismatch, hash mismatch, missing regime policy, or another reason?
 
-```text
-plain_sma_live_not_allowed
-regime_policy_missing
-regime_policy_unreadable
-regime_policy_invalid_json
-regime_policy_missing_allowed_regimes
-regime_policy_version_mismatch
-current_regime_not_in_candidate_allowed_regimes
-current_regime_in_candidate_blocked_regimes
-```
+Use the repo’s existing logging and decision-context conventions. Avoid leaking secrets.
 
-For any BUY blocked by regime policy, context should include:
+## Recovery and rollback requirements
 
-```text
-current_market_regime_snapshot
-current_regime
-current_regime_classifier_version
-candidate_regime_classifier_version
-candidate_allowed_regimes
-candidate_blocked_regimes
-regime_decision
-regime_block_reason
-regime_policy_source
-regime_policy_present
-regime_policy_valid
-```
+Provide a safe recovery path:
 
-If the fix is startup rejection instead of decision-time blocking, the error message must name the selected strategy and explain the safe alternative.
+* If profile verification fails, runtime must stop before live BUY or enter existing safe no-buy mode.
+* Operators must be able to revert to the previous approved profile by changing only the profile path or equivalent non-secret selector.
+* Failed profile generation must leave no partial approved artifact, or must write atomically.
+* CLI errors must be deterministic and machine-readable enough for CI.
+* The implementation must not mutate live env files automatically.
 
-## Documentation/config requirements
+## Scope constraints
 
-Check and update `.env.example` and docs if needed.
+Do not:
 
-At minimum, document:
+* connect the research registry directly to live execution
+* auto-copy research parameters into live env files
+* auto-arm live trading
+* weaken live arming checks
+* weaken DB/storage-root isolation
+* weaken lot-native SELL authority or ledger/reconciliation protections
+* require exchange credentials for profile diff/generation/verification tests
+* introduce nondeterministic hashes that include timestamps unless explicitly separated from content hash
 
-```text
-STRATEGY_CANDIDATE_PROFILE_PATH
-required role of promotion artifact / candidate profile
-missing/invalid policy fails closed
-which strategy is safe for live regime-gated operation
-whether plain sma_cross is non-live, test-only, or also regime-gated
-```
+Do:
 
-Use repo style. Do not add vague trading advice.
+* preserve the research/live separation
+* make promotion artifacts and approved profiles first-class verification anchors
+* prefer fail-closed behavior for live armed paths
+* keep paper/replay reproducible
+* update docs/runbooks to describe the new workflow exactly
 
-## Testing requirements
+## Suggested implementation order
 
-Run or add tests depending on the chosen fix.
-
-At minimum, add tests for the primary ambiguity:
-
-```text
-1. live config cannot select plain sma_cross without regime policy, OR plain sma_cross enforces regime policy.
-2. missing STRATEGY_CANDIDATE_PROFILE_PATH cannot silently allow a live BUY through any live-selectable SMA path.
-3. allowed candidate policy permits BUY only when all other gates pass.
-4. blocked/not-allowed/version-mismatch policy blocks BUY.
-5. SELL/exit is not blocked by entry regime policy.
-6. operator context or startup error includes the exact reason.
-7. .env.example/docs mention STRATEGY_CANDIDATE_PROFILE_PATH and live strategy safety policy.
-```
-
-Also rerun the existing regime tests:
-
-```bash
-pytest tests/test_sma_with_filter_strategy.py tests/test_market_regime.py tests/test_research_promotion_gate.py
-```
-
-Then run:
-
-```bash
-pytest
-```
-
-If full pytest fails for unrelated pre-existing reasons, report the narrow tests and the full-suite failure separately.
-
-## Secondary checks
-
-Do these only after the primary ambiguity is closed.
-
-### Secondary B: `.env.example` completeness
-
-Verify `STRATEGY_CANDIDATE_PROFILE_PATH` exists and explains fail-closed behavior.
-
-### Secondary C: policy loader observability
-
-Verify unreadable/invalid policy path errors appear in either decision context or startup logs.
-
-### Secondary D: research/live rule alignment
-
-Confirm docs or tests state whether research backtest uses regime as attribution/gate evidence while live uses it as entry policy. Do not change this unless there is a direct inconsistency.
+1. Inventory existing research promotion, candidate profile, strategy config, env parsing, runtime preflight, regime policy, and live BUY/SELL paths.
+2. Write down which hypotheses are confirmed or falsified by code.
+3. Add approved profile schema and deterministic hashing utilities, reusing existing research hash conventions.
+4. Add `profile-generate`.
+5. Add `profile-diff`.
+6. Add `profile-verify`.
+7. Wire runtime/preflight to verify approved profile against actual runtime config.
+8. Add live armed fail-closed behavior for missing/mismatched profile.
+9. Add observability/audit fields.
+10. Add tests and regression fixtures.
+11. Update docs/runbooks.
+12. Run the full relevant test suite.
 
 ## Final report format
 
-When finished, report in this exact structure:
+When finished, produce a concise final report with these sections:
 
-```text
-1. Summary
-2. What I verified before changing code
-3. Hypotheses
-   - Hypothesis A: supported / refuted / partially supported / still unknown
-   - Secondary B/C/D: supported / refuted / partially supported / still unknown, if inspected
-4. Files changed
-5. Design decision
-   - Plain SMA non-live, plain SMA regime-gated, or live factory always sma_with_filter
-6. Live/replay regime safety behavior
-7. Recovery and compatibility behavior
-8. Observability behavior
-9. Documentation/config updates
-10. Tests added or changed
-11. Tests run and results
-12. Remaining risks or follow-up work
+```markdown
+## Summary
+
+## Hypotheses Verified / Falsified
+
+For each hypothesis:
+- status: verified, falsified, partially verified, or inconclusive
+- evidence from repo
+- implemented change or reason no change was needed
+
+## Design Changes
+
+## Runtime Safety Behavior
+
+Explain exact behavior for:
+- paper
+- replay
+- live dry run
+- live armed / small live
+
+## CLI Added or Changed
+
+Include example commands and expected exit behavior.
+
+## Tests Added
+
+List test files and what each verifies.
+
+## Observability / Audit Fields
+
+List fields added to logs, decision context, reports, or startup audit output.
+
+## Recovery / Rollback
+
+Explain how an operator recovers from failed verification or rolls back to a previous approved profile.
+
+## Backward Compatibility
+
+Explain old artifact/profile behavior.
+
+## Risks and Follow-ups
+
+Include remaining risks, intentionally deferred work, and any hypothesis that could not be conclusively verified.
+
+## Validation
+
+Include exact commands run and results.
 ```
 
-Be precise. Do not claim the strategy is profitable or “safe” financially. The goal is to ensure every live-operable SMA BUY path is structurally regime-policy-aware, fail-closed, reproducible, and auditable.
+Focus on making the system more robust, reproducible, and operable. The success criterion is not “research automatically updates live.” The success criterion is:
+
+> A human can manually approve promotion from research to paper/live, while the system cryptographically and semantically verifies that runtime execution matches the approved artifact chain, fails closed on dangerous drift, and leaves enough audit evidence to reproduce what happened.

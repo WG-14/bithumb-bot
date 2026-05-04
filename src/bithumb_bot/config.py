@@ -23,6 +23,12 @@ from .markets import (
 from .market_catalog_snapshot import record_market_catalog_snapshot
 from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError, validate_runtime_root_separation
+from .approved_profile import (
+    LIVE_COMPATIBLE_PROFILE_MODES,
+    approved_profile_path_from_env,
+    runtime_contract_from_settings,
+    verify_profile_against_runtime,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -486,6 +492,7 @@ class Settings:
     STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO: float = float(
         os.getenv("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO", "0")
     )
+    APPROVED_STRATEGY_PROFILE_PATH: str = approved_profile_path_from_env()
     STRATEGY_CANDIDATE_PROFILE_PATH: str = os.getenv("STRATEGY_CANDIDATE_PROFILE_PATH", "").strip()
     LIVE_PERFORMANCE_GATE_ENABLED: bool = parse_bool_env("LIVE_PERFORMANCE_GATE_ENABLED", "true")
     LIVE_PERFORMANCE_GATE_MIN_SAMPLE: int = int(os.getenv("LIVE_PERFORMANCE_GATE_MIN_SAMPLE", "30"))
@@ -1098,6 +1105,23 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         except MarketPreflightValidationError as exc:
             issues.append(str(exc))
 
+    if not issues:
+        profile_required = bool(not cfg.LIVE_DRY_RUN and cfg.LIVE_REAL_ORDER_ARMED)
+        configured_profile_path = str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+        if profile_required or configured_profile_path:
+            expected_profile_modes = {"small_live"} if profile_required else set(LIVE_COMPATIBLE_PROFILE_MODES)
+            profile_result = verify_profile_against_runtime(
+                profile_path=configured_profile_path,
+                runtime=runtime_contract_from_settings(cfg),
+                require_profile=profile_required,
+                expected_profile_modes=expected_profile_modes,
+            )
+            if not profile_result.ok:
+                issues.append(
+                    "approved profile verification failed: "
+                    f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
+                )
+
     if issues:
         raise LiveModeValidationError(
             "live mode preflight validation failed: " + "; ".join(issues)
@@ -1202,6 +1226,12 @@ def live_execution_contract_summary(
         "RUN_LOCK_PATH": str(os.getenv("RUN_LOCK_PATH") or cfg.RUN_LOCK_PATH or ""),
     }
     explicit_env = dict(env_summary or {})
+    profile_result = verify_profile_against_runtime(
+        profile_path=str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip(),
+        runtime=runtime_contract_from_settings(cfg),
+        require_profile=False,
+        expected_profile_modes=None,
+    )
     return {
         "mode": cfg.MODE,
         "pair": cfg.PAIR,
@@ -1217,6 +1247,7 @@ def live_execution_contract_summary(
         "api_secret_present": bool(str(cfg.BITHUMB_API_SECRET or "").strip()),
         "api_secret_length": len(str(cfg.BITHUMB_API_SECRET or "")),
         "code_provenance": runtime_code_provenance(),
+        "approved_profile": profile_result.audit_fields(),
         "explicit_env": explicit_env,
         "managed_roots": managed_roots,
         "runtime_paths": runtime_paths,
@@ -1243,6 +1274,7 @@ def log_live_execution_contract(
     paths = summary.get("runtime_paths") if isinstance(summary.get("runtime_paths"), dict) else {}
     explicit_env = summary.get("explicit_env") if isinstance(summary.get("explicit_env"), dict) else {}
     code_provenance = summary.get("code_provenance") if isinstance(summary.get("code_provenance"), dict) else {}
+    approved_profile = summary.get("approved_profile") if isinstance(summary.get("approved_profile"), dict) else {}
     logging.getLogger("bithumb_bot.run").info(
         format_log_kv(
             "[LIVE_EXECUTION_CONTRACT]",
@@ -1262,6 +1294,15 @@ def log_live_execution_contract(
             code_commit_sha=code_provenance.get("commit_sha"),
             code_working_tree_dirty=code_provenance.get("working_tree_dirty"),
             code_provenance_source=code_provenance.get("source"),
+            approved_profile_path=approved_profile.get("approved_profile_path"),
+            approved_profile_hash=approved_profile.get("approved_profile_hash"),
+            approved_profile_mode=approved_profile.get("approved_profile_mode"),
+            approved_profile_verification_ok=approved_profile.get("approved_profile_verification_ok"),
+            approved_profile_block_reason=approved_profile.get("approved_profile_block_reason"),
+            promotion_content_hash=approved_profile.get("promotion_content_hash"),
+            candidate_profile_hash=approved_profile.get("candidate_profile_hash"),
+            manifest_hash=approved_profile.get("manifest_hash"),
+            dataset_content_hash=approved_profile.get("dataset_content_hash"),
             env_source_key=explicit_env.get("source_key"),
             env_file=explicit_env.get("env_file"),
             env_loaded=explicit_env.get("loaded"),

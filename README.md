@@ -96,6 +96,9 @@ uv run bithumb-bot strategy-report
 uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
 uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter_manifest.example.json
 uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id>
+uv run bithumb-bot profile-generate --promotion <promotion.json> --mode paper --out <profile.json>
+uv run bithumb-bot profile-diff --profile <profile.json> --target-env <env-file> --json
+uv run bithumb-bot profile-verify --profile <profile.json> --env <env-file>
 uv run bithumb-bot config-dump --masked
 uv run bithumb-bot live-dry-run --short 7 --long 30
 uv run bithumb-bot cash-drift-report --recent-limit 5
@@ -174,7 +177,7 @@ Expected artifact placement:
 
 - Real-order flow requires explicit arming.
 - Live SMA operation uses `sma_with_filter`; `MODE=live` rejects plain `sma_cross` with `plain_sma_live_not_allowed`.
-- Set `STRATEGY_CANDIDATE_PROFILE_PATH` to a reviewed promoted candidate profile before paper or live-dry-run validation. Missing, unreadable, invalid, or version-mismatched candidate regime policy fails closed for new BUY entries.
+- Set `APPROVED_STRATEGY_PROFILE_PATH` to a reviewed approved profile before paper or live-dry-run validation. Live armed execution fails closed unless it points to a `small_live` approved profile whose strategy, market, interval, parameter, cost, promotion hash, candidate profile hash, manifest hash, dataset hash, and regime policy contract matches runtime settings. Legacy `STRATEGY_CANDIDATE_PROFILE_PATH` remains a regime-policy compatibility selector only; it is not sufficient for live armed approval.
 - `LIVE_DRY_RUN=true` is the safe starting point for live bring-up and post-change validation.
 - `LIVE_REAL_ORDER_ARMED=true` is required before real orders are allowed.
 - Live preflight must fail fast when required limits, notifier configuration, or safety inputs are missing.

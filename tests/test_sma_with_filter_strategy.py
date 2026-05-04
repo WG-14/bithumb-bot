@@ -201,6 +201,31 @@ def test_market_regime_allows_trend_entry_and_records_replay_fingerprint() -> No
     assert replay["fee_authority_source"]
 
 
+def test_decision_context_includes_approved_profile_audit_fields() -> None:
+    policy = {
+        "live_regime_policy": _allowing_policy(),
+        "strategy_profile_hash": "sha256:profile",
+        "source_promotion_content_hash": "sha256:promotion",
+        "candidate_profile_hash": "sha256:candidate",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+    }
+    original = settings.APPROVED_STRATEGY_PROFILE_PATH
+    try:
+        object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "/runtime/profiles/small_live.json")
+        decision = _buy_decision_with_policy(policy)
+    finally:
+        object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", original)
+
+    assert decision is not None
+    assert decision.context["approved_profile_hash"] == "sha256:profile"
+    assert decision.context["approved_profile_path"] == "/runtime/profiles/small_live.json"
+    assert decision.context["promotion_content_hash"] == "sha256:promotion"
+    assert decision.context["candidate_profile_hash"] == "sha256:candidate"
+    assert decision.context["manifest_hash"] == "sha256:manifest"
+    assert decision.context["dataset_content_hash"] == "sha256:dataset"
+
+
 def test_replay_fingerprint_preserves_distinct_through_ts_ms() -> None:
     conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
     last_candle_ts = 1_700_000_000_000 + 4 * 60_000

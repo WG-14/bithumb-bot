@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from .approved_profile import load_profile_or_promotion_regime_policy
 from .config import settings
-from .market_regime import load_candidate_regime_policy_from_path
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,10 @@ def sma_strategy_config_from_settings(
     short_n: int | None = None,
     long_n: int | None = None,
 ) -> SmaStrategyConfig:
+    profile_or_candidate_path = (
+        str(settings.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
+        or str(settings.STRATEGY_CANDIDATE_PROFILE_PATH or "").strip()
+    )
     return SmaStrategyConfig(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
         long_n=int(settings.SMA_LONG if long_n is None else long_n),
@@ -54,7 +58,5 @@ def sma_strategy_config_from_settings(
         strategy_min_expected_edge_ratio=float(settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO),
         buy_fraction=float(settings.BUY_FRACTION),
         max_order_krw=float(settings.MAX_ORDER_KRW),
-        candidate_regime_policy=load_candidate_regime_policy_from_path(
-            settings.STRATEGY_CANDIDATE_PROFILE_PATH
-        ),
+        candidate_regime_policy=load_profile_or_promotion_regime_policy(profile_or_candidate_path),
     )

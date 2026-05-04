@@ -471,6 +471,8 @@ def _report_payload(
         "manifest_hash": manifest.manifest_hash(),
         "dataset_snapshot_id": manifest.dataset.snapshot_id,
         "dataset_content_hash": combined_dataset_fingerprint(snapshots),
+        "market": manifest.market,
+        "interval": manifest.interval,
         "dataset_splits": {
             snapshot.split_name: {
                 "date_range": snapshot.date_range.as_dict(),

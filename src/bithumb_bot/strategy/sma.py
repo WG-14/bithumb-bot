@@ -1057,6 +1057,32 @@ class SmaWithFilterStrategy:
             "ts": ts_list[-1],
             "last_close": float(closes[-1]),
             "strategy": self.name,
+            "approved_profile_hash": (
+                self.candidate_regime_policy.get("strategy_profile_hash")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "approved_profile_path": settings.APPROVED_STRATEGY_PROFILE_PATH or None,
+            "promotion_content_hash": (
+                self.candidate_regime_policy.get("source_promotion_content_hash")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "candidate_profile_hash": (
+                self.candidate_regime_policy.get("candidate_profile_hash")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "manifest_hash": (
+                self.candidate_regime_policy.get("manifest_hash")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
+            "dataset_content_hash": (
+                self.candidate_regime_policy.get("dataset_content_hash")
+                if isinstance(self.candidate_regime_policy, dict)
+                else None
+            ),
             "base_signal": base_signal,
             "base_reason": base_reason,
             "entry_signal": entry_signal,

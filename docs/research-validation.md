@@ -108,7 +108,57 @@ If walk-forward is not required, the promotion artifact explicitly records `walk
 
 Promotion writes an operator-reviewable artifact only after these checks pass. It does not edit `.env`, `BITHUMB_ENV_FILE_LIVE`, `BITHUMB_ENV_FILE_PAPER`, or live secrets.
 
-The operator next step is review. Copying values into paper runtime env/profile remains an explicit human action after validation evidence is accepted. Promotion evidence does not imply live readiness.
+The operator next step is review. Promotion evidence does not imply live readiness and does not edit env files or secrets.
+
+## Approved Profiles
+
+Approved profiles are the manual approval contract between research evidence and runtime configuration. They are operator-reviewable `reports` artifacts and are written atomically. The deterministic `profile_content_hash` excludes `generated_at`, matching the research report hashing convention.
+
+Generate a paper profile from a reviewed promotion artifact:
+
+```bash
+uv run bithumb-bot profile-generate \
+  --promotion "$DATA_ROOT/paper/reports/research/<experiment>/promotion_<candidate>.json" \
+  --mode paper \
+  --out "$DATA_ROOT/paper/reports/profiles/<profile_id>.json"
+```
+
+Old promotion artifacts that predate embedded `market` or `interval` must be generated with explicit `--market` and `--interval`; missing values fail closed.
+
+Compare and verify the profile against the intended env file before running:
+
+```bash
+uv run bithumb-bot profile-diff \
+  --profile "$DATA_ROOT/paper/reports/profiles/<profile_id>.json" \
+  --target-env "$BITHUMB_ENV_FILE_PAPER" \
+  --json
+
+uv run bithumb-bot profile-verify \
+  --profile "$DATA_ROOT/paper/reports/profiles/<profile_id>.json" \
+  --env "$BITHUMB_ENV_FILE_PAPER"
+```
+
+Both commands are credential-free. `profile-verify` exits non-zero on schema errors, hash mismatch, mode mismatch, missing required fields, strategy parameter drift, market/interval drift, or cost model drift.
+
+Promotion between runtime approval states is explicit:
+
+```bash
+uv run bithumb-bot profile-promote \
+  --profile "$DATA_ROOT/paper/reports/profiles/<paper_profile>.json" \
+  --mode live_dry_run \
+  --paper-validation-evidence "$DATA_ROOT/paper/reports/<paper_validation>.json" \
+  --out "$DATA_ROOT/live/reports/profiles/<live_dry_run_profile>.json"
+
+uv run bithumb-bot profile-promote \
+  --profile "$DATA_ROOT/live/reports/profiles/<live_dry_run_profile>.json" \
+  --mode small_live \
+  --live-readiness-evidence "$DATA_ROOT/live/reports/<live_readiness>.json" \
+  --out "$DATA_ROOT/live/reports/profiles/<small_live_profile>.json"
+```
+
+Each transition verifies the parent profile, records `parent_profile_hash`, and refuses mode skipping. Live armed execution accepts only a `small_live` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`.
+
+Runtime still keeps research separated from live execution: profiles verify approved values; they do not auto-apply values to env files and do not arm live trading.
 
 ## Current Scope
 

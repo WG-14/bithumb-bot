@@ -6,8 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from bithumb_bot.approved_profile import build_approved_profile
 from bithumb_bot import config
 from bithumb_bot.config import settings
+from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
+from bithumb_bot.research.promotion_gate import build_candidate_profile
+from bithumb_bot.storage_io import write_json_atomic
 from bithumb_bot.broker import order_rules
 from bithumb_bot.markets import MarketInfo, MarketRegistry
 
@@ -45,6 +49,25 @@ def _restore_settings():
         "MARKET_PREFLIGHT_WARNING_STATES": settings.MARKET_PREFLIGHT_WARNING_STATES,
         "MARKET_REGISTRY_CACHE_TTL_SEC": settings.MARKET_REGISTRY_CACHE_TTL_SEC,
         "MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH": settings.MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH,
+        "APPROVED_STRATEGY_PROFILE_PATH": settings.APPROVED_STRATEGY_PROFILE_PATH,
+        "STRATEGY_NAME": settings.STRATEGY_NAME,
+        "SMA_SHORT": settings.SMA_SHORT,
+        "SMA_LONG": settings.SMA_LONG,
+        "SMA_FILTER_GAP_MIN_RATIO": settings.SMA_FILTER_GAP_MIN_RATIO,
+        "SMA_FILTER_VOL_WINDOW": settings.SMA_FILTER_VOL_WINDOW,
+        "SMA_FILTER_VOL_MIN_RANGE_RATIO": settings.SMA_FILTER_VOL_MIN_RANGE_RATIO,
+        "SMA_FILTER_OVEREXT_LOOKBACK": settings.SMA_FILTER_OVEREXT_LOOKBACK,
+        "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO,
+        "SMA_COST_EDGE_ENABLED": settings.SMA_COST_EDGE_ENABLED,
+        "SMA_COST_EDGE_MIN_RATIO": settings.SMA_COST_EDGE_MIN_RATIO,
+        "ENTRY_EDGE_BUFFER_RATIO": settings.ENTRY_EDGE_BUFFER_RATIO,
+        "STRATEGY_MIN_EXPECTED_EDGE_RATIO": settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO,
+        "STRATEGY_EXIT_RULES": settings.STRATEGY_EXIT_RULES,
+        "STRATEGY_EXIT_MAX_HOLDING_MIN": settings.STRATEGY_EXIT_MAX_HOLDING_MIN,
+        "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO,
+        "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO,
+        "LIVE_FEE_RATE_ESTIMATE": settings.LIVE_FEE_RATE_ESTIMATE,
+        "STRATEGY_ENTRY_SLIPPAGE_BPS": settings.STRATEGY_ENTRY_SLIPPAGE_BPS,
     }
     old_cache = dict(order_rules._cached_rules)
     yield
@@ -128,6 +151,7 @@ def _set_valid_live_defaults(
     object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", False)
     object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 100000.0)
     object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "STRATEGY_NAME", "sma_with_filter")
     object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", False)
     object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_WARNING", False)
     object.__setattr__(settings, "MARKET_PREFLIGHT_WARNING_STATES", "CAUTION")
@@ -170,6 +194,84 @@ def _set_valid_live_defaults(
                 },
             ),
         )
+    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="small_live")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+
+
+def _candidate_profile_for_current_settings() -> dict[str, object]:
+    return {
+        "SMA_SHORT": int(settings.SMA_SHORT),
+        "SMA_LONG": int(settings.SMA_LONG),
+        "SMA_FILTER_GAP_MIN_RATIO": float(settings.SMA_FILTER_GAP_MIN_RATIO),
+        "SMA_FILTER_VOL_WINDOW": int(settings.SMA_FILTER_VOL_WINDOW),
+        "SMA_FILTER_VOL_MIN_RANGE_RATIO": float(settings.SMA_FILTER_VOL_MIN_RANGE_RATIO),
+        "SMA_FILTER_OVEREXT_LOOKBACK": int(settings.SMA_FILTER_OVEREXT_LOOKBACK),
+        "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": float(settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO),
+        "SMA_COST_EDGE_ENABLED": bool(settings.SMA_COST_EDGE_ENABLED),
+        "SMA_COST_EDGE_MIN_RATIO": float(settings.SMA_COST_EDGE_MIN_RATIO),
+        "ENTRY_EDGE_BUFFER_RATIO": float(settings.ENTRY_EDGE_BUFFER_RATIO),
+        "STRATEGY_MIN_EXPECTED_EDGE_RATIO": float(settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO),
+        "STRATEGY_EXIT_RULES": str(settings.STRATEGY_EXIT_RULES),
+        "STRATEGY_EXIT_MAX_HOLDING_MIN": int(settings.STRATEGY_EXIT_MAX_HOLDING_MIN),
+        "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": float(settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO),
+        "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": float(settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO),
+    }
+
+
+def _write_live_profile(tmp_path: Path, *, mode: str = "small_live", sma_short: int | None = None) -> Path:
+    parameters = _candidate_profile_for_current_settings()
+    if sma_short is not None:
+        parameters["SMA_SHORT"] = int(sma_short)
+    candidate = {
+        "experiment_id": "live-exp",
+        "manifest_hash": "sha256:manifest",
+        "dataset_snapshot_id": "snap",
+        "dataset_content_hash": "sha256:dataset",
+        "strategy_name": "sma_with_filter",
+        "parameter_candidate_id": "candidate_001",
+        "parameter_values": parameters,
+        "cost_model": {
+            "fee_rate": float(settings.LIVE_FEE_RATE_ESTIMATE),
+            "slippage_bps": float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+        },
+        "regime_classifier_version": "market_regime_v2",
+        "allowed_live_regimes": ["uptrend_normal_vol_unknown"],
+        "blocked_live_regimes": ["downtrend_normal_vol_unknown"],
+    }
+    candidate_hash = sha256_prefixed(build_candidate_profile(candidate))
+    promotion = {
+        "strategy_name": "sma_with_filter",
+        "strategy_profile_source_experiment": "live-exp",
+        "candidate_id": "candidate_001",
+        "manifest_hash": "sha256:manifest",
+        "dataset_snapshot_id": "snap",
+        "dataset_content_hash": "sha256:dataset",
+        "market": "KRW-BTC",
+        "interval": str(settings.INTERVAL),
+        "repository_version": "test",
+        "candidate_profile": build_candidate_profile(candidate),
+        "candidate_profile_hash": candidate_hash,
+        "verified_candidate_profile_hash": candidate_hash,
+        "live_regime_policy": {
+            "regime_classifier_version": "market_regime_v2",
+            "allowed_regimes": ["uptrend_normal_vol_unknown"],
+            "blocked_regimes": ["downtrend_normal_vol_unknown"],
+            "missing_policy_behavior": "fail_closed",
+        },
+        "generated_at": "2026-05-04T00:00:00+00:00",
+    }
+    promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
+    profile = build_approved_profile(
+        promotion=promotion,
+        mode=mode,
+        source_promotion_path=str(tmp_path / "promotion.json"),
+        market="KRW-BTC",
+        interval=str(settings.INTERVAL),
+        generated_at="2026-05-04T00:00:00+00:00",
+    )
+    path = tmp_path / f"{mode}_profile.json"
+    write_json_atomic(path, profile)
+    return path
 
 
 
@@ -200,6 +302,50 @@ def test_live_real_order_execution_preflight_accepts_armed_live(monkeypatch: pyt
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
 
     config.validate_live_real_order_execution_preflight(settings)
+
+
+def test_live_armed_preflight_requires_approved_small_live_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "approved_profile_missing" in str(exc.value)
+
+
+def test_live_armed_preflight_rejects_profile_env_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    profile_path = _write_live_profile(tmp_path, mode="small_live", sma_short=int(settings.SMA_SHORT) + 1)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "approved_profile_runtime_mismatch" in str(exc.value)
+
+
+def test_live_armed_preflight_rejects_paper_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    profile_path = _write_live_profile(tmp_path, mode="paper")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "profile_mode_mismatch" in str(exc.value)
 
 
 def test_live_preflight_rejects_dry_run_when_real_order_armed(monkeypatch: pytest.MonkeyPatch) -> None:

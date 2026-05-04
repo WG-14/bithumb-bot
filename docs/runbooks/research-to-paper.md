@@ -78,9 +78,25 @@ jq '{profile: .strategy_profile_id, hash: .verified_candidate_profile_hash, gate
 
 Verify the profile hash, candidate parameter values, dataset fingerprint, manifest hash, content hash, backtest evidence source, and walk-forward evidence source when required. Promotion does not edit `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
 
-9. Manually prepare paper env/profile consideration.
+9. Generate and verify the approved paper profile.
 
-Copying values into a paper env/profile is a manual operator action. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate. Set `STRATEGY_CANDIDATE_PROFILE_PATH` to the reviewed promotion artifact/profile path before paper or live-dry-run validation; missing or invalid regime policy fails closed for BUY entries.
+```bash
+uv run bithumb-bot profile-generate \
+  --promotion "$DATA_ROOT/paper/reports/research/sma_filter_v1_2026_05/promotion_<candidate_id>.json" \
+  --mode paper \
+  --out "$DATA_ROOT/paper/reports/profiles/<paper_profile>.json"
+
+uv run bithumb-bot profile-diff \
+  --profile "$DATA_ROOT/paper/reports/profiles/<paper_profile>.json" \
+  --target-env "$BITHUMB_ENV_FILE_PAPER" \
+  --json
+
+uv run bithumb-bot profile-verify \
+  --profile "$DATA_ROOT/paper/reports/profiles/<paper_profile>.json" \
+  --env "$BITHUMB_ENV_FILE_PAPER"
+```
+
+Set `APPROVED_STRATEGY_PROFILE_PATH` in the paper env file only after operator review. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate. The profile verification chain checks strategy name, market, interval, strategy parameters, cost model, promotion content hash, candidate profile hash, manifest hash, dataset content hash, profile mode, and regime policy.
 
 10. Run paper or live-dry-run observation.
 
@@ -104,3 +120,21 @@ Review paper behavior, suppressed decisions, order intent evidence, and operator
 12. Consider small-live readiness only after paper evidence.
 
 Research promotion, paper validation, and live readiness are separate gates. Live execution still requires existing live safety configuration, explicit arming, notifier requirements, loss limits, order count limits, preflight checks, run locks, reconciliation, and operator intervention when consistency is unclear.
+
+To promote beyond paper, use explicit profile transitions:
+
+```bash
+uv run bithumb-bot profile-promote \
+  --profile "$DATA_ROOT/paper/reports/profiles/<paper_profile>.json" \
+  --mode live_dry_run \
+  --paper-validation-evidence "$DATA_ROOT/paper/reports/<paper_validation>.json" \
+  --out "$DATA_ROOT/live/reports/profiles/<live_dry_run_profile>.json"
+
+uv run bithumb-bot profile-promote \
+  --profile "$DATA_ROOT/live/reports/profiles/<live_dry_run_profile>.json" \
+  --mode small_live \
+  --live-readiness-evidence "$DATA_ROOT/live/reports/<live_readiness>.json" \
+  --out "$DATA_ROOT/live/reports/profiles/<small_live_profile>.json"
+```
+
+Live armed startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `small_live` profile whose runtime contract matches the effective settings.

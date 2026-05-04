@@ -154,6 +154,12 @@ from .research.cli import (
     cmd_research_promote_candidate,
     cmd_research_walk_forward,
 )
+from .profile_cli import (
+    cmd_profile_diff,
+    cmd_profile_generate,
+    cmd_profile_promote,
+    cmd_profile_verify,
+)
 from .storage_io import write_json_atomic
 from .bootstrap import get_last_explicit_env_load_summary
 
@@ -7151,6 +7157,42 @@ def main(argv: list[str] | None = None) -> int:
     research_promote.add_argument("--experiment-id", required=True)
     research_promote.add_argument("--candidate-id", required=True)
 
+    profile_generate = sub.add_parser(
+        "profile-generate",
+        help="generate an approved profile artifact from a reviewed promotion artifact",
+        description="Generate an approved profile; this command never rewrites paper/live env files.",
+    )
+    profile_generate.add_argument("--promotion", required=True)
+    profile_generate.add_argument("--mode", required=True, choices=("paper", "live_dry_run", "small_live"))
+    profile_generate.add_argument("--out")
+    profile_generate.add_argument("--market")
+    profile_generate.add_argument("--interval")
+
+    profile_diff = sub.add_parser(
+        "profile-diff",
+        help="compare an approved profile against a target env file",
+    )
+    profile_diff.add_argument("--profile", required=True)
+    profile_diff.add_argument("--target-env", required=True)
+    profile_diff.add_argument("--json", action="store_true")
+
+    profile_verify = sub.add_parser(
+        "profile-verify",
+        help="verify an approved profile against a target env file and fail on drift",
+    )
+    profile_verify.add_argument("--profile", required=True)
+    profile_verify.add_argument("--env", required=True)
+
+    profile_promote = sub.add_parser(
+        "profile-promote",
+        help="promote an approved profile through paper -> live_dry_run -> small_live states",
+    )
+    profile_promote.add_argument("--profile", required=True)
+    profile_promote.add_argument("--mode", required=True, choices=("live_dry_run", "small_live"))
+    profile_promote.add_argument("--out")
+    profile_promote.add_argument("--paper-validation-evidence")
+    profile_promote.add_argument("--live-readiness-evidence")
+
     cash_drift_report = sub.add_parser(
         "cash-drift-report",
         help="audit broker cash versus local ledger and recent external cash adjustments",
@@ -7444,6 +7486,38 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_research_promote_candidate(
             experiment_id=str(args.experiment_id),
             candidate_id=str(args.candidate_id),
+        )
+    elif args.cmd == "profile-generate":
+        return cmd_profile_generate(
+            promotion_path=str(args.promotion),
+            mode=str(args.mode),
+            out_path=str(args.out) if args.out is not None else None,
+            market=str(args.market) if args.market is not None else None,
+            interval=str(args.interval) if args.interval is not None else None,
+        )
+    elif args.cmd == "profile-diff":
+        return cmd_profile_diff(
+            profile_path=str(args.profile),
+            target_env=str(args.target_env),
+            as_json=bool(args.json),
+        )
+    elif args.cmd == "profile-verify":
+        return cmd_profile_verify(profile_path=str(args.profile), env_path=str(args.env))
+    elif args.cmd == "profile-promote":
+        return cmd_profile_promote(
+            profile_path=str(args.profile),
+            mode=str(args.mode),
+            out_path=str(args.out) if args.out is not None else None,
+            paper_validation_evidence=(
+                str(args.paper_validation_evidence)
+                if args.paper_validation_evidence is not None
+                else None
+            ),
+            live_readiness_evidence=(
+                str(args.live_readiness_evidence)
+                if args.live_readiness_evidence is not None
+                else None
+            ),
         )
     elif args.cmd == "cash-drift-report":
         cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))

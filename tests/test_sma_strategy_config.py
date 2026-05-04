@@ -52,6 +52,7 @@ def settings_guard():
         "STRATEGY_MIN_EXPECTED_EDGE_RATIO",
         "BUY_FRACTION",
         "MAX_ORDER_KRW",
+        "APPROVED_STRATEGY_PROFILE_PATH",
         "STRATEGY_CANDIDATE_PROFILE_PATH",
     )
     original = {name: getattr(settings, name) for name in names}
@@ -77,6 +78,7 @@ def test_sma_strategy_config_factory_preserves_settings_defaults(settings_guard)
     object.__setattr__(settings, "STRATEGY_MIN_EXPECTED_EDGE_RATIO", 0.002)
     object.__setattr__(settings, "BUY_FRACTION", 0.42)
     object.__setattr__(settings, "MAX_ORDER_KRW", 55_000.0)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
     object.__setattr__(settings, "STRATEGY_CANDIDATE_PROFILE_PATH", "")
 
     config = sma_strategy_config_from_settings()
