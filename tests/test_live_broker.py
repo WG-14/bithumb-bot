@@ -2326,6 +2326,8 @@ def test_live_success_persists_submit_attempt_record(monkeypatch, tmp_path):
     assert submit_evidence["request_ts"] is not None
     assert submit_evidence["response_ts"] is not None
     assert int(submit_evidence["response_ts"]) >= int(submit_evidence["request_ts"])
+    assert submit_evidence["submit_elapsed_ms"] is not None
+    assert int(submit_evidence["submit_elapsed_ms"]) >= 0
     preflight_evidence = json.loads(str(preflight["submit_evidence"]))
     assert preflight_evidence["exchange_order_type"] == "price"
     assert preflight_evidence["exchange_submit_field"] == "price"
@@ -2333,6 +2335,9 @@ def test_live_success_persists_submit_attempt_record(monkeypatch, tmp_path):
     assert preflight_evidence["contract_profile"] == LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE
     assert preflight_evidence["submit_phase"] == "planning"
     assert preflight_evidence["execution_state"] == "validated_pre_submit"
+    assert preflight_evidence["request_ts"] is None
+    assert preflight_evidence["response_ts"] is None
+    assert preflight_evidence["submit_elapsed_ms"] is None
     assert preflight_evidence["execution_trace_id"] == row["client_order_id"]
     assert preflight_evidence["submit_plan_id"] == f"{row['client_order_id']}:plan"
     assert preflight_evidence["signed_request_id"] == f"{row['client_order_id']}:signed_request"
@@ -2441,7 +2446,9 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert submit_evidence["submit_path"] == "live_standard_market"
     assert submit_evidence["error_class"] == "BrokerTemporaryError"
     assert "timeout" in str(submit_evidence["error_summary"])
+    assert submit_evidence["request_ts"] is not None
     assert int(submit_evidence["response_ts"]) >= int(submit_evidence["request_ts"])
+    assert submit_evidence["submit_elapsed_ms"] is not None
     assert preflight is not None
     assert preflight["submit_attempt_id"] == submit_attempt["submit_attempt_id"]
     assert preflight["order_status"] == "PENDING_SUBMIT"
@@ -3341,6 +3348,9 @@ def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, t
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["submit_phase"] == "planning"
     assert submit_evidence["execution_state"] == "planning_failed"
+    assert submit_evidence["request_ts"] is None
+    assert submit_evidence["response_ts"] is None
+    assert submit_evidence["submit_elapsed_ms"] is None
     assert submit_evidence["execution_trace_id"] == row["client_order_id"]
     assert submit_evidence["submit_plan_id"] == f"{row['client_order_id']}:plan"
     assert submit_evidence["signed_request_id"] == f"{row['client_order_id']}:signed_request"
@@ -3883,6 +3893,9 @@ def test_submit_live_order_and_confirm_does_not_run_reconcile_application(monkey
         assert submission is not None
         assert submission.client_order_id == request.client_order_id
         assert submission.exchange_order_id == "ex1"
+        assert submission.request_ts_ms is not None
+        assert submission.response_ts_ms >= submission.request_ts_ms
+        assert submission.submit_elapsed_ms >= 0
         assert broker.place_order_calls == 1
     finally:
         conn.close()
@@ -3956,8 +3969,23 @@ def test_reconcile_apply_fills_and_refresh_runs_against_confirmed_submission(mon
             "SELECT status FROM orders WHERE client_order_id=?",
             (request.client_order_id,),
         ).fetchone()
+        application_event = conn.execute(
+            """
+            SELECT submit_evidence
+            FROM order_events
+            WHERE client_order_id=? AND event_type='submit_attempt_application'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (request.client_order_id,),
+        ).fetchone()
         assert row is not None
         assert row["status"] == "FILLED"
+        assert application_event is not None
+        application_evidence = json.loads(str(application_event["submit_evidence"]))
+        assert application_evidence["request_ts"] == submission.request_ts_ms
+        assert application_evidence["response_ts"] == submission.response_ts_ms
+        assert application_evidence["submit_elapsed_ms"] == submission.submit_elapsed_ms
     finally:
         conn.close()
 

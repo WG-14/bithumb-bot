@@ -35,7 +35,7 @@ from .live_submit_orchestrator import (
     StandardSubmitPipelineRequest,
     _runtime_identity_fields,
     record_standard_submit_planning_failure,
-    run_standard_submit_pipeline,
+    run_standard_submit_pipeline_with_evidence,
 )
 
 
@@ -53,6 +53,9 @@ class ConfirmedLiveSubmission:
     decision_id: int | None
     decision_reason: str | None
     exit_rule_name: str | None
+    request_ts_ms: int
+    response_ts_ms: int
+    submit_elapsed_ms: int
 
 
 def _emit_notification(message: str) -> None:
@@ -71,15 +74,15 @@ def submit_live_order_and_confirm(
     decision_reason: str | None,
     exit_rule_name: str | None,
 ) -> ConfirmedLiveSubmission | None:
-    order = run_standard_submit_pipeline(broker=broker, request=request)
-    if order is None:
+    result = run_standard_submit_pipeline_with_evidence(broker=broker, request=request)
+    if result is None:
         return None
     return ConfirmedLiveSubmission(
         conn=request.conn,
         request=request,
-        order=order,
+        order=result.order,
         client_order_id=request.client_order_id,
-        exchange_order_id=str(order.exchange_order_id),
+        exchange_order_id=str(result.order.exchange_order_id),
         side=request.side,
         intent_key=intent_key,
         ts=request.ts,
@@ -87,6 +90,9 @@ def submit_live_order_and_confirm(
         decision_id=decision_id,
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
+        request_ts_ms=result.request_ts_ms,
+        response_ts_ms=result.response_ts_ms,
+        submit_elapsed_ms=result.submit_elapsed_ms,
     )
 
 
@@ -112,8 +118,9 @@ def _record_application_phase(
             **request.submit_truth_source_fields,
             "reference_price": request.reference_price,
             "top_of_book": request.top_of_book_summary,
-            "request_ts": None,
-            "response_ts": None,
+            "request_ts": submission.request_ts_ms,
+            "response_ts": submission.response_ts_ms,
+            "submit_elapsed_ms": submission.submit_elapsed_ms,
             "submit_path": "live_standard_market",
             "contract_profile": request.contract_profile,
             "submit_phase": "application",

@@ -82,6 +82,51 @@ Key operator-facing payload surfaces:
 - `runtime_state_snapshot`
 - `run_lock`
 
+## 3-0. Execution Quality Workflow
+
+Execution quality is the operating evidence that live fills matched the cost and
+latency assumptions used by research, backtest, and paper runs. It is separate
+from accounting reconciliation: reconciliation proves local and exchange trade
+records agree, while execution-quality reporting proves whether the live
+execution conditions stayed inside the modeled assumptions.
+
+Use the standalone report for the full queryable view:
+
+```bash
+uv run bithumb-bot execution-quality-report --limit 100
+uv run bithumb-bot execution-quality-report --format json
+uv run bithumb-bot execution-quality-report --compare-manifest examples/research/sma_filter_manifest.example.json
+sqlite3 "$DB_PATH" ".schema execution_quality_events"
+```
+
+`execution-quality-report` refreshes the `execution_quality_events` table with
+one idempotent row per `client_order_id`. New live submissions should carry
+broker dispatch evidence in `submit_evidence.request_ts` and
+`submit_evidence.response_ts`; historical rows without those fields are still
+reconstructed from order-event timestamps and should be treated as weaker
+latency evidence.
+
+Status interpretation:
+
+- `PASS`: enough samples are present and observed slippage/latency are within
+  the configured thresholds and optional manifest model.
+- `WARN`: execution evidence exists, but there are missing links, latency
+  concerns, partial-fill concerns, or other telemetry issues.
+- `FAIL`: observed slippage or model-breach rate exceeds configured thresholds
+  or the compared research manifest.
+- `INSUFFICIENT_EVIDENCE`: there are too few rows or missing evidence. Do not
+  treat this as proof that live execution is healthy.
+
+`ops-report` also prints a telemetry-only `[EXECUTION-QUALITY]` block:
+
+```text
+[EXECUTION-QUALITY]
+  quality_gate_status=INSUFFICIENT_EVIDENCE sample_count=12 primary_issue=insufficient_sample next_action=collect_more_live_execution_quality_samples quality_gate_enabled=0 quality_gate_mode=telemetry
+```
+
+This block is visibility only. It does not block live trading unless a separate
+operator-approved gate policy enables blocking behavior.
+
 ## 4. Live Read Checklist
 
 1. Run `ops-report`.
@@ -100,10 +145,15 @@ Key operator-facing payload surfaces:
 7. Check `[RECENT-STRATEGY-ORDER-FILL-FLOW]`.
    - Review the latest order events by time.
    - Confirm `submission_reason_code` and `message(note)` are correct.
-8. Check `[RECENT-TRADES-OPERATIONS]`.
+8. Check `[EXECUTION-QUALITY]`.
+   - Treat `INSUFFICIENT_EVIDENCE` as a collection or instrumentation state,
+     not as live execution approval.
+   - If status is `WARN` or `FAIL`, run the standalone
+     `execution-quality-report` before changing live arming.
+9. Check `[RECENT-TRADES-OPERATIONS]`.
    - Review `fee`, `cash_after`, `asset_after`, and `note`.
 
-## 3-0. `/v1/accounts` Preflight Interpretation
+## 4-1. `/v1/accounts` Preflight Interpretation
 
 `broker-diagnose` and `health` print `/v1/accounts` preflight context together with the report output.
 
@@ -120,7 +170,7 @@ Key operator-facing payload surfaces:
 
 If `order_rules_autosync=FALLBACK`, the bot could not use `/v1/orders/chance` and is using local fallback constraints. In `MODE=live`, treat that as a warning to clear before real-order arming.
 
-## 3-1. `health` / `recovery-report` Field Guide
+## 4-2. `health` / `recovery-report` Field Guide
 
 Read `health` and `recovery-report` as status maps, not as a simple green/red stamp.
 
@@ -184,13 +234,13 @@ material live fill is refused.
   - `exit_block_reason`
   - current exposure cross-check fields such as `sellable_executable_qty`, `executable_exposure_qty`, `tracked_dust_qty`, and `normalized_exposure_qty`
 
-## 3-1-1. Preflight Interpretation
+## 4-2-1. Preflight Interpretation
 
 - In live dry-run, a missing base row can still yield `pass_no_position_allowed`.
 - A missing quote row is a preflight failure.
 - In live real-order mode, the same missing-base policy must remain a blocker until explicitly cleared.
 
-## 3-2. Fee Diagnostics
+## 4-3. Fee Diagnostics
 
 Use `fee-diagnostics` to review live fill fee behavior.
 

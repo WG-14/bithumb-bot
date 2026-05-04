@@ -11,6 +11,7 @@ from bithumb_bot.execution_quality import (
     ExecutionQualityThresholds,
     build_execution_quality_record,
     latency_ms,
+    refresh_execution_quality_records,
     side_aware_slippage_bps,
     summarize_execution_quality,
 )
@@ -307,6 +308,37 @@ def test_order_level_execution_quality_aggregates_fills_and_latency(tmp_path) ->
     assert record.quality_status == "within_model"
 
 
+def test_execution_quality_historical_submit_timestamp_fallback_remains_explicit(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "execution-quality-fallback.sqlite"))
+    try:
+        _seed_quality_order(
+            conn,
+            client_order_id="quality_historical",
+            request_ts=None,
+            response_ts=None,
+            fill_prices=(100.0,),
+            fill_qtys=(1.0,),
+        )
+        confirmation = conn.execute(
+            """
+            SELECT event_ts
+            FROM order_events
+            WHERE client_order_id='quality_historical' AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        record = build_execution_quality_record(conn, client_order_id="quality_historical")
+    finally:
+        conn.close()
+
+    assert record is not None
+    assert confirmation is not None
+    assert record.submit_sent_ts_ms == int(confirmation["event_ts"])
+    assert record.submit_response_ts_ms == int(confirmation["event_ts"])
+    assert record.response_latency_ms == 0
+
+
 def test_order_level_execution_quality_partial_and_unfilled(tmp_path) -> None:
     conn = ensure_db(str(tmp_path / "execution-quality-partial.sqlite"))
     try:
@@ -407,3 +439,29 @@ def test_execution_quality_report_cli_json_and_persistence(tmp_path, monkeypatch
 
     assert row is not None
     assert float(row["slippage_vs_signal_bps"]) == pytest.approx(100.0)
+
+
+def test_execution_quality_schema_and_refresh_are_idempotent(tmp_path) -> None:
+    db_path = tmp_path / "execution-quality-idempotent.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        schema_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_quality_events'"
+        ).fetchone()
+        assert schema_row is not None
+        schema_sql = str(schema_row["sql"])
+        assert "client_order_id TEXT NOT NULL UNIQUE" in schema_sql
+        assert "created_ts INTEGER NOT NULL" in schema_sql
+        assert "updated_ts INTEGER NOT NULL" in schema_sql
+
+        _seed_quality_order(conn, client_order_id="quality_idempotent", fill_prices=(100.0,), fill_qtys=(1.0,))
+        refresh_execution_quality_records(conn, limit=10)
+        refresh_execution_quality_records(conn, limit=10)
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM execution_quality_events WHERE client_order_id='quality_idempotent'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert count is not None
+    assert int(count["count"]) == 1

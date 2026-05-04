@@ -1,519 +1,336 @@
-```text
+````text
 You are Codex working in the GitHub repository `WG-14/bithumb-bot`.
 
-Task: turn execution quality into a first-class, testable, observable part of the live trading experiment system. Do not dilute this into generic logging or parameter tightening. The goal is to verify whether live fills occur inside the cost/latency/fill assumptions used by research/backtest/paper, and to make deviations reproducible, reportable, and eventually gateable.
+Task: perform a focused follow-up hardening patch for the execution-quality system that already exists on `main`.
 
-Core problem statement
+Do not reimplement the whole execution-quality feature. The current patch already added:
+- `execution_quality.py`
+- `ExecutionQualityRecord`
+- side-aware slippage calculations
+- order-level execution-quality upsert
+- `execution-quality-report`
+- manifest slippage comparison
+- telemetry-first execution quality config
+- tests in `tests/test_execution_quality.py`
 
-The current system appears relatively strong on:
-- safe order submission,
-- accounting reconciliation,
-- recovery/runbook flows,
-- authoritative ledger application.
+The remaining concern is narrower and more operationally important:
 
-But accounting consistency is not the same as profitability validity.
+The execution-quality model is structurally good, but live latency evidence may still be based on fallback event timestamps instead of actual broker request/response timestamps. That weakens the ability to analyze real submit latency and submit-to-fill latency. The next patch should harden the evidence source, expose the operator workflow clearly, and make execution-quality status visible in ops/readiness without unexpectedly blocking live trading.
 
-The critical question is:
+Keep the core problem explicit:
 
-Can this repo prove, per order, whether the live path from strategy signal -> order submit -> exchange fill stayed within the backtest/research cost model, or whether latency, spread movement, top-of-book changes, partial fills, unfilled orders, or realized slippage invalidated the expected edge?
-
-Treat the following as hypotheses, not facts. Verify them directly in the repo and adjust the implementation accordingly.
+Accounting correctness is not the same as profitability validity. The repo must be able to prove whether live fills occurred within the research/backtest/paper cost and latency assumptions. Execution quality must remain a first-class, queryable, reproducible operating signal, not just an aggregate report or generic logging.
 
 Hypotheses to verify or refute
 
-H1: Execution-quality data model is missing or incomplete.
-Even if DB records match Bithumb trade history, the repo may not currently normalize the full signal -> submit -> fill chain into a queryable execution-quality dataset.
+H1: Actual broker submit request/response timestamps are not reliably captured in live submit evidence.
+The current execution-quality report can work by falling back to order event timestamps, but those timestamps may not represent the true moment the broker request was sent and the true moment the broker response was received.
 
 Verification:
-- Inspect existing models/tables/repositories/events around orders, order events, submit attempts, fills, trades, broker fill observations, strategy decisions, and research/backtest manifests.
-- Determine whether one can reconstruct this chain for each live order:
-  strategy_decision_id
-  -> signal_ts
-  -> signal_reference_price
-  -> signal bid/ask/spread if available
-  -> submit_plan_created_ts
-  -> broker_request_sent_ts
-  -> broker_response_ts
-  -> exchange_order_id
-  -> first_fill_ts
-  -> last_fill_ts
-  -> avg_fill_price
-  -> filled_qty
-  -> requested_qty
-  -> remaining_qty
-  -> fee
-  -> fill_ratio
-  -> partial/unfilled status
-  -> realized slippage bps
-  -> latency metrics
-  -> quality status.
-- If the chain cannot be reconstructed without ad-hoc log parsing, missing timestamps, or ambiguous joins, H1 is supported.
+- Inspect `src/bithumb_bot/broker/live_submit_orchestrator.py`.
+- Inspect `src/bithumb_bot/broker/live_submission_execution.py`.
+- Inspect the actual call path around `run_standard_submit_pipeline()` and `broker.submit_order(...)`.
+- Find every `submit_evidence` payload that includes `request_ts` and `response_ts`.
+- Determine whether `request_ts` and `response_ts` are currently actual broker-call timestamps or placeholders/fallbacks.
+- Determine whether success, timeout, transport error, ambiguous response, and planning failure paths behave correctly.
 
-Refutation:
-- If the repo already has a complete, stable, tested, queryable model producing these metrics, do not duplicate it. Extend or harden the existing path instead.
+Expected result:
+- For real broker dispatch paths, `request_ts` should be set immediately before the broker call.
+- `response_ts` should be set immediately after the broker call returns or after an exception is caught following a sent request.
+- Planning failures before dispatch should not pretend a request was sent; they may keep `request_ts=None` and `response_ts=None`, with clear evidence/reason.
+- If a request was sent but response is unknown/timeout, preserve `request_ts`; set `response_ts` only when there is a real response/catch timestamp that represents the endpoint returning control.
 
-H2: Backtest/research/paper slippage assumptions are not being closed-loop validated against live fills.
-The repo may use fixed slippage bps in research/backtest and top-of-book plus fixed slippage in paper, but may not compare those assumptions against live observed distributions.
-
+H2: The execution-quality report currently works, but its latency metrics may be polluted by fallback timestamps.
 Verification:
-- Inspect research manifest schemas/examples, backtest cost model code, paper fill simulation, live fill application, and any performance gate/reporting code.
-- Determine whether live p50/p75/p90/p95 slippage and latency can be compared to the configured backtest/research slippage assumptions.
-- Determine whether model-breach counts/rates are currently computed.
+- Inspect `build_execution_quality_record()` in `execution_quality.py`.
+- Confirm where `submit_sent_ts_ms`, `submit_response_ts_ms`, `response_latency_ms`, `first_fill_latency_ms`, and `full_fill_latency_ms` come from.
+- Keep fallback behavior for historical rows, but make fresh live rows use true request/response timestamps.
 
-Refutation:
-- If the repo already computes live observed execution quality against the active research cost model and exposes it operationally, reuse that implementation and only fix missing pieces.
-
-H3: Existing live gates are likely PnL/accounting/recovery oriented, not execution-quality oriented.
-The system may block or warn on performance/recovery/accounting issues, but not on early indicators such as p90 slippage breaching the model, p95 submit-to-fill latency, partial-fill rate, or unfilled rate.
-
+H3: The operator workflow exists in code but may not be documented clearly enough for live operations.
 Verification:
-- Inspect live preflight, readiness, performance gate, health, ops report, recovery report, and runbook code/docs.
-- Search for existing execution-quality gates or commands such as:
-  execution-quality-report
-  live-slippage-report
-  compare-live-to-backtest-cost
-  execution-quality-gate
-  paper-live-gap-report.
-- If absent, H3 is supported.
+- Inspect README, RUNBOOK, operations docs, or equivalent docs.
+- Determine where live recovery/reporting commands are documented.
+- Add a concise section documenting `execution-quality-report`, JSON output, manifest comparison, and how to interpret `INSUFFICIENT_EVIDENCE`, `WARN`, and `FAIL`.
 
-Refutation:
-- If equivalent gates already exist, avoid creating a parallel concept. Integrate with the existing gate.
-
-H4: The deeper root cause may be observability/reproducibility, not a single bad order, bad parameter, or accounting mismatch.
-A one-off fix such as lowering max slippage, changing market/limit policy, or making strategy filters stricter is not sufficient unless the repo can prove the live execution path stayed within or breached the research assumptions.
-
+H4: Execution quality gate config exists but may not be visible in readiness/ops surfaces.
 Verification:
-- Determine whether a postmortem for a live order can be reproduced from DB/CLI alone, without reading raw logs manually.
-- Determine whether accounting status, exchange execution status, and quality status can be independently reported.
-
-Required design direction
-
-Prioritize design changes that prevent the entire class of problems, not symptom suppression.
-
-Do not make the main fix simply:
-- lowering MAX_MARKET_SLIPPAGE_BPS,
-- lowering LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
-- switching market orders to limit orders,
-- tightening SMA/strategy conditions,
-- adding unstructured logs.
-
-Those may be follow-up mitigations, but they are not the root solution.
-
-The root solution is:
-1. Persist execution-quality evidence per order.
-2. Compute realized quality metrics per order.
-3. Aggregate live distributions.
-4. Compare live distributions against research/backtest/paper cost assumptions.
-5. Expose the result through CLI/reporting.
-6. Make the path testable and recoverable.
-7. Prepare a telemetry-first gate that can later become a hard live-readiness/new-entry gate.
+- Inspect health, ops report, runtime readiness, and live preflight/readiness outputs.
+- Determine whether execution quality status appears anywhere operational other than the standalone report.
+- Add telemetry-only visibility if missing. Do not introduce default live blocking.
 
 Scope
 
-Work directly in `WG-14/bithumb-bot`.
+This is a follow-up hardening patch, not a rewrite.
 
-First inspect the repo and identify the actual architecture:
-- CLI framework,
-- DB/migration framework,
-- order submission pipeline,
-- submit attempt evidence,
-- fill/trade application,
-- paper broker/fill simulation,
-- research manifest/cost model,
-- live readiness/performance gates,
-- tests.
+In scope:
+1. Capture actual broker request/response timestamps in live submit evidence.
+2. Preserve safe behavior for failure modes.
+3. Keep historical fallback logic in execution-quality reconstruction.
+4. Add focused tests proving real request/response timestamps are recorded and used.
+5. Add or update operator documentation for `execution-quality-report`.
+6. Optionally surface execution-quality gate status in ops/readiness/health if this can be done cleanly and without default blocking.
 
-Then implement the smallest coherent design that satisfies the goal without creating duplicate concepts.
+Out of scope:
+- Rewriting `execution_quality.py` from scratch.
+- Replacing the existing execution-quality table/model.
+- Changing strategy rules.
+- Tightening slippage thresholds as a substitute for evidence.
+- Changing market/limit order policy.
+- Enabling hard live blocking by default.
+- Removing existing accounting/recovery safeguards.
+- Adding heavyweight dependencies.
 
-Preferred implementation shape
+Implementation requirements
 
-A. Add or extend a first-class execution quality data model
+A. Capture actual live broker dispatch timestamps
 
-Create or extend a DB-backed model/table for execution traces or execution quality events.
+Find the exact live order dispatch point, likely inside `run_standard_submit_pipeline()` or a helper around `broker.submit_order(...)`.
 
-Name it according to repo conventions. Acceptable examples:
-- `execution_quality_events`
-- `execution_traces`
-- or an extension of an existing order/fill/submit-attempt table if that is cleaner.
+Implement timestamp capture with clear semantics:
+- `request_ts`: wall-clock epoch ms immediately before broker submit call.
+- `response_ts`: wall-clock epoch ms when the broker submit call returns successfully or control returns due to an exception after dispatch.
+- Optional but preferred: `submit_elapsed_ms` or equivalent monotonic duration if the repo already uses monotonic timing patterns.
 
-The stored record should support, at minimum, these fields where data is available:
+Use existing repo time conventions. If there is an existing clock abstraction, use it. If not, use:
+- `int(time.time() * 1000)` for persisted wall-clock timestamps.
+- `time.monotonic()` only for elapsed durations, not persisted ordering.
 
-Identity:
-- execution_trace_id or stable equivalent
-- client_order_id
-- submit_attempt_id if available
-- decision_id if available
-- strategy_name if available
-- mode
-- market
-- side
-- order_type
-- exchange_order_id if available
+B. Preserve failure semantics
 
-Signal-time evidence:
-- signal_ts_ms
-- signal_reference_price
-- signal_best_bid
-- signal_best_ask
-- signal_spread_bps
+Classify paths carefully:
 
-Submit-time evidence:
-- submit_plan_ts_ms
-- submit_sent_ts_ms
-- submit_response_ts_ms
-- submit_reference_price
-- submit_best_bid
-- submit_best_ask
-- submit_spread_bps
+1. Planning failure before broker dispatch
+- `request_ts=None`
+- `response_ts=None`
+- quality/reason should make clear that no request was sent.
+- Do not fabricate latency.
 
-Fill evidence:
-- first_fill_ts_ms
-- last_fill_ts_ms
-- avg_fill_price
-- filled_qty
-- requested_qty
-- remaining_qty
-- fee
-- realized_fee_rate if derivable
+2. Failure before send
+- `request_ts=None`
+- `response_ts=None`
+- existing failed-before-send semantics preserved.
 
-Derived metrics:
-- submit_latency_ms
-- response_latency_ms
-- first_fill_latency_ms
-- full_fill_latency_ms
-- slippage_vs_signal_bps
-- slippage_vs_submit_ref_bps
-- slippage_vs_best_quote_bps
-- fill_ratio
-- partial_fill_flag
-- unfilled_flag
-- quality_status
-- quality_reason
-- backtest_assumed_slippage_bps if available
-- model_breach_flag if available
+3. Sent but timeout / transport error / ambiguous response
+- `request_ts` must be present if the broker call was attempted.
+- `response_ts` should be set only if the exception point reliably represents control returning after the attempted request.
+- `timeout_flag` and existing `SUBMIT_UNKNOWN` / failure reason semantics must remain unchanged.
+- Do not weaken unresolved order gates or recovery requirements.
 
-Status semantics:
-- Do not conflate accounting status, exchange execution status, and execution quality status.
-- Execution quality status should be independently representable, for example:
-  within_model
-  degraded
-  model_breach
-  insufficient_evidence.
+4. Confirmed success
+- `request_ts` and `response_ts` must both be present.
+- `response_ts >= request_ts`.
+- execution-quality reconstruction should prefer these evidence timestamps over order event fallback timestamps.
 
-If some fields are not currently available, do not fake them. Store null/None and set quality_status or quality_reason accordingly. The report must make missing evidence visible.
+C. Update submit evidence consistently
 
-B. Capture real request/response timing
+Every submit evidence payload for a real dispatch phase should use the captured timestamps instead of hard-coded `None`.
 
-If live submit evidence currently has placeholder request/response timestamps or does not persist them reliably, instrument the actual order-submit path to capture:
-- request sent timestamp,
-- response received timestamp,
-- elapsed submit/response latency.
+Search and update all relevant payload construction sites:
+- planning/preflight/signed/confirmation/application evidence,
+- success,
+- temporary error,
+- broker rejection,
+- submission unknown,
+- ambiguous response,
+- any application phase record that currently stores `request_ts=None` and `response_ts=None`.
 
-Use monotonic time for elapsed durations when appropriate and wall-clock UTC timestamps for persisted event ordering. Follow existing repo time conventions.
+If application phase cannot know the original timestamps directly, pass them through from the confirmed submission/request context rather than setting them to `None`.
 
-Do not break deterministic tests. Inject clocks where the repo already uses clock abstractions.
+If adding fields to dataclasses is necessary, do it in a narrow, explicit way. Possible examples:
+- add `request_ts_ms` / `response_ts_ms` to the submit context or confirmed submission object,
+- or add a small dispatch evidence object used by submit attempt recording.
 
-C. Link signal, submit, and fill
+Do not rely on parsing logs.
 
-Implement a robust join/linking strategy based on actual repo identifiers.
+D. Keep historical fallback behavior
 
-Preferred keys:
-- decision_id,
-- client_order_id,
-- submit_attempt_id or phase trace id,
-- exchange_order_id.
+`execution_quality.py` currently falls back to confirmation event timestamps when evidence timestamps are missing. Keep this behavior for old DB rows.
 
-Do not rely on timestamps alone unless no stable identifier exists. If an identifier is missing, record that as insufficient evidence rather than silently guessing.
+But for new live rows:
+- evidence timestamps should be present,
+- `build_execution_quality_record()` should prefer evidence `request_ts`/`response_ts`,
+- tests should prove this.
 
-D. Compute realized slippage correctly
+E. Schema and persistence verification
 
-Implement side-aware bps calculations.
+Do not assume the schema is fine just because tests pass.
 
-For BUY:
-- slippage_vs_reference_bps = (avg_fill_price - reference_price) / reference_price * 10000
+Verify:
+- `execution_quality_events` is created by `ensure_schema()`.
+- `client_order_id` is unique or primary-keyed.
+- `created_ts` and `updated_ts` exist.
+- nulls are allowed for historical/missing evidence fields.
+- `upsert_execution_quality_record()` is idempotent.
+- re-running `execution-quality-report` does not duplicate rows.
 
-For SELL:
-- slippage_vs_reference_bps = (reference_price - avg_fill_price) / reference_price * 10000
+If any of these are not true, patch them with a minimal migration-safe schema change.
 
-For top-of-book:
-- BUY should compare against best ask where available.
-- SELL should compare against best bid where available.
+F. Operator documentation
 
-Guard against:
-- missing prices,
-- zero or negative prices,
-- missing side,
-- zero requested quantity,
-- partial fills,
-- no fills.
+Add a concise execution-quality operating section to the most appropriate docs file. Prefer an existing RUNBOOK/operations doc if one exists; otherwise use README or a dedicated operations doc.
 
-E. Add an execution quality report CLI
+Document exact commands:
 
-Add a CLI command following existing CLI conventions. Preferred name:
+```bash
+uv run bithumb-bot execution-quality-report --limit 100
+uv run bithumb-bot execution-quality-report --format json
+uv run bithumb-bot execution-quality-report --compare-manifest examples/research/sma_filter_manifest.example.json
+sqlite3 "$DB_PATH" ".schema execution_quality_events"
+````
 
-`execution-quality-report`
+Document interpretation:
 
-It should support practical options consistent with repo style, such as:
-- `--limit`
-- `--since`
-- `--market`
-- `--mode`
-- `--by order_type`
-- `--compare-manifest <path>`
-- `--format text|json` if the repo supports format options.
+* `PASS`: enough samples and within configured thresholds/model.
+* `WARN`: evidence exists but there are missing links, latency concerns, partial-fill concerns, or other telemetry issues.
+* `FAIL`: observed slippage/model breach exceeds configured thresholds.
+* `INSUFFICIENT_EVIDENCE`: not enough rows or missing evidence; do not treat this as proof that live execution is healthy.
 
-The report should output at least:
-- sample_count
-- market_order_count
-- limit_order_count
-- median_submit_to_fill_ms where available
-- p90_submit_to_fill_ms where available
-- p95_submit_to_fill_ms where available
-- median_slippage_vs_signal_bps where available
-- p90_slippage_vs_signal_bps where available
-- p95_slippage_vs_signal_bps where available
-- median_slippage_vs_submit_ref_bps where available
-- p90_slippage_vs_submit_ref_bps where available
-- partial_fill_rate
-- unfilled_rate
-- insufficient_evidence_count
-- backtest_slippage_bps_max if a manifest is provided
-- model_breach_count if a manifest is provided
-- model_breach_rate if a manifest is provided
-- quality_gate_status as PASS/WARN/FAIL/INSUFFICIENT_EVIDENCE
-- primary_issue
-- next_action.
+Document the key operational distinction:
 
-The report must be useful to an operator without reading raw logs.
+* Accounting reconciliation proves local/exchange trade records agree.
+* Execution-quality reporting proves whether live fills matched the assumptions used by research/backtest/paper.
 
-Example text output target:
+G. Optional ops/readiness visibility
 
-sample_count=42
-market_order_count=42
-limit_order_count=0
-median_submit_to_fill_ms=380
-p90_submit_to_fill_ms=1400
-p95_submit_to_fill_ms=2400
-median_slippage_vs_signal_bps=7.2
-p90_slippage_vs_signal_bps=18.5
-p95_slippage_vs_signal_bps=31.0
-partial_fill_rate=0.00
-unfilled_rate=0.00
-insufficient_evidence_count=2
-backtest_slippage_bps_max=20
-model_breach_count=3
-model_breach_rate=0.0714
-quality_gate_status=FAIL
-primary_issue=p95_slippage_exceeds_backtest_model
-next_action=reduce_live_to_dry_run_or_update_research_cost_model
+If the repo has an obvious `ops-report`, `health`, or runtime readiness surface, add execution-quality status there in telemetry-only form.
 
-F. Compare against research/backtest manifest
+Output shape example:
 
-If a research manifest cost model exists, parse its fee/slippage assumptions.
+```text
+[EXECUTION-QUALITY]
+quality_gate_status=INSUFFICIENT_EVIDENCE
+sample_count=12
+primary_issue=insufficient_sample
+next_action=collect_more_live_execution_quality_samples
+```
 
-Use the maximum configured slippage bps as a basic first comparison unless the repo already has richer semantics.
+Do not hard-block live trading by default.
+Respect:
 
-When `--compare-manifest` is provided:
-- compute whether observed p90/p95 realized slippage exceeds the configured assumption,
-- compute model_breach_count/rate per order where evidence is sufficient,
-- print whether the live observed profile is inside or outside the model.
+* `LIVE_EXECUTION_QUALITY_GATE_ENABLED=false`
+* `LIVE_EXECUTION_QUALITY_GATE_MODE=telemetry`
 
-Do not change the manifest schema unless necessary for this step.
-
-If schema extension is low-risk and fits repo conventions, optionally add a documented `live_observed_profile` section, but do not make the implementation depend on speculative schema unless tests cover it.
-
-G. Add telemetry-first execution quality gate plumbing
-
-Add config settings, but default them so they do not unexpectedly block live trading unless existing repo conventions prefer explicit opt-in.
-
-Suggested settings:
-- LIVE_EXECUTION_QUALITY_GATE_ENABLED=false by default
-- LIVE_EXECUTION_QUALITY_MIN_SAMPLE=30
-- LIVE_EXECUTION_QUALITY_MAX_P90_SLIPPAGE_BPS=20
-- LIVE_EXECUTION_QUALITY_MAX_P95_FULL_FILL_LATENCY_MS=3000
-- LIVE_EXECUTION_QUALITY_MAX_PARTIAL_FILL_RATE=0.05
-- LIVE_EXECUTION_QUALITY_MAX_MODEL_BREACH_RATE=0.10
-- LIVE_EXECUTION_QUALITY_GATE_MODE=telemetry or warn, depending on repo conventions.
-
-Initial behavior should be telemetry/reporting-first.
-If integrating into live readiness, make it non-breaking unless explicitly enabled.
-
-The gate should classify:
-- PASS,
-- WARN,
-- FAIL,
-- INSUFFICIENT_EVIDENCE.
-
-H. Add paper/live gap report only if it can be implemented cleanly
-
-If time and architecture allow, add `paper-live-gap-report`.
-It should compare paper slippage assumptions or simulated fill assumptions against live observed execution quality.
-
-If this is too large for one change, leave a concrete TODO and design note, but do not skip the core execution-quality-report.
+If enabling hard blocking would require broader policy work, leave it disabled and documented.
 
 Testing requirements
 
-Add focused tests. Do not only add snapshot text.
+Add focused tests. Do not only update snapshots.
 
-Required test coverage:
+Required tests:
 
-1. Side-aware slippage math
-- BUY positive adverse slippage.
-- SELL positive adverse slippage.
-- Missing/zero reference price returns insufficient evidence or null metric safely.
-- Top-of-book comparison uses ask for BUY and bid for SELL.
+1. Successful live submit evidence timestamps
 
-2. Latency calculation
-- submit sent to response.
-- submit sent to first fill.
-- submit sent to full fill.
-- Missing timestamps handled safely.
+* Simulate or fake the broker submit path.
+* Assert submit evidence contains non-null `request_ts` and `response_ts`.
+* Assert `response_ts >= request_ts`.
+* Assert `build_execution_quality_record()` uses those evidence timestamps for `submit_sent_ts_ms`, `submit_response_ts_ms`, and `response_latency_ms`.
 
-3. Fill aggregation
-- multiple fills produce correct avg_fill_price weighted by quantity.
-- partial fill computes fill_ratio correctly.
-- unfilled order reports unfilled/insufficient fill evidence correctly.
+2. Historical fallback remains safe
 
-4. Manifest comparison
-- observed p90 <= max manifest slippage -> PASS or within model.
-- observed p90/p95 > max manifest slippage -> breach/WARN/FAIL according to config.
-- insufficient sample -> INSUFFICIENT_EVIDENCE.
+* Seed a submit attempt with missing `request_ts` and `response_ts`.
+* Assert the report still works.
+* Assert missing/fallback behavior is explicit and does not crash.
 
-5. CLI/report behavior
-- report works with no records.
-- report works with complete records.
-- report surfaces missing evidence instead of hiding it.
-- JSON output if implemented is valid and stable.
+3. Sent-but-error path
 
-6. Persistence/migration
-- new table or fields migrate cleanly.
-- existing data can remain null without crashing reports.
-- tests use temporary DB fixtures according to repo conventions.
+* Simulate a broker temporary error, timeout, or submission-unknown path if existing tests support it.
+* Assert `request_ts` is recorded when dispatch was attempted.
+* Assert existing status/recovery semantics remain unchanged.
+* Assert no fake fill latency is produced without fills.
+
+4. Planning failure before dispatch
+
+* Assert no request timestamp is fabricated.
+* Assert evidence/reason indicates failure before send or planning failure.
+
+5. CLI/report still passes
+
+* Existing `execution-quality-report` tests must pass.
+* Add a test, if needed, that JSON output still includes `quality_gate_status`, `primary_issue`, and `next_action`.
+
+6. Schema/idempotency
+
+* Assert `execution_quality_events` exists after `ensure_db()`.
+* Assert repeated `refresh_execution_quality_records()` or repeated report runs do not duplicate rows for the same `client_order_id`.
 
 7. Regression safety
-- existing order submission tests still pass.
-- existing recovery/accounting tests still pass.
-- existing paper/backtest tests still pass.
 
-Recovery and operational requirements
+* Existing order submission tests pass.
+* Existing recovery/accounting tests pass.
+* Existing execution quality tests pass.
+* Existing paper/backtest/research tests pass if relevant.
 
-- New persistence must be append-safe or idempotent by stable keys.
-- Re-running reconciliation or report generation must not duplicate quality records unless the repo’s event model explicitly allows append-only duplicates.
-- If quality computation can be recomputed from existing authoritative events, prefer deterministic recomputation or upsert semantics.
-- Reports must tolerate partially migrated or historical rows with missing fields.
-- Do not make live trading depend on quality data until the gate is explicitly enabled.
-- Any new blocking behavior must be opt-in and documented.
+Suggested commands to run
 
-Observability requirements
+Run the smallest relevant set first, then the broader suite:
 
-- Structured evidence should be queryable from DB, not only raw logs.
-- Missing evidence must be counted and reported.
-- Emit concise structured logs/metrics if the repo has an existing logging/metrics convention.
-- Include enough identifiers in logs/reports to correlate:
-  decision_id,
-  client_order_id,
-  submit_attempt_id,
-  exchange_order_id,
-  market,
-  side,
-  order_type.
+```bash
+uv run pytest tests/test_execution_quality.py
+uv run pytest tests -q
+```
 
-Implementation constraints
-
-- Follow existing repo naming, style, type hints, dependency, DB, CLI, and test conventions.
-- Do not introduce heavyweight dependencies for simple statistics.
-- Implement percentile calculation deterministically.
-- Avoid changing trading behavior unless explicitly required for timestamp capture or id linking.
-- Do not weaken existing safety checks.
-- Do not remove existing recovery/accounting semantics.
-- Do not assume the initial diagnosis is true. Inspect and adapt.
-
-Suggested implementation order
-
-1. Inspect relevant files and summarize actual existing architecture for yourself:
-   - app/CLI entry points,
-   - settings/config,
-   - order submission pipeline,
-   - Bithumb broker/client,
-   - submit attempt/evidence persistence,
-   - fill/trade/accounting persistence,
-   - paper broker,
-   - research manifest/backtest cost model,
-   - live performance/readiness gates,
-   - migrations/tests.
-
-2. Identify the smallest clean place to persist execution quality data.
-
-3. Implement pure calculation utilities first:
-   - weighted average fill price,
-   - side-aware slippage bps,
-   - latency metrics,
-   - fill ratio,
-   - percentile summary,
-   - quality status classification.
-
-4. Add persistence/migration or extend existing persistence.
-
-5. Capture actual submit request/response timestamps.
-
-6. Link execution traces to fills and compute/upsert quality rows.
-
-7. Add CLI report.
-
-8. Add optional manifest comparison.
-
-9. Add telemetry-first gate config/classification.
-
-10. Add tests.
-
-11. Run the repo’s relevant test suite and formatting/type checks.
+If the repo has formatting/typecheck conventions, run them too.
 
 Acceptance criteria
 
-The change is acceptable only if:
+The patch is acceptable only if:
 
-- A user can run a CLI report and see live execution quality metrics without manually inspecting logs.
-- The system can distinguish accounting consistency from execution quality.
-- Missing evidence is explicit and counted.
-- Realized slippage is side-aware and tested.
-- Fill latency and submit latency are computed where timestamps exist.
-- Partial and unfilled orders are represented.
-- Manifest/backtest slippage assumptions can be compared to live observed slippage, at least through `--compare-manifest`.
-- The change is non-breaking for existing live operation by default.
-- Tests cover calculation, persistence/reporting, manifest comparison, and missing-evidence cases.
-- The final report clearly states which hypotheses were supported, refuted, or left unresolved.
+* New live submit evidence records actual broker request/response timestamps for real dispatches.
+* Planning failures and failed-before-send paths do not fabricate request timestamps.
+* Sent-but-error paths preserve request timing when a broker call was attempted.
+* Execution-quality reconstruction prefers real evidence timestamps but still handles historical missing evidence.
+* Latency metrics are no longer primarily dependent on order event fallback for new live submissions.
+* Operator docs explain how to run and interpret `execution-quality-report`.
+* Any ops/readiness integration is telemetry-only unless explicitly configured.
+* Existing safety, accounting, recovery, and unresolved-order behavior are not weakened.
+* Tests cover success, fallback, failure-before-send, sent-but-error where feasible, CLI/report, and idempotency.
 
-Final response format
+Final report format
 
 When done, report in this exact structure:
 
 1. Summary
-- One paragraph explaining what changed and why it addresses execution quality rather than only accounting stability.
+
+* One paragraph explaining what changed and why this improves execution-quality evidence rather than just reporting.
 
 2. Files changed
-- List changed files with one-line purpose for each.
+
+* List each changed file and one-line purpose.
 
 3. Hypothesis results
-- H1: supported/refuted/partially supported, with repo evidence.
-- H2: supported/refuted/partially supported, with repo evidence.
-- H3: supported/refuted/partially supported, with repo evidence.
-- H4: supported/refuted/partially supported, with repo evidence.
 
-4. New operator workflow
-- Exact commands to run, including `execution-quality-report`.
-- Example output shape.
+* H1: supported/refuted/partially supported, with repo evidence.
+* H2: supported/refuted/partially supported, with repo evidence.
+* H3: supported/refuted/partially supported, with repo evidence.
+* H4: supported/refuted/partially supported, with repo evidence.
 
-5. Tests
-- Exact tests added.
-- Exact commands run.
-- Pass/fail result.
+4. Timestamp semantics
 
-6. Recovery and safety notes
-- Explain idempotency/upsert behavior.
-- Explain behavior on historical rows with missing evidence.
-- Explain why live behavior is not unexpectedly blocked by default.
+* Explain exactly what `request_ts`, `response_ts`, and any elapsed duration mean.
+* Explain how success, planning failure, failed-before-send, timeout/transport error, and ambiguous response are handled.
 
-7. Remaining risks / follow-up
-- List only concrete remaining work, such as hard gate rollout, paper-live-gap-report, or manifest schema extension.
+5. Operator workflow
+
+* Exact commands to run.
+* Example output shape.
+* Explanation of PASS/WARN/FAIL/INSUFFICIENT_EVIDENCE.
+
+6. Tests
+
+* Exact tests added or updated.
+* Exact commands run.
+* Pass/fail result.
+
+7. Recovery and safety notes
+
+* Explain idempotency/upsert behavior.
+* Explain historical missing-evidence fallback.
+* Explain why live behavior is not unexpectedly blocked by default.
+
+8. Remaining risks / follow-up
+
+* Only concrete remaining work, such as hard gate rollout, paper-live-gap-report, or deeper readiness integration.
+
+```
 ```
 

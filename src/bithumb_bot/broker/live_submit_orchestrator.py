@@ -140,6 +140,14 @@ class _StandardSubmitAttemptContext:
     base_submit_failure_fields: dict[str, object]
 
 
+@dataclass(frozen=True)
+class StandardSubmitDispatchResult:
+    order: BrokerOrder
+    request_ts_ms: int
+    response_ts_ms: int
+    submit_elapsed_ms: int
+
+
 def _encode_submit_evidence(*, payload: dict) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -603,6 +611,7 @@ def _planning_failure(
             "top_of_book": request.top_of_book_summary,
             "request_ts": None,
             "response_ts": None,
+            "submit_elapsed_ms": None,
             "submit_path": "live_standard_market",
             "contract_profile": request.contract_profile,
             "submit_phase": "planning",
@@ -827,6 +836,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
             "top_of_book": request.top_of_book_summary,
             "request_ts": None,
             "response_ts": None,
+            "submit_elapsed_ms": None,
             "submit_path": context.submit_path,
             "contract_profile": request.contract_profile,
             "submit_phase": "planning",
@@ -912,6 +922,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
             "top_of_book": request.top_of_book_summary,
             "request_ts": None,
             "response_ts": None,
+            "submit_elapsed_ms": None,
             "submit_path": context.submit_path,
             "contract_profile": request.contract_profile,
             "submit_phase": "signed_request",
@@ -970,55 +981,86 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
     request.conn.commit()
 
 
-def _dispatch_submit_attempt(*, context: _StandardSubmitAttemptContext, broker: Broker) -> tuple[BrokerOrder, int, int] | None:
+def _dispatch_submit_attempt(*, context: _StandardSubmitAttemptContext, broker: Broker) -> StandardSubmitDispatchResult | None:
     request = context.request
     dispatch_kwargs = _dispatch_kwargs_from_submit_plan(submit_plan=context.submit_plan)
-    try:
-        request_ts = int(time.time() * 1000)
-        RUN_LOG.info(
-            format_log_kv(
-                "[ORDER_DECISION] broker.place_order dispatch",
-                signal=request.signal,
-                signal_ts=request.ts,
-                candle_ts=request.ts,
-                side=request.side,
-                market_price=request.market_price,
-                position_qty=request.position_qty,
-                order_qty=request.order_qty,
-                normalized_qty=request.qty,
-                submit_payload_qty=request.qty,
-                submit_qty=request.qty,
-                submit_qty_source=request.submit_qty_source,
-                position_state_source=request.position_state_source,
-                raw_total_asset_qty=request.raw_total_asset_qty,
-                open_exposure_qty=request.open_exposure_qty,
-                dust_tracking_qty=request.dust_tracking_qty,
-                reference_price=request.reference_price,
-                client_order_id=request.client_order_id,
-                **context.phase_trace_fields,
-                internal_lot_size=request.internal_lot_size,
-                intended_lot_count=request.intended_lot_count,
-                executable_lot_count=request.executable_lot_count,
-                final_intended_qty=request.final_intended_qty,
-                final_submitted_qty=request.final_submitted_qty,
-                decision_reason_code=request.decision_reason_code,
-                exchange_order_type=context.base_submit_contract_fields["exchange_order_type"],
-                exchange_submit_field=context.base_submit_contract_fields["exchange_submit_field"],
-                exchange_submit_notional_krw=context.base_submit_contract_fields["exchange_submit_notional_krw"] or "",
-            )
+    RUN_LOG.info(
+        format_log_kv(
+            "[ORDER_DECISION] broker.place_order dispatch",
+            signal=request.signal,
+            signal_ts=request.ts,
+            candle_ts=request.ts,
+            side=request.side,
+            market_price=request.market_price,
+            position_qty=request.position_qty,
+            order_qty=request.order_qty,
+            normalized_qty=request.qty,
+            submit_payload_qty=request.qty,
+            submit_qty=request.qty,
+            submit_qty_source=request.submit_qty_source,
+            position_state_source=request.position_state_source,
+            raw_total_asset_qty=request.raw_total_asset_qty,
+            open_exposure_qty=request.open_exposure_qty,
+            dust_tracking_qty=request.dust_tracking_qty,
+            reference_price=request.reference_price,
+            client_order_id=request.client_order_id,
+            **context.phase_trace_fields,
+            internal_lot_size=request.internal_lot_size,
+            intended_lot_count=request.intended_lot_count,
+            executable_lot_count=request.executable_lot_count,
+            final_intended_qty=request.final_intended_qty,
+            final_submitted_qty=request.final_submitted_qty,
+            decision_reason_code=request.decision_reason_code,
+            exchange_order_type=context.base_submit_contract_fields["exchange_order_type"],
+            exchange_submit_field=context.base_submit_contract_fields["exchange_submit_field"],
+            exchange_submit_notional_krw=context.base_submit_contract_fields["exchange_submit_notional_krw"] or "",
         )
+    )
+    request_ts = int(time.time() * 1000)
+    elapsed_start = time.monotonic()
+    try:
         order = broker.place_order(**dispatch_kwargs)
         response_ts = int(time.time() * 1000)
-        return order, request_ts, response_ts
+        return StandardSubmitDispatchResult(
+            order=order,
+            request_ts_ms=request_ts,
+            response_ts_ms=response_ts,
+            submit_elapsed_ms=max(0, int((time.monotonic() - elapsed_start) * 1000)),
+        )
     except BrokerTemporaryError as error:
-        return _handle_temporary_submit_error(context=context, error=error, request_ts=request_ts, response_ts=int(time.time() * 1000))
+        return _handle_temporary_submit_error(
+            context=context,
+            error=error,
+            request_ts=request_ts,
+            response_ts=int(time.time() * 1000),
+            submit_elapsed_ms=max(0, int((time.monotonic() - elapsed_start) * 1000)),
+        )
     except BrokerRejectError as error:
-        return _handle_reject_submit_error(context=context, error=error, request_ts=request_ts, response_ts=int(time.time() * 1000))
+        return _handle_reject_submit_error(
+            context=context,
+            error=error,
+            request_ts=request_ts,
+            response_ts=int(time.time() * 1000),
+            submit_elapsed_ms=max(0, int((time.monotonic() - elapsed_start) * 1000)),
+        )
     except Exception as error:
-        return _handle_unexpected_submit_error(context=context, error=error, request_ts=request_ts, response_ts=int(time.time() * 1000))
+        return _handle_unexpected_submit_error(
+            context=context,
+            error=error,
+            request_ts=request_ts,
+            response_ts=int(time.time() * 1000),
+            submit_elapsed_ms=max(0, int((time.monotonic() - elapsed_start) * 1000)),
+        )
 
 
-def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, error: BrokerTemporaryError, request_ts: int, response_ts: int) -> None:
+def _handle_temporary_submit_error(
+    *,
+    context: _StandardSubmitAttemptContext,
+    error: BrokerTemporaryError,
+    request_ts: int,
+    response_ts: int,
+    submit_elapsed_ms: int,
+) -> None:
     request = context.request
     planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     err = BrokerSubmissionUnknownError(f"submit unknown: {type(error).__name__}: {error}")
@@ -1042,6 +1084,7 @@ def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, er
             "top_of_book": request.top_of_book_summary,
             "request_ts": request_ts,
             "response_ts": response_ts,
+            "submit_elapsed_ms": submit_elapsed_ms,
             "submit_path": context.submit_path,
             "contract_profile": request.contract_profile,
             "submit_phase": "submission",
@@ -1092,7 +1135,14 @@ def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, er
     return None
 
 
-def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error: BrokerRejectError, request_ts: int, response_ts: int) -> None:
+def _handle_reject_submit_error(
+    *,
+    context: _StandardSubmitAttemptContext,
+    error: BrokerRejectError,
+    request_ts: int,
+    response_ts: int,
+    submit_elapsed_ms: int,
+) -> None:
     request = context.request
     planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     reason = f"submit rejected: {type(error).__name__}: {error}"
@@ -1116,6 +1166,7 @@ def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error
             "top_of_book": request.top_of_book_summary,
             "request_ts": request_ts,
             "response_ts": response_ts,
+            "submit_elapsed_ms": submit_elapsed_ms,
             "submit_path": context.submit_path,
             "contract_profile": request.contract_profile,
             "submit_phase": "submission",
@@ -1167,7 +1218,14 @@ def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error
     return None
 
 
-def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, error: Exception, request_ts: int, response_ts: int) -> None:
+def _handle_unexpected_submit_error(
+    *,
+    context: _StandardSubmitAttemptContext,
+    error: Exception,
+    request_ts: int,
+    response_ts: int,
+    submit_elapsed_ms: int,
+) -> None:
     request = context.request
     planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     reason = f"submit failed: {type(error).__name__}: {error}"
@@ -1190,6 +1248,7 @@ def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, e
             "top_of_book": request.top_of_book_summary,
             "request_ts": request_ts,
             "response_ts": response_ts,
+            "submit_elapsed_ms": submit_elapsed_ms,
             "submit_path": context.submit_path,
             "contract_profile": request.contract_profile,
             "submit_phase": "submission",
@@ -1240,7 +1299,14 @@ def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, e
     return None
 
 
-def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: BrokerOrder, request_ts: int, response_ts: int) -> BrokerOrder | None:
+def _confirm_submit_attempt(
+    *,
+    context: _StandardSubmitAttemptContext,
+    order: BrokerOrder,
+    request_ts: int,
+    response_ts: int,
+    submit_elapsed_ms: int,
+) -> BrokerOrder | None:
     request = context.request
     planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     if order.exchange_order_id:
@@ -1260,7 +1326,13 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
             )
         )
     if not order.exchange_order_id:
-        return _confirm_submit_missing_exchange_id(context=context, order=order, request_ts=request_ts, response_ts=response_ts)
+        return _confirm_submit_missing_exchange_id(
+            context=context,
+            order=order,
+            request_ts=request_ts,
+            response_ts=response_ts,
+            submit_elapsed_ms=submit_elapsed_ms,
+        )
     set_status(request.client_order_id, order.status, conn=request.conn)
     success_submit_contract_fields = _submit_contract_fields(
         side=request.side,
@@ -1282,6 +1354,7 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
             "top_of_book": request.top_of_book_summary,
             "request_ts": request_ts,
             "response_ts": response_ts,
+            "submit_elapsed_ms": submit_elapsed_ms,
             "submit_path": context.submit_path,
             "contract_profile": request.contract_profile,
             "submit_phase": "confirmation",
@@ -1331,7 +1404,14 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
     return order
 
 
-def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContext, order: BrokerOrder, request_ts: int, response_ts: int) -> None:
+def _confirm_submit_missing_exchange_id(
+    *,
+    context: _StandardSubmitAttemptContext,
+    order: BrokerOrder,
+    request_ts: int,
+    response_ts: int,
+    submit_elapsed_ms: int,
+) -> None:
     request = context.request
     planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     reason = "submit acknowledged without exchange_order_id; classification=SUBMIT_UNKNOWN"
@@ -1364,6 +1444,7 @@ def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContex
             "top_of_book": request.top_of_book_summary,
             "request_ts": request_ts,
             "response_ts": response_ts,
+            "submit_elapsed_ms": submit_elapsed_ms,
             "submit_path": context.submit_path,
             "contract_profile": request.contract_profile,
             "submit_phase": "confirmation",
@@ -1414,7 +1495,7 @@ def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContex
     return None
 
 
-def run_standard_submit_pipeline(*, broker: Broker, request: StandardSubmitPipelineRequest) -> BrokerOrder | None:
+def run_standard_submit_pipeline_with_evidence(*, broker: Broker, request: StandardSubmitPipelineRequest) -> StandardSubmitDispatchResult | None:
     try:
         submit_plan = _validate_explicit_submit_plan(request=request)
     except Exception as error:
@@ -1426,5 +1507,23 @@ def run_standard_submit_pipeline(*, broker: Broker, request: StandardSubmitPipel
     submission = _dispatch_submit_attempt(context=context, broker=broker)
     if submission is None:
         return None
-    order, request_ts, response_ts = submission
-    return _confirm_submit_attempt(context=context, order=order, request_ts=request_ts, response_ts=response_ts)
+    order = _confirm_submit_attempt(
+        context=context,
+        order=submission.order,
+        request_ts=submission.request_ts_ms,
+        response_ts=submission.response_ts_ms,
+        submit_elapsed_ms=submission.submit_elapsed_ms,
+    )
+    if order is None:
+        return None
+    return StandardSubmitDispatchResult(
+        order=order,
+        request_ts_ms=submission.request_ts_ms,
+        response_ts_ms=submission.response_ts_ms,
+        submit_elapsed_ms=submission.submit_elapsed_ms,
+    )
+
+
+def run_standard_submit_pipeline(*, broker: Broker, request: StandardSubmitPipelineRequest) -> BrokerOrder | None:
+    result = run_standard_submit_pipeline_with_evidence(broker=broker, request=request)
+    return None if result is None else result.order

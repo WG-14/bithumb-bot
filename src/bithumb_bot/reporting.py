@@ -17,6 +17,11 @@ from .analytics_context import (
 from .config import PATH_MANAGER, settings
 from .decision_contract import BLOCK_LAYER_PRIORITY
 from .decision_context import resolve_canonical_position_exposure_snapshot
+from .execution_quality import (
+    ExecutionQualityThresholds,
+    refresh_execution_quality_records,
+    summarize_execution_quality,
+)
 from .fee_authority import resolve_fee_authority_snapshot
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .reason_codes import (
@@ -4362,6 +4367,36 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         )
         recovery_attribution_signals = fetch_recovery_attribution_signal_summary(conn)
         recent_external_cash_adjustment = get_external_cash_adjustment_summary(conn)
+        try:
+            execution_quality_records = refresh_execution_quality_records(
+                conn,
+                limit=max(1, int(limit)),
+                market=market,
+                mode=str(settings.MODE),
+            )
+            execution_quality_status: dict[str, object] = summarize_execution_quality(
+                execution_quality_records,
+                thresholds=ExecutionQualityThresholds(
+                    min_sample=max(1, int(settings.LIVE_EXECUTION_QUALITY_MIN_SAMPLE)),
+                    max_p90_slippage_bps=float(settings.LIVE_EXECUTION_QUALITY_MAX_P90_SLIPPAGE_BPS),
+                    max_p95_full_fill_latency_ms=float(settings.LIVE_EXECUTION_QUALITY_MAX_P95_FULL_FILL_LATENCY_MS),
+                    max_partial_fill_rate=float(settings.LIVE_EXECUTION_QUALITY_MAX_PARTIAL_FILL_RATE),
+                    max_model_breach_rate=float(settings.LIVE_EXECUTION_QUALITY_MAX_MODEL_BREACH_RATE),
+                ),
+            )
+            execution_quality_status["quality_gate_enabled"] = bool(settings.LIVE_EXECUTION_QUALITY_GATE_ENABLED)
+            execution_quality_status["quality_gate_mode"] = str(settings.LIVE_EXECUTION_QUALITY_GATE_MODE)
+            conn.commit()
+        except Exception as exc:
+            execution_quality_status = {
+                "quality_gate_status": "INSUFFICIENT_EVIDENCE",
+                "sample_count": 0,
+                "primary_issue": "execution_quality_status_unavailable",
+                "next_action": "run_execution_quality_report",
+                "quality_gate_enabled": bool(settings.LIVE_EXECUTION_QUALITY_GATE_ENABLED),
+                "quality_gate_mode": str(settings.LIVE_EXECUTION_QUALITY_GATE_MODE),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         health_row = conn.execute(
             """
             SELECT
@@ -4551,6 +4586,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "last_reconcile_epoch_sec": recovery_attribution_signals.last_reconcile_epoch_sec,
         },
         "recent_external_cash_adjustment": recent_external_cash_adjustment,
+        "execution_quality": execution_quality_status,
         "runtime_state_snapshot": {
             "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
             "oldest_unresolved_order_age_sec": (
@@ -4825,6 +4861,19 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     )
     run_lock = payload.get("run_lock") or {}
     print(f"  run_lock={run_lock.get('human_text') or '-'}")
+    execution_quality = payload.get("execution_quality") or {}
+    print("\n[EXECUTION-QUALITY]")
+    print(
+        "  "
+        f"quality_gate_status={execution_quality.get('quality_gate_status') or 'INSUFFICIENT_EVIDENCE'} "
+        f"sample_count={execution_quality.get('sample_count', 0)} "
+        f"primary_issue={execution_quality.get('primary_issue') or 'unknown'} "
+        f"next_action={execution_quality.get('next_action') or 'run_execution_quality_report'} "
+        f"quality_gate_enabled={1 if execution_quality.get('quality_gate_enabled') else 0} "
+        f"quality_gate_mode={execution_quality.get('quality_gate_mode') or 'telemetry'}"
+    )
+    if execution_quality.get("error"):
+        print(f"  status_error={execution_quality.get('error')}")
     print("\n[ORDER-RULE-SNAPSHOT]")
     if "error" in order_rule_snapshot:
         print(f"  failed_to_load={order_rule_snapshot['error']}")
