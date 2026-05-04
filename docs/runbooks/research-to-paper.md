@@ -96,13 +96,12 @@ uv run bithumb-bot profile-verify \
   --env "$BITHUMB_ENV_FILE_PAPER"
 ```
 
-Set `APPROVED_STRATEGY_PROFILE_PATH` in the paper env file only after operator review. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate. The profile verification chain checks strategy name, market, interval, strategy parameters, cost model, promotion content hash, candidate profile hash, manifest hash, dataset content hash, profile mode, and regime policy.
+Set `APPROVED_STRATEGY_PROFILE_PATH` in the paper env file only after operator review. Do not automate promotion into paper or live env files. Keep paper and live storage roots separate. The profile verification chain checks strategy name, market, interval, strategy parameters, cost model, source promotion content hash, candidate profile hash, manifest hash, dataset content hash, profile mode, and regime policy.
 
-10. Run paper or live-dry-run observation.
+10. Run paper observation.
 
 ```bash
 uv run bithumb-bot run --short <paper_value> --long <paper_value>
-uv run bithumb-bot live-dry-run --short <paper_value> --long <paper_value>
 ```
 
 Use only explicit env files or process env. Do not reintroduce repo-root `.env` autoloading.
@@ -121,7 +120,7 @@ Review paper behavior, suppressed decisions, order intent evidence, and operator
 
 Research promotion, paper validation, and live readiness are separate gates. Live execution still requires existing live safety configuration, explicit arming, notifier requirements, loss limits, order count limits, preflight checks, run locks, reconciliation, and operator intervention when consistency is unclear.
 
-To promote beyond paper, use explicit profile transitions:
+To promote beyond paper, use explicit profile transitions. `profile-generate` creates paper profiles only; live-compatible profiles must be created with `profile-promote`.
 
 ```bash
 uv run bithumb-bot profile-promote \
@@ -129,7 +128,17 @@ uv run bithumb-bot profile-promote \
   --mode live_dry_run \
   --paper-validation-evidence "$DATA_ROOT/paper/reports/<paper_validation>.json" \
   --out "$DATA_ROOT/live/reports/profiles/<live_dry_run_profile>.json"
+```
 
+After setting `APPROVED_STRATEGY_PROFILE_PATH` in the live env file to the verified `live_dry_run` profile, run live dry-run observation:
+
+```bash
+uv run bithumb-bot live-dry-run --short <paper_value> --long <paper_value>
+```
+
+Promote to small live only after live readiness evidence:
+
+```bash
 uv run bithumb-bot profile-promote \
   --profile "$DATA_ROOT/live/reports/profiles/<live_dry_run_profile>.json" \
   --mode small_live \
@@ -137,4 +146,4 @@ uv run bithumb-bot profile-promote \
   --out "$DATA_ROOT/live/reports/profiles/<small_live_profile>.json"
 ```
 
-Live armed startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `small_live` profile whose runtime contract matches the effective settings.
+Live dry-run startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `live_dry_run` profile. Live armed startup fails closed unless `APPROVED_STRATEGY_PROFILE_PATH` points to a verified `small_live` profile whose runtime contract matches the effective settings.

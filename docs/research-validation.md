@@ -138,7 +138,7 @@ uv run bithumb-bot profile-verify \
   --env "$BITHUMB_ENV_FILE_PAPER"
 ```
 
-Both commands are credential-free. `profile-verify` exits non-zero on schema errors, hash mismatch, mode mismatch, missing required fields, strategy parameter drift, market/interval drift, or cost model drift.
+Both commands are credential-free. `profile-verify` exits non-zero on schema errors, hash mismatch, source promotion content-hash drift, mode mismatch, missing required fields, strategy parameter drift, market/interval drift, or cost model drift.
 
 Promotion between runtime approval states is explicit:
 
@@ -156,7 +156,7 @@ uv run bithumb-bot profile-promote \
   --out "$DATA_ROOT/live/reports/profiles/<small_live_profile>.json"
 ```
 
-Each transition verifies the parent profile, records `parent_profile_hash`, and refuses mode skipping. Live armed execution accepts only a `small_live` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`.
+Each transition verifies the parent profile, records `parent_profile_hash`, and refuses mode skipping. `profile-generate` creates paper profiles only; live-compatible profiles must come from `profile-promote`. Live dry-run startup accepts only a verified `live_dry_run` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`. Live armed execution accepts only a verified `small_live` approved profile selected by `APPROVED_STRATEGY_PROFILE_PATH`.
 
 Runtime still keeps research separated from live execution: profiles verify approved values; they do not auto-apply values to env files and do not arm live trading.
 

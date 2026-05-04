@@ -7163,7 +7163,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Generate an approved profile; this command never rewrites paper/live env files.",
     )
     profile_generate.add_argument("--promotion", required=True)
-    profile_generate.add_argument("--mode", required=True, choices=("paper", "live_dry_run", "small_live"))
+    profile_generate.add_argument("--mode", required=True, choices=("paper",))
     profile_generate.add_argument("--out")
     profile_generate.add_argument("--market")
     profile_generate.add_argument("--interval")

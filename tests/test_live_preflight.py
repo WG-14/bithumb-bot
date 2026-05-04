@@ -261,10 +261,12 @@ def _write_live_profile(tmp_path: Path, *, mode: str = "small_live", sma_short: 
         "generated_at": "2026-05-04T00:00:00+00:00",
     }
     promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, promotion)
     profile = build_approved_profile(
         promotion=promotion,
         mode=mode,
-        source_promotion_path=str(tmp_path / "promotion.json"),
+        source_promotion_path=str(promotion_path),
         market="KRW-BTC",
         interval=str(settings.INTERVAL),
         generated_at="2026-05-04T00:00:00+00:00",
@@ -346,6 +348,43 @@ def test_live_armed_preflight_rejects_paper_profile(
         config.validate_live_mode_preflight(settings)
 
     assert "profile_mode_mismatch" in str(exc.value)
+
+
+def test_live_dry_run_startup_requires_approved_live_dry_run_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "approved_profile_missing" in str(exc.value)
+
+
+def test_live_dry_run_startup_rejects_small_live_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    profile_path = _write_live_profile(tmp_path, mode="small_live")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "profile_mode_mismatch" in str(exc.value)
+
+
+def test_live_dry_run_startup_accepts_live_dry_run_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    profile_path = _write_live_profile(tmp_path, mode="live_dry_run")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+
+    config.validate_live_dry_run_loop_startup_contract(settings)
 
 
 def test_live_preflight_rejects_dry_run_when_real_order_armed(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -87,11 +87,11 @@ def _promotion(**overrides) -> dict[str, object]:
     return promotion
 
 
-def _profile() -> dict[str, object]:
+def _profile(source_promotion_path: str = "/runtime/promotion.json") -> dict[str, object]:
     return build_approved_profile(
         promotion=_promotion(),
         mode="paper",
-        source_promotion_path="/runtime/promotion.json",
+        source_promotion_path=source_promotion_path,
         market="KRW-BTC",
         interval="1m",
         generated_at="2026-05-04T00:00:00+00:00",
@@ -131,6 +131,14 @@ def _write_env(path: Path, *, sma_short: int = 2, profile_path: str = "") -> Non
     )
 
 
+def _write_profile_with_source(tmp_path: Path) -> Path:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    profile_path = tmp_path / "paper_profile.json"
+    write_json_atomic(profile_path, _profile(source_promotion_path=str(promotion_path)))
+    return profile_path
+
+
 def test_profile_generation_rejects_tampered_candidate_profile_hash(tmp_path: Path) -> None:
     promotion = _promotion(candidate_profile_hash="sha256:tampered")
     promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
@@ -141,6 +149,23 @@ def test_profile_generation_rejects_tampered_candidate_profile_hash(tmp_path: Pa
     rc = cmd_profile_generate(
         promotion_path=str(path),
         mode="paper",
+        out_path=str(out),
+        market=None,
+        interval=None,
+    )
+
+    assert rc == 1
+    assert not out.exists()
+
+
+def test_profile_generate_refuses_live_modes_without_explicit_transition(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    out = tmp_path / "profiles" / "live.json"
+
+    rc = cmd_profile_generate(
+        promotion_path=str(promotion_path),
+        mode="small_live",
         out_path=str(out),
         market=None,
         interval=None,
@@ -167,8 +192,7 @@ def test_corrupted_profile_content_hash_is_rejected() -> None:
 
 
 def test_profile_diff_detects_env_drift(tmp_path: Path) -> None:
-    profile_path = tmp_path / "paper_profile.json"
-    write_json_atomic(profile_path, _profile())
+    profile_path = _write_profile_with_source(tmp_path)
     env_path = tmp_path / "paper.env"
     _write_env(env_path, sma_short=99)
 
@@ -181,8 +205,7 @@ def test_profile_diff_detects_env_drift(tmp_path: Path) -> None:
 
 
 def test_profile_verify_fails_on_strategy_parameter_mismatch(tmp_path: Path) -> None:
-    profile_path = tmp_path / "paper_profile.json"
-    write_json_atomic(profile_path, _profile())
+    profile_path = _write_profile_with_source(tmp_path)
     env_path = tmp_path / "paper.env"
     _write_env(env_path, sma_short=99, profile_path=str(profile_path))
 
@@ -190,12 +213,33 @@ def test_profile_verify_fails_on_strategy_parameter_mismatch(tmp_path: Path) -> 
 
 
 def test_profile_verify_passes_when_env_matches(tmp_path: Path) -> None:
-    profile_path = tmp_path / "paper_profile.json"
-    write_json_atomic(profile_path, _profile())
+    profile_path = _write_profile_with_source(tmp_path)
     env_path = tmp_path / "paper.env"
     _write_env(env_path, profile_path=str(profile_path))
 
     assert cmd_profile_verify(profile_path=str(profile_path), env_path=str(env_path)) == 0
+
+
+def test_profile_verify_fails_when_source_promotion_hash_drifts(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "paper.env"
+    _write_env(env_path, profile_path=str(profile_path))
+    promotion = _promotion()
+    promotion["dataset_content_hash"] = "sha256:other-dataset"
+    promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
+    write_json_atomic(tmp_path / "promotion.json", promotion)
+
+    assert cmd_profile_verify(profile_path=str(profile_path), env_path=str(env_path)) == 1
+
+
+def test_profile_diff_detects_profile_mode_env_incompatibility(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "live.env"
+    _write_env(env_path, profile_path=str(profile_path))
+    env_text = env_path.read_text(encoding="utf-8").replace("MODE=paper", "MODE=live")
+    env_path.write_text(env_text + "LIVE_DRY_RUN=false\nLIVE_REAL_ORDER_ARMED=true\n", encoding="utf-8")
+
+    assert cmd_profile_diff(profile_path=str(profile_path), target_env=str(env_path), as_json=True) == 1
 
 
 def test_paper_profile_cannot_skip_directly_to_small_live() -> None:

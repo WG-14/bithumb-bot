@@ -177,7 +177,7 @@ Expected artifact placement:
 
 - Real-order flow requires explicit arming.
 - Live SMA operation uses `sma_with_filter`; `MODE=live` rejects plain `sma_cross` with `plain_sma_live_not_allowed`.
-- Set `APPROVED_STRATEGY_PROFILE_PATH` to a reviewed approved profile before paper or live-dry-run validation. Live armed execution fails closed unless it points to a `small_live` approved profile whose strategy, market, interval, parameter, cost, promotion hash, candidate profile hash, manifest hash, dataset hash, and regime policy contract matches runtime settings. Legacy `STRATEGY_CANDIDATE_PROFILE_PATH` remains a regime-policy compatibility selector only; it is not sufficient for live armed approval.
+- Set `APPROVED_STRATEGY_PROFILE_PATH` to a reviewed approved profile before paper or live-dry-run validation. `profile-generate` creates paper profiles only; live-compatible profiles must be created through explicit `profile-promote` transitions. Live dry-run startup fails closed unless it points to a verified `live_dry_run` profile. Live armed execution fails closed unless it points to a `small_live` approved profile whose strategy, market, interval, parameter, cost, source promotion hash, candidate profile hash, manifest hash, dataset hash, and regime policy contract matches runtime settings. Legacy `STRATEGY_CANDIDATE_PROFILE_PATH` remains a regime-policy compatibility selector only; it is not sufficient for live armed approval.
 - `LIVE_DRY_RUN=true` is the safe starting point for live bring-up and post-change validation.
 - `LIVE_REAL_ORDER_ARMED=true` is required before real orders are allowed.
 - Live preflight must fail fast when required limits, notifier configuration, or safety inputs are missing.

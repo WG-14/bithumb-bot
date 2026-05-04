@@ -250,6 +250,22 @@ def load_approved_profile(path: str | Path) -> dict[str, Any]:
     return validate_approved_profile(_load_json(path))
 
 
+def verify_profile_source_promotion(profile: dict[str, Any]) -> dict[str, Any]:
+    validated = validate_approved_profile(profile)
+    source_path = str(validated.get("source_promotion_artifact_path") or "").strip()
+    if not source_path:
+        raise ApprovedProfileError("source_promotion_artifact_path_missing")
+    promotion = verify_promotion_artifact(_load_json(source_path))
+    expected_hash = str(validated.get("source_promotion_content_hash") or "")
+    actual_hash = str(promotion.get("content_hash") or "")
+    if actual_hash != expected_hash:
+        raise ApprovedProfileError("source_promotion_content_hash_mismatch")
+    for key in ("candidate_profile_hash", "manifest_hash", "dataset_content_hash", "strategy_name"):
+        if not _values_equal(validated.get(key), promotion.get(key)):
+            raise ApprovedProfileError(f"source_promotion_{key}_mismatch")
+    return promotion
+
+
 def load_profile_or_promotion_regime_policy(path: str | Path | None) -> dict[str, object] | None:
     raw = str(path or "").strip()
     if not raw:
@@ -353,6 +369,8 @@ def runtime_contract_from_env_values(env: dict[str, str]) -> dict[str, Any]:
     }
     return {
         "mode": _value("MODE", default="paper"),
+        "live_dry_run": _value("LIVE_DRY_RUN", default="true"),
+        "live_real_order_armed": _value("LIVE_REAL_ORDER_ARMED", default="false"),
         "profile_selector": _value(APPROVED_PROFILE_SELECTOR_ENV, "STRATEGY_APPROVED_PROFILE_PATH"),
         "strategy_name": _value("STRATEGY_NAME", default="sma_with_filter"),
         "market": _value("MARKET", "PAIR", default="KRW-BTC"),
@@ -379,6 +397,8 @@ def runtime_contract_from_env_values(env: dict[str, str]) -> dict[str, Any]:
 def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
     return {
         "mode": str(getattr(cfg, "MODE", "")),
+        "live_dry_run": bool(getattr(cfg, "LIVE_DRY_RUN", True)),
+        "live_real_order_armed": bool(getattr(cfg, "LIVE_REAL_ORDER_ARMED", False)),
         "profile_selector": str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "")),
         "strategy_name": str(getattr(cfg, "STRATEGY_NAME", "")),
         "market": str(getattr(cfg, "PAIR", "")),
@@ -412,6 +432,7 @@ def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
 def diff_profile_to_runtime(profile: dict[str, Any], runtime: dict[str, Any]) -> tuple[dict[str, object], ...]:
     validate_approved_profile(profile)
     mismatches: list[dict[str, object]] = []
+    _compare_profile_mode(mismatches, profile, runtime)
     _compare_scalar(mismatches, "strategy_name", profile.get("strategy_name"), runtime.get("strategy_name"))
     _compare_scalar(mismatches, "market", profile.get("market"), runtime.get("market"))
     _compare_scalar(mismatches, "interval", profile.get("interval"), runtime.get("interval"))
@@ -434,6 +455,28 @@ def diff_profile_to_runtime(profile: dict[str, Any], runtime: dict[str, Any]) ->
         if not _values_equal(expected, runtime_cost[key]):
             mismatches.append({"field": f"cost_model.{key}", "expected": expected, "actual": runtime_cost[key]})
     return tuple(mismatches)
+
+
+def _compare_profile_mode(mismatches: list[dict[str, object]], profile: dict[str, Any], runtime: dict[str, Any]) -> None:
+    profile_mode = str(profile.get("profile_mode") or "").strip().lower()
+    runtime_mode = str(runtime.get("mode") or "").strip().lower()
+    if profile_mode == "paper":
+        ok = runtime_mode == "paper"
+        expected = "MODE=paper"
+    elif profile_mode in LIVE_COMPATIBLE_PROFILE_MODES:
+        ok = runtime_mode == "live"
+        expected = "MODE=live"
+    else:
+        ok = False
+        expected = "valid approved profile mode"
+    if not ok:
+        mismatches.append(
+            {
+                "field": "profile_mode_compatibility",
+                "expected": expected,
+                "actual": f"MODE={runtime_mode or '-'}",
+            }
+        )
 
 
 def _compare_scalar(mismatches: list[dict[str, object]], field: str, expected: object, actual: object) -> None:
@@ -462,6 +505,7 @@ def verify_profile_against_runtime(
     runtime: dict[str, Any],
     require_profile: bool,
     expected_profile_modes: set[str] | None = None,
+    verify_source_promotion: bool = False,
 ) -> ProfileVerificationResult:
     raw_path = str(profile_path or "").strip()
     if not raw_path:
@@ -469,8 +513,10 @@ def verify_profile_against_runtime(
         return _verification_result(False, reason, None, None, tuple(), None)
     try:
         profile = load_approved_profile(raw_path)
+        if verify_source_promotion:
+            verify_profile_source_promotion(profile)
         mode = str(profile.get("profile_mode"))
-        if expected_profile_modes and mode not in expected_profile_modes:
+        if expected_profile_modes is not None and mode not in expected_profile_modes:
             raise ApprovedProfileError(f"profile_mode_mismatch: expected={sorted(expected_profile_modes)} actual={mode}")
         mismatches = diff_profile_to_runtime(profile, runtime)
         if mismatches:

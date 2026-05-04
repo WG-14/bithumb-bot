@@ -1115,6 +1115,7 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 runtime=runtime_contract_from_settings(cfg),
                 require_profile=profile_required,
                 expected_profile_modes=expected_profile_modes,
+                verify_source_promotion=True,
             )
             if not profile_result.ok:
                 issues.append(
@@ -1166,6 +1167,18 @@ def validate_live_dry_run_loop_startup_contract(cfg: Settings) -> None:
             "live dry-run loop startup contract failed: " + "; ".join(issues)
         )
     validate_live_mode_preflight(cfg)
+    profile_result = verify_profile_against_runtime(
+        profile_path=str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip(),
+        runtime=runtime_contract_from_settings(cfg),
+        require_profile=True,
+        expected_profile_modes={"live_dry_run"},
+        verify_source_promotion=True,
+    )
+    if not profile_result.ok:
+        raise LiveModeValidationError(
+            "live dry-run loop startup contract failed: approved profile verification failed: "
+            f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
+        )
 
 
 def validate_live_run_startup_contract(cfg: Settings) -> None:
@@ -1231,6 +1244,7 @@ def live_execution_contract_summary(
         runtime=runtime_contract_from_settings(cfg),
         require_profile=False,
         expected_profile_modes=None,
+        verify_source_promotion=True,
     )
     return {
         "mode": cfg.MODE,

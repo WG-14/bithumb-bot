@@ -40,6 +40,8 @@ def cmd_profile_generate(
     interval: str | None = None,
 ) -> int:
     try:
+        if str(mode or "").strip().lower() != "paper":
+            raise ApprovedProfileError("profile_generate_requires_paper_mode_use_profile-promote_for_live_modes")
         promotion = _load_json(promotion_path)
         profile_market = str(market or promotion.get("market") or "").strip()
         profile_interval = str(interval or promotion.get("interval") or "").strip()
@@ -121,6 +123,8 @@ def cmd_profile_verify(*, profile_path: str, env_path: str) -> int:
             profile_path=profile_path,
             runtime=runtime,
             require_profile=True,
+            expected_profile_modes=_expected_profile_modes_for_runtime(runtime),
+            verify_source_promotion=True,
         )
     except (ApprovedProfileError, OSError, ValueError) as exc:
         _print_json({"ok": False, "error": str(exc), "command": "profile-verify"})
@@ -133,6 +137,27 @@ def cmd_profile_verify(*, profile_path: str, env_path: str) -> int:
     }
     _print_json(payload)
     return 0 if result.ok else 1
+
+
+def _expected_profile_modes_for_runtime(runtime: dict[str, object]) -> set[str] | None:
+    mode = str(runtime.get("mode") or "").strip().lower()
+    if mode == "paper":
+        return {"paper"}
+    if mode != "live":
+        return None
+    live_dry_run = str(runtime.get("live_dry_run", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    live_real_order_armed = str(runtime.get("live_real_order_armed", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    if live_dry_run and not live_real_order_armed:
+        return {"live_dry_run"}
+    if not live_dry_run and live_real_order_armed:
+        return {"small_live"}
+    return set()
 
 
 def cmd_profile_promote(
