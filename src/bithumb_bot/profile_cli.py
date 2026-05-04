@@ -100,6 +100,9 @@ def cmd_profile_diff(*, profile_path: str, target_env: str, as_json: bool) -> in
         "profile_hash": profile.get("profile_content_hash"),
         "mismatch_count": len(mismatches),
         "mismatches": [dict(item) for item in mismatches],
+        "source_promotion_verified": False,
+        "evidence_verified": False,
+        "use_profile_verify_for_artifact_chain": True,
     }
     if as_json:
         _print_json(payload)
@@ -108,6 +111,9 @@ def cmd_profile_diff(*, profile_path: str, target_env: str, as_json: bool) -> in
         print(f"  profile_path={payload['profile_path']}")
         print(f"  target_env={payload['target_env']}")
         print(f"  profile_hash={payload['profile_hash']}")
+        print("  source_promotion_verified=False")
+        print("  evidence_verified=False")
+        print("  use_profile_verify_for_artifact_chain=True")
         print(f"  mismatch_count={payload['mismatch_count']}")
         for item in mismatches:
             print(f"  mismatch field={item['field']} expected={item['expected']} actual={item['actual']}")
@@ -117,11 +123,13 @@ def cmd_profile_diff(*, profile_path: str, target_env: str, as_json: bool) -> in
 def cmd_profile_verify(*, profile_path: str, env_path: str) -> int:
     try:
         runtime = runtime_contract_from_env_values(parse_env_file(env_path))
+        expected_modes, mode_reason = expected_profile_modes_for_runtime(runtime)
         result = verify_profile_against_runtime(
             profile_path=profile_path,
             runtime=runtime,
             require_profile=True,
-            expected_profile_modes=expected_profile_modes_for_runtime(runtime)[0],
+            expected_profile_modes=expected_modes,
+            expected_profile_mode_reason=mode_reason,
             verify_source_promotion=True,
         )
     except (ApprovedProfileError, OSError, ValueError) as exc:

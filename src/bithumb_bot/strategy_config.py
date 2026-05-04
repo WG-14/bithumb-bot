@@ -45,11 +45,17 @@ def sma_strategy_config_from_settings(
     short_n: int | None = None,
     long_n: int | None = None,
 ) -> SmaStrategyConfig:
+    approved_profile_selector = str(
+        runtime_contract_from_settings(settings).get("profile_selector") or ""
+    ).strip()
     profile_or_candidate_path = (
-        str(settings.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
+        approved_profile_selector
         or str(settings.STRATEGY_CANDIDATE_PROFILE_PATH or "").strip()
     )
-    candidate_regime_policy = _candidate_regime_policy_from_configured_profile(profile_or_candidate_path)
+    candidate_regime_policy = _candidate_regime_policy_from_configured_profile(
+        profile_or_candidate_path,
+        approved_profile_path=approved_profile_selector,
+    )
     return SmaStrategyConfig(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
         long_n=int(settings.SMA_LONG if long_n is None else long_n),
@@ -69,11 +75,15 @@ def sma_strategy_config_from_settings(
     )
 
 
-def _candidate_regime_policy_from_configured_profile(path: str) -> dict[str, object] | None:
+def _candidate_regime_policy_from_configured_profile(
+    path: str,
+    *,
+    approved_profile_path: str | None = None,
+) -> dict[str, object] | None:
     raw_path = str(path or "").strip()
     if not raw_path:
         return None
-    approved_profile_path = str(settings.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
+    approved_profile_path = str(approved_profile_path or "").strip()
     if str(settings.MODE or "").strip().lower() == "live" and not approved_profile_path:
         return {
             "_policy_load_error": "approved_profile_missing",
@@ -84,11 +94,13 @@ def _candidate_regime_policy_from_configured_profile(path: str) -> dict[str, obj
         }
     if raw_path == approved_profile_path:
         runtime = runtime_contract_from_settings(settings)
+        expected_modes, mode_reason = expected_profile_modes_for_runtime(runtime)
         result = verify_profile_against_runtime(
             profile_path=raw_path,
             runtime=runtime,
             require_profile=True,
-            expected_profile_modes=expected_profile_modes_for_runtime(runtime)[0],
+            expected_profile_modes=expected_modes,
+            expected_profile_mode_reason=mode_reason,
             verify_source_promotion=True,
         )
         if not result.ok:
@@ -97,7 +109,13 @@ def _candidate_regime_policy_from_configured_profile(path: str) -> dict[str, obj
                 "_policy_source": raw_path,
                 **result.audit_fields(),
             }
-    policy = load_profile_or_promotion_regime_policy(raw_path)
+    policy = load_profile_or_promotion_regime_policy(
+        raw_path,
+        verify_source=raw_path == approved_profile_path,
+        approved_profile_contract_scope=(
+            "full_approved_profile" if raw_path == approved_profile_path else "legacy_regime_policy_only"
+        ),
+    )
     if policy is not None:
         policy = {
             **policy,

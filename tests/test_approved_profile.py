@@ -13,9 +13,11 @@ from bithumb_bot.approved_profile import (
     content_hash_payload,
     diff_profile_to_runtime,
     load_approved_profile,
+    load_profile_or_promotion_regime_policy,
     parse_env_file,
     promote_profile_mode,
     runtime_contract_from_env_values,
+    runtime_contract_from_settings,
     sha256_prefixed,
     validate_approved_profile,
 )
@@ -243,6 +245,22 @@ def test_profile_diff_detects_env_drift(tmp_path: Path) -> None:
     assert cmd_profile_diff(profile_path=str(profile_path), target_env=str(env_path), as_json=True) == 1
 
 
+def test_profile_diff_json_clarifies_artifact_chain_is_not_verified(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "paper.env"
+    _write_env(env_path, profile_path=str(profile_path))
+
+    assert cmd_profile_diff(profile_path=str(profile_path), target_env=str(env_path), as_json=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["source_promotion_verified"] is False
+    assert payload["evidence_verified"] is False
+    assert payload["use_profile_verify_for_artifact_chain"] is True
+
+
 def test_profile_verify_fails_on_strategy_parameter_mismatch(tmp_path: Path) -> None:
     profile_path = _write_profile_with_source(tmp_path)
     env_path = tmp_path / "paper.env"
@@ -257,6 +275,40 @@ def test_profile_verify_passes_when_env_matches(tmp_path: Path) -> None:
     _write_env(env_path, profile_path=str(profile_path))
 
     assert cmd_profile_verify(profile_path=str(profile_path), env_path=str(env_path)) == 0
+
+
+def test_profile_verify_json_preserves_ambiguous_live_flags_reason(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "live.env"
+    _write_env(env_path, profile_path=str(profile_path))
+    text = env_path.read_text(encoding="utf-8").replace("MODE=paper", "MODE=live")
+    env_path.write_text(text + "LIVE_DRY_RUN=true\nLIVE_REAL_ORDER_ARMED=true\n", encoding="utf-8")
+
+    assert cmd_profile_verify(profile_path=str(profile_path), env_path=str(env_path)) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["reason"] == "live_mode_arming_flags_ambiguous"
+    assert payload["approved_profile_block_reason"] == "live_mode_arming_flags_ambiguous"
+
+
+def test_profile_verify_json_preserves_live_not_dry_run_or_armed_reason(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "live.env"
+    _write_env(env_path, profile_path=str(profile_path))
+    text = env_path.read_text(encoding="utf-8").replace("MODE=paper", "MODE=live")
+    env_path.write_text(text + "LIVE_DRY_RUN=false\nLIVE_REAL_ORDER_ARMED=false\n", encoding="utf-8")
+
+    assert cmd_profile_verify(profile_path=str(profile_path), env_path=str(env_path)) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["reason"] == "live_mode_not_dry_run_or_armed"
+    assert payload["approved_profile_block_reason"] == "live_mode_not_dry_run_or_armed"
 
 
 def test_profile_verify_fails_when_env_selector_points_to_other_profile(tmp_path: Path) -> None:
@@ -381,8 +433,7 @@ def test_profile_promote_fails_when_live_readiness_evidence_missing(tmp_path: Pa
 
 def test_profile_promote_fails_when_parent_source_promotion_drifts(tmp_path: Path) -> None:
     profile_path = _write_profile_with_source(tmp_path)
-    promotion = _promotion(dataset_content_hash="sha256:other")
-    promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
+    promotion = _promotion(repository_version="other-version")
     write_json_atomic(tmp_path / "promotion.json", promotion)
 
     assert cmd_profile_promote(
@@ -392,6 +443,95 @@ def test_profile_promote_fails_when_parent_source_promotion_drifts(tmp_path: Pat
         paper_validation_evidence=str(_write_evidence(tmp_path, "paper_validation.json")),
         live_readiness_evidence=None,
     ) == 1
+
+
+def test_profile_promote_fails_when_parent_paper_validation_evidence_drifts(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    paper = _profile(str(promotion_path))
+    paper_evidence = _write_evidence(tmp_path, "paper_validation.json")
+    live_dry_run = promote_profile_mode(
+        parent_profile=paper,
+        target_mode="live_dry_run",
+        paper_validation_evidence=str(paper_evidence),
+    )
+    live_dry_run_path = tmp_path / "live_dry_run.json"
+    write_json_atomic(live_dry_run_path, live_dry_run)
+    paper_evidence.write_text('{"ok":false}\n', encoding="utf-8")
+
+    assert cmd_profile_promote(
+        profile_path=str(live_dry_run_path),
+        mode="small_live",
+        out_path=str(tmp_path / "small_live.json"),
+        paper_validation_evidence=None,
+        live_readiness_evidence=str(_write_evidence(tmp_path, "live_ready.json")),
+    ) == 1
+
+
+def test_regime_policy_helper_verify_source_fails_on_source_drift(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    promotion = _promotion(repository_version="other-version")
+    write_json_atomic(tmp_path / "promotion.json", promotion)
+
+    policy = load_profile_or_promotion_regime_policy(profile_path, verify_source=True)
+
+    assert policy is not None
+    assert policy["_policy_load_error"] == "source_promotion_content_hash_mismatch"
+    assert policy["approved_profile_verification_ok"] is False
+    assert policy["approved_profile_block_reason"] == "source_promotion_content_hash_mismatch"
+
+
+def test_regime_policy_helper_without_verify_source_marks_legacy_scope(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+
+    policy = load_profile_or_promotion_regime_policy(
+        profile_path,
+        verify_source=False,
+        approved_profile_contract_scope="legacy_regime_policy_only",
+    )
+
+    assert policy is not None
+    assert policy["approved_profile_verification_ok"] is False
+    assert policy["approved_profile_block_reason"] == "legacy_regime_policy_only_source_not_verified"
+    assert policy["approved_profile_contract_scope"] == "legacy_regime_policy_only"
+
+
+def test_runtime_contract_settings_supports_approved_profile_alias_with_canonical_precedence(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "canonical.json"
+    alias = tmp_path / "alias.json"
+
+    class Cfg:
+        MODE = "paper"
+        LIVE_DRY_RUN = True
+        LIVE_REAL_ORDER_ARMED = False
+        APPROVED_STRATEGY_PROFILE_PATH = str(canonical)
+        STRATEGY_APPROVED_PROFILE_PATH = str(alias)
+        STRATEGY_NAME = "sma_with_filter"
+        PAIR = "KRW-BTC"
+        INTERVAL = "1m"
+        SMA_SHORT = 2
+        SMA_LONG = 4
+        SMA_FILTER_GAP_MIN_RATIO = 0.0012
+        SMA_FILTER_VOL_WINDOW = 10
+        SMA_FILTER_VOL_MIN_RANGE_RATIO = 0.003
+        SMA_FILTER_OVEREXT_LOOKBACK = 3
+        SMA_FILTER_OVEREXT_MAX_RETURN_RATIO = 0.02
+        SMA_COST_EDGE_ENABLED = True
+        SMA_COST_EDGE_MIN_RATIO = 0.001
+        ENTRY_EDGE_BUFFER_RATIO = 0.0005
+        STRATEGY_MIN_EXPECTED_EDGE_RATIO = 0.001
+        STRATEGY_EXIT_RULES = "opposite_cross,max_holding_time"
+        STRATEGY_EXIT_MAX_HOLDING_MIN = 0
+        STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO = 0
+        STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO = 0
+        LIVE_FEE_RATE_ESTIMATE = 0.0025
+        STRATEGY_ENTRY_SLIPPAGE_BPS = 50
+
+    assert runtime_contract_from_settings(Cfg)["profile_selector"] == str(canonical)
+    Cfg.APPROVED_STRATEGY_PROFILE_PATH = ""
+    assert runtime_contract_from_settings(Cfg)["profile_selector"] == str(alias)
 
 
 def test_changing_evidence_content_changes_child_profile_hash(tmp_path: Path) -> None:

@@ -423,7 +423,12 @@ def verify_profile_evidence_artifacts(profile: dict[str, Any]) -> None:
             raise ApprovedProfileError(f"{hash_key}_mismatch")
 
 
-def load_profile_or_promotion_regime_policy(path: str | Path | None) -> dict[str, object] | None:
+def load_profile_or_promotion_regime_policy(
+    path: str | Path | None,
+    *,
+    verify_source: bool = False,
+    approved_profile_contract_scope: str = "full_approved_profile",
+) -> dict[str, object] | None:
     raw = str(path or "").strip()
     if not raw:
         return None
@@ -437,22 +442,32 @@ def load_profile_or_promotion_regime_policy(path: str | Path | None) -> dict[str
     if "profile_schema_version" in payload:
         try:
             profile = validate_approved_profile(payload)
+            if verify_source:
+                verify_profile_source_promotion(profile)
         except ApprovedProfileError as exc:
             return {
                 "_policy_load_error": str(exc),
                 "_policy_source": raw,
+                "approved_profile_verification_ok": False,
+                "approved_profile_block_reason": str(exc),
             }
         policy = profile.get("regime_policy")
         if isinstance(policy, dict):
+            source_verified = bool(verify_source)
+            block_reason = "ok" if source_verified else "legacy_regime_policy_only_source_not_verified"
             return {
                 "live_regime_policy": dict(policy),
                 "strategy_profile_id": profile.get("profile_id") or profile.get(PROFILE_HASH_FIELD),
                 "strategy_profile_hash": profile.get(PROFILE_HASH_FIELD),
                 "content_hash": profile.get(PROFILE_HASH_FIELD),
                 "approved_profile_mode": profile.get("profile_mode"),
-                "approved_profile_verification_ok": True,
-                "approved_profile_block_reason": "ok",
+                "approved_profile_path": str(Path(raw).expanduser().resolve()),
+                "approved_profile_hash": profile.get(PROFILE_HASH_FIELD),
+                "approved_profile_verification_ok": source_verified,
+                "approved_profile_block_reason": block_reason,
+                "approved_profile_contract_scope": approved_profile_contract_scope,
                 "source_promotion_content_hash": profile.get("source_promotion_content_hash"),
+                "promotion_content_hash": profile.get("source_promotion_content_hash"),
                 "source_promotion_artifact_path": profile.get("source_promotion_artifact_path"),
                 "candidate_profile_hash": profile.get("candidate_profile_hash"),
                 "manifest_hash": profile.get("manifest_hash"),
@@ -560,11 +575,15 @@ def runtime_contract_from_env_values(env: dict[str, str]) -> dict[str, Any]:
 
 
 def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
+    profile_selector = (
+        str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+        or str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+    )
     return {
         "mode": str(getattr(cfg, "MODE", "")),
         "live_dry_run": bool(getattr(cfg, "LIVE_DRY_RUN", True)),
         "live_real_order_armed": bool(getattr(cfg, "LIVE_REAL_ORDER_ARMED", False)),
-        "profile_selector": str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "")),
+        "profile_selector": profile_selector,
         "strategy_name": str(getattr(cfg, "STRATEGY_NAME", "")),
         "market": str(getattr(cfg, "PAIR", "")),
         "interval": str(getattr(cfg, "INTERVAL", "")),
@@ -676,6 +695,7 @@ def verify_profile_against_runtime(
     runtime: dict[str, Any],
     require_profile: bool,
     expected_profile_modes: set[str] | None = None,
+    expected_profile_mode_reason: str | None = None,
     verify_source_promotion: bool = False,
 ) -> ProfileVerificationResult:
     raw_path = str(profile_path or "").strip()
@@ -684,8 +704,17 @@ def verify_profile_against_runtime(
         return _verification_result(False, reason, None, None, tuple(), None)
     try:
         if expected_profile_modes is not None and len(expected_profile_modes) == 0:
-            _, reason = expected_profile_modes_for_runtime(runtime)
-            return _verification_result(False, reason or "profile_expected_mode_unavailable", raw_path, None, tuple(), runtime)
+            reason = expected_profile_mode_reason
+            if reason is None:
+                _, reason = expected_profile_modes_for_runtime(runtime)
+            return _verification_result(
+                False,
+                reason or "profile_expected_mode_unavailable",
+                raw_path,
+                None,
+                tuple(),
+                runtime,
+            )
         profile = load_approved_profile(raw_path)
         if verify_source_promotion:
             verify_profile_source_promotion(profile)

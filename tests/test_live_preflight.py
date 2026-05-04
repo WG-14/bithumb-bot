@@ -50,6 +50,7 @@ def _restore_settings():
         "MARKET_REGISTRY_CACHE_TTL_SEC": settings.MARKET_REGISTRY_CACHE_TTL_SEC,
         "MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH": settings.MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH,
         "APPROVED_STRATEGY_PROFILE_PATH": settings.APPROVED_STRATEGY_PROFILE_PATH,
+        "STRATEGY_APPROVED_PROFILE_PATH": settings.STRATEGY_APPROVED_PROFILE_PATH,
         "STRATEGY_NAME": settings.STRATEGY_NAME,
         "SMA_SHORT": settings.SMA_SHORT,
         "SMA_LONG": settings.SMA_LONG,
@@ -196,6 +197,7 @@ def _set_valid_live_defaults(
         )
     profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="live_dry_run")
     object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+    object.__setattr__(settings, "STRATEGY_APPROVED_PROFILE_PATH", "")
 
 
 def _candidate_profile_for_current_settings() -> dict[str, object]:
@@ -403,6 +405,43 @@ def test_live_preflight_rejects_dry_run_when_real_order_armed(monkeypatch: pytes
     assert "LIVE_DRY_RUN=true and LIVE_REAL_ORDER_ARMED=true is ambiguous" in str(exc.value)
 
 
+def test_live_preflight_preserves_unarmed_non_dry_run_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "live_mode_not_dry_run_or_armed" in str(exc.value)
+
+
+def test_live_execution_contract_summary_preserves_ambiguous_profile_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+
+    summary = config.live_execution_contract_summary(settings)
+
+    approved_profile = summary["approved_profile"]
+    assert approved_profile["approved_profile_verification_ok"] is False
+    assert approved_profile["approved_profile_block_reason"] == "live_mode_arming_flags_ambiguous"
+
+
+def test_live_preflight_accepts_approved_profile_alias_selector(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    profile_path = _write_live_profile(tmp_path, mode="live_dry_run")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+    object.__setattr__(settings, "STRATEGY_APPROVED_PROFILE_PATH", str(profile_path))
+
+    config.validate_live_mode_preflight(settings)
+
+
 def test_live_execution_contract_log_emits_redacted_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -410,6 +449,7 @@ def test_live_execution_contract_log_emits_redacted_fingerprint(
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     object.__setattr__(settings, "BITHUMB_API_KEY", "visible-key-length")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret-value-must-not-log")
 
@@ -422,6 +462,11 @@ def test_live_execution_contract_log_emits_redacted_fingerprint(
     assert "live_dry_run=0" in caplog.text
     assert "live_real_order_armed=1" in caplog.text
     assert "api_secret_present=1" in caplog.text
+    assert "approved_profile_hash=" in caplog.text
+    assert "promotion_content_hash=" in caplog.text
+    assert "candidate_profile_hash=" in caplog.text
+    assert "manifest_hash=" in caplog.text
+    assert "dataset_content_hash=" in caplog.text
     assert "secret-value-must-not-log" not in caplog.text
 
 

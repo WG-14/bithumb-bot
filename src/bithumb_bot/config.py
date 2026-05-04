@@ -492,6 +492,7 @@ class Settings:
     STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO: float = float(
         os.getenv("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO", "0")
     )
+    STRATEGY_APPROVED_PROFILE_PATH: str = os.getenv("STRATEGY_APPROVED_PROFILE_PATH", "").strip()
     APPROVED_STRATEGY_PROFILE_PATH: str = approved_profile_path_from_env()
     STRATEGY_CANDIDATE_PROFILE_PATH: str = os.getenv("STRATEGY_CANDIDATE_PROFILE_PATH", "").strip()
     LIVE_PERFORMANCE_GATE_ENABLED: bool = parse_bool_env("LIVE_PERFORMANCE_GATE_ENABLED", "true")
@@ -1109,15 +1110,19 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
 
     if not issues:
         profile_required = bool(not cfg.LIVE_DRY_RUN and cfg.LIVE_REAL_ORDER_ARMED)
-        configured_profile_path = str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+        runtime_contract = runtime_contract_from_settings(cfg)
+        configured_profile_path = str(runtime_contract.get("profile_selector") or "").strip()
         if profile_required or configured_profile_path:
-            runtime_contract = runtime_contract_from_settings(cfg)
-            expected_profile_modes = {"small_live"} if profile_required else expected_profile_modes_for_runtime(runtime_contract)[0]
+            expected_profile_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
+            if profile_required:
+                expected_profile_modes = {"small_live"}
+                mode_reason = None
             profile_result = verify_profile_against_runtime(
                 profile_path=configured_profile_path,
                 runtime=runtime_contract,
                 require_profile=profile_required,
                 expected_profile_modes=expected_profile_modes,
+                expected_profile_mode_reason=mode_reason,
                 verify_source_promotion=True,
             )
             if not profile_result.ok:
@@ -1170,9 +1175,10 @@ def validate_live_dry_run_loop_startup_contract(cfg: Settings) -> None:
             "live dry-run loop startup contract failed: " + "; ".join(issues)
         )
     validate_live_mode_preflight(cfg)
+    runtime_contract = runtime_contract_from_settings(cfg)
     profile_result = verify_profile_against_runtime(
-        profile_path=str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip(),
-        runtime=runtime_contract_from_settings(cfg),
+        profile_path=str(runtime_contract.get("profile_selector") or "").strip(),
+        runtime=runtime_contract,
         require_profile=True,
         expected_profile_modes={"live_dry_run"},
         verify_source_promotion=True,
@@ -1242,11 +1248,14 @@ def live_execution_contract_summary(
         "RUN_LOCK_PATH": str(os.getenv("RUN_LOCK_PATH") or cfg.RUN_LOCK_PATH or ""),
     }
     explicit_env = dict(env_summary or {})
+    runtime_contract = runtime_contract_from_settings(cfg)
+    expected_profile_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
     profile_result = verify_profile_against_runtime(
-        profile_path=str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip(),
-        runtime=runtime_contract_from_settings(cfg),
+        profile_path=str(runtime_contract.get("profile_selector") or "").strip(),
+        runtime=runtime_contract,
         require_profile=False,
-        expected_profile_modes=None,
+        expected_profile_modes=expected_profile_modes,
+        expected_profile_mode_reason=mode_reason,
         verify_source_promotion=True,
     )
     return {
