@@ -88,6 +88,13 @@ from .fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
 )
+from .execution_quality import (
+    ExecutionQualityThresholds,
+    format_execution_quality_text,
+    load_manifest_max_slippage_bps,
+    refresh_execution_quality_records,
+    summarize_execution_quality,
+)
 from .position_authority_repair import (
     apply_position_authority_rebuild,
     build_position_authority_rebuild_preview,
@@ -2435,6 +2442,115 @@ def cmd_report(days: int) -> None:
     print(f"  drawdown<=20%: {'PASS' if gate_mdd else 'FAIL'}")
     print(f"  avg_daily_return>=0.10%: {'PASS' if gate_pnl else 'FAIL'}")
     print(f"  => {'PASS' if gate_pass else 'FAIL'}")
+
+
+def _execution_quality_thresholds_from_settings() -> ExecutionQualityThresholds:
+    return ExecutionQualityThresholds(
+        min_sample=max(1, int(settings.LIVE_EXECUTION_QUALITY_MIN_SAMPLE)),
+        max_p90_slippage_bps=float(settings.LIVE_EXECUTION_QUALITY_MAX_P90_SLIPPAGE_BPS),
+        max_p95_full_fill_latency_ms=float(settings.LIVE_EXECUTION_QUALITY_MAX_P95_FULL_FILL_LATENCY_MS),
+        max_partial_fill_rate=float(settings.LIVE_EXECUTION_QUALITY_MAX_PARTIAL_FILL_RATE),
+        max_model_breach_rate=float(settings.LIVE_EXECUTION_QUALITY_MAX_MODEL_BREACH_RATE),
+    )
+
+
+def _parse_since_ts_ms(value: str | None) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    raw = str(value).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError("--since must be an epoch millisecond value or ISO date/datetime") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone(timedelta(hours=9)))
+    return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def cmd_execution_quality_report(
+    *,
+    limit: int,
+    since: str | None,
+    market: str | None,
+    mode: str | None,
+    compare_manifest: str | None,
+    output_format: str,
+    group_by: str | None,
+) -> None:
+    try:
+        since_ts_ms = _parse_since_ts_ms(since)
+    except ValueError as exc:
+        print(f"[EXECUTION-QUALITY] {exc}")
+        raise SystemExit(2) from exc
+    try:
+        backtest_slippage_bps_max = load_manifest_max_slippage_bps(compare_manifest)
+    except Exception as exc:
+        print(f"[EXECUTION-QUALITY] compare-manifest failed: {exc}")
+        raise SystemExit(2) from exc
+
+    conn = ensure_db()
+    try:
+        records = refresh_execution_quality_records(
+            conn,
+            limit=max(1, int(limit)),
+            market=market,
+            mode=mode,
+            backtest_assumed_slippage_bps=backtest_slippage_bps_max,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if since_ts_ms is not None:
+        records = [
+            row
+            for row in records
+            if max(
+                ts for ts in (
+                    row.submit_sent_ts_ms,
+                    row.signal_ts_ms,
+                    row.first_fill_ts_ms,
+                    0,
+                )
+                if ts is not None
+            )
+            >= since_ts_ms
+        ]
+    thresholds = _execution_quality_thresholds_from_settings()
+    summary = summarize_execution_quality(
+        records,
+        thresholds=thresholds,
+        backtest_slippage_bps_max=backtest_slippage_bps_max,
+    )
+    summary["quality_gate_enabled"] = bool(settings.LIVE_EXECUTION_QUALITY_GATE_ENABLED)
+    summary["quality_gate_mode"] = str(settings.LIVE_EXECUTION_QUALITY_GATE_MODE)
+
+    if str(group_by or "").strip() == "order_type":
+        grouped: dict[str, dict[str, object]] = {}
+        for order_type in sorted({str(row.order_type or "unknown") for row in records}):
+            grouped[order_type] = summarize_execution_quality(
+                [row for row in records if str(row.order_type or "unknown") == order_type],
+                thresholds=thresholds,
+                backtest_slippage_bps_max=backtest_slippage_bps_max,
+            )
+        summary["groups"] = grouped
+
+    if output_format == "json":
+        print(json.dumps(summary, sort_keys=True, ensure_ascii=False))
+        return
+
+    print(format_execution_quality_text(summary))
+    if "groups" in summary:
+        groups = summary["groups"]
+        if isinstance(groups, dict):
+            for name, group_summary in groups.items():
+                print(f"[order_type={name}]")
+                if isinstance(group_summary, dict):
+                    print(format_execution_quality_text(group_summary))
 
 
 def _print_operator_command_contract(
@@ -6870,6 +6986,22 @@ def main(argv: list[str] | None = None) -> int:
     ops = sub.add_parser("ops-report", help="operator observability report")
     ops.add_argument("--limit", type=int, default=20)
 
+    execution_quality = sub.add_parser(
+        "execution-quality-report",
+        help="report signal-submit-fill execution quality against research cost assumptions",
+        description=(
+            "Materialize and summarize order-level execution quality from strategy decisions, "
+            "submit evidence, and fills without changing live trading behavior."
+        ),
+    )
+    execution_quality.add_argument("--limit", type=int, default=200)
+    execution_quality.add_argument("--since")
+    execution_quality.add_argument("--market")
+    execution_quality.add_argument("--mode")
+    execution_quality.add_argument("--by", choices=("order_type",))
+    execution_quality.add_argument("--compare-manifest")
+    execution_quality.add_argument("--format", choices=("text", "json"), default="text")
+
     risk_report = sub.add_parser(
         "risk-report",
         help="show daily-loss baseline and recent risk evaluations",
@@ -7152,6 +7284,16 @@ def main(argv: list[str] | None = None) -> int:
         cmd_fills(args.limit)
     elif args.cmd == "ops-report":
         cmd_ops_report(limit=max(1, int(args.limit)))
+    elif args.cmd == "execution-quality-report":
+        cmd_execution_quality_report(
+            limit=max(1, int(args.limit)),
+            since=args.since,
+            market=args.market,
+            mode=args.mode,
+            compare_manifest=args.compare_manifest,
+            output_format=str(args.format),
+            group_by=args.by,
+        )
     elif args.cmd == "risk-report":
         cmd_risk_report(limit=max(1, int(args.limit)), as_json=bool(args.json))
     elif args.cmd == "decision-telemetry":

@@ -492,6 +492,31 @@ class Settings:
     LIVE_PERFORMANCE_GATE_SCOPE: str = os.getenv(
         "LIVE_PERFORMANCE_GATE_SCOPE", "closed_lifecycles_recent"
     ).strip() or "closed_lifecycles_recent"
+    LIVE_EXECUTION_QUALITY_GATE_ENABLED: bool = parse_bool_env(
+        "LIVE_EXECUTION_QUALITY_GATE_ENABLED",
+        "false",
+    )
+    LIVE_EXECUTION_QUALITY_MIN_SAMPLE: int = int(os.getenv("LIVE_EXECUTION_QUALITY_MIN_SAMPLE", "30"))
+    LIVE_EXECUTION_QUALITY_MAX_P90_SLIPPAGE_BPS: float = parse_non_negative_float_env(
+        "LIVE_EXECUTION_QUALITY_MAX_P90_SLIPPAGE_BPS",
+        "20",
+    )
+    LIVE_EXECUTION_QUALITY_MAX_P95_FULL_FILL_LATENCY_MS: float = parse_non_negative_float_env(
+        "LIVE_EXECUTION_QUALITY_MAX_P95_FULL_FILL_LATENCY_MS",
+        "3000",
+    )
+    LIVE_EXECUTION_QUALITY_MAX_PARTIAL_FILL_RATE: float = parse_non_negative_float_env(
+        "LIVE_EXECUTION_QUALITY_MAX_PARTIAL_FILL_RATE",
+        "0.05",
+    )
+    LIVE_EXECUTION_QUALITY_MAX_MODEL_BREACH_RATE: float = parse_non_negative_float_env(
+        "LIVE_EXECUTION_QUALITY_MAX_MODEL_BREACH_RATE",
+        "0.10",
+    )
+    LIVE_EXECUTION_QUALITY_GATE_MODE: str = os.getenv(
+        "LIVE_EXECUTION_QUALITY_GATE_MODE",
+        "telemetry",
+    ).strip().lower() or "telemetry"
 
     # storage
     ENV_ROOT: str = str(PATH_MANAGER.config.env_root)

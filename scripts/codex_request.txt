@@ -1,556 +1,519 @@
-Continue working directly in the GitHub repository `WG-14/bithumb-bot`.
-
-Do not treat this as a generic CLI beautification task. The EC2 smoke run showed that the research pipeline correctly generated artifacts, correctly failed all candidates, and correctly prevented promotion. The remaining issue is operator observability: the machine-readable reports contain useful diagnostic evidence, but the immediate CLI summary does not explain why no candidate can be promoted.
-
-This patch must improve the repository as a reproducible and operable automated-trading research system. It must not change strategy results, gate logic, promotion logic, live execution behavior, broker behavior, path policy, env loading, or artifact hash semantics.
-
-## Core problem statement
-
-The direct EC2 symptom was:
-
 ```text
-research-backtest and research-walk-forward produced reports
-gate_result=FAIL
-best_candidate_id=null
-operator had to use jq repeatedly to understand why
-```
-
-The deeper structural issue is:
-
-```text
-Research artifacts are diagnostically rich,
-but operator-facing diagnosis is too weak.
-```
-
-The CLI currently prints experiment id, hashes, candidate count, best candidate, gate result, artifact paths, content hash, and warnings, but it does not summarize candidate failure reasons, window failure reasons, promotion eligibility, or next safe action.
-
-This can lead to operator mistakes:
-
-```text
-- lowering gates blindly
-- attempting promotion when best_candidate_id is null
-- inspecting the wrong experiment report
-- confusing backtest failure with walk-forward failure
-- confusing no-trade windows with negative-expectancy strategy failure
-```
-
-Your task is to add an explicit research run summary layer and wire it into the research CLI.
-
-## Preserve priority order
-
-Use this priority order:
-
-```text
-P0: Live safety, correctness, live/paper isolation, wrong-order prevention, duplicate-order prevention, ledger consistency, restart/recovery behavior
-P1: Operator observability, reproducibility, deterministic artifacts, anti-misuse feedback, path policy, promotion safety
-P2: Strategy tuning, profitability, parameter search convenience
-```
-
-Any P2 change that weakens P0 or P1 is unacceptable.
-
-## Scope boundaries
-
-Do not:
-
-* Change strategy simulation logic.
-* Change acceptance gate logic.
-* Change promotion logic.
-* Change candidate ranking logic.
-* Change report content hashes unless explicitly and intentionally adding summary data to report artifacts.
-* Change live broker behavior.
-* Change live or paper order submission.
-* Change run locks.
-* Change restart/reconcile behavior.
-* Change lot-native SELL authority.
-* Change duplicate-order prevention.
-* Add new trading behavior.
-* Auto-edit `.env`, `BITHUMB_ENV_FILE_PAPER`, `BITHUMB_ENV_FILE_LIVE`, or secrets.
-* Reintroduce repo-root `.env` autoloading.
-* Write generated artifacts into the repository.
-* Make failed candidates look promotable.
-* Put failed candidates into `best_candidate_id`.
-
-Do:
-
-* Add a reusable operator-facing research summary layer.
-* Use existing report fields.
-* Preserve machine-readable artifacts.
-* Preserve deterministic behavior.
-* Print actionable failure summaries.
-* Keep failed-candidate diagnostics separate from promotable-candidate fields.
-* Add focused tests.
-
-## Keep these hypotheses explicit
-
-Keep these hypotheses in your implementation notes and final report.
-
-### Hypothesis A
-
-The root issue is not missing diagnostic data. The diagnostic data already exists in reports as fields such as `gate_fail_reasons`, `validation_metrics`, `walk_forward_metrics`, and `parameter_stability`.
-
-The problem is that CLI summary does not surface those diagnostics.
-
-Confirm or refute by inspecting:
-
-```text
-src/bithumb_bot/research/validation_protocol.py
-src/bithumb_bot/research/cli.py
-```
-
-### Hypothesis B
-
-The higher-level structural issue is that operator-facing summary and machine-readable report artifacts are not separated into a reusable layer.
-
-Currently `_print_report_summary()` directly prints a small subset of report fields. This makes diagnostics harder to test and reuse.
-
-Confirm or refute by inspecting `src/bithumb_bot/research/cli.py`.
-
-### Hypothesis C
-
-The EC2 smoke failure was a correct strategy/gate failure, not a research system failure. The system generated reports and correctly produced `gate_result=FAIL`, but operator diagnosis required manual `jq`.
-
-Confirm or refute by testing a synthetic FAIL report and verifying that the new CLI summary shows the same facts without requiring `jq`.
-
-### Hypothesis D
-
-A simple one-line `top_fail_reasons` patch is not enough. The repository needs a small `ResearchRunSummary` model or equivalent pure summary builder so the same summary logic can be reused and tested independently of CLI printing.
-
-Confirm or refute by implementing a pure function and tests.
-
-## Required design change
-
-Add a new module:
-
-```text
-src/bithumb_bot/research/run_summary.py
-```
-
-Implement a pure summary builder, for example:
-
-```python
-@dataclass(frozen=True)
-class ResearchRunSummary:
-    candidate_gate_counts: dict[str, int]
-    top_fail_reasons: dict[str, int]
-    top_window_fail_reasons: dict[str, int]
-    walk_forward_window_count: int | None
-    walk_forward_pass_window_count: int | None
-    walk_forward_fail_window_count: int | None
-    promotion_allowed: bool
-    nearest_failed_candidate_id: str | None
-    nearest_failed_candidate_fail_reasons: tuple[str, ...]
-    next_action: str
-```
-
-Exact names may differ, but the resulting behavior must be equivalent and operator-readable.
-
-Add:
-
-```python
-def build_research_run_summary(report: dict[str, object]) -> ResearchRunSummary:
-    ...
-```
-
-The function must be defensive:
-
-```text
-- malformed or missing candidates should not crash
-- candidates missing gate_fail_reasons should be handled safely
-- missing walk_forward_metrics should be handled safely
-- non-list candidates should be handled safely
-- unknown gate labels should be counted rather than crashing
-```
-
-## Summary fields to compute
-
-Compute at least:
-
-```text
-candidate_gate_counts
-top_fail_reasons
-promotion_allowed
-nearest_failed_candidate_id
-nearest_failed_candidate_fail_reasons
-walk_forward_window_count
-walk_forward_pass_window_count
-walk_forward_fail_window_count
-top_window_fail_reasons
-next_action
-```
-
-### candidate_gate_counts
-
-Count candidate `acceptance_gate_result`.
-
-Example:
-
-```text
-PASS:0,FAIL:8
-```
-
-If no candidates exist:
-
-```text
-none
-```
-
-### top_fail_reasons
-
-Aggregate every candidate’s `gate_fail_reasons`.
-
-Example:
-
-```text
-profit_factor_failed:8,walk_forward_failed:8,min_trade_count_failed:4
-```
-
-### promotion_allowed
-
-Must be true only when the report itself indicates there is a promotable candidate.
-
-Suggested rule:
-
-```text
-promotion_allowed = bool(report.best_candidate_id) and report.gate_result == "PASS"
-```
-
-Do not infer promotion allowed from a failed or nearest candidate.
-
-Print as:
-
-```text
-promotion_allowed=1
-```
-
-or:
-
-```text
-promotion_allowed=0
-```
-
-### nearest_failed_candidate_id
-
-When no PASS candidate exists, show a separate diagnostic candidate id.
-
-This must not replace `best_candidate_id`.
-
-Use the first candidate in the sorted report list if it exists, since reports are already sorted by candidate rank.
-
-Example:
-
-```text
-best_candidate_id=none
-nearest_failed_candidate_id=candidate_004_1e322c70
-nearest_failed_candidate_fail_reasons=profit_factor_failed,walk_forward_missing
-```
-
-Important invariant:
-
-```text
-best_candidate_id remains none when all candidates fail.
-nearest_failed_candidate_id is diagnostic only and must never be used as a promotion candidate.
-```
-
-### walk_forward_window_summary
-
-If any candidate has `walk_forward_metrics`, compute aggregate window counts from the first available candidate’s walk-forward metrics.
-
-Example:
-
-```text
-walk_forward_window_summary=window_count:5,pass:0,fail:5
-```
-
-### top_window_fail_reasons
-
-Aggregate window-level `fail_reasons` across all candidates and all walk-forward windows.
-
-Example:
-
-```text
-top_window_fail_reasons=test_metrics_gate_incompatible:40
-```
-
-### next_action
-
-Add a simple deterministic next action.
-
-Suggested mapping:
-
-```text
-promotion_allowed=1
-→ next_action=review_promotion_candidate
-
-no candidates
-→ next_action=inspect_dataset_or_manifest
-
-top_fail_reasons includes walk_forward_missing
-→ next_action=run_walk_forward_before_promotion
-
-top_fail_reasons includes walk_forward_failed
-→ next_action=do_not_promote_review_walk_forward_windows
-
-top_fail_reasons includes profit_factor_failed or min_trade_count_failed
-→ next_action=do_not_promote_revise_strategy_hypothesis
-
-otherwise gate_result=FAIL
-→ next_action=inspect_report_or_adjust_hypothesis_not_promote
-```
-
-Keep this conservative. Do not suggest lowering gates.
-
-## CLI output requirements
-
-Update:
-
-```text
-src/bithumb_bot/research/cli.py
-```
-
-Modify `_print_report_summary()` to use the new summary builder.
-
-Keep existing output lines. Add new lines after `gate_result` or near the end:
-
-```text
-candidate_gate_counts=PASS:0,FAIL:8
-top_fail_reasons=profit_factor_failed:8,walk_forward_failed:8,min_trade_count_failed:4
-promotion_allowed=0
-nearest_failed_candidate_id=candidate_004_1e322c70
-nearest_failed_candidate_fail_reasons=profit_factor_failed,walk_forward_missing
-walk_forward_window_summary=window_count:5,pass:0,fail:5
-top_window_fail_reasons=test_metrics_gate_incompatible:40
-next_action=do_not_promote_revise_strategy_hypothesis
-```
-
-If a field is not applicable, print a stable safe value:
-
-```text
-top_fail_reasons=none
-nearest_failed_candidate_id=none
-nearest_failed_candidate_fail_reasons=none
-walk_forward_window_summary=none
-top_window_fail_reasons=none
-```
-
-Do not remove existing lines:
-
-```text
-experiment_id
-manifest_hash
-dataset_snapshot_id
-dataset_content_hash
-candidates_evaluated
-best_candidate_id
-gate_result
-report_path
-derived_path
-content_hash
-warnings
-```
-
-## Artifact behavior
-
-Default requirement:
-
-```text
-Do not modify persisted report payloads.
-Do not change content_hash behavior.
-Do not add summary fields to report artifacts in this patch unless absolutely necessary.
-```
-
-This patch should primarily improve CLI/operator output and testable summary logic.
-
-If you decide to add summary data to report artifacts, explain why and preserve deterministic hashing behavior.
-
-## Tests
-
-Add:
-
-```text
-tests/test_research_cli_summary.py
-```
-
-or another appropriately named focused test file.
-
-Required tests:
-
-```text
-1. FAIL report summary includes top_fail_reasons.
-2. PASS report summary sets promotion_allowed=1.
-3. FAIL report summary sets promotion_allowed=0.
-4. Candidate gate counts are computed correctly.
-5. Walk-forward report summary includes walk_forward_window_summary.
-6. Walk-forward report summary includes top_window_fail_reasons.
-7. Empty or malformed candidate sections do not crash.
-8. best_candidate_id remains none when all candidates fail.
-9. nearest_failed_candidate_id is separate from best_candidate_id.
-10. next_action is conservative and does not suggest promotion for failed reports.
-```
-
-Also test CLI rendering if practical:
-
-```text
-- _print_report_summary() prints candidate_gate_counts
-- _print_report_summary() prints top_fail_reasons
-- _print_report_summary() prints next_action
-```
-
-If `_print_report_summary()` is private, either test the pure summary builder directly and minimally test CLI output using `capsys`, or keep rendering helpers small and testable.
-
-## Existing tests to run
-
-Run at least:
-
-```bash
-uv run pytest -q tests/test_research_cli_summary.py
-uv run pytest -q tests/test_research_promotion_gate.py
-uv run pytest -q tests/test_research_walk_forward.py
-uv run pytest -q tests/test_research_parameter_stability.py
-uv run pytest -q tests/test_research_strategy_registry.py
-uv run pytest -q tests/test_research_manifest.py
-uv run pytest -q tests/test_research_backtest_reproducibility.py
-uv run pytest -q tests/test_research_path_policy.py
-uv run pytest -q
-```
-
-Also run safety tests if present:
-
-```bash
-uv run pytest -q tests/test_live_preflight.py
-uv run pytest -q tests/test_mode_validation.py
-uv run pytest -q tests/test_run_lock.py
-```
-
-If any requested test file does not exist, report that explicitly and run the closest equivalent.
-
-## Optional EC2 smoke verification
-
-If you have access to the live smoke manifest and runtime DB, rerun:
-
-```bash
-uv run bithumb-bot research-backtest --manifest /tmp/sma_live_smoke_manifest_short.json
-uv run bithumb-bot research-walk-forward --manifest /tmp/sma_live_smoke_manifest_short.json
-```
-
-Expected improved CLI output should include something like:
-
-```text
-candidate_gate_counts=PASS:0,FAIL:8
-top_fail_reasons=profit_factor_failed:8,walk_forward_failed:8,min_trade_count_failed:4
-promotion_allowed=0
-nearest_failed_candidate_id=...
-next_action=...
-```
-
-Do not fake this run. If the runtime DB or manifest is unavailable, state that.
-
-## Documentation
-
-Update documentation only if useful.
-
-Likely files:
-
-```text
-docs/research-validation.md
-docs/runbooks/research-to-paper.md
-```
-
-Add a short note that research CLI summaries now show:
-
-```text
-candidate_gate_counts
-top_fail_reasons
-walk_forward_window_summary
-top_window_fail_reasons
-promotion_allowed
-nearest_failed_candidate_id
-next_action
-```
-
-Emphasize:
-
-```text
-nearest_failed_candidate_id is diagnostic only and must not be promoted.
-promotion_allowed=0 means do not run research-promote-candidate.
-```
-
-Do not write generic trading advice.
-
-## Backwards compatibility
-
-Keep existing canonical commands:
-
-```bash
-uv run bithumb-bot research-backtest --manifest <path>
-uv run bithumb-bot research-walk-forward --manifest <path>
-uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id>
-```
-
-Keep `backtest2.py` as a deprecated wrapper if it already exists.
-
-Do not reintroduce:
-
-```python
-load_dotenv(Path(__file__).with_name(".env"))
-```
-
-## Final report format
-
-At the end, report in this exact structure:
-
-```text
-Summary
-- Concrete repository changes.
-
-Hypotheses
-- Hypothesis A: confirmed/refuted/partially confirmed, with evidence.
-- Hypothesis B: confirmed/refuted/partially confirmed, with evidence.
-- Hypothesis C: confirmed/refuted/partially confirmed, with evidence.
-- Hypothesis D: confirmed/refuted/partially confirmed, with evidence.
-
-Design Changes
-- New run summary module/model.
-- CLI summary changes.
-- Any documentation changes.
-- Any behavior explicitly left unchanged.
-
-Artifacts and Hashes
-- Whether report artifacts changed.
-- Whether content_hash behavior changed.
-- Whether output paths changed.
-
-Safety / Recovery / Observability
-- Existing live safety contracts intentionally not touched.
-- New operator-facing diagnostics.
-- How this reduces promotion misuse risk.
-- How malformed reports are handled.
-
-Tests
+You are Codex working in the GitHub repository `WG-14/bithumb-bot`.
+
+Task: turn execution quality into a first-class, testable, observable part of the live trading experiment system. Do not dilute this into generic logging or parameter tightening. The goal is to verify whether live fills occur inside the cost/latency/fill assumptions used by research/backtest/paper, and to make deviations reproducible, reportable, and eventually gateable.
+
+Core problem statement
+
+The current system appears relatively strong on:
+- safe order submission,
+- accounting reconciliation,
+- recovery/runbook flows,
+- authoritative ledger application.
+
+But accounting consistency is not the same as profitability validity.
+
+The critical question is:
+
+Can this repo prove, per order, whether the live path from strategy signal -> order submit -> exchange fill stayed within the backtest/research cost model, or whether latency, spread movement, top-of-book changes, partial fills, unfilled orders, or realized slippage invalidated the expected edge?
+
+Treat the following as hypotheses, not facts. Verify them directly in the repo and adjust the implementation accordingly.
+
+Hypotheses to verify or refute
+
+H1: Execution-quality data model is missing or incomplete.
+Even if DB records match Bithumb trade history, the repo may not currently normalize the full signal -> submit -> fill chain into a queryable execution-quality dataset.
+
+Verification:
+- Inspect existing models/tables/repositories/events around orders, order events, submit attempts, fills, trades, broker fill observations, strategy decisions, and research/backtest manifests.
+- Determine whether one can reconstruct this chain for each live order:
+  strategy_decision_id
+  -> signal_ts
+  -> signal_reference_price
+  -> signal bid/ask/spread if available
+  -> submit_plan_created_ts
+  -> broker_request_sent_ts
+  -> broker_response_ts
+  -> exchange_order_id
+  -> first_fill_ts
+  -> last_fill_ts
+  -> avg_fill_price
+  -> filled_qty
+  -> requested_qty
+  -> remaining_qty
+  -> fee
+  -> fill_ratio
+  -> partial/unfilled status
+  -> realized slippage bps
+  -> latency metrics
+  -> quality status.
+- If the chain cannot be reconstructed without ad-hoc log parsing, missing timestamps, or ambiguous joins, H1 is supported.
+
+Refutation:
+- If the repo already has a complete, stable, tested, queryable model producing these metrics, do not duplicate it. Extend or harden the existing path instead.
+
+H2: Backtest/research/paper slippage assumptions are not being closed-loop validated against live fills.
+The repo may use fixed slippage bps in research/backtest and top-of-book plus fixed slippage in paper, but may not compare those assumptions against live observed distributions.
+
+Verification:
+- Inspect research manifest schemas/examples, backtest cost model code, paper fill simulation, live fill application, and any performance gate/reporting code.
+- Determine whether live p50/p75/p90/p95 slippage and latency can be compared to the configured backtest/research slippage assumptions.
+- Determine whether model-breach counts/rates are currently computed.
+
+Refutation:
+- If the repo already computes live observed execution quality against the active research cost model and exposes it operationally, reuse that implementation and only fix missing pieces.
+
+H3: Existing live gates are likely PnL/accounting/recovery oriented, not execution-quality oriented.
+The system may block or warn on performance/recovery/accounting issues, but not on early indicators such as p90 slippage breaching the model, p95 submit-to-fill latency, partial-fill rate, or unfilled rate.
+
+Verification:
+- Inspect live preflight, readiness, performance gate, health, ops report, recovery report, and runbook code/docs.
+- Search for existing execution-quality gates or commands such as:
+  execution-quality-report
+  live-slippage-report
+  compare-live-to-backtest-cost
+  execution-quality-gate
+  paper-live-gap-report.
+- If absent, H3 is supported.
+
+Refutation:
+- If equivalent gates already exist, avoid creating a parallel concept. Integrate with the existing gate.
+
+H4: The deeper root cause may be observability/reproducibility, not a single bad order, bad parameter, or accounting mismatch.
+A one-off fix such as lowering max slippage, changing market/limit policy, or making strategy filters stricter is not sufficient unless the repo can prove the live execution path stayed within or breached the research assumptions.
+
+Verification:
+- Determine whether a postmortem for a live order can be reproduced from DB/CLI alone, without reading raw logs manually.
+- Determine whether accounting status, exchange execution status, and quality status can be independently reported.
+
+Required design direction
+
+Prioritize design changes that prevent the entire class of problems, not symptom suppression.
+
+Do not make the main fix simply:
+- lowering MAX_MARKET_SLIPPAGE_BPS,
+- lowering LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
+- switching market orders to limit orders,
+- tightening SMA/strategy conditions,
+- adding unstructured logs.
+
+Those may be follow-up mitigations, but they are not the root solution.
+
+The root solution is:
+1. Persist execution-quality evidence per order.
+2. Compute realized quality metrics per order.
+3. Aggregate live distributions.
+4. Compare live distributions against research/backtest/paper cost assumptions.
+5. Expose the result through CLI/reporting.
+6. Make the path testable and recoverable.
+7. Prepare a telemetry-first gate that can later become a hard live-readiness/new-entry gate.
+
+Scope
+
+Work directly in `WG-14/bithumb-bot`.
+
+First inspect the repo and identify the actual architecture:
+- CLI framework,
+- DB/migration framework,
+- order submission pipeline,
+- submit attempt evidence,
+- fill/trade application,
+- paper broker/fill simulation,
+- research manifest/cost model,
+- live readiness/performance gates,
+- tests.
+
+Then implement the smallest coherent design that satisfies the goal without creating duplicate concepts.
+
+Preferred implementation shape
+
+A. Add or extend a first-class execution quality data model
+
+Create or extend a DB-backed model/table for execution traces or execution quality events.
+
+Name it according to repo conventions. Acceptable examples:
+- `execution_quality_events`
+- `execution_traces`
+- or an extension of an existing order/fill/submit-attempt table if that is cleaner.
+
+The stored record should support, at minimum, these fields where data is available:
+
+Identity:
+- execution_trace_id or stable equivalent
+- client_order_id
+- submit_attempt_id if available
+- decision_id if available
+- strategy_name if available
+- mode
+- market
+- side
+- order_type
+- exchange_order_id if available
+
+Signal-time evidence:
+- signal_ts_ms
+- signal_reference_price
+- signal_best_bid
+- signal_best_ask
+- signal_spread_bps
+
+Submit-time evidence:
+- submit_plan_ts_ms
+- submit_sent_ts_ms
+- submit_response_ts_ms
+- submit_reference_price
+- submit_best_bid
+- submit_best_ask
+- submit_spread_bps
+
+Fill evidence:
+- first_fill_ts_ms
+- last_fill_ts_ms
+- avg_fill_price
+- filled_qty
+- requested_qty
+- remaining_qty
+- fee
+- realized_fee_rate if derivable
+
+Derived metrics:
+- submit_latency_ms
+- response_latency_ms
+- first_fill_latency_ms
+- full_fill_latency_ms
+- slippage_vs_signal_bps
+- slippage_vs_submit_ref_bps
+- slippage_vs_best_quote_bps
+- fill_ratio
+- partial_fill_flag
+- unfilled_flag
+- quality_status
+- quality_reason
+- backtest_assumed_slippage_bps if available
+- model_breach_flag if available
+
+Status semantics:
+- Do not conflate accounting status, exchange execution status, and execution quality status.
+- Execution quality status should be independently representable, for example:
+  within_model
+  degraded
+  model_breach
+  insufficient_evidence.
+
+If some fields are not currently available, do not fake them. Store null/None and set quality_status or quality_reason accordingly. The report must make missing evidence visible.
+
+B. Capture real request/response timing
+
+If live submit evidence currently has placeholder request/response timestamps or does not persist them reliably, instrument the actual order-submit path to capture:
+- request sent timestamp,
+- response received timestamp,
+- elapsed submit/response latency.
+
+Use monotonic time for elapsed durations when appropriate and wall-clock UTC timestamps for persisted event ordering. Follow existing repo time conventions.
+
+Do not break deterministic tests. Inject clocks where the repo already uses clock abstractions.
+
+C. Link signal, submit, and fill
+
+Implement a robust join/linking strategy based on actual repo identifiers.
+
+Preferred keys:
+- decision_id,
+- client_order_id,
+- submit_attempt_id or phase trace id,
+- exchange_order_id.
+
+Do not rely on timestamps alone unless no stable identifier exists. If an identifier is missing, record that as insufficient evidence rather than silently guessing.
+
+D. Compute realized slippage correctly
+
+Implement side-aware bps calculations.
+
+For BUY:
+- slippage_vs_reference_bps = (avg_fill_price - reference_price) / reference_price * 10000
+
+For SELL:
+- slippage_vs_reference_bps = (reference_price - avg_fill_price) / reference_price * 10000
+
+For top-of-book:
+- BUY should compare against best ask where available.
+- SELL should compare against best bid where available.
+
+Guard against:
+- missing prices,
+- zero or negative prices,
+- missing side,
+- zero requested quantity,
+- partial fills,
+- no fills.
+
+E. Add an execution quality report CLI
+
+Add a CLI command following existing CLI conventions. Preferred name:
+
+`execution-quality-report`
+
+It should support practical options consistent with repo style, such as:
+- `--limit`
+- `--since`
+- `--market`
+- `--mode`
+- `--by order_type`
+- `--compare-manifest <path>`
+- `--format text|json` if the repo supports format options.
+
+The report should output at least:
+- sample_count
+- market_order_count
+- limit_order_count
+- median_submit_to_fill_ms where available
+- p90_submit_to_fill_ms where available
+- p95_submit_to_fill_ms where available
+- median_slippage_vs_signal_bps where available
+- p90_slippage_vs_signal_bps where available
+- p95_slippage_vs_signal_bps where available
+- median_slippage_vs_submit_ref_bps where available
+- p90_slippage_vs_submit_ref_bps where available
+- partial_fill_rate
+- unfilled_rate
+- insufficient_evidence_count
+- backtest_slippage_bps_max if a manifest is provided
+- model_breach_count if a manifest is provided
+- model_breach_rate if a manifest is provided
+- quality_gate_status as PASS/WARN/FAIL/INSUFFICIENT_EVIDENCE
+- primary_issue
+- next_action.
+
+The report must be useful to an operator without reading raw logs.
+
+Example text output target:
+
+sample_count=42
+market_order_count=42
+limit_order_count=0
+median_submit_to_fill_ms=380
+p90_submit_to_fill_ms=1400
+p95_submit_to_fill_ms=2400
+median_slippage_vs_signal_bps=7.2
+p90_slippage_vs_signal_bps=18.5
+p95_slippage_vs_signal_bps=31.0
+partial_fill_rate=0.00
+unfilled_rate=0.00
+insufficient_evidence_count=2
+backtest_slippage_bps_max=20
+model_breach_count=3
+model_breach_rate=0.0714
+quality_gate_status=FAIL
+primary_issue=p95_slippage_exceeds_backtest_model
+next_action=reduce_live_to_dry_run_or_update_research_cost_model
+
+F. Compare against research/backtest manifest
+
+If a research manifest cost model exists, parse its fee/slippage assumptions.
+
+Use the maximum configured slippage bps as a basic first comparison unless the repo already has richer semantics.
+
+When `--compare-manifest` is provided:
+- compute whether observed p90/p95 realized slippage exceeds the configured assumption,
+- compute model_breach_count/rate per order where evidence is sufficient,
+- print whether the live observed profile is inside or outside the model.
+
+Do not change the manifest schema unless necessary for this step.
+
+If schema extension is low-risk and fits repo conventions, optionally add a documented `live_observed_profile` section, but do not make the implementation depend on speculative schema unless tests cover it.
+
+G. Add telemetry-first execution quality gate plumbing
+
+Add config settings, but default them so they do not unexpectedly block live trading unless existing repo conventions prefer explicit opt-in.
+
+Suggested settings:
+- LIVE_EXECUTION_QUALITY_GATE_ENABLED=false by default
+- LIVE_EXECUTION_QUALITY_MIN_SAMPLE=30
+- LIVE_EXECUTION_QUALITY_MAX_P90_SLIPPAGE_BPS=20
+- LIVE_EXECUTION_QUALITY_MAX_P95_FULL_FILL_LATENCY_MS=3000
+- LIVE_EXECUTION_QUALITY_MAX_PARTIAL_FILL_RATE=0.05
+- LIVE_EXECUTION_QUALITY_MAX_MODEL_BREACH_RATE=0.10
+- LIVE_EXECUTION_QUALITY_GATE_MODE=telemetry or warn, depending on repo conventions.
+
+Initial behavior should be telemetry/reporting-first.
+If integrating into live readiness, make it non-breaking unless explicitly enabled.
+
+The gate should classify:
+- PASS,
+- WARN,
+- FAIL,
+- INSUFFICIENT_EVIDENCE.
+
+H. Add paper/live gap report only if it can be implemented cleanly
+
+If time and architecture allow, add `paper-live-gap-report`.
+It should compare paper slippage assumptions or simulated fill assumptions against live observed execution quality.
+
+If this is too large for one change, leave a concrete TODO and design note, but do not skip the core execution-quality-report.
+
+Testing requirements
+
+Add focused tests. Do not only add snapshot text.
+
+Required test coverage:
+
+1. Side-aware slippage math
+- BUY positive adverse slippage.
+- SELL positive adverse slippage.
+- Missing/zero reference price returns insufficient evidence or null metric safely.
+- Top-of-book comparison uses ask for BUY and bid for SELL.
+
+2. Latency calculation
+- submit sent to response.
+- submit sent to first fill.
+- submit sent to full fill.
+- Missing timestamps handled safely.
+
+3. Fill aggregation
+- multiple fills produce correct avg_fill_price weighted by quantity.
+- partial fill computes fill_ratio correctly.
+- unfilled order reports unfilled/insufficient fill evidence correctly.
+
+4. Manifest comparison
+- observed p90 <= max manifest slippage -> PASS or within model.
+- observed p90/p95 > max manifest slippage -> breach/WARN/FAIL according to config.
+- insufficient sample -> INSUFFICIENT_EVIDENCE.
+
+5. CLI/report behavior
+- report works with no records.
+- report works with complete records.
+- report surfaces missing evidence instead of hiding it.
+- JSON output if implemented is valid and stable.
+
+6. Persistence/migration
+- new table or fields migrate cleanly.
+- existing data can remain null without crashing reports.
+- tests use temporary DB fixtures according to repo conventions.
+
+7. Regression safety
+- existing order submission tests still pass.
+- existing recovery/accounting tests still pass.
+- existing paper/backtest tests still pass.
+
+Recovery and operational requirements
+
+- New persistence must be append-safe or idempotent by stable keys.
+- Re-running reconciliation or report generation must not duplicate quality records unless the repo’s event model explicitly allows append-only duplicates.
+- If quality computation can be recomputed from existing authoritative events, prefer deterministic recomputation or upsert semantics.
+- Reports must tolerate partially migrated or historical rows with missing fields.
+- Do not make live trading depend on quality data until the gate is explicitly enabled.
+- Any new blocking behavior must be opt-in and documented.
+
+Observability requirements
+
+- Structured evidence should be queryable from DB, not only raw logs.
+- Missing evidence must be counted and reported.
+- Emit concise structured logs/metrics if the repo has an existing logging/metrics convention.
+- Include enough identifiers in logs/reports to correlate:
+  decision_id,
+  client_order_id,
+  submit_attempt_id,
+  exchange_order_id,
+  market,
+  side,
+  order_type.
+
+Implementation constraints
+
+- Follow existing repo naming, style, type hints, dependency, DB, CLI, and test conventions.
+- Do not introduce heavyweight dependencies for simple statistics.
+- Implement percentile calculation deterministically.
+- Avoid changing trading behavior unless explicitly required for timestamp capture or id linking.
+- Do not weaken existing safety checks.
+- Do not remove existing recovery/accounting semantics.
+- Do not assume the initial diagnosis is true. Inspect and adapt.
+
+Suggested implementation order
+
+1. Inspect relevant files and summarize actual existing architecture for yourself:
+   - app/CLI entry points,
+   - settings/config,
+   - order submission pipeline,
+   - Bithumb broker/client,
+   - submit attempt/evidence persistence,
+   - fill/trade/accounting persistence,
+   - paper broker,
+   - research manifest/backtest cost model,
+   - live performance/readiness gates,
+   - migrations/tests.
+
+2. Identify the smallest clean place to persist execution quality data.
+
+3. Implement pure calculation utilities first:
+   - weighted average fill price,
+   - side-aware slippage bps,
+   - latency metrics,
+   - fill ratio,
+   - percentile summary,
+   - quality status classification.
+
+4. Add persistence/migration or extend existing persistence.
+
+5. Capture actual submit request/response timestamps.
+
+6. Link execution traces to fills and compute/upsert quality rows.
+
+7. Add CLI report.
+
+8. Add optional manifest comparison.
+
+9. Add telemetry-first gate config/classification.
+
+10. Add tests.
+
+11. Run the repo’s relevant test suite and formatting/type checks.
+
+Acceptance criteria
+
+The change is acceptable only if:
+
+- A user can run a CLI report and see live execution quality metrics without manually inspecting logs.
+- The system can distinguish accounting consistency from execution quality.
+- Missing evidence is explicit and counted.
+- Realized slippage is side-aware and tested.
+- Fill latency and submit latency are computed where timestamps exist.
+- Partial and unfilled orders are represented.
+- Manifest/backtest slippage assumptions can be compared to live observed slippage, at least through `--compare-manifest`.
+- The change is non-breaking for existing live operation by default.
+- Tests cover calculation, persistence/reporting, manifest comparison, and missing-evidence cases.
+- The final report clearly states which hypotheses were supported, refuted, or left unresolved.
+
+Final response format
+
+When done, report in this exact structure:
+
+1. Summary
+- One paragraph explaining what changed and why it addresses execution quality rather than only accounting stability.
+
+2. Files changed
+- List changed files with one-line purpose for each.
+
+3. Hypothesis results
+- H1: supported/refuted/partially supported, with repo evidence.
+- H2: supported/refuted/partially supported, with repo evidence.
+- H3: supported/refuted/partially supported, with repo evidence.
+- H4: supported/refuted/partially supported, with repo evidence.
+
+4. New operator workflow
+- Exact commands to run, including `execution-quality-report`.
+- Example output shape.
+
+5. Tests
+- Exact tests added.
 - Exact commands run.
-- Pass/fail results.
-- If any test failed, state whether it appears introduced or pre-existing.
-- If optional EC2 smoke was not feasible, explain why.
+- Pass/fail result.
 
-Backwards Compatibility
-- Canonical CLI status.
-- backtest2.py status if relevant.
+6. Recovery and safety notes
+- Explain idempotency/upsert behavior.
+- Explain behavior on historical rows with missing evidence.
+- Explain why live behavior is not unexpectedly blocked by default.
 
-Remaining Work
-- Failure class in persisted artifacts, if not implemented.
-- Paper shadow validation.
-- Optional env fragment renderer.
-- Small-live readiness checklist.
+7. Remaining risks / follow-up
+- List only concrete remaining work, such as hard gate rollout, paper-live-gap-report, or manifest schema extension.
 ```
-
-The patch is successful only if a failed research run no longer requires immediate `jq` inspection to answer:
-
-```text
-Why did no candidate pass?
-Can anything be promoted?
-Which failed candidate was closest?
-Was walk-forward the blocker?
-What should the operator do next?
-```
-
-And the answer must be conservative: failed candidates must remain non-promotable.
 

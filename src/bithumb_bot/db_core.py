@@ -1568,6 +1568,113 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS execution_quality_events (
+            execution_trace_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_order_id TEXT NOT NULL UNIQUE,
+            submit_attempt_id TEXT,
+            decision_id INTEGER,
+            strategy_name TEXT,
+            mode TEXT,
+            market TEXT,
+            side TEXT,
+            order_type TEXT,
+            exchange_order_id TEXT,
+            signal_ts_ms INTEGER,
+            signal_reference_price REAL,
+            signal_best_bid REAL,
+            signal_best_ask REAL,
+            signal_spread_bps REAL,
+            submit_plan_ts_ms INTEGER,
+            submit_sent_ts_ms INTEGER,
+            submit_response_ts_ms INTEGER,
+            submit_reference_price REAL,
+            submit_best_bid REAL,
+            submit_best_ask REAL,
+            submit_spread_bps REAL,
+            first_fill_ts_ms INTEGER,
+            last_fill_ts_ms INTEGER,
+            avg_fill_price REAL,
+            filled_qty REAL NOT NULL DEFAULT 0,
+            requested_qty REAL,
+            remaining_qty REAL,
+            fee REAL,
+            realized_fee_rate REAL,
+            submit_latency_ms INTEGER,
+            response_latency_ms INTEGER,
+            first_fill_latency_ms INTEGER,
+            full_fill_latency_ms INTEGER,
+            slippage_vs_signal_bps REAL,
+            slippage_vs_submit_ref_bps REAL,
+            slippage_vs_best_quote_bps REAL,
+            fill_ratio REAL,
+            partial_fill_flag INTEGER NOT NULL DEFAULT 0,
+            unfilled_flag INTEGER NOT NULL DEFAULT 0,
+            quality_status TEXT NOT NULL,
+            quality_reason TEXT NOT NULL,
+            backtest_assumed_slippage_bps REAL,
+            model_breach_flag INTEGER,
+            created_ts INTEGER NOT NULL,
+            updated_ts INTEGER NOT NULL,
+            FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
+        )
+        """
+    )
+    for column, ddl in (
+        ("submit_attempt_id", "submit_attempt_id TEXT"),
+        ("decision_id", "decision_id INTEGER"),
+        ("strategy_name", "strategy_name TEXT"),
+        ("mode", "mode TEXT"),
+        ("market", "market TEXT"),
+        ("side", "side TEXT"),
+        ("order_type", "order_type TEXT"),
+        ("exchange_order_id", "exchange_order_id TEXT"),
+        ("signal_ts_ms", "signal_ts_ms INTEGER"),
+        ("signal_reference_price", "signal_reference_price REAL"),
+        ("signal_best_bid", "signal_best_bid REAL"),
+        ("signal_best_ask", "signal_best_ask REAL"),
+        ("signal_spread_bps", "signal_spread_bps REAL"),
+        ("submit_plan_ts_ms", "submit_plan_ts_ms INTEGER"),
+        ("submit_sent_ts_ms", "submit_sent_ts_ms INTEGER"),
+        ("submit_response_ts_ms", "submit_response_ts_ms INTEGER"),
+        ("submit_reference_price", "submit_reference_price REAL"),
+        ("submit_best_bid", "submit_best_bid REAL"),
+        ("submit_best_ask", "submit_best_ask REAL"),
+        ("submit_spread_bps", "submit_spread_bps REAL"),
+        ("first_fill_ts_ms", "first_fill_ts_ms INTEGER"),
+        ("last_fill_ts_ms", "last_fill_ts_ms INTEGER"),
+        ("avg_fill_price", "avg_fill_price REAL"),
+        ("filled_qty", "filled_qty REAL NOT NULL DEFAULT 0"),
+        ("requested_qty", "requested_qty REAL"),
+        ("remaining_qty", "remaining_qty REAL"),
+        ("fee", "fee REAL"),
+        ("realized_fee_rate", "realized_fee_rate REAL"),
+        ("submit_latency_ms", "submit_latency_ms INTEGER"),
+        ("response_latency_ms", "response_latency_ms INTEGER"),
+        ("first_fill_latency_ms", "first_fill_latency_ms INTEGER"),
+        ("full_fill_latency_ms", "full_fill_latency_ms INTEGER"),
+        ("slippage_vs_signal_bps", "slippage_vs_signal_bps REAL"),
+        ("slippage_vs_submit_ref_bps", "slippage_vs_submit_ref_bps REAL"),
+        ("slippage_vs_best_quote_bps", "slippage_vs_best_quote_bps REAL"),
+        ("fill_ratio", "fill_ratio REAL"),
+        ("partial_fill_flag", "partial_fill_flag INTEGER NOT NULL DEFAULT 0"),
+        ("unfilled_flag", "unfilled_flag INTEGER NOT NULL DEFAULT 0"),
+        ("quality_status", "quality_status TEXT NOT NULL DEFAULT 'insufficient_evidence'"),
+        ("quality_reason", "quality_reason TEXT NOT NULL DEFAULT 'not_yet_computed'"),
+        ("backtest_assumed_slippage_bps", "backtest_assumed_slippage_bps REAL"),
+        ("model_breach_flag", "model_breach_flag INTEGER"),
+        ("created_ts", "created_ts INTEGER NOT NULL DEFAULT 0"),
+        ("updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0"),
+    ):
+        _ensure_column(conn, "execution_quality_events", column, ddl)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_execution_quality_market_mode_ts
+        ON execution_quality_events(market, mode, submit_sent_ts_ms, client_order_id)
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS order_intent_dedup (
             intent_key TEXT PRIMARY KEY,
             symbol TEXT NOT NULL,
