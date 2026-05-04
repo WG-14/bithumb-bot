@@ -1,243 +1,196 @@
 You are working in GitHub repository `WG-14/bithumb-bot`.
 
-The previous regime-aware research/backtest patch is already on `main` and pytest reportedly passes. Do not redo that work. Your job is to inspect the current repository, verify the remaining live-operability gap, and implement the next structural patch if the gap is confirmed.
+The latest `main` appears to have the regime-aware research pipeline and live `sma_with_filter` regime policy gate implemented. Pytest reportedly passes. Do not redo the already implemented regime research/backtest/report/promotion work. Your job is to directly inspect the repo, verify the remaining operational ambiguity, and apply only the minimal structural patch needed to close it.
 
-Core problem:
+Core issue:
 
-> The repo now has regime-aware research attribution, reporting, and acceptance gating, but the live SMA decision path may still not be fully wired to the promoted candidate’s allowed/blocked regime policy. If so, the system can approve candidates by regime evidence but still operate live without enforcing that evidence.
+> The regime-aware pipeline now appears to work for `sma_with_filter`, but plain `create_sma_strategy()` / `sma_cross` may still be able to produce live BUY decisions without promoted candidate regime policy. If plain SMA is live-operable, this bypasses the regime-policy safety model. If plain SMA is intentionally research/test/demo-only, that must be explicit, tested, and visible in operator docs/config.
 
-Treat this as a hypothesis, not a fact. Verify it directly in the repo before changing code.
+Treat this as a hypothesis. Verify it in the repo before changing code.
 
-## Current known state to verify
+## Current state to verify
 
-The latest `main` appears to already include:
-
-```text
-src/bithumb_bot/market_regime/
-  schema.py
-  classifier.py
-  thresholds.py
-  metrics.py
-  policy.py
-```
-
-`MarketRegimeSnapshot` is versioned as `market_regime_v2` and includes:
+Recent inspection suggests the repo already has:
 
 ```text
-price_regime
-trend_strength_bucket
-volatility_bucket
-volume_bucket
-liquidity_bucket
-composite_regime
-allows_sma_entry
-block_reason
-regime_classifier_version
-compatibility fields such as regime / allows_entry / volatility_state
+promotion artifact includes live_regime_policy
+candidate profile requires regime policy before promotion
+strategy_config.py loads candidate_regime_policy from STRATEGY_CANDIDATE_PROFILE_PATH
+market_regime.policy has load_candidate_regime_policy_from_path / normalize_live_regime_policy / evaluate_live_regime_policy
+sma_with_filter tests cover missing policy, invalid policy, old artifact, version mismatch, blocked regime, not-allowed regime, allowed regime, and SELL not being blocked
 ```
 
-`classify_market_regime` appears to classify:
-
-```text
-uptrend / downtrend / sideways
-low_vol / normal_vol / high_vol
-volume_decreasing / volume_normal / volume_increasing
-thin / normal / thick liquidity
-composite_regime
-```
-
-`run_sma_backtest` appears to attach regime snapshots to trades and return:
-
-```text
-regime_performance
-regime_coverage
-entry_regime
-exit_regime
-entry_regime_snapshot
-exit_regime_snapshot
-net_pnl
-fee_total
-slippage_total
-```
-
-The research report/candidate payload appears to include:
-
-```text
-regime_classifier_version
-market_regime_bucket_performance
-market_regime_coverage
-train_market_regime_bucket_performance
-train_market_regime_coverage
-final_holdout_market_regime_bucket_performance
-final_holdout_market_regime_coverage
-regime_gate_result
-allowed_live_regimes
-blocked_live_regimes
-regime_evidence
-```
-
-`evaluate_live_regime_policy` appears to already exist and should fail closed when candidate regime policy is missing.
-
-Do not assume these are correct. Confirm them.
-
-## Primary hypothesis to verify
-
-### Hypothesis A: Live SMA entry gating is not actually enforcing promoted candidate regime policy
-
-There may be a function such as `evaluate_live_regime_policy`, and `src/bithumb_bot/strategy/sma.py` may import it, but `SmaCrossStrategy.decide()` may not actually load a promoted candidate artifact/profile and apply the allowed/blocked regime policy to block new BUY entries.
-
-Verify whether the live/replay decision path actually does all of the following:
-
-```text
-1. Builds current_market_regime_snapshot at decision time.
-2. Loads the currently promoted candidate policy, candidate profile, or equivalent artifact.
-3. Reads regime_classifier_version.
-4. Reads allowed_live_regimes or allowed_regimes.
-5. Reads blocked_live_regimes or blocked_regimes.
-6. Calls evaluate_live_regime_policy(...).
-7. If base_signal or entry_signal is BUY and the current regime is not allowed, returns HOLD.
-8. If current regime is explicitly blocked, returns HOLD.
-9. If the candidate artifact has no regime policy, fails closed for live use.
-10. Emits decision context/logging fields that make the block auditable.
-```
-
-If this is already fully implemented and tested, do not duplicate it. Instead, add only missing tests or documentation if needed.
-
-If it is not fully implemented, implement it.
-
-## Required design direction
-
-This must be a structural live-operability patch, not another report-only patch.
-
-The desired chain is:
-
-```text
-research regime attribution
-→ regime acceptance gate
-→ promoted candidate artifact with allowed/blocked regimes
-→ live/replay current regime classification
-→ live/replay BUY blocked unless current regime is explicitly allowed
-→ auditable decision context explaining why
-```
-
-The system must not silently treat missing regime policy as “allowed everywhere.”
-
-For live use, missing regime policy must fail closed unless there is an explicit, documented, tested override. Prefer no override unless the repo already has a standard safe-override pattern.
-
-## Scope
-
-Focus on live/replay enforcement of promoted regime policy.
-
-Do not rework the whole research pipeline unless you find a direct integration bug.
-
-Do not optimize SMA parameters.
-
-Do not change exchange order execution semantics except to block or annotate strategy entry decisions before execution.
-
-Do not make financial claims. Keep claims as code-verified behavior.
-
-## Files and areas to inspect
+Do not assume this is complete. Confirm directly.
 
 Inspect at least:
 
 ```text
 src/bithumb_bot/strategy/sma.py
-src/bithumb_bot/strategy_replay.py
 src/bithumb_bot/strategy_config.py
 src/bithumb_bot/config.py
-src/bithumb_bot/research/promotion_gate.py
-src/bithumb_bot/research/validation_protocol.py
+src/bithumb_bot/app.py
+src/bithumb_bot/strategy_replay.py
 src/bithumb_bot/market_regime/policy.py
-src/bithumb_bot/market_regime/classifier.py
-tests/
-docs/
+src/bithumb_bot/research/promotion_gate.py
+tests/test_sma_with_filter_strategy.py
+tests/test_strategy_config.py or equivalent config tests
 .env.example
+docs/
 ```
 
-Also search for:
+Search for:
 
 ```text
-evaluate_live_regime_policy
-allowed_live_regimes
-blocked_live_regimes
+create_sma_strategy
+create_sma_with_filter_strategy
+sma_cross
+sma_with_filter
+STRATEGY_NAME
+STRATEGY_CANDIDATE_PROFILE_PATH
+candidate_regime_policy
 regime_policy_missing
-candidate_profile
-candidate_profile_hash
-promoted
-promotion
-CURRENT_CANDIDATE
-STRATEGY
+regime_decision
+current_market_regime_snapshot
 ```
+
+## Primary hypothesis
+
+### Hypothesis A: plain `sma_cross` can still be selected for live operation and bypass candidate regime policy
+
+The live app may construct strategies through settings such as `STRATEGY_NAME`, `SMA_*`, or factory functions. If plain `create_sma_strategy()` is selectable in live mode and does not require `candidate_regime_policy`, then regime-aware promotion is not a complete live safety boundary.
+
+Verify:
+
+```text
+1. Which strategy factory does the live app use by default?
+2. Can config select plain sma_cross in live mode?
+3. Does plain sma_cross call evaluate_live_regime_policy?
+4. Does plain sma_cross fail closed when STRATEGY_CANDIDATE_PROFILE_PATH is missing?
+5. Are docs/env examples explicit that live regime gating requires sma_with_filter?
+6. Are tests proving that plain SMA cannot bypass live regime policy, or that it is intentionally non-live?
+```
+
+Possible outcomes:
+
+```text
+A1. plain sma_cross is not live-selectable:
+    Add or update tests/docs proving that.
+
+A2. plain sma_cross is live-selectable but intentionally unsafe/dev-only:
+    Make that impossible in live mode, or require an explicit dangerous override with loud docs/tests.
+
+A3. plain sma_cross is live-selectable and should be allowed:
+    Wire candidate regime policy into plain sma_cross too, preserving SELL behavior.
+
+A4. live always uses sma_with_filter:
+    Add tests and docs proving this invariant, especially around settings parsing and factory selection.
+```
+
+Do not leave this ambiguous.
+
+## Required design principle
+
+Regime-aware promotion must be a live safety boundary, not just an optional strategy feature.
+
+If a strategy can submit or intend a live BUY, it must either:
+
+```text
+1. enforce promoted candidate regime policy fail-closed, or
+2. be structurally impossible to use in live trading, with tests and docs proving that.
+```
+
+Do not silently allow old behavior because tests are green.
 
 ## Implementation requirements if Hypothesis A is supported
 
-### 1. Add a clear promoted regime policy loading path
+Choose the smallest correct fix based on what the repo reveals.
 
-Find how the repo currently represents promoted candidates or candidate profiles.
+### Option 1: Make plain `sma_cross` non-live
 
-If there is already a promoted candidate artifact path/config, use it.
+If plain SMA is intended only for tests, replay, or development, enforce that.
 
-If there is not, add the smallest explicit, testable configuration surface, for example:
+Add a guard in the live strategy construction path such as:
 
 ```text
-STRATEGY_CANDIDATE_PROFILE_PATH
+if MODE == "live" and STRATEGY_NAME == "sma_cross":
+    fail startup or force HOLD with reason plain_sma_live_not_allowed
 ```
 
-or a repo-consistent equivalent.
+Prefer failing at startup/config validation over silently changing strategy behavior.
 
-The loaded policy should normalize both naming variants:
+Add tests for:
 
 ```text
-allowed_live_regimes OR allowed_regimes
-blocked_live_regimes OR blocked_regimes
-regime_classifier_version
-regime_evidence
+live mode refuses plain sma_cross
+paper/dry-run behavior is explicit
+docs explain sma_with_filter is required for promoted regime-gated live operation
 ```
 
-The normalized policy object should be deterministic and testable.
+### Option 2: Wire regime policy into plain SMA too
 
-### 2. Fail closed for missing or invalid live regime policy
+If plain SMA is still a valid live strategy, it must enforce the same candidate regime policy on new BUY entries.
 
-For live/replay entry gating, missing candidate policy must result in:
+Implement:
 
 ```text
-entry_signal = HOLD
-regime_decision = OFF
-regime_block_reason = regime_policy_missing
+SmaCrossStrategy has candidate_regime_policy field
+SmaCrossStrategy.from_config passes config.candidate_regime_policy
+create_sma_strategy accepts candidate_regime_policy or loads from config path consistently
+BUY decision evaluates current_market_regime_snapshot + candidate policy
+missing/invalid policy fails closed
+current regime not allowed fails closed
+current regime blocked fails closed
+version mismatch fails closed
+SELL/exit is not blocked
+decision context includes the same observability fields as sma_with_filter
 ```
 
-Invalid JSON, missing allowed list, missing classifier version, or unsupported policy shape must also fail closed with a specific reason such as:
+Do not duplicate policy logic unnecessarily. Reuse `evaluate_live_regime_policy`.
+
+### Option 3: Prove live factory always selects `sma_with_filter`
+
+If app config already guarantees `sma_with_filter`, add tests and docs so this cannot regress.
+
+Tests should cover:
 
 ```text
-regime_policy_invalid
+live app strategy factory defaults to sma_with_filter
+STRATEGY_NAME=sma_cross is rejected in live mode, or impossible
+STRATEGY_CANDIDATE_PROFILE_PATH is required for live sma_with_filter
+missing candidate profile leads to fail-closed BUY behavior
+```
+
+## Recovery and compatibility behavior
+
+Old candidate artifacts without regime policy must remain rejected for promotion and fail closed for live/replay entry use.
+
+Plain SMA compatibility must be explicit:
+
+```text
+research/test use: allowed if intentional
+live use: either impossible or regime-gated
+```
+
+No missing-policy path should mean “allow BUY.”
+
+## Observability requirements
+
+If any new guard or policy wiring is added, decision context or startup/config error must be specific.
+
+Use reasons like:
+
+```text
+plain_sma_live_not_allowed
+regime_policy_missing
+regime_policy_unreadable
+regime_policy_invalid_json
 regime_policy_missing_allowed_regimes
 regime_policy_version_mismatch
+current_regime_not_in_candidate_allowed_regimes
+current_regime_in_candidate_blocked_regimes
 ```
 
-Use the repo’s existing error/warning style.
-
-### 3. Apply the policy only to new entries
-
-This patch should block new BUY entries.
-
-It should not block exits. A SELL needed for risk reduction should not be prevented just because the current regime is not allowed.
-
-If the strategy has an existing position and an exit rule fires, keep exit behavior intact.
-
-### 4. Make research/live classifier version mismatches explicit
-
-If the candidate artifact has `regime_classifier_version` different from the current classifier version, fail closed for live entry unless the repo already has a safe compatibility policy.
-
-Decision context should include both:
-
-```text
-current_regime_classifier_version
-candidate_regime_classifier_version
-```
-
-### 5. Add auditable decision context
-
-Every decision where regime policy is evaluated should include at least:
+For any BUY blocked by regime policy, context should include:
 
 ```text
 current_market_regime_snapshot
@@ -253,156 +206,73 @@ regime_policy_present
 regime_policy_valid
 ```
 
-If entry is blocked, the final reason should make the cause clear, for example:
+If the fix is startup rejection instead of decision-time blocking, the error message must name the selected strategy and explain the safe alternative.
+
+## Documentation/config requirements
+
+Check and update `.env.example` and docs if needed.
+
+At minimum, document:
 
 ```text
-current_regime_not_in_candidate_allowed_regimes
-current_regime_in_candidate_blocked_regimes
-regime_policy_missing
-regime_policy_version_mismatch
+STRATEGY_CANDIDATE_PROFILE_PATH
+required role of promotion artifact / candidate profile
+missing/invalid policy fails closed
+which strategy is safe for live regime-gated operation
+whether plain sma_cross is non-live, test-only, or also regime-gated
 ```
 
-### 6. Preserve existing gates
-
-Do not remove or weaken existing gates:
-
-```text
-cost edge filter
-fee authority live entry block
-position/dust gate
-decision contract
-exit rules
-closed candle cutoff
-```
-
-Regime policy should be one more entry gate in the chain. The final context should make it clear which gate blocked the entry.
-
-### 7. Replay behavior
-
-If `strategy_replay.py` reuses `SmaCrossStrategy.decide()`, ensure regime policy appears in replay context.
-
-If replay has its own strategy construction or config path, wire the candidate policy there too.
-
-Tests must cover whichever path is used.
-
-### 8. Recovery and compatibility behavior
-
-Old candidate artifacts without regime policy must not be silently allowed for live trading.
-
-Required behavior:
-
-```text
-research-only/report reading: allowed with warning or neutral behavior
-live/replay entry use: fail closed with regime_policy_missing
-```
-
-If the repo has a “dry run” or replay mode, decide deliberately whether it should fail closed too. Prefer fail closed in replay as well, because replay is used to validate live behavior. If a test fixture needs no policy, make the fixture explicit.
-
-## Secondary improvements to consider only after the live gate is wired
-
-Do not let these distract from the primary patch.
-
-### Secondary B: zero-loss profit factor state
-
-Current regime aggregation may use:
-
-```text
-profit_factor = None
-```
-
-for zero-loss winner regimes to avoid misleading infinity. That is acceptable, but gate behavior may then fail a regime with wins and no losses when `min_profit_factor_by_regime` is configured.
-
-If quick and low-risk, add an explicit field such as:
-
-```text
-profit_factor_state = "zero_loss_with_wins" | "zero_loss_no_wins" | "finite"
-```
-
-or document the current conservative behavior.
-
-### Secondary C: walk-forward regime gate in window pass/fail
-
-Walk-forward windows now expose regime coverage/performance, but the window `gate_result` may still be based mostly on generic validation metrics.
-
-If quick and low-risk, add:
-
-```text
-window_regime_gate_result
-missing_required_regimes
-blocked_regime_trade_count
-```
-
-and make walk-forward failure include regime window failures when regime gate is required.
-
-### Secondary D: research/live entry rule alignment
-
-Research backtest currently appears to use regime snapshots for attribution/gating evidence, while actual action rules may still be SMA cross plus gap/range filters.
-
-This can be acceptable if explicitly documented as:
-
-```text
-research trade rule = SMA signal rule
-regime = attribution and acceptance/promotion gate
-live entry = SMA signal rule + promoted regime policy
-```
-
-If live uses `allows_sma_entry` directly but research does not, document or test the intended difference. Do not silently create a new mismatch.
+Use repo style. Do not add vague trading advice.
 
 ## Testing requirements
 
-Add or update tests to cover the primary live policy integration.
+Run or add tests depending on the chosen fix.
 
-At minimum:
-
-```text
-1. Missing candidate regime policy blocks BUY with regime_policy_missing.
-2. Old artifact without allowed/blocked regimes blocks BUY.
-3. Invalid candidate policy blocks BUY with a specific invalid reason.
-4. Candidate classifier version mismatch blocks BUY.
-5. Current regime not in allowed list blocks BUY.
-6. Current regime in blocked list blocks BUY.
-7. Current regime in allowed list permits BUY when all other gates permit.
-8. SELL/exit decision is not blocked by regime entry policy.
-9. Decision context contains current_market_regime_snapshot.
-10. Decision context contains candidate_allowed_regimes and candidate_blocked_regimes.
-11. Decision context contains regime_decision and regime_block_reason.
-12. Replay path includes the same regime policy fields, or a test proves replay uses the same strategy decision path.
-```
-
-Also keep or add tests for:
+At minimum, add tests for the primary ambiguity:
 
 ```text
-evaluate_live_regime_policy fail-closed behavior
-policy normalization from allowed_live_regimes / blocked_live_regimes
-policy normalization from allowed_regimes / blocked_regimes
+1. live config cannot select plain sma_cross without regime policy, OR plain sma_cross enforces regime policy.
+2. missing STRATEGY_CANDIDATE_PROFILE_PATH cannot silently allow a live BUY through any live-selectable SMA path.
+3. allowed candidate policy permits BUY only when all other gates pass.
+4. blocked/not-allowed/version-mismatch policy blocks BUY.
+5. SELL/exit is not blocked by entry regime policy.
+6. operator context or startup error includes the exact reason.
+7. .env.example/docs mention STRATEGY_CANDIDATE_PROFILE_PATH and live strategy safety policy.
 ```
 
-Run:
+Also rerun the existing regime tests:
+
+```bash
+pytest tests/test_sma_with_filter_strategy.py tests/test_market_regime.py tests/test_research_promotion_gate.py
+```
+
+Then run:
 
 ```bash
 pytest
 ```
 
-If the full suite is too slow or fails for unrelated pre-existing reasons, run the relevant narrow tests first and report both narrow and full-suite results clearly.
+If full pytest fails for unrelated pre-existing reasons, report the narrow tests and the full-suite failure separately.
 
-## Observability requirements
+## Secondary checks
 
-Add logs or decision context fields sufficient for an operator to answer:
+Do these only after the primary ambiguity is closed.
 
-```text
-Why was this BUY blocked?
-Which current regime was detected?
-Which candidate policy was loaded?
-Was the policy missing, invalid, or version mismatched?
-Was the current regime blocked or merely not allowed?
-Did another gate block first?
-```
+### Secondary B: `.env.example` completeness
 
-Do not emit secrets or full filesystem paths if the repo avoids that elsewhere. It is acceptable to emit a safe basename or policy source label.
+Verify `STRATEGY_CANDIDATE_PROFILE_PATH` exists and explains fail-closed behavior.
+
+### Secondary C: policy loader observability
+
+Verify unreadable/invalid policy path errors appear in either decision context or startup logs.
+
+### Secondary D: research/live rule alignment
+
+Confirm docs or tests state whether research backtest uses regime as attribution/gate evidence while live uses it as entry policy. Do not change this unless there is a direct inconsistency.
 
 ## Final report format
 
-When finished, provide the final report in this exact structure:
+When finished, report in this exact structure:
 
 ```text
 1. Summary
@@ -411,14 +281,15 @@ When finished, provide the final report in this exact structure:
    - Hypothesis A: supported / refuted / partially supported / still unknown
    - Secondary B/C/D: supported / refuted / partially supported / still unknown, if inspected
 4. Files changed
-5. Design changes implemented
-6. Live/replay regime gate behavior
+5. Design decision
+   - Plain SMA non-live, plain SMA regime-gated, or live factory always sma_with_filter
+6. Live/replay regime safety behavior
 7. Recovery and compatibility behavior
-8. Observability fields added
-9. Tests added or changed
-10. Tests run and results
-11. Remaining risks or follow-up work
+8. Observability behavior
+9. Documentation/config updates
+10. Tests added or changed
+11. Tests run and results
+12. Remaining risks or follow-up work
 ```
 
-Use precise language. Do not say “fully safe” or “proven profitable.” The goal is not to claim trading performance. The goal is to make the repository structurally more reproducible, auditable, regime-aware, and safer to operate live.
-
+Be precise. Do not claim the strategy is profitable or “safe” financially. The goal is to ensure every live-operable SMA BUY path is structurally regime-policy-aware, fail-closed, reproducible, and auditable.

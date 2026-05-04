@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 
 from bithumb_bot import app
@@ -13,6 +16,38 @@ def test_validate_mode_or_raise_rejects_typo() -> None:
 
     assert "invalid MODE='papre'" in str(exc.value)
     assert "allowed values: paper, live" in str(exc.value)
+
+
+def test_live_preflight_rejects_plain_sma_cross() -> None:
+    cfg = replace(settings, MODE="live", STRATEGY_NAME="sma_cross")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(cfg)
+
+    message = str(exc.value)
+    assert "plain_sma_live_not_allowed" in message
+    assert "STRATEGY_NAME='sma_cross'" in message
+    assert "STRATEGY_NAME=sma_with_filter" in message
+    assert "STRATEGY_CANDIDATE_PROFILE_PATH" in message
+
+
+def test_plain_sma_cross_remains_allowed_outside_live_preflight() -> None:
+    cfg = replace(settings, MODE="paper", STRATEGY_NAME="sma_cross")
+
+    config.validate_live_strategy_selection(cfg)
+
+
+def test_operator_docs_describe_live_sma_regime_policy_boundary() -> None:
+    env_example = Path(".env.example").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    research_doc = Path("docs/research-validation.md").read_text(encoding="utf-8")
+
+    combined = "\n".join((env_example, readme, research_doc))
+    assert "STRATEGY_CANDIDATE_PROFILE_PATH" in combined
+    assert "plain_sma_live_not_allowed" in combined
+    assert "sma_cross" in combined
+    assert "sma_with_filter" in combined
+    assert "fail closed" in combined
 
 
 def test_main_health_fails_fast_on_invalid_mode(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

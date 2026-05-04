@@ -173,6 +173,8 @@ Expected artifact placement:
 ## Live Safety
 
 - Real-order flow requires explicit arming.
+- Live SMA operation uses `sma_with_filter`; `MODE=live` rejects plain `sma_cross` with `plain_sma_live_not_allowed`.
+- Set `STRATEGY_CANDIDATE_PROFILE_PATH` to a reviewed promoted candidate profile before paper or live-dry-run validation. Missing, unreadable, invalid, or version-mismatched candidate regime policy fails closed for new BUY entries.
 - `LIVE_DRY_RUN=true` is the safe starting point for live bring-up and post-change validation.
 - `LIVE_REAL_ORDER_ARMED=true` is required before real orders are allowed.
 - Live preflight must fail fast when required limits, notifier configuration, or safety inputs are missing.

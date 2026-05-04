@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sqlite3
 
 import pytest
 
+from bithumb_bot import config
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import compute_signal
@@ -127,6 +129,20 @@ def test_compute_signal_normalizes_strategy_override_name(tmp_path) -> None:
 
     assert result is not None
     assert result["strategy"] == "sma_cross"
+
+
+def test_live_compute_signal_rejects_plain_sma_cross_override() -> None:
+    old_mode = settings.MODE
+
+    object.__setattr__(settings, "MODE", "live")
+    try:
+        with sqlite3.connect(":memory:") as conn:
+            with pytest.raises(config.LiveModeValidationError) as exc:
+                compute_signal(conn, 2, 3, strategy_name="sma_cross")
+    finally:
+        object.__setattr__(settings, "MODE", old_mode)
+
+    assert "plain_sma_live_not_allowed" in str(exc.value)
 
 
 def test_registry_rejects_unknown_strategy_name() -> None:

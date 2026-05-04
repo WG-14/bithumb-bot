@@ -6,13 +6,14 @@ import re
 import time
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .config import (
     DEFAULT_RUNTIME_STRATEGY,
     MarketPreflightValidationError,
     settings,
     validate_live_mode_preflight,
+    validate_live_strategy_selection,
     validate_market_preflight,
     validate_market_runtime,
 )
@@ -420,6 +421,7 @@ def compute_signal(
     strategy_name: str | None = None,
 ):
     selected_strategy_name = str(strategy_name or settings.STRATEGY_NAME).strip().lower()
+    validate_live_strategy_selection(replace(settings, STRATEGY_NAME=selected_strategy_name))
     strategy = create_strategy(
         selected_strategy_name,
         short_n=short_n,

@@ -317,6 +317,18 @@ def resolve_strategy_name_from_env() -> str:
     return normalized or DEFAULT_RUNTIME_STRATEGY
 
 
+def validate_live_strategy_selection(cfg: Settings) -> None:
+    if str(cfg.MODE or "").strip().lower() != "live":
+        return
+    strategy_name = str(cfg.STRATEGY_NAME or "").strip().lower()
+    if strategy_name == "sma_cross":
+        raise LiveModeValidationError(
+            "plain_sma_live_not_allowed: STRATEGY_NAME='sma_cross' is not allowed when MODE=live; "
+            "use STRATEGY_NAME=sma_with_filter with STRATEGY_CANDIDATE_PROFILE_PATH pointing to a "
+            "promoted candidate profile so BUY entries are regime-policy gated fail-closed"
+        )
+
+
 def _normalize_config_market_input(raw_market: str, *, env_key: str, strict_canonical: bool) -> str:
     token = str(raw_market or "").strip().upper()
     if not token:
@@ -851,6 +863,10 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         return
 
     issues: list[str] = []
+    try:
+        validate_live_strategy_selection(cfg)
+    except LiveModeValidationError as exc:
+        issues.append(str(exc))
     try:
         live_path_manager = PathManager.from_env(PROJECT_ROOT)
         validate_runtime_root_separation(live_path_manager.config)
