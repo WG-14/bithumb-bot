@@ -1,14 +1,12 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The latest review suggests the approved-profile contract is nearly complete. The remaining work is narrow and should stay narrow: final-confirm the promotion transition integrity, make sure approved runtime paths are not labeled with legacy-specific fields, and lock down/document artifact custody policy.
-
-Do **not** broaden this into a general refactor. Do **not** weaken existing live safety checks. Do **not** implement automatic research-to-live propagation.
+The approved-profile contract appears nearly complete. Do **not** broaden this into a general refactor. The remaining work is a narrow final verification pass focused on one potentially unconfirmed safety condition and one documentation condition.
 
 ## Core objective
 
 The repository is implementing this verified manual approval model:
 
-```text
+```text id="i9qnms"
 research evidence
   ↓
 promotion artifact
@@ -20,9 +18,9 @@ approved live-dry-run profile
 approved small-live profile
 ```
 
-The remaining success criterion is:
+The success criterion for this task is:
 
-> A child profile cannot be promoted from a drifted parent artifact chain; a normal approved-profile runtime path is not labeled legacy; artifact custody policy is explicit; and live execution still fails closed on dangerous drift.
+> `profile-promote` must not create a child profile from a parent whose source promotion artifact or evidence artifacts have drifted. Artifact custody policy must be explicit. No large patch is needed if these are already implemented and tested.
 
 ## Scope constraints
 
@@ -37,44 +35,73 @@ Do not:
 * weaken ledger/reconciliation protections
 * require exchange credentials for profile CLI/tests
 * make deterministic hashes depend on timestamps
-* let legacy compatibility fields make a full approved-profile path look legacy-only
+* refactor unrelated profile, strategy, broker, ledger, or live execution code
 
 Do:
 
-* keep the patch focused on approved-profile transition integrity and audit clarity
-* add or verify tests for the exact remaining risks
-* preserve existing CLI behavior unless explicitly changed below
+* inspect the actual repo code directly
+* keep changes minimal
+* add or confirm tests for the exact remaining risks
 * keep failures reason-coded and machine-readable where the repo already emits JSON
+* preserve current approved-vs-legacy audit semantics
+
+## Current known state
+
+The approved-vs-legacy audit confusion appears fixed.
+
+In `src/bithumb_bot/strategy_config.py`, approved selector paths should now emit:
+
+```json id="e70je8"
+{
+  "legacy_candidate_profile_path_used": false,
+  "approved_profile_contract_scope": "full_approved_profile"
+}
+```
+
+Legacy compatibility paths should emit:
+
+```json id="rdyola"
+{
+  "legacy_candidate_profile_path_used": true,
+  "legacy_profile_contract_scope": "regime_policy_only",
+  "approved_profile_contract_scope": "legacy_regime_policy_only"
+}
+```
+
+Live mode with only a legacy candidate path and no approved profile selector should still fail closed with `approved_profile_missing` or the repo’s existing equivalent reason.
+
+Do not disturb this behavior.
 
 ## Hypotheses to verify or falsify
 
-Treat these as hypotheses. Inspect the repo before changing code.
+Treat these as hypotheses, not facts.
 
 ### Hypothesis A — `promote_profile_mode()` may still need final confirmation that parent source/evidence drift is checked before child profile creation
 
-`verify_profile_source_promotion(profile)` appears to call both:
+The helper `verify_profile_source_promotion(profile)` appears to be the correct full parent-chain check. It should verify both:
 
-```python
+```python id="qi3ka5"
 verify_profile_source_artifact(profile)
 verify_profile_evidence_artifacts(profile)
 ```
 
-That helper is correctly shaped. The final question is whether `promote_profile_mode()` calls it before constructing or writing the child profile.
+The final unresolved question is whether `promote_profile_mode()` calls this helper before constructing or writing the child profile.
 
 Required action:
 
 * Open `src/bithumb_bot/approved_profile.py`.
-* Inspect the full `promote_profile_mode()` body.
-* Confirm that parent artifact-chain verification happens before child profile construction.
-* If missing, add it at the start of `promote_profile_mode()`:
+* Inspect the full `promote_profile_mode()` implementation.
+* Confirm that the parent profile’s source promotion artifact and evidence artifacts are verified before any child profile is constructed.
+* If this is already implemented and covered by tests, do not patch it.
+* If missing, add the verification at the start of `promote_profile_mode()`:
 
-```python
+```python id="j6ifmt"
 verify_profile_source_promotion(parent_profile)
 ```
 
-or the equivalent explicit pair:
+or the exact equivalent:
 
-```python
+```python id="t4wcge"
 verify_profile_source_artifact(parent_profile)
 verify_profile_evidence_artifacts(parent_profile)
 ```
@@ -92,81 +119,34 @@ Required behavior:
   * `paper_validation_evidence_content_hash_mismatch`
   * `live_readiness_evidence_content_hash_mismatch`
 
-Priority: **high**.
+Priority: **high**, but only patch if missing.
 
 ---
 
-### Hypothesis B — approved-profile success path may still emit legacy-specific `legacy_profile_contract_scope`
+### Hypothesis B — artifact custody policy may still be implicit rather than explicit in docs/tests
 
-The full approved-profile path should not look legacy in telemetry.
+The current path policy may reject repo-local paths, require file existence, and verify content hashes, while still allowing external absolute paths outside the repo.
 
-Required final state:
-
-For an approved selector path:
-
-```json
-{
-  "legacy_candidate_profile_path_used": false,
-  "approved_profile_contract_scope": "full_approved_profile"
-}
-```
-
-and either:
-
-```json
-{
-  "legacy_profile_contract_scope": null
-}
-```
-
-or no `legacy_profile_contract_scope` field at all.
-
-For a legacy compatibility path:
-
-```json
-{
-  "legacy_candidate_profile_path_used": true,
-  "legacy_profile_contract_scope": "regime_policy_only",
-  "approved_profile_contract_scope": "legacy_regime_policy_only"
-}
-```
+That can be acceptable, but only if documented and tested. Operators must know whether artifacts must live under data-root/reports or whether external absolute paths are allowed with hash custody.
 
 Required action:
 
-* Inspect `src/bithumb_bot/strategy_config.py`.
-* If approved paths still emit `legacy_profile_contract_scope="full_approved_profile"`, remove that field from approved paths or set it to `None`.
-* Do not remove `legacy_profile_contract_scope` from actual legacy paths.
-* Do not change live fail-closed behavior for legacy-only live mode.
+Inspect docs and tests for artifact custody language covering:
 
-Required tests:
+* source promotion artifacts
+* paper validation evidence
+* live readiness evidence
+* approved profile output
+* `profile-verify`
+* `profile-promote`
 
-* Approved selector path emits `legacy_candidate_profile_path_used == False`.
-* Approved selector path emits `approved_profile_contract_scope == "full_approved_profile"`.
-* Approved selector path omits `legacy_profile_contract_scope`, or emits it as `None`.
-* Approved selector path does **not** emit `legacy_profile_contract_scope == "regime_policy_only"` or `"full_approved_profile"`.
-* Legacy candidate path emits `legacy_candidate_profile_path_used == True`.
-* Legacy candidate path emits `legacy_profile_contract_scope == "regime_policy_only"`.
-* Live mode with only legacy candidate path still fails approved-profile requirement.
-
-Priority: **medium**, but this should be fixed if present because it affects audit readability.
-
----
-
-### Hypothesis C — artifact custody policy may still be implicit rather than explicit
-
-The current path policy appears to reject repo-local paths, require file existence, and verify content hashes. It may still allow arbitrary external absolute paths outside the repository.
-
-That can be acceptable, but only if documented and tested. The operator must know whether artifacts must live under data-root/reports or whether external absolute paths are allowed with hash custody.
-
-Required action:
-
-Choose and implement/document exactly one policy.
+Choose and document exactly one policy.
 
 #### Option 1 — keep external absolute artifacts allowed
 
 Use this if it matches current repo behavior.
 
-Required behavior/docs:
+Required docs/tests:
 
 * repo-local source/evidence/profile output paths are rejected
 * external absolute source/evidence paths are allowed
@@ -176,47 +156,30 @@ Required behavior/docs:
 * `profile-promote` detects parent source/evidence drift before child creation
 * operators are responsible for preserving external artifacts
 
-Required tests:
-
-* repo-local source/evidence path rejected
-* missing source/evidence path rejected
-* external absolute source/evidence path accepted
-* data-root/reports source/evidence path accepted
-* source/evidence drift detected by `profile-verify`
-* source/evidence drift detected by `profile-promote`
-
 #### Option 2 — enforce data-root/reports custody for live transitions
 
 Use this only if the repo wants stricter operational custody.
 
-Required behavior:
+Required behavior/tests:
 
 * `live_dry_run` and `small_live` promotion transitions require source/evidence artifacts under `PathManager.data_dir()` or the repo’s runtime reports/profile root
 * repo-local paths remain rejected
 * arbitrary external absolute paths are rejected for live transitions
 * paper generation may remain looser only if documented
-
-Required tests:
-
-* data-root/reports source/evidence path accepted
-* repo-local path rejected
-* external absolute path rejected for live transitions
-* missing path rejected
 * failure reason is explicit, for example:
 
   * `source_promotion_artifact_path_outside_data_root`
   * `paper_validation_evidence_path_outside_data_root`
   * `live_readiness_evidence_path_outside_data_root`
 
-Priority: **medium**. If enforcement is not changed, docs must be explicit.
+Priority: **medium**. If enforcement is not changed, docs and tests must be explicit.
 
 ## Required implementation priorities
 
-Implement in this order:
-
 1. Confirm and, if needed, patch `promote_profile_mode()` so it validates parent source/evidence artifacts before child creation.
-2. Remove or neutralize `legacy_profile_contract_scope` from non-legacy approved-profile success paths.
-3. Decide and document artifact custody policy; add tests for the chosen behavior.
+2. Confirm tests cover source/evidence drift during `profile-promote`; add tests if missing.
+3. Confirm artifact custody policy is documented and tested; update docs/tests if missing.
+4. Do not make unrelated code changes.
 
 ## Runtime safety requirements
 
@@ -244,7 +207,7 @@ SELL/exit:
 
 ## Observability requirements
 
-For a full approved-profile path, runtime/preflight/decision context should expose:
+For a full approved-profile path, runtime/preflight/decision context should continue to expose:
 
 * `approved_profile_path`
 * `approved_profile_mode`
@@ -257,7 +220,7 @@ For a full approved-profile path, runtime/preflight/decision context should expo
 * `approved_profile_source_verified`
 * `approved_profile_evidence_verified`
 * `approved_profile_runtime_verified`
-* `legacy_candidate_profile_path_used=False`
+* `legacy_candidate_profile_path_used=false`
 * source promotion path/hash fields
 * candidate profile hash
 * manifest hash
@@ -265,9 +228,9 @@ For a full approved-profile path, runtime/preflight/decision context should expo
 * evidence paths and evidence hashes when present
 * mismatch count/list on failures
 
-For a legacy/regime-policy-only path, runtime/preflight/decision context should expose:
+For a legacy/regime-policy-only path, runtime/preflight/decision context should continue to expose:
 
-* `legacy_candidate_profile_path_used=True`
+* `legacy_candidate_profile_path_used=true`
 * `legacy_profile_contract_scope="regime_policy_only"`
 * `approved_profile_contract_scope="legacy_regime_policy_only"` or equivalent
 * source/runtime/evidence verification fields false or absent
@@ -280,18 +243,16 @@ Do not log secrets.
 Ensure or document:
 
 * failed verification stops live BUY before order submission
+* failed `profile-promote` does not leave a partial child profile
 * operator can roll back by changing only the approved profile selector to a previous approved profile
 * profile generation and promotion writes are atomic
-* failed promotion does not leave a partial child profile
 * CLI errors are deterministic and machine-readable where JSON output exists
 * no CLI mutates live env files automatically
 * audit fields make rollback verification reproducible
 
 ## Required tests
 
-Add or update tests in the repo’s existing style.
-
-At minimum:
+Add tests only if missing. Keep them focused.
 
 ### Promotion transition integrity
 
@@ -300,16 +261,6 @@ At minimum:
 * `profile-promote` fails if any attached parent evidence hash no longer matches.
 * Failure output includes the specific reason code.
 * No child profile is written on failure.
-
-### Approved vs legacy audit readability
-
-* Approved selector path emits `legacy_candidate_profile_path_used == False`.
-* Approved selector path emits `approved_profile_contract_scope == "full_approved_profile"`.
-* Approved selector path omits `legacy_profile_contract_scope`, or emits it as `None`.
-* Approved selector path never emits `legacy_profile_contract_scope == "regime_policy_only"` or `"full_approved_profile"`.
-* Legacy candidate path emits `legacy_candidate_profile_path_used == True`.
-* Legacy candidate path emits `legacy_profile_contract_scope == "regime_policy_only"`.
-* Live mode with only legacy candidate path still fails approved-profile requirement.
 
 ### Artifact custody policy
 
@@ -341,7 +292,7 @@ Run or preserve tests for:
 
 ## Documentation updates
 
-Update README, research validation docs, runbooks, and env examples as needed.
+Update README, research validation docs, runbooks, and env examples only as needed.
 
 Docs must clearly state:
 
@@ -362,12 +313,12 @@ Docs must clearly state:
 
 When finished, produce this exact report:
 
-```markdown
+```markdown id="2iw06g"
 ## Summary
 
 ## Hypotheses Verified / Falsified
 
-For each hypothesis A–C:
+For each hypothesis A–B:
 - status: verified, partially verified, falsified, or inconclusive
 - repo evidence
 - implemented change or reason no change was needed
@@ -381,10 +332,7 @@ Explain whether and how `profile-promote` verifies:
 - source promotion artifact
 - paper validation evidence
 - live readiness evidence
-
-## Approved vs Legacy Audit Semantics
-
-Explain exactly how a full approved-profile path differs from legacy/regime-policy-only compatibility in emitted fields.
+- no partial child profile is written on failure
 
 ## Artifact Custody Policy
 
@@ -421,7 +369,7 @@ Explain operator recovery from failed verification and rollback to a previous ap
 
 ## Tests Added or Updated
 
-List test files and what each verifies.
+List test files and what each verifies. State explicitly if no code changes were needed because tests already covered the case.
 
 ## Backward Compatibility
 
@@ -442,5 +390,5 @@ Only list intentionally deferred work or unresolved hypotheses.
 
 Success criterion:
 
-> A child profile cannot be promoted from a drifted parent artifact chain; a normal approved-profile runtime path is not labeled legacy; artifact custody policy is explicit; live execution still fails closed on dangerous drift; and operators can reproduce which artifact chain was active.
+> `profile-promote` cannot create a child profile from a drifted parent artifact chain; artifact custody policy is explicit; live execution still fails closed on dangerous drift; and operators can reproduce which artifact chain was active.
 

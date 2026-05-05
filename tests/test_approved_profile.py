@@ -11,6 +11,7 @@ from bithumb_bot.approved_profile import (
     compute_approved_profile_hash,
     compute_file_content_hash,
     content_hash_payload,
+    default_profile_output_path,
     diff_profile_to_runtime,
     load_approved_profile,
     load_profile_or_promotion_regime_policy,
@@ -20,9 +21,10 @@ from bithumb_bot.approved_profile import (
     runtime_contract_from_settings,
     sha256_prefixed,
     validate_approved_profile,
+    write_approved_profile_atomic,
 )
 from bithumb_bot.profile_cli import cmd_profile_diff, cmd_profile_generate, cmd_profile_promote, cmd_profile_verify
-from bithumb_bot.paths import PathConfig, PathManager
+from bithumb_bot.paths import PathConfig, PathManager, PathPolicyError
 from bithumb_bot.research.promotion_gate import build_candidate_profile
 from bithumb_bot.storage_io import write_json_atomic
 
@@ -779,6 +781,52 @@ def test_profile_generation_accepts_managed_data_reports_source_promotion_path(t
     )
 
     assert profile["source_promotion_artifact_path"] == str(promotion_path.resolve())
+
+
+def test_approved_profile_output_rejects_repo_local_path(tmp_path: Path) -> None:
+    manager = PathManager(
+        project_root=Path.cwd(),
+        config=PathConfig(
+            mode="paper",
+            env_root=tmp_path / "env_root",
+            run_root=tmp_path / "run_root",
+            data_root=tmp_path / "data_root",
+            log_root=tmp_path / "log_root",
+            backup_root=tmp_path / "backup_root",
+        ),
+    )
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    profile = _profile(str(promotion_path))
+    out_path = Path.cwd() / "tmp" / "repo_local_profile.json"
+
+    with pytest.raises(PathPolicyError, match="profile output path must be outside repository"):
+        write_approved_profile_atomic(out_path, profile, manager=manager)
+
+    assert not out_path.exists()
+
+
+def test_default_approved_profile_output_uses_managed_data_reports(tmp_path: Path) -> None:
+    manager = PathManager(
+        project_root=Path.cwd(),
+        config=PathConfig(
+            mode="paper",
+            env_root=tmp_path / "env_root",
+            run_root=tmp_path / "run_root",
+            data_root=tmp_path / "data_root",
+            log_root=tmp_path / "log_root",
+            backup_root=tmp_path / "backup_root",
+        ),
+    )
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    profile = _profile(str(promotion_path))
+
+    out_path = default_profile_output_path(manager=manager, profile=profile)
+    written = write_approved_profile_atomic(out_path, profile, manager=manager)
+
+    assert written.parent == manager.data_dir() / "reports" / "profiles"
+    assert load_approved_profile(written)["profile_content_hash"] == profile["profile_content_hash"]
 
 
 def test_profile_promote_accepts_managed_data_reports_evidence_path(tmp_path: Path) -> None:
