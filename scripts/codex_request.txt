@@ -1,300 +1,317 @@
 You are working in the `WG-14/bithumb-bot` repository.
 
-Your task is not to add a narrow metric patch. Treat this as a structural hardening task: evolve the repo toward a reproducible, auditable, fail-closed automated trading experiment system.
+Your task is to inspect the current `main` branch, verify the remaining risks directly in the code, and implement the next structural hardening patch. Do not treat this as a generic cleanup. The previous patch appears to have moved the repo in the right direction by adding typed semantic evidence validation, profile transition evidence checks, decision-equivalence comparison, and tests. However, a critical remaining risk is suspected: **promotion evidence thresholds may still be self-declared inside the evidence artifact and therefore self-approving**.
 
-Use the following diagnosis as the starting point, but do not assume it is fully correct. Verify it directly against the repository before making changes: the repo already has an operational closed-lifecycle performance gate and a research validation path, but the higher-risk gap appears to be that research evidence, paper observation evidence, and live-readiness evidence are not yet fully joined into a typed, semantically validated evidence chain. The suspected core problem is not “there is no positive expectancy validation,” but “research-stage evidence, paper/runtime observation evidence, and live readiness are not yet closed into one machine-verifiable lifecycle.” Reference context: 
+Use this as the starting diagnosis, but verify it against the repository before changing code.
+
+## Core problem statement
+
+The repository now has typed paper/live evidence validation, but the validation may still trust `payload["thresholds"]` from the evidence artifact itself. If true, an evidence producer can weaken its own promotion criteria by writing thresholds such as:
+
+```json
+{
+  "thresholds": {
+    "min_observation_seconds": 1,
+    "min_decision_count": 0,
+    "min_closed_lifecycle_count": 0,
+    "max_blocked_decision_ratio": 1.0,
+    "max_execution_quality_breach_count": 999
+  }
+}
+```
+
+That would mean the repo has “typed evidence,” but not a repo-trusted promotion policy. This is not acceptable for an automated trading experiment system. Promotion policy must be owned by the repository/runtime contract, not by the evidence artifact being evaluated.
 
 ## Mission
 
-Inspect the repository, verify or falsify the hypotheses below, then implement the highest-leverage design changes that make the system more robust, reproducible, observable, recoverable, and operationally safe.
+Verify or falsify the hypotheses below, then implement the smallest coherent design change that closes the high-priority risks without weakening existing fail-closed behavior.
 
-Do not weaken the problem into generic “add more tests” or “improve docs.” Make concrete repository changes.
+Do not center this patch on `strategy_performance.py`. That file should remain an operational closed-lifecycle guard unless repository evidence proves otherwise. This task is about **trusted evidence policy, semantic promotion safety, observability, and operator recovery**.
 
 ## Scope boundaries
 
-Prioritize design changes over isolated feature patches.
+Do not remove typed evidence validation.
 
-Do not make `strategy_performance.py` the center of the solution unless repository evidence proves that is the true root cause. Treat it primarily as an operational closed-lifecycle guard unless proven otherwise.
+Do not relax existing profile promotion gates.
 
-Do not silently auto-apply research outputs to live configuration.
+Do not allow evidence artifacts to define weaker promotion rules than the repository policy.
 
-Do not relax existing fail-closed behavior.
+Do not auto-apply profiles to env files.
 
-Do not remove separation between research simulation, paper validation, approved profiles, and live execution.
-
-If a full implementation is too large, implement the smallest coherent slice that establishes the architecture, validation contracts, tests, and extension points.
-
-## Hypotheses to verify or falsify
-
-### Hypothesis 1: The main weakness is evidence-layer confusion, not absence of expectancy metrics
-
-Verify whether `strategy_performance.py` is an operational gate over closed `trade_lifecycles`, while research validation is a separate candidate approval path.
-
-Check whether paper/live readiness evidence is currently validated mostly as artifact existence/hash/path custody rather than as semantically meaningful observation evidence.
-
-Look for `profile-promote`, `profile-verify`, research promotion, paper validation, live readiness, execution-quality reports, strategy reports, experiment reports, approved profiles, and related tests.
-
-Confirm or falsify whether profile promotion can pass with evidence artifacts whose internal observation window, decision count, closed lifecycle count, blocked decisions, execution quality breaches, unresolved orders, recovery blockers, or runtime/profile drift are not machine-validated.
-
-### Hypothesis 2: Research/runtime decision equivalence is not yet fully proven
-
-Verify whether the research engine is pure replay/simulation and intentionally separate from live broker/order lifecycle/run loop code.
-
-Check whether the same approved profile can be used to prove that research-generated decisions and runtime/paper decisions are equivalent over the same candle snapshot and strategy parameters.
-
-If equivalence is missing, implement or scaffold a deterministic decision-equivalence validation path.
-
-The validation should compare, where possible:
-
-* signal timestamps
-* candle close/open basis
-* entry/exit side
-* strategy name
-* parameter profile hash
-* market and interval
-* fee/slippage or execution model assumptions
-* blocked/rejected decisions
-* runtime decision telemetry
-
-### Hypothesis 3: Overfitting controls exist, but experiment governance may still be incomplete
-
-Inspect existing research manifests, walk-forward validation, final holdout handling, parameter stability checks, scenario policies, deterministic seeds, manifest hashing, candidate IDs, and report hashes.
-
-Verify whether the repo records enough experiment-level governance to reconstruct:
-
-* manifest hash
-* dataset fingerprint/hash
-* candidate count
-* failed candidate count
-* selected candidate
-* promotion attempts
-* holdout usage
-* rerun/change history
-* reason why candidates failed
-* whether the best candidate came from a stable region or an isolated spike
-
-If this is incomplete, design an append-only or content-hashed experiment registry/audit artifact that prevents cherry-picking and makes experiment lineage inspectable.
-
-### Hypothesis 4: Live readiness needs semantic validation more than additional PnL metrics
-
-Inspect how paper validation and live readiness evidence are supplied to profile promotion.
-
-Verify whether evidence schemas enforce minimum observation days, minimum decision count, minimum closed lifecycle count, max blocked ratio, max execution-quality breach rate, no unresolved open orders, no recovery blockers, matching approved profile hash, matching DB/runtime fingerprint, and acceptable net/fee/slippage behavior.
-
-If not present, implement typed evidence validation for paper and live readiness.
-
-## Design priorities
-
-### Priority 1: Typed evidence chain
-
-Introduce or strengthen typed evidence contracts for:
-
-* `ResearchPromotionEvidence`
-* `ApprovedProfile`
-* `PaperValidationEvidence`
-* `LiveReadinessEvidence`
-
-The exact names may differ if the repo already has naming conventions. Follow existing style.
-
-The evidence chain should be machine-verifiable and fail closed.
-
-At minimum, paper/live evidence should include and validate:
-
-* evidence schema version
-* mode
-* market
-* interval
-* strategy name
-* approved profile path
-* approved profile content hash
-* source promotion path/hash where applicable
-* observation start/end timestamps
-* observation duration
-* decision count
-* blocked decision count
-* closed lifecycle count
-* gross PnL
-* fee total
-* net PnL
-* expectancy per trade where applicable
-* profit factor where applicable
-* fee drag where applicable
-* execution-quality status or breach count
-* unresolved open orders count
-* recovery blocker count/status
-* runtime/profile drift status
-* DB/data fingerprint if available
-* deterministic content hash excluding volatile fields such as generated timestamp
-
-Promotion to `live_dry_run` or `small_live` must fail closed if required semantic fields are missing, malformed, inconsistent, below threshold, or mismatched with the parent approved profile.
-
-### Priority 2: Profile promotion must validate evidence semantics, not only custody
-
-Update `profile-promote` or the relevant promotion path so that evidence artifacts are opened, parsed, schema-validated, hash-validated, and semantically checked.
-
-Examples of fail reasons to add or preserve:
-
-* `paper_validation_evidence_missing`
-* `paper_validation_schema_invalid`
-* `paper_validation_profile_hash_mismatch`
-* `paper_validation_observation_window_insufficient`
-* `paper_validation_decision_count_insufficient`
-* `paper_validation_closed_lifecycle_count_insufficient`
-* `paper_validation_execution_quality_breached`
-* `paper_validation_unresolved_orders_present`
-* `paper_validation_recovery_blocker_present`
-* `live_readiness_evidence_missing`
-* `live_readiness_schema_invalid`
-* `live_readiness_profile_hash_mismatch`
-* `live_readiness_observation_window_insufficient`
-* `live_readiness_decision_count_insufficient`
-* `live_readiness_closed_lifecycle_count_insufficient`
-* `live_readiness_execution_quality_breached`
-* `live_readiness_unresolved_orders_present`
-* `live_readiness_recovery_blocker_present`
-
-Use existing repository conventions for reason codes if they already exist.
-
-### Priority 3: Decision-equivalence validation
-
-Add a deterministic validation command, module, or test harness that can compare research-generated decisions against runtime/paper decision telemetry for the same profile and dataset.
-
-If full runtime telemetry is not yet available, implement a clear intermediate contract and tests showing how telemetry will be validated.
-
-This should not call live broker APIs.
-
-This should be credential-free.
-
-It should produce an operator-readable report with:
-
-* compared profile hash
-* compared market/interval
-* compared data fingerprint
-* matched decision count
-* mismatched decision count
-* missing research decisions
-* missing runtime decisions
-* mismatch reasons
-* pass/fail result
-* deterministic content hash
-
-### Priority 4: Experiment governance artifact
-
-If missing, add an experiment registry or audit artifact that records experiment-level lineage.
-
-It should be append-only or content-hash protected where practical.
-
-It should make it possible to detect cherry-picking, holdout overuse, or untracked manifest changes.
-
-At minimum, it should capture:
-
-* experiment ID
-* manifest path/hash
-* dataset fingerprint
-* parameter candidate count
-* passing candidate count
-* failed candidate count
-* selected candidate ID
-* selected candidate profile hash
-* walk-forward requirement/result
-* final holdout requirement/result
-* scenario policy result
-* promotion attempts
-* report paths/hashes
-* generated timestamp excluded from deterministic content hash
-
-### Priority 5: Observability and recovery
-
-Any new validation failure must produce operator-readable diagnostics and stable reason codes.
-
-Reports should include conservative `recommended_next_action`.
-
-Do not produce ambiguous pass/fail output.
-
-Add enough logging or report fields so an operator can answer:
-
-* What failed?
-* Which artifact was invalid?
-* Which threshold failed?
-* Which profile hash or evidence hash mismatched?
-* Is it safe to retry?
-* Is the correct next action rerun research, rerun paper validation, fix profile selection, inspect execution quality, or stop promotion?
-
-Do not hide missing data by defaulting to success.
-
-## Testing requirements
-
-Add or update tests for both passing and failing cases.
-
-Required test categories:
-
-1. Paper validation evidence passes only when all required semantic fields are valid.
-2. Paper validation evidence fails when profile hash mismatches.
-3. Paper validation evidence fails when observation window is too short.
-4. Paper validation evidence fails when decision count or closed lifecycle count is insufficient.
-5. Paper validation evidence fails when execution-quality breach count/status violates thresholds.
-6. Paper validation evidence fails when unresolved orders or recovery blockers are present.
-7. Live readiness evidence has equivalent fail-closed tests.
-8. Profile promotion refuses malformed or semantically insufficient evidence.
-9. Profile promotion preserves parent profile hash and source promotion/evidence hash custody.
-10. Deterministic content hash excludes volatile generated timestamps.
-11. Decision-equivalence validation passes on matching synthetic research/runtime decisions.
-12. Decision-equivalence validation fails with clear reason codes on timestamp, side, strategy, market, interval, or profile-hash mismatch.
-13. Existing research promotion and approved-profile tests continue to pass.
-14. Existing live performance gate behavior is not weakened.
-
-Run the repository’s standard test suite. If there are multiple suites, run the relevant fast unit tests plus any profile/research tests affected by the change.
-
-## Documentation requirements
-
-Update repository docs or runbooks where appropriate.
-
-Docs must clearly state:
-
-* `strategy_performance.py` is an operational closed-lifecycle performance guard, not a research approval mechanism.
-* Research validation, paper validation, and live readiness are distinct evidence layers.
-* Promotion requires typed evidence and fails closed on semantic insufficiency.
-* Root/simple smoke backtests must not be used as promotion evidence if the repo already has that rule.
-* Paper/live readiness evidence proves only what its schema validates.
-* Any remaining limitations, especially candle-only backtest limitations, orderbook/depth limitations, intra-candle path limitations, and runtime/research equivalence limitations.
-
-## Implementation constraints
-
-Preserve existing CLI style and artifact path conventions.
-
-Preserve deterministic hashing patterns already used in the repo.
-
-Preserve fail-closed behavior.
-
-Keep credential-free validation paths credential-free.
-
-Do not make live broker calls from research/evidence validation.
+Do not call live broker APIs.
 
 Do not write runtime artifacts into the repository if the repo already routes them through managed data/report roots.
 
-Do not weaken legacy compatibility safeguards. If legacy candidate profile paths exist, keep them clearly marked as limited-scope compatibility, not full approved-profile verification.
+Keep validation credential-free.
 
-## Suggested investigation targets
+Preserve deterministic hashing behavior, especially excluding volatile `generated_at` fields.
 
-Inspect these areas or their current equivalents:
+Preserve legacy compatibility safeguards, but do not let legacy compatibility masquerade as full approved-profile verification.
 
-* `strategy_performance.py`
-* research validation modules and CLI commands
-* `research-backtest`
-* `research-walk-forward`
-* `research-promote-candidate`
-* `profile-generate`
-* `profile-diff`
-* `profile-verify`
-* `profile-promote`
-* approved profile schema/hash code
-* execution-quality reporting/calibration
-* strategy reports
-* experiment reports
-* order lifecycle persistence
-* paper/live mode configuration
-* tests around research promotion, approved profiles, and live gates
-* docs/runbooks for research-to-paper or paper-to-live flows
+## Hypotheses to verify or falsify
+
+### Hypothesis 1: Evidence thresholds are currently self-declared and trusted
+
+Inspect `src/bithumb_bot/evidence_chain.py` and any callers such as `approved_profile.py`, `profile_cli.py`, and tests.
+
+Verify whether `validate_profile_transition_evidence()` currently reads `min_observation_seconds`, `min_decision_count`, `min_closed_lifecycle_count`, `max_blocked_decision_ratio`, and `max_execution_quality_breach_count` from the evidence payload itself and uses those values as the effective pass/fail criteria.
+
+If confirmed, implement a repo-trusted policy layer.
+
+If falsified, document exactly where the trusted policy is already enforced and whether tests cover attempts to weaken artifact thresholds.
+
+### Hypothesis 2: `db_data_fingerprint` is present in tests/helpers but not required by validation
+
+Inspect the evidence schema validation. Verify whether `db_data_fingerprint` is required, well-formed, and included in the deterministic evidence content hash.
+
+If it is not required, make it required by default for paper validation and live readiness evidence.
+
+At minimum, reject missing, empty, or non-`sha256:` fingerprints.
+
+If the repo already has a stronger fingerprint model, use that existing convention.
+
+Do not assume the paper/live runtime DB fingerprint must equal the research `dataset_content_hash` unless the repository already defines that contract. If exact equality is not valid, still require a valid fingerprint so the observation source is auditable.
+
+### Hypothesis 3: `execution_quality_status=not_applicable` may be too permissive for live readiness
+
+Inspect current evidence validation. Verify whether `"not_applicable"` is accepted for both paper validation and live readiness.
+
+If confirmed, make acceptance policy-dependent.
+
+Recommended behavior:
+
+* Paper validation may allow `not_applicable` only if the trusted policy explicitly allows it.
+* Live readiness should reject `not_applicable` by default.
+* Promotion to `small_live` must not be possible with live readiness evidence that says execution quality is not applicable unless there is a deliberate, explicit trusted policy override.
+
+Add a clear reason code, for example:
+
+```text
+live_readiness_evidence_execution_quality_not_applicable
+```
+
+### Hypothesis 4: Decision-equivalence diagnostics are still too coarse for market/interval mismatches
+
+Inspect `src/bithumb_bot/decision_equivalence.py`.
+
+If the decision key is `signal_timestamp|market|interval`, then a market or interval mismatch may currently appear as `missing_runtime_decision` instead of a direct field mismatch. That is not ideal for operator recovery.
+
+Implement a two-stage diagnostic if practical:
+
+1. Exact key comparison remains the primary matching path.
+2. If exact key is missing, compare timestamp-only candidates and emit clearer reason codes when the likely cause is market, interval, side, strategy, profile hash, fee model, slippage model, or blocked-state drift.
+
+Preferred reason codes include:
+
+```text
+decision_market_mismatch
+decision_interval_mismatch
+decision_profile_content_hash_mismatch
+decision_side_mismatch
+decision_strategy_name_mismatch
+decision_fee_model_hash_mismatch
+decision_slippage_model_hash_mismatch
+decision_blocked_mismatch
+```
+
+Do not make the comparison fuzzy in a way that hides missing decisions. This is only for diagnostics.
+
+### Hypothesis 5: Documentation now has a stale “Current Scope” statement
+
+Inspect `docs/research-validation.md`.
+
+If the doc both says typed paper/live readiness evidence validation exists and later says paper shadow validation, small-live readiness checks, and operational log revalidation are future work, clarify the distinction.
+
+Preferred wording:
+
+```text
+Typed paper/live readiness evidence validation exists as a promotion contract.
+However, automatic generation of those evidence artifacts from full paper/live operational logs remains a later-stage integration unless separately implemented.
+```
+
+## Design requirements
+
+### 1. Add a trusted evidence validation policy
+
+Add a repo-owned policy model, preferably in `evidence_chain.py`.
+
+Example shape:
+
+```python
+@dataclass(frozen=True)
+class EvidenceValidationPolicy:
+    min_observation_seconds: float
+    min_decision_count: int
+    min_closed_lifecycle_count: int
+    max_blocked_decision_ratio: float
+    max_execution_quality_breach_count: int
+    require_execution_quality_applicable: bool = True
+    require_db_data_fingerprint: bool = True
+```
+
+Use existing naming/style conventions if the repository has better patterns.
+
+Define separate default policies for:
+
+* paper validation evidence
+* live readiness evidence
+
+The exact numeric defaults should be conservative but testable. If production-level thresholds are not yet known, pick explicit minimal defaults and document them as policy defaults, not artifact-declared rules. Do not use zero thresholds unless there is a strong existing repository reason.
+
+The evidence artifact’s `thresholds` field may remain as report metadata, but it must not be the sole source of truth.
+
+Acceptable approaches:
+
+* Ignore artifact thresholds for pass/fail and use only trusted policy.
+* Or require artifact thresholds to be at least as strict as trusted policy, then use the stricter of the two.
+
+Fail closed if artifact thresholds are weaker than trusted policy.
+
+Add stable reason codes such as:
+
+```text
+paper_validation_evidence_policy_threshold_too_weak:min_observation_seconds
+paper_validation_evidence_policy_threshold_too_weak:min_decision_count
+paper_validation_evidence_policy_threshold_too_weak:min_closed_lifecycle_count
+paper_validation_evidence_policy_threshold_too_weak:max_blocked_decision_ratio
+paper_validation_evidence_policy_threshold_too_weak:max_execution_quality_breach_count
+
+live_readiness_evidence_policy_threshold_too_weak:min_observation_seconds
+live_readiness_evidence_policy_threshold_too_weak:min_decision_count
+live_readiness_evidence_policy_threshold_too_weak:min_closed_lifecycle_count
+live_readiness_evidence_policy_threshold_too_weak:max_blocked_decision_ratio
+live_readiness_evidence_policy_threshold_too_weak:max_execution_quality_breach_count
+```
+
+### 2. Validate `db_data_fingerprint`
+
+Make `db_data_fingerprint` required by default.
+
+Reject:
+
+* missing field
+* empty string
+* non-string value
+* value that does not start with `sha256:`
+
+Add reason code:
+
+```text
+paper_validation_evidence_schema_invalid:db_data_fingerprint
+live_readiness_evidence_schema_invalid:db_data_fingerprint
+```
+
+If a policy allows fingerprint absence in some future compatibility mode, it must be explicit and tested. Do not silently allow absence by default.
+
+### 3. Strengthen execution-quality applicability
+
+Make execution quality applicability part of trusted policy.
+
+For live readiness, reject `execution_quality_status=not_applicable` by default.
+
+Reason code:
+
+```text
+live_readiness_evidence_execution_quality_not_applicable
+```
+
+For paper validation, only allow `not_applicable` if the trusted paper policy says so. If allowed, keep it visible in reports and do not mark it as stronger than a real pass.
+
+### 4. Improve operator-facing failure payloads
+
+When `profile-promote` fails due to evidence validation, the JSON output should preserve:
+
+* `ok=false`
+* `command`
+* `error`
+* `artifact_path`
+* `recommended_next_action`
+
+Make sure `_recommended_next_action()` covers new policy threshold, DB fingerprint, and execution-quality-not-applicable failures.
+
+Suggested mappings:
+
+```text
+policy_threshold_too_weak -> regenerate_typed_evidence_with_repo_trusted_thresholds_or_update_policy
+db_data_fingerprint -> regenerate_typed_evidence_with_db_fingerprint
+execution_quality_not_applicable -> generate_or_attach_execution_quality_evidence_before_promotion
+```
+
+Do not emit vague “operator review required” when a specific recovery action is known.
+
+### 5. Improve decision-equivalence diagnostics
+
+Add clearer mismatch reason codes for timestamp-near or timestamp-only matching when exact keys are missing.
+
+Keep the existing exact-key logic, but add diagnostic classification so market/interval mismatches are not hidden as generic missing decisions.
+
+Do not let improved diagnostics turn a fail into a pass.
+
+### 6. Update documentation
+
+Update `docs/research-validation.md` or the relevant runbook.
+
+Clarify:
+
+* Typed paper/live evidence validation exists as a promotion contract.
+* Effective promotion thresholds are repository-trusted policy, not self-declared evidence policy.
+* Evidence artifact thresholds, if retained, are report metadata or must be at least as strict as trusted policy.
+* `db_data_fingerprint` is required for auditability.
+* Live readiness cannot use `execution_quality_status=not_applicable` by default.
+* Automatic generation of paper/live evidence from full operational logs may still be future work if not implemented.
+
+## Testing requirements
+
+Add or update pytest coverage. Do not only test happy paths.
+
+Required tests:
+
+1. Paper validation evidence fails if artifact `thresholds.min_observation_seconds` is weaker than trusted policy.
+2. Paper validation evidence fails if artifact `thresholds.min_decision_count` is weaker than trusted policy.
+3. Paper validation evidence fails if artifact `thresholds.min_closed_lifecycle_count` is weaker than trusted policy.
+4. Paper validation evidence fails if artifact `thresholds.max_blocked_decision_ratio` is weaker than trusted policy.
+5. Paper validation evidence fails if artifact `thresholds.max_execution_quality_breach_count` is weaker than trusted policy.
+6. Live readiness evidence has equivalent weak-threshold fail-closed tests.
+7. Evidence with missing `db_data_fingerprint` fails.
+8. Evidence with malformed `db_data_fingerprint` fails.
+9. Valid evidence with a proper `sha256:` DB fingerprint passes existing promotion tests.
+10. Live readiness evidence with `execution_quality_status=not_applicable` fails by default.
+11. Paper validation behavior for `execution_quality_status=not_applicable` is explicit and policy-driven.
+12. `generated_at` remains excluded from evidence content hash.
+13. `profile-promote` failure JSON includes a specific `recommended_next_action` for weak policy thresholds.
+14. `profile-promote` failure JSON includes a specific `recommended_next_action` for missing DB fingerprint.
+15. Decision-equivalence reports `decision_market_mismatch` for same timestamp but different market when appropriate.
+16. Decision-equivalence reports `decision_interval_mismatch` for same timestamp but different interval when appropriate.
+17. Decision-equivalence still fails, not passes, for any diagnostic mismatch.
+18. Existing approved profile, typed evidence, live performance gate, and research promotion tests continue to pass.
+
+Run the relevant test suite. If the full suite is practical, run full pytest. Otherwise, run at least the affected test modules and state exactly what was run.
+
+## Suggested files to inspect
+
+Start with:
+
+* `src/bithumb_bot/evidence_chain.py`
+* `src/bithumb_bot/approved_profile.py`
+* `src/bithumb_bot/profile_cli.py`
+* `src/bithumb_bot/decision_equivalence.py`
+* `tests/test_approved_profile.py`
+* any other evidence/profile tests
+* `docs/research-validation.md`
+* relevant runbooks
+
+## Acceptance criteria
+
+The patch is acceptable only if:
+
+* An evidence artifact can no longer weaken its own promotion criteria.
+* Paper/live evidence validation uses repo-trusted policy.
+* Missing or malformed `db_data_fingerprint` fails closed.
+* Live readiness evidence cannot pass with execution quality marked `not_applicable` by default.
+* Decision-equivalence diagnostics are more actionable without weakening pass/fail behavior.
+* CLI failure output gives specific recovery guidance.
+* Tests demonstrate the above failures and passes.
+* Documentation no longer implies that typed readiness validation both exists and does not exist.
 
 ## Final report format
 
@@ -302,42 +319,48 @@ When finished, provide a concise but complete report with these sections:
 
 1. **Repository facts verified**
 
-   * Cite exact files/modules changed or inspected.
-   * State which initial assumptions were confirmed, weakened, or falsified.
+   * List files inspected.
+   * State which hypotheses were confirmed, partially confirmed, falsified, or unresolved.
 
-2. **Root-cause hypotheses status**
+2. **Design changes implemented**
 
-   * For each hypothesis, mark: confirmed, partially confirmed, falsified, or unresolved.
-   * Explain the evidence.
+   * Explain the trusted evidence policy design.
+   * Explain how artifact-declared thresholds are handled.
+   * Explain how DB fingerprint and execution-quality applicability are enforced.
 
-3. **Design changes implemented**
-
-   * Explain the architectural change, not just file diffs.
-   * Show how the new design prevents the whole problem class.
-
-4. **Fail-closed behavior**
+3. **Fail-closed behavior added**
 
    * List new failure conditions and reason codes.
-   * Explain what now blocks promotion that previously could pass.
+   * State what previously could pass but now fails.
 
-5. **Tests added/updated**
+4. **Decision-equivalence diagnostics**
 
-   * List test files and scenarios.
-   * Include command output summary.
+   * Explain changes to mismatch classification.
+   * Confirm that diagnostics do not convert mismatches into passes.
 
-6. **Observability and operator recovery**
+5. **Observability and recovery**
 
-   * Explain new report fields, diagnostics, and recommended next actions.
+   * Show new or updated `recommended_next_action` values.
+   * Explain how an operator should recover from each new failure class.
 
-7. **Remaining limitations**
+6. **Tests**
 
-   * Be explicit about what is not solved.
-   * Include follow-up work for research/runtime equivalence, experiment governance, execution calibration, or paper/live readiness if not fully implemented.
+   * List tests added or updated.
+   * Include exact pytest commands run and results.
 
-8. **Risk assessment**
+7. **Documentation**
 
-   * State whether the change affects live trading behavior directly.
+   * List docs/runbooks updated.
+   * Summarize wording changes around typed evidence validation and remaining future work.
+
+8. **Remaining limitations**
+
+   * Be explicit about anything not solved, especially automatic generation of paper/live evidence from operational logs, research/runtime equivalence completeness, and execution calibration integration.
+
+9. **Risk assessment**
+
+   * State whether this affects live trading behavior directly.
    * State whether it changes env files, secrets, broker calls, or live arming behavior.
 
-The final result should make `WG-14/bithumb-bot` harder to misuse as a curve-fitted trading bot and easier to operate as a reproducible, evidence-gated automated trading experiment system.
+The final result should make `WG-14/bithumb-bot` resistant to self-approved evidence artifacts and safer as a reproducible, evidence-gated automated trading experiment system.
 

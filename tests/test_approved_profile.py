@@ -220,6 +220,14 @@ def _write_evidence(
     return path
 
 
+def _write_evidence_payload(tmp_path: Path, name: str, payload: dict[str, object]) -> Path:
+    path = tmp_path / name
+    payload["evidence_path"] = str(path.resolve())
+    payload["content_hash"] = compute_evidence_content_hash(payload)
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def test_profile_generation_rejects_tampered_candidate_profile_hash(tmp_path: Path) -> None:
     promotion = _promotion(candidate_profile_hash="sha256:tampered")
     promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
@@ -487,16 +495,88 @@ def test_profile_transition_preserves_parent_hash_and_stores_evidence_hash(tmp_p
     assert child["paper_validation_approved_profile_hash"] == parent["profile_content_hash"]
 
 
+@pytest.mark.parametrize(
+    ("field", "weak_value"),
+    [
+        ("min_observation_seconds", 1),
+        ("min_decision_count", 0),
+        ("min_closed_lifecycle_count", 0),
+        ("max_blocked_decision_ratio", 1.0),
+        ("max_execution_quality_breach_count", 999),
+    ],
+)
+def test_paper_validation_evidence_fails_when_artifact_threshold_is_weaker_than_policy(
+    tmp_path: Path,
+    field: str,
+    weak_value: object,
+) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    parent = _profile(str(promotion_path))
+    payload = _evidence_payload(parent)
+    thresholds = dict(payload["thresholds"])
+    thresholds[field] = weak_value
+    payload["thresholds"] = thresholds
+    evidence_path = _write_evidence_payload(tmp_path, f"weak_{field}.json", payload)
+
+    with pytest.raises(
+        ApprovedProfileError,
+        match=f"paper_validation_evidence_policy_threshold_too_weak:{field}",
+    ):
+        promote_profile_mode(
+            parent_profile=parent,
+            target_mode="live_dry_run",
+            paper_validation_evidence=str(evidence_path),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "weak_value"),
+    [
+        ("min_observation_seconds", 1),
+        ("min_decision_count", 0),
+        ("min_closed_lifecycle_count", 0),
+        ("max_blocked_decision_ratio", 1.0),
+        ("max_execution_quality_breach_count", 999),
+    ],
+)
+def test_live_readiness_evidence_fails_when_artifact_threshold_is_weaker_than_policy(
+    tmp_path: Path,
+    field: str,
+    weak_value: object,
+) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    paper = _profile(str(promotion_path))
+    live_dry_run = promote_profile_mode(
+        parent_profile=paper,
+        target_mode="live_dry_run",
+        paper_validation_evidence=str(_write_evidence(tmp_path, "paper_validation.json", profile=paper)),
+    )
+    payload = _evidence_payload(live_dry_run, evidence_type="live_readiness")
+    thresholds = dict(payload["thresholds"])
+    thresholds[field] = weak_value
+    payload["thresholds"] = thresholds
+    evidence_path = _write_evidence_payload(tmp_path, f"weak_live_{field}.json", payload)
+
+    with pytest.raises(
+        ApprovedProfileError,
+        match=f"live_readiness_evidence_policy_threshold_too_weak:{field}",
+    ):
+        promote_profile_mode(
+            parent_profile=live_dry_run,
+            target_mode="small_live",
+            live_readiness_evidence=str(evidence_path),
+        )
+
+
 def test_paper_validation_evidence_fails_when_profile_hash_mismatches(tmp_path: Path) -> None:
     promotion_path = tmp_path / "promotion.json"
     write_json_atomic(promotion_path, _promotion())
     parent = _profile(str(promotion_path))
     payload = _evidence_payload(parent)
     payload["approved_profile_content_hash"] = "sha256:other"
-    evidence_path = tmp_path / "paper_validation.json"
-    payload["evidence_path"] = str(evidence_path.resolve())
-    payload["content_hash"] = compute_evidence_content_hash(payload)
-    evidence_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    evidence_path = _write_evidence_payload(tmp_path, "paper_validation.json", payload)
 
     with pytest.raises(ApprovedProfileError, match="paper_validation_evidence_profile_hash_mismatch"):
         promote_profile_mode(
@@ -513,10 +593,7 @@ def test_paper_validation_evidence_fails_when_observation_window_too_short(tmp_p
     payload = _evidence_payload(parent)
     payload["observation_end"] = "2026-05-01T01:00:00+00:00"
     payload["observation_duration_seconds"] = 3600
-    evidence_path = tmp_path / "paper_validation.json"
-    payload["evidence_path"] = str(evidence_path.resolve())
-    payload["content_hash"] = compute_evidence_content_hash(payload)
-    evidence_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    evidence_path = _write_evidence_payload(tmp_path, "paper_validation.json", payload)
 
     with pytest.raises(ApprovedProfileError, match="paper_validation_evidence_observation_window_insufficient"):
         promote_profile_mode(
@@ -538,10 +615,7 @@ def test_paper_validation_evidence_fails_when_decision_or_lifecycle_count_insuff
         payload[field] = 0
         if field == "decision_count":
             payload["blocked_decision_count"] = 0
-        evidence_path = tmp_path / f"{field}.json"
-        payload["evidence_path"] = str(evidence_path.resolve())
-        payload["content_hash"] = compute_evidence_content_hash(payload)
-        evidence_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        evidence_path = _write_evidence_payload(tmp_path, f"{field}.json", payload)
         with pytest.raises(ApprovedProfileError, match=reason):
             promote_profile_mode(
                 parent_profile=parent,
@@ -562,16 +636,76 @@ def test_paper_validation_evidence_fails_on_execution_quality_unresolved_or_reco
     for field, value, reason in cases:
         payload = _evidence_payload(parent)
         payload[field] = value
-        evidence_path = tmp_path / f"{field}.json"
-        payload["evidence_path"] = str(evidence_path.resolve())
-        payload["content_hash"] = compute_evidence_content_hash(payload)
-        evidence_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        evidence_path = _write_evidence_payload(tmp_path, f"{field}.json", payload)
         with pytest.raises(ApprovedProfileError, match=reason):
             promote_profile_mode(
                 parent_profile=parent,
                 target_mode="live_dry_run",
                 paper_validation_evidence=str(evidence_path),
             )
+
+
+def test_evidence_fails_when_db_data_fingerprint_is_missing_or_malformed(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    parent = _profile(str(promotion_path))
+    for name, value in (("missing", None), ("empty", ""), ("malformed", "md5:abc"), ("non_string", 123)):
+        payload = _evidence_payload(parent)
+        if value is None:
+            payload.pop("db_data_fingerprint")
+        else:
+            payload["db_data_fingerprint"] = value
+        evidence_path = _write_evidence_payload(tmp_path, f"db_fingerprint_{name}.json", payload)
+        with pytest.raises(
+            ApprovedProfileError,
+            match="paper_validation_evidence_schema_invalid:db_data_fingerprint",
+        ):
+            promote_profile_mode(
+                parent_profile=parent,
+                target_mode="live_dry_run",
+                paper_validation_evidence=str(evidence_path),
+            )
+
+
+def test_paper_validation_not_applicable_execution_quality_is_policy_explicit(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    parent = _profile(str(promotion_path))
+    payload = _evidence_payload(parent)
+    payload["execution_quality_status"] = "not_applicable"
+    evidence_path = _write_evidence_payload(tmp_path, "paper_not_applicable.json", payload)
+
+    child = promote_profile_mode(
+        parent_profile=parent,
+        target_mode="live_dry_run",
+        paper_validation_evidence=str(evidence_path),
+    )
+
+    assert child["paper_validation_evidence_content_hash"] == json.loads(evidence_path.read_text())["content_hash"]
+
+
+def test_live_readiness_not_applicable_execution_quality_fails_by_default(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    paper = _profile(str(promotion_path))
+    live_dry_run = promote_profile_mode(
+        parent_profile=paper,
+        target_mode="live_dry_run",
+        paper_validation_evidence=str(_write_evidence(tmp_path, "paper_validation.json", profile=paper)),
+    )
+    payload = _evidence_payload(live_dry_run, evidence_type="live_readiness")
+    payload["execution_quality_status"] = "not_applicable"
+    evidence_path = _write_evidence_payload(tmp_path, "live_not_applicable.json", payload)
+
+    with pytest.raises(
+        ApprovedProfileError,
+        match="live_readiness_evidence_execution_quality_not_applicable",
+    ):
+        promote_profile_mode(
+            parent_profile=live_dry_run,
+            target_mode="small_live",
+            live_readiness_evidence=str(evidence_path),
+        )
 
 
 def test_live_readiness_evidence_fails_closed_with_equivalent_semantic_checks(tmp_path: Path) -> None:
@@ -585,10 +719,7 @@ def test_live_readiness_evidence_fails_closed_with_equivalent_semantic_checks(tm
     )
     payload = _evidence_payload(live_dry_run, evidence_type="live_readiness")
     payload["closed_lifecycle_count"] = 0
-    evidence_path = tmp_path / "live_ready.json"
-    payload["evidence_path"] = str(evidence_path.resolve())
-    payload["content_hash"] = compute_evidence_content_hash(payload)
-    evidence_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    evidence_path = _write_evidence_payload(tmp_path, "live_ready.json", payload)
 
     with pytest.raises(ApprovedProfileError, match="live_readiness_evidence_closed_lifecycle_count_insufficient"):
         promote_profile_mode(
@@ -613,6 +744,94 @@ def test_profile_promote_refuses_malformed_semantic_evidence(tmp_path: Path, cap
 
     assert payload["error"].startswith("paper_validation_evidence_schema_invalid")
     assert payload["recommended_next_action"] == "regenerate_typed_evidence_artifact"
+
+
+def test_profile_promote_failure_json_recommends_policy_threshold_recovery(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    profile = load_approved_profile(profile_path)
+    payload = _evidence_payload(profile)
+    thresholds = dict(payload["thresholds"])
+    thresholds["min_decision_count"] = 0
+    payload["thresholds"] = thresholds
+    evidence_path = _write_evidence_payload(tmp_path, "weak_policy.json", payload)
+
+    assert cmd_profile_promote(
+        profile_path=str(profile_path),
+        mode="live_dry_run",
+        out_path=str(tmp_path / "live_dry_run.json"),
+        paper_validation_evidence=str(evidence_path),
+        live_readiness_evidence=None,
+    ) == 1
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["ok"] is False
+    assert output["command"] == "profile-promote"
+    assert output["artifact_path"] == str(evidence_path)
+    assert output["error"] == "paper_validation_evidence_policy_threshold_too_weak:min_decision_count"
+    assert (
+        output["recommended_next_action"]
+        == "regenerate_typed_evidence_with_repo_trusted_thresholds_or_update_policy"
+    )
+
+
+def test_profile_promote_failure_json_recommends_db_fingerprint_recovery(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    profile = load_approved_profile(profile_path)
+    payload = _evidence_payload(profile)
+    payload.pop("db_data_fingerprint")
+    evidence_path = _write_evidence_payload(tmp_path, "missing_db_fingerprint.json", payload)
+
+    assert cmd_profile_promote(
+        profile_path=str(profile_path),
+        mode="live_dry_run",
+        out_path=str(tmp_path / "live_dry_run.json"),
+        paper_validation_evidence=str(evidence_path),
+        live_readiness_evidence=None,
+    ) == 1
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["error"] == "paper_validation_evidence_schema_invalid:db_data_fingerprint"
+    assert output["recommended_next_action"] == "regenerate_typed_evidence_with_db_fingerprint"
+
+
+def test_profile_promote_failure_json_recommends_execution_quality_recovery(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    paper = _profile(str(promotion_path))
+    live_dry_run = promote_profile_mode(
+        parent_profile=paper,
+        target_mode="live_dry_run",
+        paper_validation_evidence=str(_write_evidence(tmp_path, "paper_validation.json", profile=paper)),
+    )
+    live_dry_run_path = tmp_path / "live_dry_run.json"
+    write_json_atomic(live_dry_run_path, live_dry_run)
+    payload = _evidence_payload(live_dry_run, evidence_type="live_readiness")
+    payload["execution_quality_status"] = "not_applicable"
+    evidence_path = _write_evidence_payload(tmp_path, "live_no_execution_quality.json", payload)
+
+    assert cmd_profile_promote(
+        profile_path=str(live_dry_run_path),
+        mode="small_live",
+        out_path=str(tmp_path / "small_live.json"),
+        paper_validation_evidence=None,
+        live_readiness_evidence=str(evidence_path),
+    ) == 1
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["error"] == "live_readiness_evidence_execution_quality_not_applicable"
+    assert (
+        output["recommended_next_action"]
+        == "generate_or_attach_execution_quality_evidence_before_promotion"
+    )
 
 
 def test_evidence_content_hash_excludes_generated_at(tmp_path: Path) -> None:
@@ -666,9 +885,12 @@ def test_decision_equivalence_passes_on_matching_synthetic_decisions() -> None:
         ("signal_timestamp", "2026-05-01T00:02:00+00:00", "missing_runtime_decision"),
         ("side", "SELL", "decision_side_mismatch"),
         ("strategy_name", "other", "decision_strategy_name_mismatch"),
-        ("market", "KRW-ETH", "missing_runtime_decision"),
-        ("interval", "5m", "missing_runtime_decision"),
+        ("market", "KRW-ETH", "decision_market_mismatch"),
+        ("interval", "5m", "decision_interval_mismatch"),
         ("profile_content_hash", "sha256:other", "decision_profile_content_hash_mismatch"),
+        ("fee_model_hash", "sha256:other", "decision_fee_model_hash_mismatch"),
+        ("slippage_model_hash", "sha256:other", "decision_slippage_model_hash_mismatch"),
+        ("blocked", True, "decision_blocked_mismatch"),
     ],
 )
 def test_decision_equivalence_fails_with_clear_reason_codes(field: str, value: object, reason: str) -> None:
@@ -684,6 +906,34 @@ def test_decision_equivalence_fails_with_clear_reason_codes(field: str, value: o
 
     assert result.ok is False
     assert reason in result.report["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("market", "KRW-ETH", "decision_market_mismatch"),
+        ("interval", "5m", "decision_interval_mismatch"),
+    ],
+)
+def test_decision_equivalence_timestamp_only_diagnostics_do_not_pass(
+    field: str,
+    value: object,
+    reason: str,
+) -> None:
+    result = compare_decision_equivalence(
+        research_decisions=[_decision()],
+        runtime_decisions=[_decision(**{field: value})],
+        profile_hash="sha256:profile",
+        market="KRW-BTC",
+        interval="1m",
+        data_fingerprint="sha256:data",
+    )
+
+    assert result.ok is False
+    assert result.report["matched_decision_count"] == 0
+    assert "missing_runtime_decision" in result.report["reason_codes"]
+    assert reason in result.report["reason_codes"]
+    assert result.report["mismatches"][0]["diagnostic_only"] is True
 
 
 def test_decision_equivalence_hash_excludes_generated_at() -> None:

@@ -24,6 +24,16 @@ DECISION_KEYS = (
     "blocked",
     "block_reason",
 )
+DIAGNOSTIC_DRIFT_FIELDS = (
+    "market",
+    "interval",
+    "side",
+    "strategy_name",
+    "profile_content_hash",
+    "fee_model_hash",
+    "slippage_model_hash",
+    "blocked",
+)
 
 
 @dataclass(frozen=True)
@@ -61,12 +71,22 @@ def compare_decision_equivalence(
                 )
         if field_mismatches:
             mismatch_items.append({"decision_key": key, "reason_code": "decision_field_mismatch", "fields": field_mismatches})
+    mismatch_items.extend(
+        _timestamp_only_diagnostics(
+            research_decisions=research_decisions,
+            runtime_decisions=runtime_decisions,
+            missing_runtime_keys=set(missing_runtime),
+            missing_research_keys=set(missing_research),
+        )
+    )
     reason_codes = []
     if missing_research:
         reason_codes.append("missing_research_decision")
     if missing_runtime:
         reason_codes.append("missing_runtime_decision")
-    reason_codes.extend(_field_reason(item) for item in mismatch_items)
+    for item in mismatch_items:
+        reason_codes.extend(_field_reasons(item))
+    exact_mismatch_count = sum(1 for item in mismatch_items if not item.get("diagnostic_only"))
     report: dict[str, Any] = {
         "schema_version": DECISION_EQUIVALENCE_SCHEMA_VERSION,
         "ok": not reason_codes,
@@ -77,7 +97,7 @@ def compare_decision_equivalence(
         "data_fingerprint": data_fingerprint,
         "research_decision_count": len(research_decisions),
         "runtime_decision_count": len(runtime_decisions),
-        "matched_decision_count": len(set(research_by_key) & set(runtime_by_key)) - len(mismatch_items),
+        "matched_decision_count": len(set(research_by_key) & set(runtime_by_key)) - exact_mismatch_count,
         "mismatched_decision_count": len(mismatch_items),
         "missing_research_decisions": missing_research,
         "missing_runtime_decisions": missing_runtime,
@@ -123,15 +143,79 @@ def _decision_key(item: dict[str, Any]) -> str:
     )
 
 
-def _field_reason(item: dict[str, object]) -> str:
+def _timestamp_only_diagnostics(
+    *,
+    research_decisions: list[dict[str, Any]],
+    runtime_decisions: list[dict[str, Any]],
+    missing_runtime_keys: set[str],
+    missing_research_keys: set[str],
+) -> list[dict[str, object]]:
+    diagnostics: list[dict[str, object]] = []
+    runtime_by_timestamp = _decisions_by_timestamp(runtime_decisions)
+    for research in research_decisions:
+        research_key = _decision_key(research)
+        if research_key not in missing_runtime_keys:
+            continue
+        candidates = [
+            item
+            for item in runtime_by_timestamp.get(str(research.get("signal_timestamp") or ""), [])
+            if _decision_key(item) in missing_research_keys
+        ]
+        runtime = _best_timestamp_candidate(research, candidates)
+        if runtime is None:
+            continue
+        fields = [
+            {"field": field, "research": research.get(field), "runtime": runtime.get(field)}
+            for field in DIAGNOSTIC_DRIFT_FIELDS
+            if _normalized(research.get(field)) != _normalized(runtime.get(field))
+        ]
+        if fields:
+            diagnostics.append(
+                {
+                    "decision_key": research_key,
+                    "runtime_decision_key": _decision_key(runtime),
+                    "reason_code": "decision_timestamp_candidate_field_mismatch",
+                    "diagnostic_only": True,
+                    "fields": fields,
+                }
+            )
+    return diagnostics
+
+
+def _decisions_by_timestamp(decisions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_timestamp: dict[str, list[dict[str, Any]]] = {}
+    for item in decisions:
+        by_timestamp.setdefault(str(item.get("signal_timestamp") or ""), []).append(item)
+    return by_timestamp
+
+
+def _best_timestamp_candidate(
+    research: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda item: sum(
+            1
+            for field in DIAGNOSTIC_DRIFT_FIELDS
+            if _normalized(research.get(field)) != _normalized(item.get(field))
+        ),
+    )
+
+
+def _field_reasons(item: dict[str, object]) -> list[str]:
     fields = item.get("fields")
     if not isinstance(fields, list) or not fields:
-        return "decision_field_mismatch"
-    first = fields[0]
-    if not isinstance(first, dict):
-        return "decision_field_mismatch"
-    field = str(first.get("field") or "field")
-    return f"decision_{field}_mismatch"
+        return ["decision_field_mismatch"]
+    reasons: list[str] = []
+    for field_item in fields:
+        if not isinstance(field_item, dict):
+            continue
+        field = str(field_item.get("field") or "field")
+        reasons.append(f"decision_{field}_mismatch")
+    return reasons or ["decision_field_mismatch"]
 
 
 def _normalized(value: object) -> str:
