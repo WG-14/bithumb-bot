@@ -25,6 +25,42 @@ class Candle:
 
 
 @dataclass(frozen=True)
+class TopOfBookQuote:
+    ts: int
+    pair: str
+    bid_price: float
+    ask_price: float
+    spread_bps: float
+    source: str
+    observed_at_epoch_sec: float | None = None
+    matched_candle_ts: int | None = None
+    age_ms: int | None = None
+
+    def as_tuple(self) -> tuple[int, str, float, float, float, str, float | None, int | None, int | None]:
+        return (
+            self.ts,
+            self.pair,
+            self.bid_price,
+            self.ask_price,
+            self.spread_bps,
+            self.source,
+            self.observed_at_epoch_sec,
+            self.matched_candle_ts,
+            self.age_ms,
+        )
+
+    def execution_payload(self) -> dict[str, object]:
+        return {
+            "best_bid": self.bid_price,
+            "best_ask": self.ask_price,
+            "spread_bps": self.spread_bps,
+            "top_of_book_ts": self.ts,
+            "top_of_book_source": self.source,
+            "top_of_book_age_ms": self.age_ms,
+        }
+
+
+@dataclass(frozen=True)
 class DatasetSnapshot:
     snapshot_id: str
     source: str
@@ -33,6 +69,13 @@ class DatasetSnapshot:
     split_name: str
     date_range: DateRange
     candles: tuple[Candle, ...]
+    top_of_book_quotes: tuple[TopOfBookQuote | None, ...] = ()
+    top_of_book_requested: bool = False
+    top_of_book_required: bool = False
+    top_of_book_missing_policy: str | None = None
+    top_of_book_source: str | None = None
+    top_of_book_join_tolerance_ms: int | None = None
+    top_of_book_min_coverage_pct: float = 100.0
 
     def fingerprint_payload(self) -> dict[str, object]:
         return {
@@ -43,10 +86,30 @@ class DatasetSnapshot:
             "split_name": self.split_name,
             "date_range": self.date_range.as_dict(),
             "candles": [candle.as_tuple() for candle in self.candles],
+            "top_of_book": [
+                quote.as_tuple() if quote is not None else None
+                for quote in self.top_of_book_quotes
+            ],
+            "top_of_book_config": {
+                "requested": self.top_of_book_requested,
+                "required": self.top_of_book_required,
+                "missing_policy": self.top_of_book_missing_policy,
+                "source": self.top_of_book_source,
+                "join_tolerance_ms": self.top_of_book_join_tolerance_ms,
+                "min_coverage_pct": self.top_of_book_min_coverage_pct,
+            },
         }
 
     def content_hash(self) -> str:
         return sha256_prefixed(self.fingerprint_payload())
+
+    def top_of_book_for_ts(self, ts: int) -> TopOfBookQuote | None:
+        if not self.top_of_book_quotes:
+            return None
+        for candle, quote in zip(self.candles, self.top_of_book_quotes):
+            if candle.ts == ts:
+                return quote
+        return None
 
 
 @dataclass(frozen=True)
@@ -112,6 +175,16 @@ def load_dataset_range(
         )
         for row in rows
     )
+    top_of_book_quotes: tuple[TopOfBookQuote | None, ...] = ()
+    top_of_book_spec = manifest.dataset.top_of_book
+    if top_of_book_spec is not None:
+        top_of_book_quotes = _load_top_of_book_quotes(
+            db_path=db_path,
+            market=manifest.market,
+            candles=candles,
+            join_tolerance_ms=top_of_book_spec.join_tolerance_ms,
+            quote_source=top_of_book_spec.quote_source,
+        )
     return DatasetSnapshot(
         snapshot_id=manifest.dataset.snapshot_id,
         source=manifest.dataset.source,
@@ -120,6 +193,13 @@ def load_dataset_range(
         split_name=split_name,
         date_range=date_range,
         candles=candles,
+        top_of_book_quotes=top_of_book_quotes,
+        top_of_book_requested=top_of_book_spec is not None,
+        top_of_book_required=bool(top_of_book_spec.required) if top_of_book_spec is not None else False,
+        top_of_book_missing_policy=top_of_book_spec.missing_policy if top_of_book_spec is not None else None,
+        top_of_book_source=top_of_book_spec.source if top_of_book_spec is not None else None,
+        top_of_book_join_tolerance_ms=top_of_book_spec.join_tolerance_ms if top_of_book_spec is not None else None,
+        top_of_book_min_coverage_pct=top_of_book_spec.min_coverage_pct if top_of_book_spec is not None else 100.0,
     )
 
 
@@ -227,12 +307,15 @@ def build_dataset_quality_report(
         "quality_gate_reasons": reasons,
         "limitations": {
             "orderbook_depth_available": False,
-            "top_of_book_available": False,
+            "top_of_book_available": any(quote is not None for quote in snapshot.top_of_book_quotes),
             "intra_candle_path_available": False,
             "execution_reference_price": "candle_close",
             "intra_candle_policy": "close_price_only_no_intracandle_path",
+            "top_of_book_is_full_depth": False,
         },
     }
+    if snapshot.top_of_book_requested:
+        _add_top_of_book_quality_fields(payload=payload, snapshot=snapshot)
     payload["content_hash"] = sha256_prefixed(payload)
     return DatasetQualityReport(payload=payload)
 
@@ -372,5 +455,108 @@ def _db_schema_fingerprint(db_path: str | Path) -> str:
             "table_info": table_info,
             "index_list": index_list,
             "index_info": index_info,
+        }
+    )
+
+
+def _load_top_of_book_quotes(
+    *,
+    db_path: str | Path,
+    market: str,
+    candles: tuple[Candle, ...],
+    join_tolerance_ms: int,
+    quote_source: str | None,
+) -> tuple[TopOfBookQuote | None, ...]:
+    if not candles:
+        return ()
+    conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
+    try:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='orderbook_top_snapshots'"
+        ).fetchone()
+        if table is None:
+            return tuple(None for _ in candles)
+        out: list[TopOfBookQuote | None] = []
+        for candle in candles:
+            params: list[object] = [
+                market,
+                candle.ts - int(join_tolerance_ms),
+                candle.ts + int(join_tolerance_ms),
+            ]
+            source_predicate = ""
+            if quote_source is not None:
+                source_predicate = "AND source=?"
+                params.append(quote_source)
+            params.append(candle.ts)
+            row = conn.execute(
+                f"""
+                SELECT ts, pair, bid_price, ask_price, spread_bps, source, observed_at_epoch_sec
+                FROM orderbook_top_snapshots
+                WHERE pair=?
+                  AND ts >= ?
+                  AND ts <= ?
+                  {source_predicate}
+                ORDER BY ABS(ts - ?) ASC, ts ASC, source ASC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            if row is None:
+                out.append(None)
+                continue
+            quote_ts = int(row[0])
+            out.append(
+                TopOfBookQuote(
+                    ts=quote_ts,
+                    pair=str(row[1]),
+                    bid_price=float(row[2]),
+                    ask_price=float(row[3]),
+                    spread_bps=float(row[4]),
+                    source=str(row[5]),
+                    observed_at_epoch_sec=(None if row[6] is None else float(row[6])),
+                    matched_candle_ts=candle.ts,
+                    age_ms=abs(quote_ts - candle.ts),
+                )
+            )
+        return tuple(out)
+    finally:
+        conn.close()
+
+
+def _add_top_of_book_quality_fields(*, payload: dict[str, Any], snapshot: DatasetSnapshot) -> None:
+    expected = len(snapshot.candles)
+    joined = sum(1 for quote in snapshot.top_of_book_quotes if quote is not None)
+    missing_sample = [
+        candle.ts
+        for candle, quote in zip(snapshot.candles, snapshot.top_of_book_quotes)
+        if quote is None
+    ][:20]
+    coverage_pct = (joined / expected * 100.0) if expected else 0.0
+    reasons: list[str] = []
+    if joined < expected:
+        reasons.append("top_of_book_missing")
+    if coverage_pct < float(snapshot.top_of_book_min_coverage_pct):
+        reasons.append("top_of_book_coverage_below_threshold")
+    gate_status = "PASS"
+    if reasons:
+        gate_status = "FAIL" if snapshot.top_of_book_required or snapshot.top_of_book_missing_policy == "fail" else "WARN"
+    if gate_status == "FAIL":
+        existing_reasons = list(payload.get("quality_gate_reasons") or [])
+        existing_reasons.extend(reasons)
+        payload["quality_gate_reasons"] = existing_reasons
+        payload["quality_gate_status"] = "FAIL"
+    payload.update(
+        {
+            "top_of_book_requested": True,
+            "top_of_book_required": bool(snapshot.top_of_book_required),
+            "top_of_book_source": snapshot.top_of_book_source or "sqlite_orderbook_top_snapshots",
+            "top_of_book_join_tolerance_ms": snapshot.top_of_book_join_tolerance_ms,
+            "top_of_book_expected_signal_count": expected,
+            "top_of_book_joined_count": joined,
+            "top_of_book_missing_count": expected - joined,
+            "top_of_book_missing_sample": missing_sample,
+            "top_of_book_coverage_pct": round(coverage_pct, 8),
+            "top_of_book_gate_status": gate_status,
+            "top_of_book_gate_reasons": reasons,
         }
     )

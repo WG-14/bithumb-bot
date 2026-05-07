@@ -27,7 +27,7 @@ from .lineage import build_research_lineage
 from .parameter_space import candidate_id, iter_parameter_candidates
 from .promotion_gate import build_candidate_profile
 from .report_writer import ResearchReportPaths, write_research_report
-from .strategy_registry import resolve_research_strategy
+from .strategy_registry import research_strategy_data_requirements, resolve_research_strategy
 
 
 class ResearchValidationError(ValueError):
@@ -44,6 +44,7 @@ def run_research_backtest(
     manifest_path: str | None = None,
     command_args: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    _validate_strategy_data_requirements(manifest)
     snapshots = {
         "train": load_dataset_split(db_path=db_path, manifest=manifest, split_name="train"),
         "validation": load_dataset_split(db_path=db_path, manifest=manifest, split_name="validation"),
@@ -99,6 +100,7 @@ def run_research_walk_forward(
 ) -> dict[str, Any]:
     if manifest.walk_forward is None:
         raise ResearchValidationError("walk_forward_missing")
+    _validate_strategy_data_requirements(manifest)
     windows = _rolling_walk_forward_windows(manifest)
     if len(windows) < manifest.walk_forward.min_windows:
         raise ResearchValidationError(
@@ -758,6 +760,11 @@ def _report_payload(
     dataset_quality_status, dataset_quality_reasons = _combined_dataset_quality_gate(
         {report.payload["split_name"]: report for report in quality_reports}
     )
+    top_of_book_requested = manifest.dataset.top_of_book is not None
+    top_of_book_joined_count = sum(
+        int(report.payload.get("top_of_book_joined_count") or 0)
+        for report in quality_reports
+    )
     repository_version = _repository_version()
     calibration_hash = (
         str(execution_calibration.get("content_hash"))
@@ -831,8 +838,11 @@ def _report_payload(
             for snapshot in snapshots
         },
         "data_limitations": {
-            "candle_only": True,
-            "top_of_book_available": False,
+            "candle_only": not top_of_book_requested,
+            "top_of_book_requested": top_of_book_requested,
+            "top_of_book_required": bool(manifest.dataset.top_of_book.required) if manifest.dataset.top_of_book else False,
+            "top_of_book_available": top_of_book_joined_count > 0,
+            "top_of_book_is_full_depth": False,
             "orderbook_depth_available": False,
             "intra_candle_path_available": False,
             "execution_reference_price": "candle_close",
@@ -974,6 +984,12 @@ def _quality_reports(
         split_name: build_dataset_quality_report(db_path=db_path, snapshot=snapshot)
         for split_name, snapshot in snapshots.items()
     }
+
+
+def _validate_strategy_data_requirements(manifest: ExperimentManifest) -> None:
+    requirements = research_strategy_data_requirements(manifest.strategy_name)
+    if "top_of_book" in requirements.required_data and manifest.dataset.top_of_book is None:
+        raise ResearchValidationError("research_data_requirement_top_of_book_missing")
 
 
 def _combined_dataset_quality_gate(

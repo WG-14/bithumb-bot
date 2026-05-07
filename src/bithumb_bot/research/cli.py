@@ -133,6 +133,12 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  content_hash={report.get('content_hash')}")
     warnings = report.get("warnings") or []
     print(f"  warnings={','.join(str(item) for item in warnings) if warnings else 'none'}")
+    quote_missing = _top_of_book_missing(report)
+    if quote_missing:
+        print(
+            "  top_of_book_missing=collect orderbook top snapshots with sync-orderbook-top, "
+            "rerun research-backtest, and verify top_of_book_coverage_pct"
+        )
 
 
 def _format_counts(counts: dict[str, int]) -> str:
@@ -155,3 +161,13 @@ def _format_walk_forward_window_summary(summary: ResearchRunSummary) -> str:
         f"pass:{summary.walk_forward_pass_window_count if summary.walk_forward_pass_window_count is not None else 'unknown'},"
         f"fail:{summary.walk_forward_fail_window_count if summary.walk_forward_fail_window_count is not None else 'unknown'}"
     )
+
+
+def _top_of_book_missing(report: dict[str, object]) -> bool:
+    quality = report.get("dataset_quality_reports")
+    if not isinstance(quality, dict):
+        return False
+    for payload in quality.values():
+        if isinstance(payload, dict) and int(payload.get("top_of_book_missing_count") or 0) > 0:
+            return True
+    return False

@@ -48,17 +48,43 @@ class DatasetSplit:
 
 
 @dataclass(frozen=True)
+class TopOfBookDatasetSpec:
+    source: str = "sqlite_orderbook_top_snapshots"
+    required: bool = False
+    join_tolerance_ms: int = 3000
+    missing_policy: str = "warn"
+    quote_source: str | None = None
+    min_coverage_pct: float = 100.0
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "source": self.source,
+            "required": self.required,
+            "join_tolerance_ms": self.join_tolerance_ms,
+            "missing_policy": self.missing_policy,
+            "min_coverage_pct": self.min_coverage_pct,
+        }
+        if self.quote_source is not None:
+            payload["quote_source"] = self.quote_source
+        return payload
+
+
+@dataclass(frozen=True)
 class DatasetSpec:
     source: str
     snapshot_id: str
     split: DatasetSplit
+    top_of_book: TopOfBookDatasetSpec | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "source": self.source,
             "snapshot_id": self.snapshot_id,
             **self.split.as_dict(),
         }
+        if self.top_of_book is not None:
+            payload["top_of_book"] = self.top_of_book.as_dict()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -268,6 +294,10 @@ def _parse_date_range(payload: dict[str, Any], key: str) -> DateRange:
 
 
 def _parse_dataset(payload: dict[str, Any]) -> DatasetSpec:
+    allowed_fields = {"source", "snapshot_id", "train", "validation", "final_holdout", "top_of_book"}
+    unknown = sorted(set(payload) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"dataset unsupported fields: {','.join(unknown)}")
     source = _required_str(payload, "source")
     if source != "sqlite_candles":
         raise ManifestValidationError("dataset.source currently supports only 'sqlite_candles'")
@@ -284,6 +314,55 @@ def _parse_dataset(payload: dict[str, Any]) -> DatasetSpec:
         source=source,
         snapshot_id=_required_str(payload, "snapshot_id"),
         split=split,
+        top_of_book=_parse_top_of_book_dataset(payload.get("top_of_book")),
+    )
+
+
+def _parse_top_of_book_dataset(value: Any) -> TopOfBookDatasetSpec | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ManifestValidationError("dataset.top_of_book must be an object")
+    allowed_fields = {
+        "source",
+        "required",
+        "join_tolerance_ms",
+        "missing_policy",
+        "quote_source",
+        "min_coverage_pct",
+    }
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"dataset.top_of_book unsupported fields: {','.join(unknown)}")
+    source = str(value.get("source") or "sqlite_orderbook_top_snapshots").strip()
+    if source != "sqlite_orderbook_top_snapshots":
+        raise ManifestValidationError("dataset.top_of_book.source must be sqlite_orderbook_top_snapshots")
+    join_tolerance_ms = _positive_int(value.get("join_tolerance_ms", 3000), "dataset.top_of_book.join_tolerance_ms")
+    missing_policy = str(value.get("missing_policy") or "warn").strip().lower()
+    if missing_policy not in {"warn", "fail"}:
+        raise ManifestValidationError("dataset.top_of_book.missing_policy must be warn or fail")
+    required = bool(value.get("required", False))
+    if required and missing_policy != "fail":
+        missing_policy = "fail"
+    quote_source = value.get("quote_source")
+    parsed_quote_source = None
+    if quote_source is not None:
+        parsed_quote_source = str(quote_source).strip()
+        if not parsed_quote_source:
+            raise ManifestValidationError("dataset.top_of_book.quote_source must be non-empty when supplied")
+    min_coverage_pct = _finite_non_negative_float(
+        value.get("min_coverage_pct", 100.0),
+        "dataset.top_of_book.min_coverage_pct",
+    )
+    if min_coverage_pct > 100.0:
+        raise ManifestValidationError("dataset.top_of_book.min_coverage_pct must be <= 100")
+    return TopOfBookDatasetSpec(
+        source=source,
+        required=required,
+        join_tolerance_ms=join_tolerance_ms,
+        missing_policy=missing_policy,
+        quote_source=parsed_quote_source,
+        min_coverage_pct=min_coverage_pct,
     )
 
 

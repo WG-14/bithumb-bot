@@ -122,6 +122,7 @@ def run_sma_backtest(
                     reference_price=candle.close,
                     requested_notional=spend,
                     fee_rate=fee_rate,
+                    **_quote_request_fields(dataset, candle.ts),
                 )
             )
             if fill.fill_status == "failed" or fill.avg_fill_price is None or fill.filled_qty <= 0.0:
@@ -165,6 +166,7 @@ def run_sma_backtest(
                     reference_price=candle.close,
                     requested_qty=qty,
                     fee_rate=fee_rate,
+                    **_quote_request_fields(dataset, candle.ts),
                 )
             )
             if fill.fill_status == "failed" or fill.avg_fill_price is None or fill.filled_qty <= 0.0:
@@ -238,6 +240,17 @@ def run_sma_backtest(
 
 def _sma(values: list[float], n: int, end: int) -> float:
     return sum(values[end - n : end]) / n
+
+
+def _quote_request_fields(dataset: DatasetSnapshot, ts: int) -> dict[str, object]:
+    quote = dataset.top_of_book_for_ts(ts)
+    if quote is None:
+        return {}
+    return {
+        "best_bid": quote.bid_price,
+        "best_ask": quote.ask_price,
+        "spread_bps": quote.spread_bps,
+    }
 
 
 def _trade(

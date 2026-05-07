@@ -19,6 +19,7 @@ from .public_api_minute_candles import (
 )
 from .public_api_orderbook import BestQuote, fetch_orderbook_tops as fetch_public_orderbook_tops
 from .public_api_ticker import fetch_ticker_single
+from .orderbook_top_store import snapshot_from_best_quote, upsert_orderbook_top_snapshot
 
 
 BASE_URL = "https://api.bithumb.com"
@@ -223,6 +224,33 @@ def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
 
     if not quiet:
         print(f"[SYNC] upserted {len(rows)} rows -> {settings.DB_PATH}")
+
+
+def cmd_sync_orderbook_top(quiet: bool = False, pair: str | None = None) -> None:
+    market = canonical_market_id(pair or settings.PAIR)
+    quote = fetch_orderbook_top(market)
+    observed = float(quote.observed_at_epoch_sec or time.time())
+    snapshot = snapshot_from_best_quote(
+        ts=int(observed * 1000),
+        quote=quote,
+        requested_pair=market,
+    )
+    conn = ensure_db()
+    try:
+        row_count = upsert_orderbook_top_snapshot(conn, snapshot)
+        conn.commit()
+    finally:
+        conn.close()
+
+    if not quiet:
+        print(
+            "[SYNC-ORDERBOOK-TOP] "
+            f"pair={snapshot.pair} bid={snapshot.bid_price} ask={snapshot.ask_price} "
+            f"spread_bps={snapshot.spread_bps:.8f} source={snapshot.source} row_count={row_count}"
+        )
+        print(
+            "  next_action=rerun research-backtest and verify top_of_book_coverage_pct when manifests request top_of_book"
+        )
 
 
 def cmd_ticker() -> None:

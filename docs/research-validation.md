@@ -29,6 +29,7 @@ The research engine is a pure replay/simulation path. It does not call the live 
 Canonical commands:
 
 ```bash
+uv run bithumb-bot sync-orderbook-top
 uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
 uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter_manifest.example.json
 uv run bithumb-bot research-promote-candidate --experiment-id sma_filter_v1_2026_05 --candidate-id candidate_001
@@ -55,6 +56,7 @@ Required sections:
 Optional section:
 
 - `walk_forward.train_window_days`, `test_window_days`, `step_days`, `min_windows`
+- `dataset.top_of_book` to opt into SQLite top-of-book quote joins. Supported fields are `source=sqlite_orderbook_top_snapshots`, `required`, `join_tolerance_ms` (default `3000`), `missing_policy`, optional `quote_source`, and `min_coverage_pct`. Unsupported dataset or top-of-book fields fail manifest parsing rather than being ignored.
 
 When `acceptance_gate.walk_forward_required=true`, the `walk_forward` section is required. All values must be positive integers.
 
@@ -76,13 +78,27 @@ DATA_ROOT/<mode>/reports/research/<experiment_id>/...
 ```
 
 Reports include manifest hash, dataset fingerprint, dataset quality reports and hashes, candidate profile hash, content hash, repository version, metrics, gate results, and artifact paths.
-Reports aggregate by stable `parameter_candidate_id`; they do not treat each execution scenario as a separate promotion candidate. Each top-level candidate contains `scenario_policy`, pass/fail counts, required scenario count, required scenario ids, `final_holdout_present`, `final_holdout_required_for_promotion`, `candidate_profile_hash`, and `scenario_results[]`. Each scenario result records scenario identity, `scenario_role`, `scenario_role_source`, execution model payload/hash, cost model, train/validation/final-holdout/walk-forward metrics when present, regime gate result, execution-calibration gate, scenario acceptance result, fail reasons, and execution metadata. Candle datasets do not contain orderbook depth or intra-candle path data; trade metadata records that limitation instead of fabricating quotes or depth.
+Reports aggregate by stable `parameter_candidate_id`; they do not treat each execution scenario as a separate promotion candidate. Each top-level candidate contains `scenario_policy`, pass/fail counts, required scenario count, required scenario ids, `final_holdout_present`, `final_holdout_required_for_promotion`, `candidate_profile_hash`, and `scenario_results[]`. Each scenario result records scenario identity, `scenario_role`, `scenario_role_source`, execution model payload/hash, cost model, train/validation/final-holdout/walk-forward metrics when present, regime gate result, execution-calibration gate, scenario acceptance result, fail reasons, and execution metadata. Candle-only datasets do not contain top-of-book, orderbook depth, or intra-candle path data; trade metadata records that limitation instead of fabricating quotes or depth. When top-of-book is configured and joined, execution metadata carries `best_bid`, `best_ask`, and `spread_bps`, while `reference_price` remains candle close.
 `generated_at` is included for operator context but excluded from the deterministic `content_hash`.
 
-Current-generation research reports also carry one deterministic `dataset_quality_report` payload per split. Each report records expected candle count from the manifest date range and interval, actual candle row count, expected buckets actually present, coverage percentage, missing bucket count/ranges/sample, duplicate-key diagnostics, timestamp monotonicity and interval consistency diagnostics, OHLC invariant violations, non-positive prices, negative volume, first/last timestamp, the candle-table schema fingerprint, the split dataset content hash, quality gate status, quality gate reasons, and a deterministic report `content_hash`. `coverage_pct` is based on expected buckets actually present, not raw row count, so duplicates or unexpected buckets cannot push coverage above 100%. Missing diagnostics are bounded for long 1m historical splits. The combined `dataset_quality_hash` is included in research lineage, candidate profiles, and promotion artifacts. Unsupported interval formats fail closed instead of being treated as zero-coverage data.
+Current-generation research reports also carry one deterministic `dataset_quality_report` payload per split. Each report records expected candle count from the manifest date range and interval, actual candle row count, expected buckets actually present, coverage percentage, missing bucket count/ranges/sample, duplicate-key diagnostics, timestamp monotonicity and interval consistency diagnostics, OHLC invariant violations, non-positive prices, negative volume, first/last timestamp, the candle-table schema fingerprint, the split dataset content hash, quality gate status, quality gate reasons, and a deterministic report `content_hash`. `coverage_pct` is based on expected buckets actually present, not raw row count, so duplicates or unexpected buckets cannot push coverage above 100%. Missing diagnostics are bounded for long 1m historical splits. When `dataset.top_of_book` is configured, the report also records `top_of_book_requested`, `top_of_book_required`, source, join tolerance, expected signal/candle count, joined count, missing count/sample, coverage percentage, quote gate status, and reason codes. Optional missing quote coverage is `WARN` and visible; required or fail-policy missing coverage fails closed. The combined `dataset_quality_hash` is included in research lineage, candidate profiles, and promotion artifacts. Unsupported interval formats fail closed instead of being treated as zero-coverage data.
 
 Dataset quality is a research gate. Missing candles, OHLC invariant violations, non-positive prices, negative volume, duplicate keys, non-monotonic timestamps, interval mismatches, or unexpected buckets make the affected split `FAIL` and propagate reason-coded failures such as `dataset_quality_train_missing_candles` into candidate gates. Warning-mode quality output is not promotion evidence. Candle-only data remains valid only for candle-appropriate directional/filter strategies such as the current `sma_with_filter`; it is not evidence for spread-sensitive, latency-sensitive, partial-fill-sensitive, microstructure, or intra-candle path-dependent strategies.
 If `dataset_quality_gate_status=FAIL`, do not promote. Repair or rebuild the candle dataset, rerun `research-backtest`, and verify that the corrected report carries the expected `dataset_quality_hash`.
+
+## Top-Of-Book Quotes
+
+Top-of-book snapshots are persisted in SQLite table `orderbook_top_snapshots` as best bid/ask only. This is not full orderbook depth, not queue position, not trade ticks, and not an intra-candle path reconstruction. It helps research surface spread and quote availability evidence without claiming liquidity depth or tick-level replay.
+
+Collect one current public quote snapshot with:
+
+```bash
+uv run bithumb-bot sync-orderbook-top
+```
+
+The command validates the public best bid/ask, computes `spread_bps`, writes only to the configured managed SQLite DB, and prints pair, bid, ask, spread, source, and row count. It does not write repo-local artifacts. To use quote joins in research, add `dataset.top_of_book` to the manifest and rerun `research-backtest` or `research-walk-forward`. If required quote coverage is missing, reports and CLI output include a next action: collect orderbook top snapshots with `sync-orderbook-top`, rerun research, and verify `top_of_book_coverage_pct`.
+
+Top-of-book remains optional for `sma_with_filter`; candle-only runs still work. Future quote-sensitive strategies can require `top_of_book`; when a strategy requires it and the manifest lacks it, validation fails closed with `research_data_requirement_top_of_book_missing`.
 
 The research CLI prints an operator-facing run summary derived from the report payload without mutating the persisted artifact. The summary includes candidate gate counts, top candidate fail reasons, walk-forward window counts, top window fail reasons, promotion eligibility, nearest failed candidate diagnostics, and a conservative next action.
 `nearest_failed_candidate_id` is diagnostic only and must not be used as a promotion candidate. `promotion_allowed=0` means do not run `research-promote-candidate`.
@@ -249,10 +265,10 @@ Runtime still keeps research separated from live execution: profiles verify appr
 
 ## Current Scope
 
-The engine supports SQLite candle snapshots and a pure SMA-style simulation with fee/slippage costs.
+The engine supports SQLite candle snapshots, optional top-of-book quote joins, and a pure SMA-style simulation with fee/slippage costs.
 Typed paper/live readiness evidence validation exists as a promotion contract.
 However, automatic generation of those evidence artifacts from full paper/live operational logs remains a later-stage integration unless separately implemented.
-Candle-only research remains path-limited. Top-of-book storage, quote coverage joins, full orderbook depth, and intra-candle path support remain separate follow-up work and should not be claimed as available until implemented and tested.
+Candle-only research remains path-limited. Top-of-book storage and quote coverage joins are available when explicitly configured, but full orderbook depth, trade ticks, spread-gated execution policy, quote-aware slippage modeling, latency-aware quote replay, and intra-candle path support remain separate follow-up work and should not be claimed as available.
 
 Operator route:
 

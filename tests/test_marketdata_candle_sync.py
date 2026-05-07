@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from bithumb_bot.config import settings
-from bithumb_bot.marketdata import cmd_candles, cmd_sync, cmd_ticker
+from bithumb_bot.marketdata import cmd_candles, cmd_sync, cmd_sync_orderbook_top, cmd_ticker
 from bithumb_bot.marketdata import (
     fetch_orderbook_top as fetch_marketdata_orderbook_top,
     fetch_orderbook_tops as fetch_marketdata_orderbook_tops,
@@ -228,6 +228,42 @@ def test_marketdata_orderbook_multi_market_fetch(monkeypatch, _settings_guard) -
     assert captured["max_retries"] == 3
     assert [q.market for q in quotes] == ["KRW-BTC", "KRW-ETH"]
     assert all(q.observed_at_epoch_sec is not None for q in quotes)
+
+
+def test_cmd_sync_orderbook_top_persists_validated_quote(monkeypatch, capsys, _settings_guard) -> None:
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
+    monkeypatch.setattr(
+        "bithumb_bot.marketdata.fetch_orderbook_top",
+        lambda _market: BestQuote(
+            market="KRW-BTC",
+            bid_price=99.0,
+            ask_price=101.0,
+            observed_at_epoch_sec=1_700_000_000.0,
+            source="bithumb_public_v1_orderbook",
+        ),
+    )
+
+    cmd_sync_orderbook_top(pair="BTC_KRW")
+
+    captured = capsys.readouterr()
+    assert "pair=KRW-BTC" in captured.out
+    assert "bid=99.0" in captured.out
+    assert "ask=101.0" in captured.out
+    assert "spread_bps=200.00000000" in captured.out
+    assert "source=bithumb_public_v1_orderbook" in captured.out
+    assert "row_count=1" in captured.out
+    with sqlite3.connect(settings.DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT ts, pair, bid_price, ask_price, spread_bps, source FROM orderbook_top_snapshots"
+        ).fetchone()
+    assert tuple(row) == (
+        1_700_000_000_000,
+        "KRW-BTC",
+        99.0,
+        101.0,
+        200.0,
+        "bithumb_public_v1_orderbook",
+    )
 
 
 def test_cmd_ticker_uses_canonical_market_input(monkeypatch, capsys, _settings_guard) -> None:

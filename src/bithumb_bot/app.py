@@ -21,7 +21,7 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from .marketdata import cmd_sync, cmd_ticker, cmd_candles
+from .marketdata import cmd_sync, cmd_sync_orderbook_top, cmd_ticker, cmd_candles
 from .db_core import (
     compute_accounting_replay,
     ensure_db,
@@ -7157,6 +7157,13 @@ def main(argv: list[str] | None = None) -> int:
     research_backtest.add_argument("--manifest", required=True)
     research_backtest.add_argument("--execution-calibration")
 
+    sync_orderbook_top = sub.add_parser(
+        "sync-orderbook-top",
+        help="collect one validated public top-of-book snapshot into the configured SQLite DB",
+        description="Fetch and persist one best bid/ask snapshot. This stores top-of-book only, not full depth.",
+    )
+    sync_orderbook_top.add_argument("--pair")
+
     research_walk_forward = sub.add_parser(
         "research-walk-forward",
         help="run walk-forward validation from a research manifest",
@@ -7345,6 +7352,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_candles(args.limit)
     elif args.cmd == "sync":
         cmd_sync()
+    elif args.cmd == "sync-orderbook-top":
+        cmd_sync_orderbook_top(pair=str(args.pair) if args.pair else None)
     elif args.cmd == "signal":
         cmd_signal(args.short, args.long)
     elif args.cmd == "explain":

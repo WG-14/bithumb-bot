@@ -82,6 +82,7 @@ Runtime artifacts must not be written into the repository. In `MODE=live`, every
 
 ```bash
 uv run bithumb-bot sync
+uv run bithumb-bot sync-orderbook-top
 uv run bithumb-bot ticker
 uv run bithumb-bot candles --limit 5
 uv run bithumb-bot signal --short 7 --long 30

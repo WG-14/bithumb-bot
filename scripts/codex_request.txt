@@ -1,188 +1,261 @@
 You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Use the attached review note as the source context for this follow-up patch. Do not weaken the core concern or turn this into generic validation work. The previous patch moved the repository in the right direction by adding `DatasetQualityReport`, wiring dataset quality into research backtest/walk-forward candidate gates, surfacing dataset quality hash/status in promotion/profile evidence, and adding pytest coverage. However, the research evidence chain is still not fully closed. The next patch must address the remaining structural gaps, especially execution calibration assumptions and scalable dataset quality computation. 
+The previous P0/P1 patches appear to have closed the urgent research evidence gaps:
 
-Core concern:
+* `DatasetQualityReport` exists and is wired into research backtest/walk-forward, candidate gates, promotion/profile evidence, and documentation.
+* Dataset quality coverage now uses expected buckets actually present, not raw row count.
+* Long-range missing diagnostics are bounded.
+* Execution calibration now checks partial fill rate, unfilled rate, sample count, and execution-quality gate status against scenario assumptions.
+* Legacy/no-lineage dataset-quality bypass is explicit and warning-backed.
+* pytest has reportedly passed.
 
-The repository is evolving from a candle-only SMA research tool into a reproducible, evidence-bound automatic trading experiment system. The current remaining risk is that research candidates can still appear valid even when real execution quality is materially worse than the research scenario assumptions, especially for partial fills, unfilled orders, insufficient execution sample size, or failed execution-quality gates. A second remaining risk is that dataset quality reporting may work for small tests but become unnecessarily memory-heavy or misleading on long historical 1m splits.
+Your task is **not** to redo those P0/P1 fixes unless verification proves they are incomplete. Your task is to move to the next structural step: add a **top-of-book research data layer** so the repository can begin validating execution feasibility instead of relying only on candle-close execution assumptions.
 
-Do not treat this as a cosmetic patch. Treat it as closing the contract:
+Keep the core concern sharp:
 
-real execution quality → calibration artifact → research execution scenario → candidate gate → promotion evidence → operator-visible diagnostics.
+The repo is becoming a reproducible, evidence-bound automatic trading experiment system. Candle-only research remains valid only for candle-appropriate directional/filter strategies. It is still not enough for spread-sensitive, liquidity-sensitive, partial-fill-sensitive, microstructure, or intra-candle-path-sensitive strategies. The next design change should add top-of-book snapshots and quote-aware research evidence without pretending top-of-book is full orderbook depth or tick-level path data.
 
-Work on `main` unless instructed otherwise.
+Do not turn this into generic market-data cleanup. Implement concrete repository changes that can be verified and tested.
 
 Inspect first:
 
-* `src/bithumb_bot/research/execution_calibration.py`
-* `src/bithumb_bot/research/validation_protocol.py`
+* `src/bithumb_bot/db_core.py`
+* `src/bithumb_bot/marketdata.py`
+* `src/bithumb_bot/public_api_orderbook.py`
 * `src/bithumb_bot/research/dataset_snapshot.py`
-* `src/bithumb_bot/research/promotion_gate.py`
-* `src/bithumb_bot/research/lineage.py`
-* `src/bithumb_bot/execution_quality.py`
+* `src/bithumb_bot/research/backtest_engine.py`
+* `src/bithumb_bot/research/execution_model/base.py`
+* `src/bithumb_bot/research/execution_model/fixed_bps.py`
+* `src/bithumb_bot/research/execution_model/stress.py`
+* `src/bithumb_bot/research/validation_protocol.py`
 * `src/bithumb_bot/research/experiment_manifest.py`
-* `tests/test_dataset_quality_report.py`
-* `tests/test_execution_quality.py`
-* any existing research calibration, promotion, or reproducibility tests
+* `src/bithumb_bot/research/strategy_registry.py`
+* CLI command registration in `src/bithumb_bot/app.py` and research CLI modules
+* existing tests for dataset quality, execution calibration, research reproducibility, schema, and CLI behavior
 * `docs/research-validation.md`
 
-Keep these as hypotheses until verified in code.
+Maintain these as hypotheses until verified in code.
 
 Hypothesis 1:
-`compare_calibration_to_scenario()` currently validates market, interval, content hash, p90/p95 slippage, p95 latency, and model breach rate, but does not compare calibration `partial_fill_rate` or `unfilled_rate` against the scenario’s `partial_fill_rate` and `order_failure_rate`.
+The repo already has public top-of-book fetch helpers, but no persisted `orderbook_top_snapshots` research data table.
 
 Verification:
-Inspect `src/bithumb_bot/research/execution_calibration.py` and all call sites. Confirm whether `partial_fill_rate`, `unfilled_rate`, `quality_gate_status`, and sample count thresholds are actually enforced. If they are not, implement the enforcement.
+Inspect `marketdata.py`, `public_api_orderbook.py`, and `db_core.py`. Confirm whether a table exists and whether any command stores validated best bid/ask snapshots.
 
-Required patch:
-Extend `compare_calibration_to_scenario()` with these inputs, or equivalent names if a cleaner existing policy object exists:
+If not implemented, add it.
 
-```python
-assumed_partial_fill_rate: float = 0.0
-assumed_order_failure_rate: float = 0.0
-min_sample_count: int | None = None
-require_quality_gate_pass: bool = False
+Required schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS orderbook_top_snapshots (
+    ts INTEGER NOT NULL,
+    pair TEXT NOT NULL,
+    bid_price REAL NOT NULL,
+    ask_price REAL NOT NULL,
+    spread_bps REAL NOT NULL,
+    source TEXT NOT NULL,
+    observed_at_epoch_sec REAL,
+    PRIMARY KEY (ts, pair, source)
+);
 ```
 
-Add deterministic fail reasons:
+Add an index suitable for nearest-snapshot lookup:
 
-```text
-execution_calibration_partial_fill_rate_exceeds_assumption
-execution_calibration_unfilled_rate_exceeds_assumption
-execution_calibration_sample_count_below_required
-execution_calibration_quality_gate_not_passed
+```sql
+CREATE INDEX IF NOT EXISTS idx_orderbook_top_pair_ts
+ON orderbook_top_snapshots(pair, ts);
 ```
 
-Use `partial_fill_rate` from the calibration artifact as observed partial-fill rate. Use `unfilled_rate` from the calibration artifact as observed order-failure/unfilled rate. Compare these against the scenario assumptions. If the scenario assumes zero partial fills or zero order failures, observed positive partial/unfilled rates must fail when calibration is required or strictness requires failure.
+Validation requirements:
 
-Update `validation_protocol.py` so each scenario passes:
-
-* `scenario.partial_fill_rate`
-* `scenario.order_failure_rate`
-* an appropriate minimum sample threshold if a repository policy already exists
-* `require_quality_gate_pass=True` when calibration is required, or when the repository’s strictness policy says calibration must be clean
-
-Do not silently pass if the calibration artifact contains a failed execution-quality gate and the manifest requires calibration.
+* bid and ask must be finite positive numbers.
+* bid must be `<= ask`.
+* spread_bps must be finite and non-negative.
+* pair/market normalization must follow the repo’s existing market normalization conventions.
+* `source` must be explicit, for example `bithumb_public_v1_orderbook`.
+* Do not store fabricated quotes.
+* Do not claim this table contains full depth.
 
 Hypothesis 2:
-The current dataset quality implementation builds all expected timestamps with `tuple(range(...))` and may also build an `expected_set`. This is acceptable in tiny unit tests but is not scalable for long 1m research splits.
+Research backtests currently have `ExecutionRequest.best_bid`, `best_ask`, and `spread_bps` fields available, but the research path still leaves them empty because it only uses candle close as the execution reference.
 
 Verification:
-Inspect `build_dataset_quality_report()` in `src/bithumb_bot/research/dataset_snapshot.py`. Confirm whether it materializes the full expected timestamp range and expected set.
+Inspect `run_sma_backtest()` and execution model call sites. Confirm whether bid/ask/spread are ever populated from research data.
 
-Required patch:
-Refactor dataset quality expected-bucket handling to be streaming or bounded-memory.
+If not implemented, add quote-aware research join as an optional dataset layer.
 
-Requirements:
+Design requirements:
 
-* Compute `expected_candle_count` by arithmetic, not by materializing a full tuple.
-* Scan expected bucket timestamps with a generator or loop.
-* Keep only bounded missing samples and compact missing ranges.
-* Do not build an unbounded `expected_set` for long ranges.
-* Keep output deterministic.
-* Preserve existing fields unless replacing them with a strictly better equivalent.
-* Keep `missing_bucket_ranges` bounded.
-* Keep `missing_bucket_sample` bounded.
-* Preserve `content_hash` determinism.
+* Do not break existing candle-only SMA research.
+* Add optional top-of-book support for research datasets.
+* Join signal candle timestamp to the nearest orderbook top snapshot within a configurable tolerance.
+* Default tolerance should be conservative and explicit, for example 3000 ms, unless a better existing interval/tolerance policy exists.
+* If no quote snapshot exists within tolerance, record missing quote coverage explicitly.
+* Do not fabricate best bid/ask from candle OHLC.
+* Do not fail candle-only SMA research by default just because top-of-book is absent.
+* Do allow future strategies to require quote data and fail closed when it is absent.
+
+Implementation options:
+Prefer a small, typed dataset extension over a large manifest redesign. A practical first version can add:
+
+```json
+"dataset": {
+  "source": "sqlite_candles",
+  "snapshot_id": "...",
+  "top_of_book": {
+    "source": "sqlite_orderbook_top_snapshots",
+    "required": false,
+    "join_tolerance_ms": 3000,
+    "missing_policy": "warn"
+  },
+  "train": {...},
+  "validation": {...}
+}
+```
+
+If changing manifest schema is too large, implement the internal loader and report fields first, and document that quote join is opt-in through a new explicit manifest field. Unsupported or unknown top-of-book fields must fail manifest parsing rather than being silently ignored.
 
 Hypothesis 3:
-Current `coverage_pct` may be computed as `actual_candle_count / expected_candle_count`, which can overstate coverage if duplicate, malformed, or unexpected buckets exist.
+Dataset quality reports now cover candles well, but they do not yet include quote coverage when top-of-book data is part of the research contract.
 
 Verification:
-Inspect the current coverage calculation.
+Inspect `DatasetQualityReport` payload construction. Confirm whether top-of-book availability, joined quote count, missing quote count, stale quote count, and join tolerance are tracked.
 
-Required patch:
-Compute coverage from expected buckets actually present:
+If not, extend dataset quality reporting when top-of-book is configured.
 
-```text
-coverage_pct = present_expected_bucket_count / expected_candle_count * 100
-```
-
-Add or preserve these fields:
+Required quote coverage fields when top-of-book is requested:
 
 ```json
 {
-  "present_expected_bucket_count": 1438,
-  "actual_candle_count": 1440,
-  "unexpected_bucket_count": 2,
-  "coverage_pct": 99.86111111
+  "top_of_book_requested": true,
+  "top_of_book_required": false,
+  "top_of_book_source": "sqlite_orderbook_top_snapshots",
+  "top_of_book_join_tolerance_ms": 3000,
+  "top_of_book_expected_signal_count": 123,
+  "top_of_book_joined_count": 120,
+  "top_of_book_missing_count": 3,
+  "top_of_book_missing_sample": [ ... ],
+  "top_of_book_coverage_pct": 97.56097561,
+  "top_of_book_gate_status": "PASS|WARN|FAIL",
+  "top_of_book_gate_reasons": []
 }
 ```
 
-`actual_candle_count` should remain the raw number of loaded candle rows for the split. `present_expected_bucket_count` should count unique expected buckets present in the dataset. `coverage_pct` must not exceed 100.
+Policy:
+
+* If top-of-book is optional and missing, report WARN or explicit limitation, not silent PASS.
+* If top-of-book is required and missing or below threshold, fail closed.
+* If top-of-book is not configured, keep current candle-only limitation fields explicit:
+
+  * `top_of_book_available=false`
+  * `orderbook_depth_available=false`
+  * `intra_candle_path_available=false`
 
 Hypothesis 4:
-Legacy/no-lineage promotion can bypass dataset quality verification in `_verify_report_dataset_quality()`. This may be acceptable only as an explicit compatibility path, but it should be auditable and not accidentally treated as full new-generation evidence.
+Execution models can carry quote fields in metadata, but fixed-bps/stress execution still uses candle close as the reference price. The first quote-aware step should populate metadata and optionally add spread-based gating/cost adjustment without pretending to model full depth.
 
 Verification:
-Inspect `promotion_gate.py`, especially `_verify_report_dataset_quality()` and `promote_candidate(... allow_legacy_lineage=...)`. Confirm whether missing lineage skips dataset quality checks and whether warnings are recorded.
+Inspect `ExecutionRequest`, `ExecutionFill`, `FixedBpsExecutionModel`, and `StressExecutionModel`.
 
-Required patch:
-If `allow_legacy_lineage=True` allows promotion without new dataset quality evidence, make the bypass explicit and visible.
+Required behavior:
 
-Add promotion fields or equivalent:
+* When a quote snapshot is joined, pass `best_bid`, `best_ask`, and `spread_bps` into `ExecutionRequest`.
+* Ensure `ExecutionFill.as_dict()` records these values.
+* Keep `reference_price` behavior explicit.
+* Do not replace reference price with bid/ask unless you implement and test a clear quote-aware execution policy.
+* Add an optional spread gate or warning metadata if simple and low-risk:
 
-```json
-{
-  "dataset_quality_legacy_bypass_used": true
-}
-```
-
-Add promotion warning:
-
-```text
-legacy_dataset_quality_bypass_used
-```
-
-Do not let a legacy dataset-quality bypass masquerade as full verified evidence. If approved profile generation or live/small_live promotion already rejects legacy evidence, confirm and document. If it does not, patch it so full live readiness cannot rely on a hidden dataset-quality bypass.
+  * Example: if `spread_bps > max_allowed_spread_bps`, the scenario can block the trade or record an execution warning.
+* If spread gate is too broad for this pass, do not implement it. Instead ensure quote metadata is present in execution metadata so future spread-gate work is straightforward.
 
 Hypothesis 5:
-Top-of-book storage and research join are still out of scope for this patch. They should not distract from P0/P1 fixes, but the final report should clearly mark them as the next PR if not implemented.
+The repository still lacks a strategy/data requirement contract distinguishing candle-appropriate strategies from quote-sensitive or microstructure-sensitive strategies.
 
 Verification:
-Check whether `orderbook_top_snapshots`, `sync-orderbook-top`, quote coverage, and `ExecutionRequest.best_bid/best_ask/spread_bps` population in research now exist. If not, do not implement unless all P0/P1 work is complete and low-risk.
+Inspect `strategy_registry.py` and manifest parsing. Determine whether research strategies can declare required data sources.
 
-Scope decision:
-This patch should prioritize:
+Implement minimally:
 
-1. P0 calibration gate closure
-2. P0.5 scalable dataset quality computation
-3. P1 coverage correctness
-4. P1 explicit legacy dataset-quality bypass warning
-5. P2 documentation and next-PR scoping for top-of-book
+* Keep `sma_with_filter` runnable with candles.
+* Add a registry-level data requirement declaration, even if only used by current/future validation.
+* Example:
 
-Do not start a large top-of-book implementation if it risks destabilizing the calibration and dataset-quality fixes.
+```python
+required_data = ("candles",)
+optional_data = ("top_of_book",)
+unsupported_without = ()
+```
+
+* Add a path for future strategies to require `top_of_book`.
+* If a strategy requires `top_of_book` and manifest/dataset lacks it, fail closed with a reason such as:
+
+```text
+research_data_requirement_top_of_book_missing
+```
+
+* Do not add fake microstructure strategy support.
+
+Scope limits:
+
+This patch should implement P2 top-of-book snapshot and quote-aware research metadata. It should not attempt full orderbook depth, trade ticks, intra-candle path reconstruction, or full quote-aware slippage modeling unless the implementation is small, obvious, and fully tested.
+
+Specifically out of scope unless already trivial:
+
+* full depth snapshots
+* tick trade tape
+* queue position
+* intra-candle path reconstruction
+* latency-aware quote replay beyond simple nearest snapshot
+* market impact model
+* live order policy changes
+* live arming behavior changes
 
 Testing requirements:
 
-Add or update tests. Do not rely only on `pytest` passing from the previous patch.
+Add or update tests. Do not rely only on manual review.
 
-Minimum new/updated tests:
+Minimum tests:
 
-Execution calibration:
+Schema / storage:
 
-1. Required calibration fails when observed `partial_fill_rate` exceeds scenario `partial_fill_rate`.
-2. Required calibration fails when observed `unfilled_rate` exceeds scenario `order_failure_rate`.
-3. Required calibration fails when `sample_count` is below the required threshold, if a threshold is configured.
-4. Required calibration fails when artifact `quality_gate_status=FAIL` and `require_quality_gate_pass=True`.
-5. Calibration still passes when observed partial/unfilled rates are within scenario assumptions.
-6. Calibration warning-mode behavior remains explicit and does not silently pass required calibration.
-7. Candidate gate in `validation_protocol.py` receives the new calibration fail reasons and marks the scenario/candidate as FAIL.
+1. `ensure_schema()` creates `orderbook_top_snapshots`.
+2. Valid top-of-book snapshot insert succeeds.
+3. Invalid quote with bid > ask fails validation before insert.
+4. Non-positive bid/ask fails validation before insert.
+5. spread_bps is computed correctly.
+6. Upsert/primary-key behavior is deterministic.
+
+CLI / ingestion:
+
+7. If adding a command such as `sync-orderbook-top`, test it with mocked public API output.
+8. Command output should include pair, bid, ask, spread_bps, source, and row count.
+9. Command must not write repo-local artifacts.
+
+Research join:
+
+10. When top-of-book is configured and snapshots exist within tolerance, research execution metadata includes `best_bid`, `best_ask`, and `spread_bps`.
+11. When top-of-book is configured but missing within tolerance, dataset quality/reporting records missing quote count and sample.
+12. Optional top-of-book missing does not break candle-only SMA research.
+13. Required top-of-book missing fails closed with a deterministic reason.
+14. Joined quote snapshot must be the nearest within tolerance, not an arbitrary row.
+15. Quote join must be deterministic when multiple candidates are equally near; define and test tie-break behavior.
 
 Dataset quality:
 
-8. Coverage uses `present_expected_bucket_count`, not raw `actual_candle_count`.
-9. Coverage never exceeds 100 even with duplicate/unexpected rows.
-10. Missing bucket detection remains deterministic after streaming refactor.
-11. Existing OHLC, non-positive price, negative volume, missing candle, and unknown interval tests continue to pass.
-12. Content hash remains deterministic across repeated report generation.
-13. A long-range split test or synthetic test verifies that report generation does not require materializing all expected timestamps into a tuple or set. This can be tested indirectly by asserting bounded missing samples/ranges and using a range large enough to catch obvious inefficient behavior without making the test slow.
+16. Quote coverage fields appear only when top-of-book is requested or configured.
+17. Existing candle quality tests still pass.
+18. `content_hash` remains deterministic with quote coverage fields.
 
-Promotion / legacy:
+Strategy data contract:
 
-14. New-generation promotion still refuses failed dataset quality.
-15. Legacy lineage promotion, if allowed, records `dataset_quality_legacy_bypass_used=true` and warning `legacy_dataset_quality_bypass_used`.
-16. Legacy bypass is not reported as full dataset-quality verification.
+19. `sma_with_filter` remains valid with candle-only data.
+20. A test-only or registry-level strategy requiring top-of-book fails closed when top-of-book is absent.
+21. Unknown data requirement fields or unsupported dataset source fields fail parsing rather than being ignored.
+
+Execution metadata:
+
+22. `ExecutionFill.as_dict()` includes joined `best_bid`, `best_ask`, and `spread_bps` when present.
+23. Candle-only execution metadata continues to explicitly record no quote/depth/path data.
 
 Run at least:
 
@@ -190,67 +263,58 @@ Run at least:
 uv run pytest -q
 ```
 
-If the full suite is too slow, run the smallest relevant subsets first, then the full suite if feasible. In the final report, state exactly what was run.
+If full pytest is too slow, run the relevant subsets first, then run full pytest if feasible. In the final report, state exactly what was run.
 
 Operational and recovery constraints:
 
 * Do not weaken live safety gates.
 * Do not change live arming behavior.
+* Do not change real order submission behavior.
 * Do not write runtime artifacts into the repository.
-* Preserve existing `PathManager` and repository-external artifact policy.
+* Use existing `PathManager` / runtime data policy where applicable.
 * Preserve deterministic hashing.
-* Do not silently ignore unsupported fields.
-* Do not hide failures behind warning-mode unless the manifest or legacy compatibility path explicitly says so.
+* Do not silently ignore unsupported manifest fields.
+* Do not fabricate quotes or depth.
 * Keep all new failure reasons deterministic, reason-coded, and searchable.
-* Do not introduce heavy dependencies.
-* Avoid broad top-of-book work in this patch unless it is trivial and fully testable.
+* Avoid heavy dependencies.
+* Keep this patch reversible and safe if operators choose not to collect top-of-book data.
 
 Observability requirements:
 
-Execution calibration reports and candidate/promotion evidence should make it obvious when failure came from:
+Reports should make the following visible:
 
-* partial fill rate exceeding scenario assumption
-* unfilled/order failure rate exceeding scenario assumption
-* insufficient sample count
-* failed execution-quality gate
-* slippage assumption breach
-* latency assumption breach
-* market/interval mismatch
-* content hash mismatch
+* whether top-of-book was requested
+* whether it was required
+* join tolerance
+* joined quote count
+* missing quote count
+* quote coverage percentage
+* quote gate status and reasons
+* whether execution metadata was quote-aware or candle-close-only
+* explicit limitation that top-of-book is not full depth
+* explicit limitation that intra-candle path is still unavailable
 
-Dataset quality reports should make it obvious when failure came from:
+CLI/operator output should include concrete next actions on failure, for example:
 
-* missing candles
-* low expected-bucket coverage
-* unexpected buckets
-* duplicate keys
-* non-monotonic timestamps
-* interval mismatch
-* OHLC invariant violation
-* non-positive prices
-* negative volume
-
-Promotion diagnostics should distinguish:
-
-* normal dataset-quality verification
-* failed dataset quality
-* missing dataset quality
-* explicit legacy dataset-quality bypass
+```text
+top_of_book_missing: collect orderbook top snapshots with sync-orderbook-top, rerun research-backtest, and verify top_of_book_coverage_pct.
+```
 
 Documentation requirements:
 
-Update `docs/research-validation.md` after code changes. Keep wording concrete and operator-facing.
+Update `docs/research-validation.md` after code changes.
 
-Add or clarify:
+Must clarify:
 
-* Calibration now checks partial fill rate and unfilled rate against scenario assumptions.
-* Calibration can fail on insufficient sample count and failed execution-quality gate status.
-* `coverage_pct` is based on expected buckets actually present, not raw row count.
-* If `dataset_quality_gate_status=FAIL`, do not promote. Repair or rebuild the candle dataset, rerun research-backtest, and verify the corrected `dataset_quality_hash`.
-* Legacy dataset-quality bypass is compatibility-only and is not full new-generation evidence.
-* Top-of-book storage/research join remains a separate next PR unless implemented here.
-
-Do not claim top-of-book or intra-candle path support unless it is actually implemented and tested. Continue to state that candle-only research remains path-limited.
+* Candle-only research remains valid only for candle-appropriate strategies.
+* Top-of-book snapshots are optional unless required by strategy or manifest.
+* Top-of-book is not full orderbook depth.
+* Top-of-book does not solve intra-candle path.
+* Quote coverage is now part of dataset quality when configured.
+* Missing required quote coverage fails closed.
+* Optional quote coverage must be visible and warning-like, not silently ignored.
+* How to collect top-of-book snapshots.
+* How to rerun research after quote data is collected.
 
 Final report format:
 
@@ -258,7 +322,7 @@ Return a concise engineering report with these sections:
 
 1. Summary
 
-   * What structural gaps were verified.
+   * What was verified.
    * What was changed.
    * What remains out of scope.
 
@@ -272,7 +336,7 @@ Return a concise engineering report with these sections:
 3. Implemented Changes
 
    * Files changed
-   * New function arguments, report fields, reason codes, and gates
+   * New schemas, functions, commands, manifest fields, report fields, and reason codes
    * Backward compatibility behavior
 
 4. Validation and Tests
@@ -283,18 +347,22 @@ Return a concise engineering report with these sections:
 
 5. Operational Impact
 
-   * How operators will see calibration failures
-   * How operators will see dataset quality failures
-   * How legacy bypass is surfaced
+   * How operators collect top-of-book snapshots
+   * How quote coverage failures surface
+   * How candle-only research behavior changes or does not change
    * Whether promotion/live readiness behavior changed
 
 6. Remaining Risks / Follow-up
 
-   * Especially top-of-book snapshots, quote-aware research execution, full orderbook depth, intra-candle path, and long-range historical backfill
+   * full orderbook depth
+   * trade ticks
+   * intra-candle path
+   * quote-aware slippage model
+   * spread gate
+   * long-range historical quote backfill
 
 7. Suggested Next PRs
 
-   * P0/P1/P2/P3 priority list for anything not completed
+   * P2/P3 priority list for anything not completed
 
 Do not produce a generic architecture essay. Make concrete repository changes where feasible, run tests, and report with exact file/function references.
-

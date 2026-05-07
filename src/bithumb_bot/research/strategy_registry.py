@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .backtest_engine import BacktestRun, run_sma_backtest
@@ -17,8 +18,23 @@ class ResearchStrategyRegistryError(ValueError):
     pass
 
 
-def resolve_research_strategy(strategy_name: str) -> ResearchStrategyRunner:
+@dataclass(frozen=True)
+class ResearchStrategyDataRequirements:
+    required_data: tuple[str, ...]
+    optional_data: tuple[str, ...] = ()
+    unsupported_without: tuple[str, ...] = ()
+
+
+def research_strategy_data_requirements(strategy_name: str) -> ResearchStrategyDataRequirements:
     if strategy_name == "sma_with_filter":
+        return ResearchStrategyDataRequirements(required_data=("candles",), optional_data=("top_of_book",))
+    if strategy_name == "top_of_book_required_test":
+        return ResearchStrategyDataRequirements(required_data=("candles", "top_of_book"))
+    raise ResearchStrategyRegistryError(f"unsupported research strategy: {strategy_name}")
+
+
+def resolve_research_strategy(strategy_name: str) -> ResearchStrategyRunner:
+    if strategy_name in {"sma_with_filter", "top_of_book_required_test"}:
         return _run_sma_with_filter
     raise ResearchStrategyRegistryError(f"unsupported research strategy: {strategy_name}")
 

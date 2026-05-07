@@ -27,6 +27,26 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ON candles(pair, interval, ts)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orderbook_top_snapshots (
+            ts INTEGER NOT NULL,
+            pair TEXT NOT NULL,
+            bid_price REAL NOT NULL,
+            ask_price REAL NOT NULL,
+            spread_bps REAL NOT NULL,
+            source TEXT NOT NULL,
+            observed_at_epoch_sec REAL,
+            PRIMARY KEY (ts, pair, source)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_orderbook_top_pair_ts
+        ON orderbook_top_snapshots(pair, ts)
+        """
+    )
 
     # portfolio (single-asset)
     conn.execute(
