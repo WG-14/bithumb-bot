@@ -34,6 +34,13 @@ def test_runtime_strategy_decision_exports_canonical_operational_fields() -> Non
                 "dust_state": "flat",
                 "effective_flat": True,
                 "normalized_exposure_active": False,
+                "order_rules": {
+                    "min_qty": 0.0001,
+                    "qty_step": 0.0001,
+                    "max_qty_decimals": 4,
+                    "min_notional_krw": 5000,
+                    "source": "test",
+                },
             },
             "exit": {
                 "rule": None,
@@ -64,6 +71,46 @@ def test_runtime_strategy_decision_exports_canonical_operational_fields() -> Non
     assert event["position_state_hash"].startswith("sha256:")
     assert event["exit_evaluations_hash"].startswith("sha256:")
     assert event["execution_timing_policy_hash"] == "sha256:timing"
+    assert event["order_rules_hash"].startswith("sha256:")
+
+
+def test_runtime_order_rules_hash_changes_with_rule_inputs() -> None:
+    def event_for(min_qty: float) -> dict[str, object]:
+        return runtime_decision_to_canonical_event(
+            StrategyDecision(
+                signal="BUY",
+                reason="sma golden cross",
+                context={
+                    "strategy": "sma_with_filter",
+                    "ts": 1_714_521_660_000,
+                    "raw_signal": "BUY",
+                    "final_signal": "BUY",
+                    "position_gate": {
+                        "entry_allowed": True,
+                        "exit_allowed": False,
+                        "dust_state": "flat",
+                        "effective_flat": True,
+                        "normalized_exposure_active": False,
+                        "order_rules": {
+                            "min_qty": min_qty,
+                            "qty_step": 0.0001,
+                            "max_qty_decimals": 4,
+                            "min_notional_krw": 5000,
+                            "source": "test",
+                        },
+                    },
+                    "exit": {"evaluations": []},
+                },
+            ),
+            market="KRW-BTC",
+            interval="1m",
+            profile_content_hash="sha256:profile",
+            dataset_content_hash="sha256:data",
+            db_data_fingerprint="sha256:data",
+            execution_timing_policy_hash="sha256:timing",
+        ).as_dict()
+
+    assert event_for(0.0001)["order_rules_hash"] != event_for(0.0002)["order_rules_hash"]
 
 
 def test_research_decision_export_normalizes_to_canonical_schema() -> None:

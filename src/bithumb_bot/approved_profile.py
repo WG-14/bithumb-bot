@@ -1199,6 +1199,8 @@ def _validate_decision_equivalence_evidence(
     mismatch_count = int(report.get("mismatch_count") or report.get("mismatched_decision_count") or 0)
     if mismatch_count > 0:
         raise ApprovedProfileError(f"{label}_decision_equivalence_mismatch_count_nonzero")
+    if int(report.get("canonical_incomplete_decision_count") or 0) > 0:
+        raise ApprovedProfileError(f"{label}_decision_equivalence_incomplete_canonical")
     if report.get("missing_research_decisions"):
         raise ApprovedProfileError(f"{label}_decision_equivalence_missing_research_decisions")
     if report.get("missing_runtime_decisions"):
@@ -1207,5 +1209,9 @@ def _validate_decision_equivalence_evidence(
         raise ApprovedProfileError(f"{label}_decision_equivalence_blocked")
     if report.get("comparison_contract_version") != "canonical_decision_v1" or report.get("canonical_schema") is not True:
         raise ApprovedProfileError(f"{label}_decision_equivalence_legacy_schema")
+    if report.get("legacy_schema") is True:
+        raise ApprovedProfileError(f"{label}_decision_equivalence_legacy_schema")
+    if report.get("promotion_grade_comparison") is not True:
+        raise ApprovedProfileError(f"{label}_decision_equivalence_not_promotion_grade")
     if report.get("ok") is not True:
         raise ApprovedProfileError(f"{label}_decision_equivalence_not_ok")

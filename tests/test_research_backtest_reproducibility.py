@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from bithumb_bot.paths import PathManager
+from bithumb_bot.canonical_decision import export_research_decisions, export_runtime_replay_decisions
+from bithumb_bot.decision_equivalence import compare_decision_equivalence
 from bithumb_bot.research.backtest_engine import run_sma_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.execution_calibration import build_calibration_artifact
@@ -15,6 +17,7 @@ from bithumb_bot.research.experiment_manifest import ExecutionTimingPolicy, pars
 from bithumb_bot.research.parameter_space import candidate_id
 from bithumb_bot.research.promotion_gate import PromotionGateError, promote_candidate
 from bithumb_bot.research.validation_protocol import run_research_backtest
+from bithumb_bot.strategy.sma import create_sma_with_filter_strategy
 
 
 def _ts(day: str, minute: int) -> int:
@@ -155,6 +158,92 @@ def test_sma_backtest_attaches_entry_and_exit_regime_snapshots() -> None:
     assert isinstance(closed[0]["exit_regime_snapshot"], dict)
     assert result.regime_performance
     assert result.regime_coverage
+    assert result.decisions
+    assert {"raw_signal", "final_signal", "position_state_hash"} <= set(result.decisions[0])
+
+
+def test_research_runtime_decision_generation_gap_is_visible_not_silent() -> None:
+    closes = [100, 99, 98, 97, 99, 102, 105, 104, 103, 100, 98, 96]
+    candles = tuple(
+        Candle(
+            ts=1_700_000_000_000 + index * 60_000,
+            open=float(close),
+            high=float(close) * 1.02,
+            low=float(close) * 0.98,
+            close=float(close),
+            volume=1.0,
+        )
+        for index, close in enumerate(closes)
+    )
+    manifest = parse_manifest(_manifest())
+    snapshot = DatasetSnapshot(
+        snapshot_id="unit",
+        source="sqlite_candles",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=manifest.dataset.split.validation,
+        candles=candles,
+    )
+    research = run_sma_backtest(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4, "SMA_FILTER_GAP_MIN_RATIO": 0.0, "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE candles(ts INTEGER, pair TEXT, interval TEXT, close REAL)")
+    for candle in candles:
+        conn.execute(
+            "INSERT INTO candles(ts, pair, interval, close) VALUES (?, ?, ?, ?)",
+            (candle.ts, "KRW-BTC", "1m", candle.close),
+        )
+    conn.commit()
+    strategy = create_sma_with_filter_strategy(
+        short_n=2,
+        long_n=4,
+        pair="KRW-BTC",
+        interval="1m",
+        min_gap_ratio=0.0,
+        volatility_window=1,
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        cost_edge_enabled=False,
+        market_regime_enabled=False,
+        exit_rule_names=["opposite_cross", "max_holding_time"],
+    )
+    selected_research_decision = dict(research.decisions[1])
+    runtime_decisions = export_runtime_replay_decisions(
+        conn=conn,
+        strategy=strategy,
+        through_ts_list=[selected_research_decision["candle_ts"]],
+        market="KRW-BTC",
+        interval="1m",
+        profile_content_hash="sha256:profile",
+        dataset_content_hash="sha256:data",
+        db_data_fingerprint="sha256:data",
+        execution_timing_policy_hash="sha256:timing",
+    )
+    research_decisions = export_research_decisions(
+        [selected_research_decision],
+        profile_content_hash="sha256:profile",
+        dataset_content_hash="sha256:data",
+        execution_timing_policy_hash="sha256:timing",
+    )
+
+    result = compare_decision_equivalence(
+        research_decisions=research_decisions,
+        runtime_decisions=runtime_decisions,
+        profile_hash="sha256:profile",
+        market="KRW-BTC",
+        interval="1m",
+        data_fingerprint="sha256:data",
+    )
+
+    assert runtime_decisions
+    assert result.ok is False
+    assert result.report["promotion_grade_comparison"] is False or result.report["mismatch_count"] > 0
 
 
 def test_fixed_bps_execution_model_preserves_legacy_backtest_metrics() -> None:

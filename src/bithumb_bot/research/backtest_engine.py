@@ -11,6 +11,7 @@ from bithumb_bot.market_regime import (
     classify_market_regime,
 )
 from bithumb_bot.market_regime.thresholds import MarketRegimeThresholds
+from bithumb_bot.canonical_decision import canonical_payload_hash
 
 from .dataset_snapshot import DatasetSnapshot
 from .execution_model import ExecutionFill, ExecutionModel, ExecutionRequest, FixedBpsExecutionModel, model_params_hash
@@ -38,6 +39,7 @@ class BacktestRun:
     regime_performance: tuple[RegimePerformanceRow, ...] = ()
     regime_coverage: tuple[RegimeCoverageRow, ...] = ()
     execution_event_summary: dict[str, object] | None = None
+    decisions: tuple[dict[str, object], ...] = ()
 
 
 @dataclass
@@ -107,6 +109,7 @@ def run_sma_backtest(
     slippage_total = 0.0
     trades: list[dict[str, object]] = []
     pending_fills: list[_PendingFill] = []
+    decisions: list[dict[str, object]] = []
     closed_pnls: list[float] = []
     prev_above: bool | None = None
     model = execution_model or FixedBpsExecutionModel(fee_rate=fee_rate, slippage_bps=slippage_bps)
@@ -165,14 +168,56 @@ def run_sma_backtest(
         regime_snapshots.append(regime_snapshot)
 
         action = "HOLD"
+        raw_signal = "HOLD"
+        raw_reason = "sma no crossover"
         pending_buy_qty = sum(item.qty for item in pending_fills if item.side == "BUY")
         pending_sell_qty = sum(item.qty for item in pending_fills if item.side == "SELL")
         sellable_qty = max(0.0, qty - pending_sell_qty)
-        if gap_ratio >= min_gap and range_ratio >= min_range and prev_above is not None:
-            if not prev_above and above and qty <= 0.0 and pending_buy_qty <= 0.0:
+        filter_blocked = False
+        blocked_filters: list[str] = []
+        if prev_above is not None:
+            if not prev_above and above:
+                raw_signal = "BUY"
+                raw_reason = "sma golden cross"
+            elif prev_above and not above:
+                raw_signal = "SELL"
+                raw_reason = "sma dead cross"
+        if raw_signal in {"BUY", "SELL"} and gap_ratio < min_gap:
+            filter_blocked = True
+            blocked_filters.append("gap")
+        if raw_signal in {"BUY", "SELL"} and range_ratio < min_range:
+            filter_blocked = True
+            blocked_filters.append("volatility")
+        if not filter_blocked and prev_above is not None:
+            if raw_signal == "BUY" and qty <= 0.0 and pending_buy_qty <= 0.0:
                 action = "BUY"
-            elif prev_above and not above and sellable_qty > 0.0:
+            elif raw_signal == "SELL" and sellable_qty > 0.0:
                 action = "SELL"
+        decisions.append(
+            _research_decision_payload(
+                dataset=dataset,
+                parameter_values=parameter_values,
+                fee_rate=fee_rate,
+                slippage_bps=slippage_bps,
+                timing_policy=timing_policy,
+                candle_ts=int(candle.ts),
+                decision_ts=int(decision_boundary_ts),
+                raw_signal=raw_signal,
+                final_signal=action,
+                raw_reason=raw_reason,
+                blocked=bool(raw_signal in {"BUY", "SELL"} and action == "HOLD"),
+                blocked_filters=blocked_filters,
+                prev_s=prev_short,
+                prev_l=prev_long,
+                curr_s=curr_short,
+                curr_l=curr_long,
+                gap_ratio=gap_ratio,
+                range_ratio=range_ratio,
+                regime_snapshot=regime_snapshot,
+                qty=qty,
+                sellable_qty=sellable_qty,
+            )
+        )
 
         if action == "BUY":
             signal = build_signal_event(
@@ -399,6 +444,7 @@ def run_sma_backtest(
         regime_performance=performance,
         regime_coverage=coverage,
         execution_event_summary=execution_summary,
+        decisions=tuple(decisions),
     )
 
 
@@ -516,6 +562,108 @@ def _feature_snapshot(
         "gap_ratio": float(gap_ratio),
         "range_ratio": float(range_ratio),
         "candle_index": int(index),
+    }
+
+
+def _research_decision_payload(
+    *,
+    dataset: DatasetSnapshot,
+    parameter_values: dict[str, Any],
+    fee_rate: float,
+    slippage_bps: float,
+    timing_policy: ExecutionTimingPolicy,
+    candle_ts: int,
+    decision_ts: int,
+    raw_signal: str,
+    final_signal: str,
+    raw_reason: str,
+    blocked: bool,
+    blocked_filters: list[str],
+    prev_s: float,
+    prev_l: float,
+    curr_s: float,
+    curr_l: float,
+    gap_ratio: float,
+    range_ratio: float,
+    regime_snapshot: dict[str, object],
+    qty: float,
+    sellable_qty: float,
+) -> dict[str, object]:
+    position_state = {
+        "research_position_model": "cash_qty_simulation_v1",
+        "qty": float(qty),
+        "sellable_qty": float(sellable_qty),
+    }
+    order_rules = {
+        "source": "research_execution_model",
+        "fee_rate": float(fee_rate),
+        "slippage_bps": float(slippage_bps),
+        "sizing": "cash_fraction_0.99_or_full_sellable_qty",
+    }
+    return {
+        "strategy_name": "sma_with_filter",
+        "market": dataset.market,
+        "interval": dataset.interval,
+        "signal_timestamp": str(candle_ts),
+        "candle_ts": int(candle_ts),
+        "through_ts_ms": int(candle_ts),
+        "candle_basis": "research_closed_candle",
+        "decision_ts": int(decision_ts),
+        "raw_signal": raw_signal,
+        "final_signal": final_signal,
+        "side": final_signal,
+        "blocked": bool(blocked),
+        "block_reason": f"filtered entry: {', '.join(blocked_filters)}" if blocked_filters else (raw_reason if blocked else ""),
+        "blocked_filters": tuple(blocked_filters),
+        "prev_s": float(prev_s),
+        "prev_l": float(prev_l),
+        "curr_s": float(curr_s),
+        "curr_l": float(curr_l),
+        "feature_hash": canonical_payload_hash(
+            {
+                "prev_s": prev_s,
+                "prev_l": prev_l,
+                "curr_s": curr_s,
+                "curr_l": curr_l,
+                "gap_ratio": gap_ratio,
+                "range_ratio": range_ratio,
+            }
+        ),
+        "gap_ratio": float(gap_ratio),
+        "range_ratio": float(range_ratio),
+        "expected_edge_ratio": float(gap_ratio),
+        "required_edge_ratio": float(
+            parameter_values.get(
+                "SMA_FILTER_GAP_MIN_RATIO",
+                parameter_values.get("strategy_min_expected_edge_ratio", 0.0),
+            )
+        ),
+        "fee_authority_hash": canonical_payload_hash({"source": "research_manifest", "fee_rate": float(fee_rate)}),
+        "fee_model_hash": canonical_payload_hash({"fee_rate": float(fee_rate)}),
+        "slippage_model_hash": canonical_payload_hash({"slippage_bps": float(slippage_bps)}),
+        "order_rules_hash": canonical_payload_hash(order_rules),
+        "market_regime": str(regime_snapshot.get("composite_regime") or ""),
+        "regime_decision": "allowed",
+        "regime_block_reason": "",
+        "position_state_hash": canonical_payload_hash(position_state),
+        "entry_allowed": bool(qty <= 0.0),
+        "exit_allowed": bool(sellable_qty > 0.0),
+        "dust_state": "research_not_modeled",
+        "effective_flat": bool(qty <= 0.0),
+        "normalized_exposure_active": bool(qty > 0.0),
+        "exit_rule": "opposite_cross" if final_signal == "SELL" and raw_signal == "SELL" else "",
+        "exit_reason": "exit by opposite cross" if final_signal == "SELL" and raw_signal == "SELL" else "",
+        "exit_evaluations_hash": canonical_payload_hash(
+            {"raw_signal": raw_signal, "final_signal": final_signal, "position_qty": float(qty)}
+        ),
+        "execution_timing_policy_hash": canonical_payload_hash(timing_policy.as_dict()),
+        "replay_fingerprint_hash": canonical_payload_hash(
+            {
+                "dataset_content_hash": dataset.content_hash(),
+                "parameter_values": parameter_values,
+                "candle_ts": int(candle_ts),
+            }
+        ),
     }
 
 

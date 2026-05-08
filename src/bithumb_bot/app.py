@@ -162,6 +162,8 @@ from .profile_cli import (
     cmd_profile_generate,
     cmd_profile_promote,
     cmd_profile_verify,
+    cmd_research_export_decisions,
+    cmd_runtime_replay_decisions,
 )
 from .storage_io import write_json_atomic
 from .bootstrap import get_last_explicit_env_load_summary
@@ -7239,6 +7241,26 @@ def main(argv: list[str] | None = None) -> int:
     decision_equivalence.add_argument("--interval", required=True)
     decision_equivalence.add_argument("--data-fingerprint", required=True)
 
+    research_export_decisions = sub.add_parser(
+        "research-export-decisions",
+        help="export repo-generated canonical research decisions for a manifest candidate",
+        description="Generate canonical research decision evidence from the repository research path.",
+    )
+    research_export_decisions.add_argument("--manifest", required=True)
+    research_export_decisions.add_argument("--candidate-id", required=True)
+    research_export_decisions.add_argument("--split", default="validation")
+    research_export_decisions.add_argument("--out", required=True)
+
+    runtime_replay_decisions = sub.add_parser(
+        "runtime-replay-decisions",
+        help="replay runtime SMA decisions at explicit closed-candle timestamps",
+        description="Read-only runtime decision replay from SQLite; does not call live broker APIs or submit orders.",
+    )
+    runtime_replay_decisions.add_argument("--profile", required=True)
+    runtime_replay_decisions.add_argument("--db", required=True)
+    runtime_replay_decisions.add_argument("--through-ts-list", required=True)
+    runtime_replay_decisions.add_argument("--out", required=True)
+
     cash_drift_report = sub.add_parser(
         "cash-drift-report",
         help="audit broker cash versus local ledger and recent external cash adjustments",
@@ -7585,6 +7607,20 @@ def main(argv: list[str] | None = None) -> int:
             market=str(args.market),
             interval=str(args.interval),
             data_fingerprint=str(args.data_fingerprint),
+        )
+    elif args.cmd == "research-export-decisions":
+        return cmd_research_export_decisions(
+            manifest_path=str(args.manifest),
+            candidate_id_value=str(args.candidate_id),
+            split=str(args.split),
+            out_path=str(args.out),
+        )
+    elif args.cmd == "runtime-replay-decisions":
+        return cmd_runtime_replay_decisions(
+            profile_path=str(args.profile),
+            db_path=str(args.db),
+            through_ts_list_path=str(args.through_ts_list),
+            out_path=str(args.out),
         )
     elif args.cmd == "cash-drift-report":
         cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))

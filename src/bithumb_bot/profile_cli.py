@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .canonical_decision import export_runtime_replay_decisions
 from .approved_profile import (
     ApprovedProfileError,
     build_approved_profile,
@@ -19,7 +22,14 @@ from .approved_profile import (
 from .config import PATH_MANAGER, settings
 from .evidence_chain import evidence_report_failure_payload
 from .decision_equivalence import compare_decision_equivalence, load_decision_list
+from .research.dataset_snapshot import load_dataset_split
+from .research.experiment_manifest import load_manifest
+from .research.hashing import content_hash_payload, sha256_prefixed
+from .research.parameter_space import candidate_id, iter_parameter_candidates
 from .research.promotion_gate import PromotionGateError
+from .research.strategy_registry import resolve_research_strategy
+from .storage_io import write_json_atomic
+from .strategy.sma import create_sma_with_filter_strategy
 
 
 def _load_json(path: str) -> dict[str, object]:
@@ -215,3 +225,193 @@ def cmd_decision_equivalence(
         return 1
     _print_json({"command": "decision-equivalence", **result.report})
     return 0 if result.ok else 1
+
+
+def cmd_research_export_decisions(
+    *,
+    manifest_path: str,
+    candidate_id_value: str,
+    split: str,
+    out_path: str,
+) -> int:
+    try:
+        manifest = load_manifest(manifest_path)
+        snapshot = load_dataset_split(db_path=settings.DB_PATH, manifest=manifest, split_name=split)
+        params = _candidate_params_from_manifest(manifest, candidate_id_value)
+        scenario = manifest.execution_model.scenarios[0]
+        run = resolve_research_strategy(manifest.strategy_name)(
+            snapshot,
+            params,
+            float(scenario.fee_rate),
+            float(scenario.slippage_bps),
+            None,
+            None,
+            manifest.execution_timing,
+        )
+        profile_hash = sha256_prefixed(
+            {
+                "strategy_name": manifest.strategy_name,
+                "candidate_id": candidate_id_value,
+                "parameter_values": params,
+                "market": manifest.market,
+                "interval": manifest.interval,
+                "dataset_content_hash": snapshot.content_hash(),
+            }
+        )
+        decisions = [
+            {
+                **item,
+                "profile_content_hash": profile_hash,
+                "dataset_content_hash": snapshot.content_hash(),
+                "db_data_fingerprint": snapshot.content_hash(),
+            }
+            for item in run.decisions
+        ]
+        payload = _decision_export_payload(
+            source="research",
+            profile_content_hash=profile_hash,
+            data_fingerprint=snapshot.content_hash(),
+            market=manifest.market,
+            interval=manifest.interval,
+            decisions=decisions,
+        )
+        write_json_atomic(Path(out_path).expanduser(), payload)
+    except (OSError, ValueError) as exc:
+        _print_json({"ok": False, "error": str(exc), "command": "research-export-decisions"})
+        return 1
+    _print_json(
+        {
+            "ok": True,
+            "command": "research-export-decisions",
+            "out": str(Path(out_path).expanduser()),
+            "decision_count": len(decisions),
+            "content_hash": payload["content_hash"],
+        }
+    )
+    return 0
+
+
+def cmd_runtime_replay_decisions(
+    *,
+    profile_path: str,
+    db_path: str,
+    through_ts_list_path: str,
+    out_path: str,
+) -> int:
+    try:
+        profile = load_approved_profile(profile_path)
+        params = profile.get("strategy_parameters") if isinstance(profile.get("strategy_parameters"), dict) else {}
+        cost = profile.get("cost_model") if isinstance(profile.get("cost_model"), dict) else {}
+        through_ts_list = _load_through_ts_list(through_ts_list_path)
+        strategy = create_sma_with_filter_strategy(
+            short_n=int(params.get("SMA_SHORT", settings.SMA_SHORT)),
+            long_n=int(params.get("SMA_LONG", settings.SMA_LONG)),
+            pair=str(profile.get("market") or settings.PAIR),
+            interval=str(profile.get("interval") or settings.INTERVAL),
+            min_gap_ratio=float(params.get("SMA_FILTER_GAP_MIN_RATIO", settings.SMA_FILTER_GAP_MIN_RATIO)),
+            volatility_window=int(params.get("SMA_FILTER_VOL_WINDOW", settings.SMA_FILTER_VOL_WINDOW)),
+            min_volatility_ratio=float(params.get("SMA_FILTER_VOL_MIN_RANGE_RATIO", settings.SMA_FILTER_VOL_MIN_RANGE_RATIO)),
+            overextended_lookback=int(params.get("SMA_FILTER_OVEREXT_LOOKBACK", settings.SMA_FILTER_OVEREXT_LOOKBACK)),
+            overextended_max_return_ratio=float(params.get("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO)),
+            cost_edge_enabled=_coerce_bool(params.get("SMA_COST_EDGE_ENABLED", settings.SMA_COST_EDGE_ENABLED)),
+            cost_edge_min_ratio=float(params.get("SMA_COST_EDGE_MIN_RATIO", settings.SMA_COST_EDGE_MIN_RATIO)),
+            entry_edge_buffer_ratio=float(params.get("ENTRY_EDGE_BUFFER_RATIO", settings.ENTRY_EDGE_BUFFER_RATIO)),
+            slippage_bps=float(cost.get("slippage_bps", settings.STRATEGY_ENTRY_SLIPPAGE_BPS)),
+            live_fee_rate_estimate=float(cost.get("fee_rate", settings.LIVE_FEE_RATE_ESTIMATE)),
+            exit_rule_names=str(params.get("STRATEGY_EXIT_RULES", settings.STRATEGY_EXIT_RULES)).split(","),
+            exit_max_holding_min=int(params.get("STRATEGY_EXIT_MAX_HOLDING_MIN", settings.STRATEGY_EXIT_MAX_HOLDING_MIN)),
+            exit_min_take_profit_ratio=float(params.get("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO)),
+            exit_small_loss_tolerance_ratio=float(params.get("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO", settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO)),
+            candidate_regime_policy={"strategy_profile_hash": profile.get("profile_content_hash")},
+        )
+        db_fingerprint = sha256_prefixed({"db_path": str(Path(db_path).expanduser().resolve()), "through_ts": through_ts_list})
+        conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
+        try:
+            decisions = export_runtime_replay_decisions(
+                conn=conn,
+                strategy=strategy,
+                through_ts_list=through_ts_list,
+                market=str(profile.get("market") or settings.PAIR),
+                interval=str(profile.get("interval") or settings.INTERVAL),
+                profile_content_hash=str(profile.get("profile_content_hash") or ""),
+                dataset_content_hash=str(profile.get("dataset_content_hash") or ""),
+                db_data_fingerprint=db_fingerprint,
+                execution_timing_policy_hash=sha256_prefixed({"runtime_replay": "closed_candle_through_ts"}),
+            )
+        finally:
+            conn.close()
+        payload = _decision_export_payload(
+            source="runtime_replay",
+            profile_content_hash=str(profile.get("profile_content_hash") or ""),
+            data_fingerprint=db_fingerprint,
+            market=str(profile.get("market") or settings.PAIR),
+            interval=str(profile.get("interval") or settings.INTERVAL),
+            decisions=decisions,
+            db_data_fingerprint=db_fingerprint,
+        )
+        write_json_atomic(Path(out_path).expanduser(), payload)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        _print_json({"ok": False, "error": str(exc), "command": "runtime-replay-decisions"})
+        return 1
+    _print_json(
+        {
+            "ok": True,
+            "command": "runtime-replay-decisions",
+            "out": str(Path(out_path).expanduser()),
+            "decision_count": len(decisions),
+            "content_hash": payload["content_hash"],
+        }
+    )
+    return 0
+
+
+def _candidate_params_from_manifest(manifest: object, wanted_candidate_id: str) -> dict[str, object]:
+    for index, params in enumerate(iter_parameter_candidates(manifest.parameter_space)):  # type: ignore[attr-defined]
+        if candidate_id(params, index) == wanted_candidate_id:
+            return dict(params)
+    raise ValueError("candidate_id_not_found")
+
+
+def _load_through_ts_list(path: str) -> list[int]:
+    with Path(path).expanduser().open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if isinstance(payload, dict):
+        payload = payload.get("through_ts_list")
+    if not isinstance(payload, list):
+        raise ValueError("through_ts_list_not_list")
+    return [int(item) for item in payload]
+
+
+def _decision_export_payload(
+    *,
+    source: str,
+    profile_content_hash: str,
+    data_fingerprint: str,
+    market: str,
+    interval: str,
+    decisions: list[dict[str, object]],
+    db_data_fingerprint: str = "",
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "decision_contract_version": 1,
+        "source": source,
+        "profile_content_hash": profile_content_hash,
+        "dataset_content_hash": data_fingerprint,
+        "db_data_fingerprint": db_data_fingerprint,
+        "market": market,
+        "interval": interval,
+        "decision_count": len(decisions),
+        "decisions": decisions,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    payload["content_hash"] = sha256_prefixed(
+        content_hash_payload({key: value for key, value in payload.items() if key not in {"content_hash", "generated_at"}})
+    )
+    return payload
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}

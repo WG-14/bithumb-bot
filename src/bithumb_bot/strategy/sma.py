@@ -23,6 +23,7 @@ from ..lifecycle import (
     summarize_position_lots,
 )
 from ..broker.order_rules import get_effective_order_rules
+from ..canonical_decision import order_rules_snapshot_payload
 from ..decision_contract import apply_decision_contract, build_replay_fingerprint
 from ..fee_authority import (
     FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
@@ -215,7 +216,11 @@ def _build_position_state_context(position_state: PositionStateModel) -> dict[st
     }
 
 
-def _build_position_gate_context(exposure: NormalizedExposure) -> dict[str, Any]:
+def _build_position_gate_context(
+    exposure: NormalizedExposure,
+    *,
+    order_rules: dict[str, object] | None = None,
+) -> dict[str, Any]:
     return {
         "raw_qty_open": float(exposure.raw_qty_open),
         "raw_total_asset_qty": float(exposure.raw_total_asset_qty),
@@ -245,6 +250,7 @@ def _build_position_gate_context(exposure: NormalizedExposure) -> dict[str, Any]
         "dust_new_orders_allowed": bool(exposure.dust_operator_view.new_orders_allowed),
         "dust_resume_allowed": bool(exposure.dust_operator_view.resume_allowed),
         "dust_treat_as_flat": bool(exposure.dust_operator_view.treat_as_flat),
+        "order_rules": dict(order_rules or {}),
     }
 
 
@@ -319,10 +325,11 @@ def _load_position_context(
     signal_context: dict[str, Any],
     slippage_bps: float,
     entry_edge_buffer_ratio: float,
-) -> tuple[PositionContext, NormalizedExposure, PositionStateModel]:
+) -> tuple[PositionContext, NormalizedExposure, PositionStateModel, dict[str, object]]:
     dust_context = build_dust_display_context(_load_last_reconcile_metadata(conn))
     resolution = get_effective_order_rules(pair)
     rules = resolution.rules
+    order_rules_snapshot = order_rules_snapshot_payload(resolution, pair=pair)
     fee_authority = build_fee_authority_snapshot(resolution)
     reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=pair)
     try:
@@ -410,6 +417,7 @@ def _load_position_context(
             ),
             exposure,
             position_state,
+            order_rules_snapshot,
         )
 
     entry_ts = int(row[0])
@@ -492,6 +500,7 @@ def _load_position_context(
         ),
         exposure,
         position_state,
+        order_rules_snapshot,
     )
 
 
@@ -528,7 +537,11 @@ def _apply_entry_exit_policy(
                 entry_block_reason = str(entry.get("entry_reason") or context.get("reason") or "").strip() or None
             else:
                 entry_block_reason = str(final_reason or "").strip() or None
-        context["position_gate"] = _build_position_gate_context(position_state.normalized_exposure)
+        order_rules = context.get("order_rules") if isinstance(context.get("order_rules"), dict) else {}
+        context["position_gate"] = _build_position_gate_context(
+            position_state.normalized_exposure,
+            order_rules=order_rules,
+        )
         context["position_state"] = _build_position_state_context(position_state)
         normalized_state = context["position_state"]["normalized_exposure"]
         state_interpretation = context["position_state"]["state_interpretation"]
@@ -786,7 +799,7 @@ class SmaCrossStrategy:
             "curr_s": curr_s,
             "curr_l": curr_l,
         }
-        position, exposure, position_state = _load_position_context(
+        position, exposure, position_state, order_rules_snapshot = _load_position_context(
             conn,
             pair=self.pair,
             candle_ts=ts_list[-1],
@@ -837,7 +850,11 @@ class SmaCrossStrategy:
                 buy_fraction=float(self.buy_fraction),
                 max_order_krw=float(self.max_order_krw),
             ),
-            "position_gate": _build_position_gate_context(position_state.normalized_exposure),
+            "order_rules": order_rules_snapshot,
+            "position_gate": _build_position_gate_context(
+                position_state.normalized_exposure,
+                order_rules=order_rules_snapshot,
+            ),
             "position_state": _build_position_state_context(position_state),
             "filters": {
                 "cost_edge": {
@@ -1036,7 +1053,7 @@ class SmaWithFilterStrategy:
             "curr_s": curr_s,
             "curr_l": curr_l,
         }
-        position, exposure, position_state = _load_position_context(
+        position, exposure, position_state, order_rules_snapshot = _load_position_context(
             conn,
             pair=self.pair,
             candle_ts=ts_list[-1],
@@ -1215,7 +1232,11 @@ class SmaWithFilterStrategy:
             "regime_policy_source": candidate_regime_decision.get("regime_policy_source"),
             "regime_policy_present": bool(candidate_regime_decision.get("regime_policy_present")),
             "regime_policy_valid": bool(candidate_regime_decision.get("regime_policy_valid")),
-            "position_gate": _build_position_gate_context(position_state.normalized_exposure),
+            "order_rules": order_rules_snapshot,
+            "position_gate": _build_position_gate_context(
+                position_state.normalized_exposure,
+                order_rules=order_rules_snapshot,
+            ),
             "position_state": _build_position_state_context(position_state),
             "fee_authority": _fee_authority_context(fee_authority),
             "filters": {

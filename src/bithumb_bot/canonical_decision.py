@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +58,32 @@ CANONICAL_DECISION_SCHEMA_FIELDS = (
     "execution_timing_policy_hash",
     "replay_fingerprint_hash",
 )
+PROMOTION_REQUIRED_CANONICAL_FIELDS = (
+    "decision_contract_version",
+    "strategy_contract_version",
+    "strategy_name",
+    "profile_content_hash",
+    "market",
+    "interval",
+    "candle_basis",
+    "raw_signal",
+    "final_signal",
+    "side",
+    "blocked",
+    "fee_model_hash",
+    "slippage_model_hash",
+    "order_rules_hash",
+    "position_state_hash",
+    "entry_allowed",
+    "exit_allowed",
+    "dust_state",
+    "effective_flat",
+    "normalized_exposure_active",
+    "exit_evaluations_hash",
+    "execution_timing_policy_hash",
+)
+PROMOTION_REQUIRED_ONE_OF_CANONICAL_FIELDS = (("signal_timestamp", "candle_ts"),)
+EMPTY_ORDER_RULES_HASH = sha256_prefixed({})
 
 
 @dataclass(frozen=True)
@@ -65,6 +92,17 @@ class CanonicalDecisionEvent:
 
     def as_dict(self) -> dict[str, Any]:
         return dict(self.payload)
+
+
+@dataclass(frozen=True)
+class CanonicalDecisionValidation:
+    canonical_schema_present: bool
+    canonical_schema_complete: bool
+    promotion_grade: bool
+    legacy_shallow_decision: bool
+    incomplete_canonical_decision: bool
+    missing_fields: tuple[str, ...]
+    reason_codes: tuple[str, ...]
 
 
 def canonical_payload_hash(value: object) -> str:
@@ -91,6 +129,56 @@ def is_canonical_decision(payload: dict[str, Any]) -> bool:
     return int(payload.get("decision_contract_version") or 0) >= CANONICAL_DECISION_CONTRACT_VERSION
 
 
+def validate_canonical_decision_payload(
+    payload: dict[str, Any],
+    *,
+    promotion_grade: bool = True,
+) -> CanonicalDecisionValidation:
+    schema_present = is_canonical_decision(payload)
+    if not schema_present:
+        return CanonicalDecisionValidation(
+            canonical_schema_present=False,
+            canonical_schema_complete=False,
+            promotion_grade=False,
+            legacy_shallow_decision=True,
+            incomplete_canonical_decision=False,
+            missing_fields=(),
+            reason_codes=("canonical_decision_legacy_schema",),
+        )
+    normalized = normalize_canonical_decision(payload)
+    missing: list[str] = []
+    for field in PROMOTION_REQUIRED_CANONICAL_FIELDS:
+        if _canonical_required_missing(normalized.get(field)):
+            missing.append(field)
+    for group in PROMOTION_REQUIRED_ONE_OF_CANONICAL_FIELDS:
+        if all(_canonical_required_missing(normalized.get(field)) for field in group):
+            missing.append("|".join(group))
+    reason_codes: list[str] = []
+    if missing:
+        reason_codes.extend(["canonical_decision_required_field_missing", "canonical_decision_incomplete"])
+    if str(normalized.get("order_rules_hash") or "").strip() == EMPTY_ORDER_RULES_HASH:
+        missing.append("order_rules_hash")
+        reason_codes.extend(
+            [
+                "canonical_decision_empty_order_rules_hash",
+                "canonical_decision_incomplete",
+            ]
+        )
+    complete = not missing
+    is_promotion_grade = bool(complete)
+    if promotion_grade and not is_promotion_grade:
+        reason_codes.append("canonical_decision_not_promotion_grade")
+    return CanonicalDecisionValidation(
+        canonical_schema_present=True,
+        canonical_schema_complete=complete,
+        promotion_grade=is_promotion_grade,
+        legacy_shallow_decision=False,
+        incomplete_canonical_decision=not complete,
+        missing_fields=tuple(sorted(set(missing))),
+        reason_codes=tuple(sorted(set(reason_codes))),
+    )
+
+
 def runtime_decision_to_canonical_event(
     decision: Any,
     *,
@@ -112,6 +200,7 @@ def runtime_decision_to_canonical_event(
     cost_edge = filters.get("cost_edge") if isinstance(filters.get("cost_edge"), dict) else {}
     exit_context = context.get("exit") if isinstance(context.get("exit"), dict) else {}
     position_gate = context.get("position_gate") if isinstance(context.get("position_gate"), dict) else {}
+    order_rules = position_gate.get("order_rules") or context.get("order_rules") or {}
     market_regime = context.get("market_regime") if isinstance(context.get("market_regime"), dict) else {}
     fee_authority = context.get("fee_authority") if isinstance(context.get("fee_authority"), dict) else {}
     blocked_filters = tuple(str(item) for item in context.get("blocked_filters") or ())
@@ -156,7 +245,7 @@ def runtime_decision_to_canonical_event(
         "fee_authority_hash": canonical_payload_hash(fee_authority),
         "fee_model_hash": canonical_payload_hash({"fee_authority": fee_authority}),
         "slippage_model_hash": canonical_payload_hash(context.get("position_lot_interpretation_costs") or {}),
-        "order_rules_hash": canonical_payload_hash(position_gate.get("order_rules") or {}),
+        "order_rules_hash": canonical_payload_hash(order_rules),
         "market_regime": market_regime.get("composite_regime") or context.get("current_regime") or "",
         "regime_decision": context.get("regime_decision") or "",
         "regime_block_reason": context.get("regime_block_reason") or "",
@@ -273,6 +362,27 @@ def _canonical_field_value(field: str, value: object) -> object:
             return None
         return float(value)  # type: ignore[arg-type]
     return "" if value is None else str(value)
+
+
+def _canonical_required_missing(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) == 0
+    return str(value).strip() == ""
+
+
+def order_rules_snapshot_payload(resolution_or_rules: object, *, pair: str = "") -> dict[str, object]:
+    rules = getattr(resolution_or_rules, "rules", resolution_or_rules)
+    payload = asdict(rules) if hasattr(rules, "__dataclass_fields__") else dict(rules or {})  # type: ignore[arg-type]
+    source = getattr(resolution_or_rules, "source", None)
+    if isinstance(source, dict):
+        payload["rule_source"] = {str(key): str(value) for key, value in sorted(source.items())}
+    if pair:
+        payload["pair"] = str(pair)
+    return _stable_value(payload)  # type: ignore[return-value]
 
 
 def _stable_value(value: object) -> object:

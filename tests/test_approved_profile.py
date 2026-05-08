@@ -249,6 +249,7 @@ def _attach_decision_equivalence_report(
         "comparison_contract_version": "canonical_decision_v1",
         "canonical_schema": True,
         "legacy_schema": False,
+        "promotion_grade_comparison": True,
         "ok": True,
         "reason_codes": [],
         "profile_content_hash": profile["profile_content_hash"],
@@ -267,6 +268,9 @@ def _attach_decision_equivalence_report(
         "missing_research_decisions": [],
         "missing_runtime_decisions": [],
         "mismatches": [],
+        "canonical_incomplete_decision_count": 0,
+        "canonical_missing_field_count": 0,
+        "canonical_missing_fields_by_decision": {},
         "recommended_next_action": "none",
         "generated_at": "2026-05-03T00:00:00+00:00",
     }
@@ -1264,6 +1268,14 @@ def test_profile_promote_fails_when_decision_equivalence_mismatch_count_nonzero(
                 "legacy_schema": True,
             },
             "paper_validation_evidence_decision_equivalence_legacy_schema",
+        ),
+        (
+            {"promotion_grade_comparison": False},
+            "paper_validation_evidence_decision_equivalence_not_promotion_grade",
+        ),
+        (
+            {"canonical_incomplete_decision_count": 1},
+            "paper_validation_evidence_decision_equivalence_incomplete_canonical",
         ),
     ],
 )

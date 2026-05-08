@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .canonical_decision import CANONICAL_DECISION_SCHEMA_FIELDS, is_canonical_decision, normalize_canonical_decision
+from .canonical_decision import (
+    CANONICAL_DECISION_SCHEMA_FIELDS,
+    is_canonical_decision,
+    normalize_canonical_decision,
+    validate_canonical_decision_payload,
+)
 from .research.hashing import content_hash_payload, sha256_prefixed
 
 
@@ -66,6 +71,20 @@ def compare_decision_equivalence(
     )
     normalized_research = [_normalize_for_comparison(item, canonical=canonical_comparison) for item in research_decisions]
     normalized_runtime = [_normalize_for_comparison(item, canonical=canonical_comparison) for item in runtime_decisions]
+    canonical_validation_items = _canonical_validation_items(
+        research_decisions=research_decisions,
+        runtime_decisions=runtime_decisions,
+        canonical=canonical_comparison,
+    )
+    binding_items = _binding_validation_items(
+        research_decisions=normalized_research,
+        runtime_decisions=normalized_runtime,
+        canonical=canonical_comparison,
+        profile_hash=profile_hash,
+        market=market,
+        interval=interval,
+        data_fingerprint=data_fingerprint,
+    )
     research_by_key = {_decision_key(item): item for item in normalized_research}
     runtime_by_key = {_decision_key(item): item for item in normalized_runtime}
     mismatch_items: list[dict[str, object]] = []
@@ -108,12 +127,24 @@ def compare_decision_equivalence(
         reason_codes.append("missing_runtime_decision")
     for item in mismatch_items:
         reason_codes.extend(_field_reasons(item))
+    for item in canonical_validation_items + binding_items:
+        reason_codes.extend(str(code) for code in item.get("reason_codes") or [item.get("reason_code")])
     exact_mismatch_count = sum(1 for item in mismatch_items if not item.get("diagnostic_only"))
+    canonical_missing_fields_by_decision = {
+        str(item["decision_key"]): list(item.get("missing_fields") or ())
+        for item in canonical_validation_items
+        if item.get("missing_fields")
+    }
+    canonical_incomplete_decision_count = len(
+        [item for item in canonical_validation_items if item.get("incomplete_canonical_decision")]
+    )
+    promotion_grade_comparison = bool(canonical_comparison and canonical_incomplete_decision_count == 0 and not binding_items)
     report: dict[str, Any] = {
         "schema_version": DECISION_EQUIVALENCE_SCHEMA_VERSION,
         "comparison_contract_version": comparison_contract_version,
         "canonical_schema": canonical_comparison,
         "legacy_schema": not canonical_comparison,
+        "promotion_grade_comparison": promotion_grade_comparison,
         "ok": not reason_codes,
         "reason_codes": sorted(set(reason_codes)),
         "profile_content_hash": profile_hash,
@@ -129,6 +160,11 @@ def compare_decision_equivalence(
         "missing_research_decisions": missing_research,
         "missing_runtime_decisions": missing_runtime,
         "mismatches": mismatch_items,
+        "canonical_missing_field_count": sum(len(fields) for fields in canonical_missing_fields_by_decision.values()),
+        "canonical_missing_fields_by_decision": canonical_missing_fields_by_decision,
+        "canonical_incomplete_decision_count": canonical_incomplete_decision_count,
+        "canonical_validation": canonical_validation_items,
+        "binding_validation": binding_items,
         "recommended_next_action": _recommended_next_action(
             reason_codes=sorted(set(reason_codes)),
             canonical_comparison=canonical_comparison,
@@ -178,6 +214,92 @@ def _normalize_for_comparison(item: dict[str, Any], *, canonical: bool) -> dict[
     if canonical:
         return normalize_canonical_decision(item)
     return dict(item)
+
+
+def _canonical_validation_items(
+    *,
+    research_decisions: list[dict[str, Any]],
+    runtime_decisions: list[dict[str, Any]],
+    canonical: bool,
+) -> list[dict[str, object]]:
+    if not canonical:
+        return [
+            {
+                "decision_key": _decision_key(dict(item)),
+                "source": source,
+                "legacy_shallow_decision": True,
+                "incomplete_canonical_decision": False,
+                "missing_fields": [],
+                "reason_codes": ["canonical_decision_legacy_schema"],
+            }
+            for source, decisions in (("research", research_decisions), ("runtime", runtime_decisions))
+            for item in decisions
+        ]
+    out: list[dict[str, object]] = []
+    for source, decisions in (("research", research_decisions), ("runtime", runtime_decisions)):
+        for item in decisions:
+            result = validate_canonical_decision_payload(item, promotion_grade=True)
+            if result.reason_codes:
+                out.append(
+                    {
+                        "decision_key": _decision_key(normalize_canonical_decision(item)),
+                        "source": source,
+                        "canonical_schema_present": result.canonical_schema_present,
+                        "canonical_schema_complete": result.canonical_schema_complete,
+                        "promotion_grade": result.promotion_grade,
+                        "legacy_shallow_decision": result.legacy_shallow_decision,
+                        "incomplete_canonical_decision": result.incomplete_canonical_decision,
+                        "missing_fields": list(result.missing_fields),
+                        "reason_codes": list(result.reason_codes),
+                    }
+                )
+    return out
+
+
+def _binding_validation_items(
+    *,
+    research_decisions: list[dict[str, Any]],
+    runtime_decisions: list[dict[str, Any]],
+    canonical: bool,
+    profile_hash: str,
+    market: str,
+    interval: str,
+    data_fingerprint: str,
+) -> list[dict[str, object]]:
+    if not canonical:
+        return []
+    out: list[dict[str, object]] = []
+    expected_profile = str(profile_hash or "").strip()
+    expected_market = str(market or "").strip()
+    expected_interval = str(interval or "").strip()
+    expected_data = str(data_fingerprint or "").strip()
+    for source, decisions in (("research", research_decisions), ("runtime", runtime_decisions)):
+        for item in decisions:
+            reasons: list[str] = []
+            if str(item.get("profile_content_hash") or "").strip() != expected_profile:
+                reasons.append("decision_profile_hash_not_bound_to_report")
+            if str(item.get("market") or "").strip() != expected_market:
+                reasons.append("decision_market_not_bound_to_report")
+            if str(item.get("interval") or "").strip() != expected_interval:
+                reasons.append("decision_interval_not_bound_to_report")
+            dataset_hash = str(item.get("dataset_content_hash") or "").strip()
+            db_fingerprint = str(item.get("db_data_fingerprint") or "").strip()
+            if expected_data and expected_data not in {dataset_hash, db_fingerprint}:
+                reasons.append("decision_data_fingerprint_not_bound_to_report")
+            if reasons:
+                out.append(
+                    {
+                        "decision_key": _decision_key(item),
+                        "source": source,
+                        "reason_codes": reasons,
+                        "profile_content_hash": item.get("profile_content_hash"),
+                        "market": item.get("market"),
+                        "interval": item.get("interval"),
+                        "dataset_content_hash": item.get("dataset_content_hash"),
+                        "db_data_fingerprint": item.get("db_data_fingerprint"),
+                    }
+                )
+    return out
 
 
 def _timestamp_only_diagnostics(
@@ -305,6 +427,12 @@ def _reason_for_field(field: str) -> str:
 def _recommended_next_action(*, reason_codes: list[str], canonical_comparison: bool) -> str:
     if not canonical_comparison:
         return "regenerate_decisions_with_canonical_schema_before_promotion"
+    if any(code.startswith("canonical_decision_") for code in reason_codes):
+        return "regenerate_decisions_with_canonical_schema_before_promotion"
+    if any(code.endswith("_not_bound_to_report") for code in reason_codes):
+        return "bind_decisions_to_requested_profile_market_interval_data_fingerprint"
+    if "decision_order_rules_mismatch" in reason_codes:
+        return "populate_runtime_order_rules_hash_before_replay"
     if not reason_codes:
         return "none"
     if "decision_timestamp_candle_basis_mismatch" in reason_codes:

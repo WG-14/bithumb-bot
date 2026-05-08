@@ -1,157 +1,257 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`. Your task is to verify and fix the research/runtime strategy-equivalence risk without weakening the core concern or reducing it to superficial patches. This task is based on the prior repository review and risk analysis: 
+You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
+
+Use the attached review notes as source context, but do not treat any claim as proven until you verify it against the current repository state:  
+
+Your task is to perform the next hardening pass on the research/runtime SMA strategy-equivalence system. The previous patch appears to have moved in the right direction by adding a canonical decision schema, strengthening decision equivalence, rejecting legacy shallow evidence for promotion, and clarifying the current exit-rule scope. However, the core concern is not fully closed: the repository may still lack a complete, repo-owned, promotion-grade loop that generates research decisions, replays runtime decisions, validates canonical decision completeness, binds decisions to the requested profile/market/interval/data fingerprint, and proves equivalence with tests.
+
+Do not turn this into general advice. Inspect, patch, and test the actual repository.
 
 ## Core problem to address
 
-Do not treat the current diagnosis as proven. Treat it as a set of hypotheses to validate or falsify in the repo.
+The structural risk is still this:
 
-The suspected structural issue is that SMA strategy semantics are not fixed as one executable contract. Instead, they appear to be distributed across:
+> Strategy semantics may remain distributed across research backtest logic, runtime strategy logic, canonical decision adapters, decision-equivalence comparison, and promotion evidence validation. If the repo can mark incomplete or manually prepared decision payloads as canonical, or if it cannot generate research/runtime decision lists internally, then “research-validated strategy” can still drift from “paper/live runtime strategy” while appearing validated.
 
-* runtime strategy logic: `src/bithumb_bot/strategy/sma.py`
-* runtime exit rules: `src/bithumb_bot/strategy/exit_rules.py`
-* research backtest logic: `src/bithumb_bot/research/backtest_engine.py`
-* research strategy routing: `src/bithumb_bot/research/strategy_registry.py`
-* decision equivalence comparison: `src/bithumb_bot/decision_equivalence.py`
-* profile / promotion / evidence flow: `src/bithumb_bot/profile_cli.py`, `src/bithumb_bot/approved_profile.py`
-* docs and tests around research validation, approved profiles, promotion, runtime strategy, and evidence
+A passing `pytest` run is not enough. The test suite must cover the failure modes that matter for this problem class.
 
-The practical risk is that “the strategy validated in research” and “the strategy actually used in paper/live runtime” can drift while still appearing to be validated. The fix must move the repo toward a more reproducible, auditable, and operable automated trading experiment system.
-
-Do not solve this by copying a few conditions from one file to another unless that is explicitly justified as a temporary compatibility adapter. Prefer design changes that prevent the entire class of research/runtime decision drift.
-
-## Initial hypotheses to validate or falsify
-
-Keep these as hypotheses until verified in code and tests.
-
-### Hypothesis 1: Research and runtime implement the same intended SMA strategy through different code paths, allowing decision drift
-
-Validate by inspecting whether `run_sma_backtest()` directly or indirectly reuses `SmaCrossStrategy.decide()` or a shared decision kernel. Check whether research decisions and runtime decisions can be generated from the same candles, same profile, same fee/slippage assumptions, same position state, and same timestamp basis.
-
-Falsify only if the repo already has a shared executable decision core or an automated equivalence pipeline that proves semantic equivalence across the relevant cases.
-
-### Hypothesis 2: The existing decision-equivalence comparator is too shallow for full strategy/safety equivalence
-
-Inspect `src/bithumb_bot/decision_equivalence.py`. Determine whether it compares all trade-affecting and safety-affecting semantics, including but not limited to:
-
-* candle basis / timestamp basis
-* raw signal and final signal
-* blocked filters and block reasons
-* edge/cost filter values
-* fee authority / fee model identity
-* order rules identity
-* regime decision
-* position gate
-* dust state
-* entry allowed / exit allowed
-* exit rule and exit reason
-* exit evaluations
-* approved profile hash
-* dataset/runtime DB fingerprint
-* execution timing policy hash
-
-Validate by writing synthetic mismatch tests that mutate only runtime-critical fields such as exit rule, dust state, position gate, fee authority, or regime decision. The comparator must fail if those fields affect trading or safety semantics.
-
-### Hypothesis 3: The profile/evidence chain exists, but research/runtime decision generation is not fully automated and closed
-
-Inspect `profile_cli.py`, `approved_profile.py`, `research/cli.py`, promotion gate code, docs, and tests. Determine whether the repo can generate canonical research decisions and canonical runtime replay decisions internally, or whether `cmd_decision_equivalence()` only compares externally prepared JSON lists.
-
-Validate the promotion flow from research backtest through candidate promotion, profile generation, paper validation, live-dry-run promotion, and small-live promotion.
-
-Falsify only if the repo already generates canonical decision lists from repo-owned commands and enforces a passing equivalence report as a promotion gate.
-
-### Hypothesis 4: Exit rule semantics differ between research and runtime
-
-Inspect `exit_rules.py` and `backtest_engine.py`.
-
-Specifically verify whether runtime has:
-
-* opposite SMA cross exit
-* max holding time exit
-* min take-profit floor
-* small-loss tolerance band
-
-Then verify whether research backtest applies the same semantics.
-
-Also verify whether hard stop-loss and take-profit rules such as `-1.5% stop loss` or `+3% take profit` actually exist. If they do not exist, do not pretend they exist. Either document that they are not implemented or implement explicit `StopLossExitRule` and `TakeProfitExitRule` only if the strategy/profile contract requires them.
-
-### Hypothesis 5: Candle boundary and timestamp semantics can cause off-by-one decisions
-
-Compare runtime closed-candle cutoff / `through_ts_ms` semantics against research `candle_close_ts`, decision guard, signal timestamp, decision timestamp, and execution timing policy.
-
-Validate with tests where the last candle is not safely closed, where `through_ts_ms` is between candle start and candle close, and where decision guard timing matters.
-
-### Hypothesis 6: Strategy scope is ambiguous across docs, profile parameters, runtime settings, and tests
-
-Inspect docs, approved profile fields, settings, manifests, examples, and strategy tests. Verify that every strategy-affecting rule in docs is present in code and profile contracts. Verify that missing rules are explicitly marked out of scope instead of implied.
-
-## Required design direction
-
-Prioritize a structural fix.
-
-The target architecture is:
-
-```text
-CandleSlice + StrategyProfile + FeeAuthoritySnapshot + PositionStateSnapshot
-+ RuntimeClock/CandleBasis + RegimeSnapshot
-        ↓
-Shared Decision Kernel or Canonical Decision Adapter
-        ↓
-CanonicalDecisionEvent
-        ↓
-research execution simulator OR runtime OMS
-```
-
-The shared decision layer does not need to know about broker APIs, live order lifecycle, or actual fill handling. It must determine the canonical strategy decision: BUY intent, SELL exit intent, HOLD, and the complete reason/blocking context.
-
-If introducing a full shared decision kernel is too invasive for one change, implement a concrete non-superficial first slice:
-
-1. Define a `CanonicalDecisionEvent` representation in repo code.
-2. Add adapters that export canonical decisions from runtime `SmaCrossStrategy.decide()` and from research backtest/replay logic.
-3. Extend decision equivalence to compare canonical strategy/safety semantics, not only side/block fields.
-4. Add golden equivalence tests that fail on known drift cases.
-5. Document remaining gaps and make promotion/evidence boundaries explicit.
-
-Do not leave the repo with only a prose recommendation.
-
-## Required implementation work
-
-### 1. Repository audit
+## Files to inspect first
 
 Inspect at minimum:
 
-* `src/bithumb_bot/strategy/sma.py`
-* `src/bithumb_bot/strategy/exit_rules.py`
-* `src/bithumb_bot/research/backtest_engine.py`
-* `src/bithumb_bot/research/strategy_registry.py`
-* `src/bithumb_bot/decision_equivalence.py`
-* `src/bithumb_bot/profile_cli.py`
-* `src/bithumb_bot/approved_profile.py`
-* `src/bithumb_bot/research/cli.py`
-* `docs/research-validation.md`
-* `docs/runbooks/research-to-paper.md`
-* tests covering research reproducibility, approved profile, SMA strategy, decision equivalence, promotion, evidence, and runtime strategy context
+```text
+src/bithumb_bot/canonical_decision.py
+src/bithumb_bot/decision_equivalence.py
+src/bithumb_bot/profile_cli.py
+src/bithumb_bot/approved_profile.py
+src/bithumb_bot/research/backtest_engine.py
+src/bithumb_bot/research/strategy_registry.py
+src/bithumb_bot/research/cli.py
+src/bithumb_bot/research/validation_protocol.py
+src/bithumb_bot/research/promotion_gate.py
+src/bithumb_bot/strategy/sma.py
+src/bithumb_bot/strategy/exit_rules.py
+docs/research-validation.md
+docs/runbooks/research-to-paper.md
+tests/test_canonical_decision.py
+tests/test_approved_profile.py
+tests/test_strategy_exit_rules.py
+tests/test_sma_with_filter_strategy.py
+tests/test_research_backtest_reproducibility.py
+tests/test_research_promotion_gate.py
+```
 
-Record precise findings in the final report. Do not assume the initial analysis is fully current.
+Also inspect any CLI dispatch code that wires `bithumb-bot` subcommands.
 
-### 2. Canonical decision schema
+## Hypotheses to validate or falsify
 
-Implement or extend a canonical decision schema that can represent both research and runtime strategy decisions.
+Keep these as hypotheses until verified in the current code.
 
-It must include, either as explicit fields or stable hashes:
+### H1. Canonical decision completeness is too weak
+
+The current code may classify a payload as canonical when it only has `decision_contract_version >= 1`. If so, `normalize_canonical_decision()` may fill missing semantic fields with `""`, `None`, or falsey values. Two incomplete decision lists could then compare equal and produce a passing canonical decision-equivalence report.
+
+Validate by inspecting `is_canonical_decision()`, `normalize_canonical_decision()`, and `compare_decision_equivalence()`.
+
+Falsify only if the repo already has a promotion-grade canonical validation path that fails on missing required semantic fields.
+
+### H2. Decision-equivalence may not bind each decision to the requested report-level profile, market, interval, and data fingerprint
+
+The comparator may compare research decisions to runtime decisions, but not verify that each decision payload is bound to the `profile_hash`, `market`, `interval`, and `data_fingerprint` passed into `compare_decision_equivalence()`.
+
+Validate by creating tests where research/runtime decisions agree with each other but both carry the wrong profile hash, market, interval, or data fingerprint.
+
+Falsify only if such cases already fail with explicit reason codes.
+
+### H3. `order_rules_hash` may not reflect actual runtime order rules
+
+The runtime canonical adapter may compute `order_rules_hash` from `position_gate["order_rules"]`, while `strategy/sma.py` may not put order rules into `position_gate`. If true, runtime canonical decisions may use a hash of `{}` for order rules and fail to detect order-rule drift.
+
+Validate by inspecting `_build_position_gate_context()` and `runtime_decision_to_canonical_event()`.
+
+Falsify only if runtime canonical events already contain a non-empty, deterministic, actual order-rule hash or equivalent order-rule snapshot hash.
+
+### H4. Research backtest still does not directly emit canonical decisions
+
+`BacktestRun` may still contain metrics/trades/warnings/regime/execution summaries but no canonical decision list. If so, `export_research_decisions()` may only normalize externally prepared dicts instead of making research decision generation repo-owned and deterministic.
+
+Validate by inspecting `BacktestRun`, `run_sma_backtest()`, and validation protocol output artifacts.
+
+Falsify only if the research engine already records canonical-compatible decision events at signal boundaries.
+
+### H5. Repo-owned decision generation CLI is still incomplete
+
+`cmd_decision_equivalence()` may still only compare two JSON files. If there are no repo-owned commands for exporting research decisions and replaying runtime decisions, then operators still have to manually prepare JSON decision lists.
+
+Validate by inspecting `profile_cli.py`, `research/cli.py`, and CLI dispatch.
+
+Falsify only if commands equivalent to the following already exist and are tested:
+
+```bash
+bithumb-bot research-export-decisions ...
+bithumb-bot runtime-replay-decisions ...
+bithumb-bot decision-equivalence ...
+```
+
+### H6. Golden research/runtime equivalence tests are still missing
+
+Existing tests may be synthetic: one test builds a fake `StrategyDecision`, another normalizes a fake research dict. That is useful but not sufficient. The repo needs tests that run both the research decision path and the runtime replay path on the same candle/state/profile fixtures.
+
+Validate by inspecting tests.
+
+Falsify only if there are golden tests that execute both sides and compare canonical events across entry, blocked entry, exit, deferred exit, max holding, dust/position, and candle-boundary cases.
+
+### H7. Exit-rule scope is probably already sufficiently clarified, but verify it
+
+The previous patch appears to document and test that the current SMA runtime exit rules are exactly `opposite_cross` and `max_holding_time`, and that standalone `stop_loss` / `take_profit` are not implemented. Verify this remains true. Do not add stop-loss or take-profit unless the strategy/profile contract explicitly requires it.
+
+## Patch priorities
+
+### P0: Canonical validation and binding must be fail-closed
+
+Implement a validation layer for canonical decisions.
+
+Add a function such as:
+
+```python
+validate_canonical_decision_payload(
+    payload: dict[str, Any],
+    *,
+    promotion_grade: bool = True,
+) -> tuple[bool, list[str]]
+```
+
+or an equivalent dataclass result.
+
+It must distinguish:
+
+```text
+canonical schema present
+canonical schema complete
+promotion-grade canonical decision
+legacy shallow decision
+incomplete canonical decision
+```
+
+Do not treat `decision_contract_version=1` alone as promotion-grade canonical.
+
+For promotion-grade decision-equivalence, fail closed when required fields are missing or empty. Required fields should include at least:
 
 ```text
 decision_contract_version
 strategy_contract_version
 strategy_name
 profile_content_hash
-candidate_profile_hash where available
-dataset_content_hash or db_data_fingerprint
+market
+interval
+signal_timestamp or candle_ts
+candle_basis
+raw_signal
+final_signal
+side
+blocked
+fee_model_hash
+slippage_model_hash
+order_rules_hash
+position_state_hash
+entry_allowed
+exit_allowed
+dust_state
+effective_flat
+normalized_exposure_active
+exit_evaluations_hash
+execution_timing_policy_hash
+```
+
+Fields that may be optional depending on context should be documented and handled explicitly, not silently normalized away. Examples: `candidate_profile_hash`, `db_data_fingerprint`, `decision_ts`.
+
+Add reason codes such as:
+
+```text
+canonical_decision_required_field_missing
+canonical_decision_incomplete
+canonical_decision_not_promotion_grade
+canonical_decision_legacy_schema
+canonical_decision_empty_order_rules_hash
+```
+
+Update `compare_decision_equivalence()` so incomplete canonical payloads do not produce a passing canonical comparison. The report should include:
+
+```text
+canonical_missing_field_count
+canonical_missing_fields_by_decision
+canonical_incomplete_decision_count
+promotion_grade_comparison
+```
+
+### P0: Bind each decision to the comparator inputs
+
+Inside `compare_decision_equivalence()`, verify that each decision payload agrees with the report-level arguments:
+
+```text
+profile_hash
+market
+interval
+data_fingerprint
+```
+
+Do this for both research and runtime decisions.
+
+Fail closed with explicit reason codes:
+
+```text
+decision_profile_hash_not_bound_to_report
+decision_market_not_bound_to_report
+decision_interval_not_bound_to_report
+decision_data_fingerprint_not_bound_to_report
+```
+
+Do not rely only on profile/evidence validation outside the comparator. The comparator itself must not produce `ok=True` if both decision lists agree with each other but are bound to the wrong profile, market, interval, or data fingerprint.
+
+### P0: Fix actual runtime `order_rules_hash`
+
+Ensure runtime canonical decisions include actual order-rule identity.
+
+Acceptable approaches:
+
+```text
+A. Add an order rules snapshot/hash to runtime strategy decision context in strategy/sma.py.
+B. Pass order_rules_hash or order_rules_snapshot explicitly into runtime_decision_to_canonical_event().
+```
+
+Whichever approach you choose, ensure the hash is deterministic and includes the fields that can affect execution eligibility or sizing, such as min quantity, quantity step, max quantity decimals, min notional, fee authority inputs if applicable, and any effective rule source.
+
+Do not allow promotion-grade canonical events to use the hash of `{}` as an order-rule hash.
+
+Add tests proving:
+
+```text
+runtime canonical event has a non-empty actual order_rules_hash
+changing order-rule inputs changes order_rules_hash
+decision equivalence fails when order_rules_hash differs
+```
+
+### P1: Make research backtest emit canonical research decisions
+
+Extend the research path so decision generation is repo-owned.
+
+Preferred implementation:
+
+```text
+BacktestRun.decisions: tuple[dict[str, object], ...] = ()
+```
+
+or an equivalent deterministic decision artifact.
+
+`run_sma_backtest()` should record canonical-compatible research decisions at each decision boundary, including at least:
+
+```text
+strategy_name
 market
 interval
 signal_timestamp
 candle_ts
-through_ts_ms
 candle_basis
-decision_ts where available
+decision_ts if known
 raw_signal
 final_signal
 side
@@ -162,256 +262,291 @@ prev_s
 prev_l
 curr_s
 curr_l
-feature_hash
 gap_ratio
-range_ratio where applicable
-expected_edge_ratio
-required_edge_ratio
-fee_authority_hash
+range_ratio
+market_regime / regime decision where applicable
 fee_model_hash
 slippage_model_hash
-order_rules_hash
-market_regime
-regime_decision
-regime_block_reason
-position_state_hash
-entry_allowed
-exit_allowed
-dust_state
-effective_flat
-normalized_exposure_active
-exit_rule
-exit_reason
-exit_evaluations_hash
 execution_timing_policy_hash
-replay_fingerprint_hash
+dataset_content_hash if available from caller/report context or left explicitly bindable by export wrapper
 ```
 
-Do not make unstable timestamps, generated-at values, or path-only fields part of content hashes unless they are semantically required.
+Be careful: research execution simulation and runtime OMS are still different layers. The research decision event should represent the strategy decision before simulated fill application, while execution/fill details remain execution-model outputs.
 
-### 3. Decision export / replay
+If adding full canonical decisions directly inside `run_sma_backtest()` is too invasive, implement a deterministic adapter in the validation protocol that builds research canonical decisions from the same internal signal/action data. Do not rely on externally prepared decision dicts.
 
-Add repo-owned paths for generating decision lists. Prefer CLI commands if consistent with the existing CLI architecture.
+### P1: Add repo-owned decision export/replay commands
 
-Required capabilities:
+Add CLI functions and dispatch wiring consistent with the existing `bithumb-bot` CLI style.
 
-* Export canonical research decisions from a research dataset/profile/manifest or promotion artifact.
-* Replay runtime strategy decisions against a DB and explicit timestamp list or through-ts sequence.
-* Compare the two using the strengthened equivalence comparator.
-* Emit JSON reports with stable content hashes and actionable mismatch reasons.
-
-If full CLI integration is too large, implement the underlying functions plus tests, and add a minimal CLI wrapper consistent with the existing `bithumb-bot` command structure.
-
-Example desired command shape:
+Minimum required capabilities:
 
 ```bash
 bithumb-bot research-export-decisions \
-  --promotion <promotion.json> \
+  --manifest <manifest.json> \
+  --candidate-id <candidate_id> \
   --split validation \
-  --out research_decisions.json
+  --out <research_decisions.json>
 
 bithumb-bot runtime-replay-decisions \
   --profile <approved_profile.json> \
   --db <paper_or_runtime.sqlite> \
   --through-ts-list <timestamps.json> \
-  --out runtime_decisions.json
-
-bithumb-bot decision-equivalence \
-  --research-decisions research_decisions.json \
-  --runtime-decisions runtime_decisions.json \
-  --profile-hash <sha256:...> \
-  --market KRW-BTC \
-  --interval 1m \
-  --data-fingerprint <sha256:...>
+  --out <runtime_decisions.json>
 ```
 
-Preserve backward compatibility where possible. If existing `cmd_decision_equivalence()` accepts older fields, keep it working but make the report clearly indicate whether a comparison used the strengthened canonical schema or a legacy shallow schema.
+The exact flags may differ if the repo has a more suitable CLI pattern, but the result must be repo-owned generation of canonical decision lists.
 
-### 4. Strengthen decision equivalence
+The exported JSON should include:
 
-Update `decision_equivalence.py` so that equivalence failure is triggered by mismatches in trade-affecting or safety-affecting fields.
+```text
+schema_version
+decision_contract_version
+source
+profile_content_hash
+dataset_content_hash or db_data_fingerprint
+market
+interval
+decision_count
+decisions
+content_hash
+generated_at
+```
 
-The report must include:
+`generated_at` should be excluded from deterministic content hashes unless existing repo policy says otherwise.
 
-* `ok`
-* `schema_version`
-* `comparison_contract_version`
-* `profile_content_hash`
-* `market`
-* `interval`
-* `data_fingerprint`
-* `research_decision_count`
-* `runtime_decision_count`
-* `matched_decision_count`
-* `mismatched_decision_count`
-* `missing_research_decisions`
-* `missing_runtime_decisions`
-* structured mismatch entries
-* per-field mismatch reason codes
-* explicit `recommended_next_action`
-* stable `content_hash`
+Runtime replay must:
 
-Add diagnostics that help distinguish:
+```text
+load approved profile
+construct the matching SMA strategy config
+open the provided DB
+replay decisions at explicit through_ts values
+export canonical runtime decisions
+not call live broker APIs
+not submit orders
+not mutate live state except unavoidable read-only DB access
+```
 
-* timestamp/candle-basis mismatch
-* raw signal mismatch
-* final signal mismatch
-* filter/block reason mismatch
-* fee/slippage/order-rule mismatch
-* regime mismatch
-* position/dust mismatch
-* exit-rule mismatch
-* profile/data fingerprint mismatch
+Research export must:
 
-### 5. Exit rule scope clarification
+```text
+load manifest / report / candidate inputs deterministically
+select the requested candidate
+generate decisions from repo-owned research path
+export canonical research decisions
+not use manually supplied arbitrary decision dicts as promotion-grade evidence
+```
 
-Verify whether hard stop-loss and take-profit rules exist.
+### P1: Add golden research/runtime equivalence tests
 
-If they do not exist:
+Add tests that execute both research decision generation and runtime replay generation on shared fixtures. Synthetic normalization tests are not enough.
 
-* Do not silently add them unless strategy/profile requirements demand them.
-* Add or update tests that prove current runtime exit rules are exactly the implemented set.
-* Update docs or comments so operators cannot infer that hard `-1.5%` stop-loss or `+3%` take-profit rules exist when they do not.
-
-If they do exist elsewhere:
-
-* Wire them into the canonical decision schema.
-* Add equivalence tests covering them.
-* Ensure approved profile, strategy parameters, and docs include them.
-
-If you decide to implement `StopLossExitRule` and `TakeProfitExitRule`, do so as explicit named rules in `exit_rules.py`, add settings/profile parameters, include them in `normalize_exit_rule_names`, add research/runtime equivalence coverage, and update docs. Do not implement them as hidden conditions.
-
-### 6. Tests
-
-Add targeted tests. At minimum include:
+At minimum cover:
 
 ```text
 1. no position + golden cross + edge sufficient -> BUY
 2. no position + golden cross + cost edge insufficient -> HOLD, cost_edge block
-3. candidate regime blocked -> HOLD, candidate_regime block
-4. in position + dead cross + pnl floor outside noise band -> SELL, opposite_cross
-5. in position + dead cross + small loss band -> HOLD, opposite_cross deferred
-6. in position + dead cross + small gain below fee floor -> HOLD, opposite_cross deferred
-7. in position + max holding exceeded + no opposite cross -> SELL, max_holding_time
-8. harmless dust effective flat + golden cross -> BUY allowed
-9. non-executable dust/exposure + dead cross -> no unsafe SELL
-10. live armed fee authority unavailable + BUY -> HOLD, fee authority block
-11. insufficient closed candles -> no decision
-12. same candles but last candle not closed -> research/runtime both ignore it or report equivalent candle basis
+3. in position + dead cross + pnl outside noise floor -> SELL, opposite_cross
+4. in position + dead cross + small loss band -> HOLD, opposite_cross deferred
+5. in position + dead cross + small gain below fee floor -> HOLD, opposite_cross deferred
+6. max holding exceeded + no opposite cross -> SELL, max_holding_time
+7. harmless dust effective flat + golden cross -> BUY allowed
+8. non-executable dust/exposure + dead cross -> no unsafe SELL
+9. insufficient closed candles -> no decision or explicit equivalent no-decision event
+10. last candle not closed / through_ts boundary -> no lookahead and equivalent candle basis
 ```
 
-Also add mutation-style tests proving equivalence fails when any of these are changed:
-
-* exit rule
-* exit reason
-* position state hash
-* dust state
-* entry allowed / exit allowed
-* fee authority hash
-* order rules hash
-* regime decision
-* candle basis
-* profile hash
-* dataset/runtime DB fingerprint
-* execution timing policy hash
-
-Existing tests should continue to pass unless a failure exposes a real contract inconsistency. If a test expectation must change, explain why in the final report.
-
-### 7. Promotion and evidence integration
-
-Inspect whether profile transition already enforces decision-equivalence evidence. Strengthen where appropriate.
-
-For paper -> live_dry_run and live_dry_run -> small_live, the evidence path should require:
+If research currently cannot model some runtime-only state such as dust or lot-native sell authority, do not fake a passing equivalence. Instead:
 
 ```text
-decision_equivalence_content_hash present
-decision equivalence report content hash valid
-profile hash matches parent/current approved profile
-market and interval match
-dataset/db fingerprint matches the evidence context
-mismatch_count == 0
-missing_research_decisions == []
-missing_runtime_decisions == []
-comparison used canonical strengthened schema, not legacy shallow schema
+mark that case as currently runtime-only
+fail closed for promotion-grade equivalence when such state is present
+document the limitation
+add a regression test proving the limitation is visible and not silently passing
 ```
 
-If full enforcement is not safe in this change, implement fail-closed warnings or explicit compatibility flags, and add tests showing the legacy path is marked as weaker and not silently treated as full equivalence.
+### P1: Add mutation/failure tests for comparator
 
-### 8. Observability
+Add a dedicated test module, for example:
 
-Ensure generated decision-equivalence reports and canonical decision events are operationally useful.
+```text
+tests/test_decision_equivalence_canonical.py
+```
 
-Add or preserve fields that allow an operator to answer:
+It should prove that canonical comparison fails when any of these change:
 
-* Which candle was used?
-* Was the candle safely closed?
-* What raw signal was produced?
-* What final signal was emitted?
-* Why was entry or exit blocked?
-* Which filter or state layer blocked it?
-* Which exit rule triggered or deferred?
-* Which fee/slippage/order-rule assumptions were used?
-* Which approved profile and dataset/runtime DB fingerprint were used?
-* What should the operator do next?
+```text
+missing required canonical field
+profile_content_hash not bound to report profile_hash
+market not bound to report market
+interval not bound to report interval
+dataset_content_hash or db_data_fingerprint not bound to report data_fingerprint
+order_rules_hash missing or empty
+order_rules_hash mismatch
+fee_model_hash mismatch
+slippage_model_hash mismatch
+position_state_hash mismatch
+dust_state mismatch
+entry_allowed mismatch
+exit_allowed mismatch
+exit_rule mismatch
+exit_reason mismatch
+exit_evaluations_hash mismatch
+regime_decision mismatch
+candle_basis mismatch
+execution_timing_policy_hash mismatch
+raw_signal mismatch
+final_signal mismatch
+blocked_filters mismatch
+```
+
+Also test that legacy shallow input:
+
+```text
+emits comparison_contract_version=legacy_shallow_v1
+sets legacy_schema=true
+sets canonical_schema=false
+is not promotion-grade
+recommends canonical regeneration
+does not pass promotion evidence validation
+```
+
+### P1: Verify and strengthen promotion evidence validation
+
+Inspect `_validate_decision_equivalence_evidence()` in `approved_profile.py`.
+
+Ensure it fails closed on:
+
+```text
+missing decision_equivalence_report_path
+missing decision_equivalence_content_hash
+report file missing
+report content_hash mismatch
+ok != true
+comparison_contract_version != canonical_decision_v1
+canonical_schema != true
+legacy_schema == true
+promotion_grade_comparison != true, if added
+canonical_incomplete_decision_count > 0, if added
+mismatch_count != 0
+mismatched_decision_count != 0 unless diagnostic-only and explicitly separated
+missing_research_decisions non-empty
+missing_runtime_decisions non-empty
+profile hash mismatch
+market mismatch
+interval mismatch
+dataset/db fingerprint mismatch
+blocked_decision_equivalence true
+```
+
+Add or update tests in `tests/test_approved_profile.py` so that profile promotion fails on legacy shallow decision-equivalence evidence and incomplete canonical evidence, not only on mismatch counts.
+
+### P2: Observability and operator diagnostics
+
+Make decision-equivalence reports useful for operators.
+
+Reports should clearly answer:
+
+```text
+Was this canonical or legacy?
+Was this promotion-grade?
+Which required canonical fields were missing?
+Which decision keys were affected?
+Was the mismatch timestamp/candle-basis, signal, filter, fee, order-rule, regime, position/dust, exit-rule, profile, or data binding related?
+What exact next action should the operator take?
+```
+
+Recommended next actions should be specific:
+
+```text
+regenerate_decisions_with_canonical_schema_before_promotion
+bind_decisions_to_requested_profile_market_interval_data_fingerprint
+populate_runtime_order_rules_hash_before_replay
+align_candle_cutoff_through_ts_and_execution_timing_policy_then_replay
+inspect_strategy_exit_rule_profile_and_runtime_configuration
+inspect_runtime_position_snapshot_dust_state_and_lot_authority
+```
 
 Do not log secrets or broker credentials.
 
-### 9. Recovery and compatibility
+### P2: Documentation
 
-Avoid breaking existing paper/live safety behavior.
+Update docs only after code/tests are updated.
 
-Preserve existing runtime safety gates unless a test proves they are wrong. Be careful with:
+Clarify:
 
-* live real-order arming
-* live dry-run
-* fee authority
-* dust handling
-* non-executable exposure
-* reserved exit quantity
-* lot-native SELL authority
-* approved profile verification
-* evidence-chain validation
-* reproducibility hashes
+```text
+A canonical-looking payload is not promotion-grade unless required semantic fields are present.
+Legacy shallow decision-equivalence is diagnostic only.
+Research decisions and runtime replay decisions should be generated by repo-owned commands.
+Manual decision JSON should not be used as promotion-grade evidence.
+Runtime order-rule identity is part of the canonical decision contract.
+Hard stop-loss / standalone take-profit are not implemented unless explicitly added as named exit rules.
+Smoke tests are not promotion evidence.
+```
 
-If a new schema version is introduced, support migration or legacy parsing where reasonable. Legacy reports must be marked as legacy and weaker if they do not contain canonical strategy/safety fields.
+Keep docs tied to actual repo commands, files, artifacts, and validation behavior.
 
-### 10. Documentation
+## Scope rules
 
-Update docs so the strategy scope is explicit:
+Do not weaken existing safety gates.
 
-* research backtest is a simulation path, not live broker execution
-* decision equivalence is required to claim research/runtime reproduction
-* hard stop-loss/take-profit rules are either implemented and named, or explicitly not part of the current strategy
-* official promotion evidence must come from the strengthened equivalence path
-* smoke tests are not promotion evidence
+Do not:
 
-Do not write generic trading advice. Keep docs tied to this repo’s actual commands, files, artifacts, and evidence flow.
+```text
+bypass approved profile validation
+bypass evidence-chain validation
+allow legacy shallow decision-equivalence as promotion evidence
+silently accept incomplete canonical decisions
+silently accept empty order_rules_hash for promotion-grade comparison
+call live broker APIs from tests
+submit real orders
+mutate live runtime state from export/replay commands
+hide missing research/runtime equivalence behind docs only
+add stop_loss or take_profit as hidden behavior
+```
+
+If a full shared decision kernel is too large for this pass, do not claim it is done. Implement the closed-loop canonical export/replay/completeness/binding layer and report the remaining gap explicitly.
+
+## Tests to run
+
+Run targeted tests first:
+
+```bash
+pytest -q tests/test_canonical_decision.py
+pytest -q tests/test_decision_equivalence_canonical.py
+pytest -q tests/test_approved_profile.py
+pytest -q tests/test_strategy_exit_rules.py
+pytest -q tests/test_sma_with_filter_strategy.py
+pytest -q tests/test_research_backtest_reproducibility.py
+pytest -q tests/test_research_promotion_gate.py
+```
+
+Then run the full suite if feasible:
+
+```bash
+pytest -q
+```
+
+If full pytest is too slow or fails for unrelated environmental reasons, run all changed tests and clearly report what was not run and why.
 
 ## Acceptance criteria
 
-The change is acceptable only if:
+The patch is acceptable only if:
 
-1. The hypotheses above are explicitly validated or falsified in the final report.
-2. The repo has a concrete strengthened canonical decision/equivalence path, not just prose.
-3. Tests cover both normal equivalence and intentional mismatch failures.
-4. Exit rule scope is explicit and tested.
-5. Existing research reproducibility and approved-profile tests still pass or are intentionally updated with clear reasons.
-6. Promotion/evidence behavior is either strengthened or clearly marked with fail-closed legacy limitations.
-7. Operators get actionable mismatch reports, not only `ok=False`.
-
-## Commands to run
-
-Run the relevant test suite. At minimum:
-
-```bash
-pytest tests/test_sma_strategy_config.py
-pytest tests/test_sma_with_filter_strategy.py
-pytest tests/test_research_backtest_reproducibility.py
-pytest tests/test_approved_profile.py
-pytest
+```text
+1. Incomplete canonical payloads cannot pass as promotion-grade canonical decision-equivalence.
+2. Decision payloads are bound to comparator-level profile_hash, market, interval, and data_fingerprint.
+3. Runtime canonical events include actual non-empty order_rules_hash or equivalent actual order-rule identity.
+4. Research path emits or exports repo-owned canonical research decisions, not only externally normalized dicts.
+5. Runtime replay decisions can be generated by repo-owned code/CLI without live broker calls or order submission.
+6. Golden tests exercise both research and runtime decision generation where feasible.
+7. Comparator mutation tests fail on trade/safety-affecting mismatches.
+8. Promotion evidence validation rejects legacy shallow reports and incomplete canonical reports.
+9. Existing exit-rule scope remains explicit: current SMA runtime exit rules are opposite_cross and max_holding_time only, unless explicitly changed with tests and docs.
+10. Operator-facing reports include actionable mismatch diagnostics.
 ```
-
-If the full suite is too slow or fails due to unrelated external assumptions, run the targeted tests you changed and explain exactly what was and was not run.
 
 ## Final report format
 
@@ -419,33 +554,42 @@ At the end, provide a concise but complete report with these sections:
 
 ```text
 Summary
-- What structural issue was addressed
-- Whether the original concern was confirmed, partially confirmed, or falsified
+- What was fixed
+- Whether the remaining review concerns were confirmed, partially confirmed, or falsified
 
 Verified Findings
-- File-by-file findings with exact code references
-- Which hypotheses were validated/falsified
+- File-by-file findings
+- Which hypotheses were validated or falsified
+- Any claims from the review that turned out to be stale or already fixed
 
 Design Changes
-- New or changed modules/functions/classes
-- Canonical decision schema fields
-- How research/runtime decision export now works
-- How equivalence comparison is stronger than before
+- New/changed modules, functions, dataclasses, CLI commands
+- Canonical completeness validation behavior
+- Report-level binding validation behavior
+- Runtime order_rules_hash source
+- Research decision export/source of truth
+- Runtime replay behavior
 
-Exit Rule Scope
-- Current implemented exit rules
-- Whether hard stop-loss/take-profit exists
-- If implemented, where and how
-- If not implemented, where it is documented as out of scope
+Promotion/Evidence Changes
+- How profile transition evidence validation changed
+- How legacy shallow reports are handled
+- How incomplete canonical reports are handled
 
 Tests Added/Changed
-- List tests and what each proves
-- Include mismatch/mutation tests
+- List each new/changed test and what failure mode it covers
+- Include golden research/runtime equivalence tests
+- Include mutation/failure tests
 
-Promotion/Evidence/Observability
-- How evidence and profile transition behavior changed
-- What report fields operators can inspect
-- Any legacy compatibility limitations
+Exit Rule Scope
+- Confirm current implemented exit rules
+- Confirm stop_loss/take_profit status
+- State whether any exit-rule behavior changed
+
+Observability / Recovery
+- New report fields
+- New reason codes
+- Recommended next actions
+- How an operator should recover from common failures
 
 Commands Run
 - Exact commands
@@ -453,8 +597,9 @@ Commands Run
 - Any skipped or not-run tests with reason
 
 Remaining Risks / Follow-up
-- Only concrete repo-specific risks
+- Only repo-specific risks
 - No generic trading disclaimers
+- If a shared decision kernel remains future work, say exactly what file/function boundary still needs refactoring
 ```
 
-Do not hide uncertainty. If a hypothesis cannot be fully resolved within this change, leave a testable follow-up with the exact file/function/command needed to resolve it.
+Be explicit. Do not claim the problem class is solved unless the repo now has a tested, fail-closed, repo-owned research/export -> runtime/replay -> canonical/equivalence -> promotion-evidence path.
