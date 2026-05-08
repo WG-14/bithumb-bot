@@ -5,7 +5,12 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .canonical_decision import export_runtime_replay_decisions, order_rules_snapshot_payload
+from .canonical_decision import (
+    canonical_payload_hash,
+    export_research_decisions,
+    export_runtime_replay_decisions,
+    order_rules_snapshot_payload,
+)
 from .approved_profile import (
     ApprovedProfileError,
     build_approved_profile,
@@ -34,7 +39,9 @@ from .research.experiment_manifest import load_manifest
 from .research.hashing import content_hash_payload, sha256_prefixed
 from .research.parameter_space import candidate_id, iter_parameter_candidates
 from .research.promotion_gate import PromotionGateError
+from .research.promotion_gate import build_candidate_profile
 from .research.strategy_registry import resolve_research_strategy
+from .strategy.market_regime import classify_sma_market_regime
 from .storage_io import write_json_atomic
 from .broker.order_rules import get_effective_order_rules
 from .strategy.sma import create_sma_with_filter_strategy
@@ -294,16 +301,27 @@ def cmd_research_export_decisions(
         order_rules_hash = sha256_prefixed(
             order_rules_snapshot_payload(get_effective_order_rules(manifest.market), pair=manifest.market)
         )
-        decisions = [
+        raw_decisions = [
             {
                 **item,
                 "profile_content_hash": profile_hash,
+                "candidate_profile_hash": "" if profile is None else str(profile.get("candidate_profile_hash") or ""),
                 "dataset_content_hash": snapshot.content_hash(),
                 "db_data_fingerprint": snapshot.content_hash(),
                 "order_rules_hash": order_rules_hash,
             }
             for item in run.decisions
         ]
+        if promotion_grade_export:
+            decisions = _promotion_grade_research_export_decisions(
+                raw_decisions=raw_decisions,
+                snapshot=snapshot,
+                params=params,
+                profile=profile or {},
+                order_rules_hash=order_rules_hash,
+            )
+        else:
+            decisions = raw_decisions
         payload = _decision_export_payload(
             source="research" if promotion_grade_export else "research_legacy_unbound",
             profile_content_hash=profile_hash,
@@ -381,7 +399,8 @@ def cmd_runtime_replay_decisions(
                 profile_content_hash=str(profile.get("profile_content_hash") or ""),
                 dataset_content_hash=str(profile.get("dataset_content_hash") or ""),
                 db_data_fingerprint=db_fingerprint,
-                execution_timing_policy_hash=sha256_prefixed({"runtime_replay": "closed_candle_through_ts"}),
+                candle_basis="closed_candle",
+                execution_timing_policy_hash=_decision_export_execution_timing_policy_hash(),
             )
         finally:
             conn.close()
@@ -442,6 +461,7 @@ def _research_export_profile_hash(
         manifest=manifest,
         snapshot=snapshot,
         params=params,
+        candidate_id_value=candidate_id_value,
         profile=profile,
     )
     return str(profile.get("profile_content_hash") or "")
@@ -452,6 +472,7 @@ def _validate_research_export_profile_binding(
     manifest: object,
     snapshot: object,
     params: dict[str, object],
+    candidate_id_value: str,
     profile: dict[str, object],
 ) -> None:
     checks = {
@@ -464,6 +485,12 @@ def _validate_research_export_profile_binding(
     for field, (left, right) in checks.items():
         if str(left or "").strip() != str(right or "").strip():
             raise ValueError(f"research_export_profile_{field}_mismatch")
+    source_promotion_path = str(profile.get("source_promotion_artifact_path") or "").strip()
+    if not source_promotion_path:
+        raise ValueError("research_export_profile_source_promotion_missing")
+    source_promotion = _load_json(str(Path(source_promotion_path).expanduser()))
+    if str(source_promotion.get("candidate_id") or "").strip() != str(candidate_id_value or "").strip():
+        raise ValueError("research_export_profile_candidate_id_mismatch")
     profile_params = profile.get("strategy_parameters") if isinstance(profile.get("strategy_parameters"), dict) else {}
     for key, expected in profile_params.items():
         if key not in params:
@@ -493,6 +520,107 @@ def _validate_research_export_profile_binding(
         raise ValueError(f"research_export_profile_cost_model_mismatch:{key}")
     if not str(profile.get("candidate_profile_hash") or "").startswith("sha256:"):
         raise ValueError("research_export_profile_candidate_profile_hash_missing")
+    profile_candidate = source_promotion.get("candidate_profile")
+    if not isinstance(profile_candidate, dict):
+        raise ValueError("research_export_profile_candidate_profile_missing")
+    selected_candidate_payload = {
+        "strategy_name": manifest.strategy_name,  # type: ignore[attr-defined]
+        "parameter_candidate_id": candidate_id_value,
+        "parameter_values": params,
+        "cost_model": cost,
+        "experiment_id": source_promotion.get("strategy_profile_source_experiment"),
+        "manifest_hash": manifest.manifest_hash(),  # type: ignore[attr-defined]
+        "dataset_snapshot_id": source_promotion.get("dataset_snapshot_id"),
+        "dataset_content_hash": snapshot.content_hash(),  # type: ignore[attr-defined]
+        "regime_classifier_version": (
+            source_promotion.get("live_regime_policy", {}).get("regime_classifier_version")
+            if isinstance(source_promotion.get("live_regime_policy"), dict)
+            else None
+        ),
+        "allowed_live_regimes": (
+            source_promotion.get("live_regime_policy", {}).get("allowed_regimes")
+            if isinstance(source_promotion.get("live_regime_policy"), dict)
+            else None
+        ),
+        "blocked_live_regimes": (
+            source_promotion.get("live_regime_policy", {}).get("blocked_regimes")
+            if isinstance(source_promotion.get("live_regime_policy"), dict)
+            else None
+        ),
+    }
+    rebuilt_hash = sha256_prefixed(build_candidate_profile(selected_candidate_payload))
+    if str(profile.get("candidate_profile_hash") or "").strip() != rebuilt_hash:
+        raise ValueError("research_export_profile_candidate_profile_hash_mismatch")
+
+
+def _decision_export_execution_timing_policy_hash() -> str:
+    return sha256_prefixed({"runtime_replay": "closed_candle_through_ts"})
+
+
+def _promotion_grade_research_export_decisions(
+    *,
+    raw_decisions: list[dict[str, object]],
+    snapshot: object,
+    params: dict[str, object],
+    profile: dict[str, object],
+    order_rules_hash: str,
+) -> list[dict[str, object]]:
+    decisions = export_research_decisions(
+        raw_decisions,
+        profile_content_hash=str(profile.get("profile_content_hash") or ""),
+        dataset_content_hash=snapshot.content_hash(),  # type: ignore[attr-defined]
+        execution_timing_policy_hash=_decision_export_execution_timing_policy_hash(),
+    )
+    cost = profile.get("cost_model") if isinstance(profile.get("cost_model"), dict) else {}
+    fee_rate = str(float(cost.get("fee_rate", 0.0) or 0.0))
+    stable_fee_model = {
+        "bid_fee": fee_rate,
+        "ask_fee": fee_rate,
+        "fee_source": "chance_doc",
+        "degraded": False,
+        "degraded_reason": "none",
+    }
+    slippage_model = {
+        "exit_slippage_bps": float(cost.get("slippage_bps", 0.0) or 0.0),
+        "exit_buffer_ratio": float(params.get("ENTRY_EDGE_BUFFER_RATIO", 0.0) or 0.0),
+    }
+    candles = list(getattr(snapshot, "candles", ()) or ())
+    min_rows = max(
+        int(params.get("SMA_LONG", 0) or 0) + 2,
+        int(params.get("SMA_FILTER_VOL_WINDOW", 1) or 1),
+        int(params.get("SMA_FILTER_OVEREXT_LOOKBACK", 1) or 1) + 1,
+    )
+    aligned_decisions: list[dict[str, object]] = []
+    for decision in decisions:
+        candle_ts = int(decision.get("candle_ts") or 0)
+        through = [candle for candle in candles if int(candle.ts) <= candle_ts]
+        if len(through) < min_rows:
+            continue
+        if through:
+            regime = classify_sma_market_regime(
+                closes=[float(candle.close) for candle in through],
+                short_sma=float(decision.get("curr_s") or 0.0),
+                long_sma=float(decision.get("curr_l") or 0.0),
+                volatility_window=max(1, int(params.get("SMA_FILTER_VOL_WINDOW", 10) or 10)),
+                min_volatility_ratio=float(params.get("SMA_FILTER_VOL_MIN_RANGE_RATIO", 0.0) or 0.0),
+                overextended_lookback=max(1, int(params.get("SMA_FILTER_OVEREXT_LOOKBACK", 3) or 3)),
+                overextended_max_return_ratio=float(params.get("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", 0.0) or 0.0),
+                min_trend_strength_ratio=float(params.get("SMA_FILTER_GAP_MIN_RATIO", 0.0) or 0.0),
+            )
+            decision["market_regime"] = regime.composite_regime
+            decision["regime_decision"] = "ON"
+            decision["regime_block_reason"] = "none"
+        decision["candidate_profile_hash"] = str(profile.get("candidate_profile_hash") or "")
+        decision["db_data_fingerprint"] = snapshot.content_hash()  # type: ignore[attr-defined]
+        decision["candle_basis"] = "closed_candle"
+        decision["decision_ts"] = None
+        decision["fee_authority_hash"] = canonical_payload_hash(stable_fee_model)
+        decision["fee_model_hash"] = canonical_payload_hash(stable_fee_model)
+        decision["slippage_model_hash"] = canonical_payload_hash(slippage_model)
+        decision["order_rules_hash"] = order_rules_hash
+        decision["exit_evaluations_hash"] = canonical_payload_hash(())
+        aligned_decisions.append(decision)
+    return aligned_decisions
 
 
 def _candidate_regime_policy_from_approved_profile(profile: dict[str, object]) -> dict[str, object]:

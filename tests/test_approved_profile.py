@@ -274,6 +274,7 @@ def _attach_decision_equivalence_report(
         "binding_validation": [],
         "research_export_content_hash": "sha256:research_export",
         "runtime_export_content_hash": "sha256:runtime_export",
+        "repo_owned_export_artifacts": True,
         "legacy_or_unverified_export": False,
         "recommended_next_action": "none",
         "generated_at": "2026-05-03T00:00:00+00:00",
@@ -1282,7 +1283,15 @@ def test_profile_promote_fails_when_decision_equivalence_mismatch_count_nonzero(
             "paper_validation_evidence_decision_equivalence_incomplete_canonical",
         ),
         (
+            {"canonical_missing_field_count": 1},
+            "paper_validation_evidence_decision_equivalence_incomplete_canonical",
+        ),
+        (
             {"legacy_or_unverified_export": True},
+            "paper_validation_evidence_decision_equivalence_unverified_export",
+        ),
+        (
+            {"repo_owned_export_artifacts": False},
             "paper_validation_evidence_decision_equivalence_unverified_export",
         ),
         (
@@ -1296,6 +1305,10 @@ def test_profile_promote_fails_when_decision_equivalence_mismatch_count_nonzero(
         (
             {"binding_validation": [{"reason_codes": ["decision_profile_hash_not_bound_to_report"]}]},
             "paper_validation_evidence_decision_equivalence_binding_validation_nonempty",
+        ),
+        (
+            {"artifact_binding_validation": [{"reason_codes": ["research_export_profile_hash_mismatch"]}]},
+            "paper_validation_evidence_decision_equivalence_artifact_binding_validation_nonempty",
         ),
     ],
 )

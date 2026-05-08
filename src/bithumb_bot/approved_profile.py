@@ -1223,6 +1223,8 @@ def _validate_decision_equivalence_evidence(
         raise ApprovedProfileError(f"{label}_decision_equivalence_not_promotion_grade")
     if report.get("legacy_or_unverified_export") is True:
         raise ApprovedProfileError(f"{label}_decision_equivalence_unverified_export")
+    if report.get("repo_owned_export_artifacts") is not True:
+        raise ApprovedProfileError(f"{label}_decision_equivalence_unverified_export")
     if not str(report.get("research_export_content_hash") or "").startswith("sha256:"):
         raise ApprovedProfileError(f"{label}_decision_equivalence_research_export_hash_missing")
     if not str(report.get("runtime_export_content_hash") or "").startswith("sha256:"):

@@ -34,7 +34,19 @@ LEGACY_DECISION_FIELDS = (
     "blocked",
     "block_reason",
 )
-CANONICAL_EQUIVALENCE_FIELDS = CANONICAL_DECISION_SCHEMA_FIELDS
+CANONICAL_EQUIVALENCE_FIELDS = tuple(
+    field
+    for field in CANONICAL_DECISION_SCHEMA_FIELDS
+    if field
+    not in {
+        # These are artifact/provenance or source-timing diagnostics. The
+        # semantic fields they derive from remain compared directly.
+        "decision_ts",
+        "db_data_fingerprint",
+        "feature_hash",
+        "replay_fingerprint_hash",
+    }
+)
 DIAGNOSTIC_DRIFT_FIELDS = (
     "market",
     "interval",
@@ -661,9 +673,11 @@ def _reason_for_field(field: str) -> str:
 
 def _recommended_next_action(*, reason_codes: list[str], canonical_comparison: bool) -> str:
     if not canonical_comparison:
-        return "regenerate_decisions_with_canonical_schema_before_promotion"
+        return "regenerate_decisions_with_repo_owned_export_commands"
+    if "decision_export_artifact_unverified" in reason_codes:
+        return "regenerate_decisions_with_repo_owned_export_commands"
     if any(code.startswith("canonical_decision_") for code in reason_codes):
-        return "regenerate_decisions_with_canonical_schema_before_promotion"
+        return "regenerate_decisions_with_repo_owned_export_commands"
     if any(code.endswith("_not_bound_to_report") for code in reason_codes):
         return "bind_decisions_to_requested_profile_market_interval_data_fingerprint"
     if "decision_order_rules_mismatch" in reason_codes:
@@ -675,9 +689,11 @@ def _recommended_next_action(*, reason_codes: list[str], canonical_comparison: b
     if "decision_exit_rule_mismatch" in reason_codes:
         return "inspect_strategy_exit_rule_profile_and_runtime_configuration"
     if "decision_position_dust_mismatch" in reason_codes:
-        return "inspect_runtime_position_snapshot_dust_state_and_lot_authority"
+        return "align_flat_position_canonical_state"
+    if "runtime_position_state_not_research_comparable" in reason_codes:
+        return "scope_runtime_only_state_as_fail_closed_or_extend_research_model"
     if "decision_fee_authority_mismatch" in reason_codes:
         return "inspect_fee_authority_order_rules_and_cost_model_inputs"
     if "decision_regime_mismatch" in reason_codes:
-        return "inspect_candidate_regime_policy_and_market_regime_snapshot"
+        return "replay_runtime_with_approved_regime_policy"
     return "inspect_research_runtime_decision_drift_before_promotion"

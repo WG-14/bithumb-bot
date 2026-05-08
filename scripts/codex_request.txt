@@ -1,474 +1,366 @@
 You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Use the attached review notes as source context, but do not treat any claim as proven until you verify it against the current repository state:   
+Use the attached review notes as source context, but do not treat any claim as proven until you verify it against the current repository state: 
 
-Your task is to perform the next hardening pass on the research/runtime SMA decision-equivalence system. The repository has improved: canonical decision validation, report-level binding, actual runtime order-rule hashing, research decision recording, and repo-owned export/replay commands appear to exist. However, the current implementation may still fail to form a promotion-grade closed loop:
+Your task is to perform the final hardening pass on the research/runtime SMA strategy-equivalence system. The latest patch appears to have closed most major structural gaps: profile-bound research export, approved-profile runtime replay, export artifact provenance validation, canonical flat/no-dust alignment, and improved evidence documentation. However, do not declare the problem solved unless the repo now proves the complete promotion-grade loop with real repo-owned fixtures:
 
 ```text
-repo-owned research export
-  -> repo-owned runtime replay
-  -> decision-equivalence
-  -> promotion evidence
+repo-owned research-export-decisions --profile
+  -> repo-owned runtime-replay-decisions
+  -> decision-equivalence over validated export artifacts
+  -> profile transition evidence validation
 ```
-
-The core risk remains: strategy semantics may still be distributed across research backtest logic, runtime strategy logic, canonical decision adapters, decision-equivalence comparison, and profile/evidence validation. If research export and runtime replay are not bound to the same approved profile, if runtime replay does not use the actual approved regime policy, if decision-equivalence accepts manually prepared canonical-looking JSON without validating export provenance, or if no positive golden equivalence test proves an aligned case can pass, then the repo can still fail to prove that “the strategy validated in research” is the same strategy replayed in runtime.
 
 Do not turn this into general advice. Inspect, patch, and test the actual repository.
 
-## Core objective
+## Core concern
 
-Make the repo-owned decision-equivalence loop actually usable as promotion-grade evidence, not merely fail-closed diagnostics.
+The root risk remains strategy-semantics drift between research backtest logic, runtime SMA logic, canonical decision adapters, export/replay CLI artifacts, and promotion evidence validation.
 
-A successful patch should make this true:
+The latest implementation is close, but the review found that these may still need proof or final patching:
 
-```bash
-bithumb-bot research-export-decisions \
-  --manifest <manifest.json> \
-  --candidate-id <candidate_id> \
-  --split validation \
-  --profile <approved_profile.json> \
-  --out <research_decisions.json>
-
-bithumb-bot runtime-replay-decisions \
-  --profile <approved_profile.json> \
-  --db <paper_or_runtime.sqlite> \
-  --through-ts-list <timestamps.json> \
-  --out <runtime_decisions.json>
-
-bithumb-bot decision-equivalence \
-  --research-decisions <research_decisions.json> \
-  --runtime-decisions <runtime_decisions.json> \
-  --profile-hash <same approved profile hash> \
-  --market <market> \
-  --interval <interval> \
-  --data-fingerprint <dataset_or_db_hash>
+```text
+1. A positive golden equivalence test may still be missing.
+2. CLI dispatch may import export/replay functions but not expose them through argparse.
+3. research-export profile binding may not fully revalidate candidate id / candidate profile hash.
+4. profile transition evidence tests may not cover all strengthened decision-equivalence rejection cases.
+5. recommended_next_action may not yet use the new operator recovery language.
 ```
 
-The loop must either produce a promotion-grade passing report for explicitly supported aligned cases, or fail closed with precise, actionable reason codes when the current research model cannot represent the runtime state.
+A passing `pytest` run is not enough if it only proves fail-closed behavior or synthetic artifact comparison. The repo must prove that a supported aligned case can actually pass.
 
 ## Files to inspect first
 
 Inspect at minimum:
 
 ```text
-src/bithumb_bot/canonical_decision.py
-src/bithumb_bot/decision_equivalence.py
-src/bithumb_bot/profile_cli.py
-src/bithumb_bot/approved_profile.py
 src/bithumb_bot/app.py
+src/bithumb_bot/profile_cli.py
+src/bithumb_bot/decision_equivalence.py
+src/bithumb_bot/canonical_decision.py
+src/bithumb_bot/approved_profile.py
 src/bithumb_bot/research/backtest_engine.py
-src/bithumb_bot/research/strategy_registry.py
 src/bithumb_bot/research/validation_protocol.py
-src/bithumb_bot/research/cli.py
+src/bithumb_bot/research/promotion_gate.py
 src/bithumb_bot/strategy/sma.py
 src/bithumb_bot/strategy/exit_rules.py
-docs/research-validation.md
-docs/runbooks/research-to-paper.md
-tests/test_canonical_decision.py
 tests/test_decision_equivalence_canonical.py
-tests/test_approved_profile.py
 tests/test_research_backtest_reproducibility.py
+tests/test_approved_profile.py
 tests/test_sma_with_filter_strategy.py
 tests/test_strategy_exit_rules.py
+docs/research-validation.md
+docs/runbooks/research-to-paper.md
+README.md
 ```
 
-Also inspect CLI dispatch code around `argparse` command registration, not only imports.
+Also inspect the actual CLI parser and dispatch branches. Do not stop at import statements.
 
 ## Hypotheses to validate or falsify
 
-Keep these as hypotheses until verified in current code.
+Keep these as hypotheses until verified in the current repo.
 
-### H1. Research export is not bound to the same approved profile as runtime replay
+### H1. A positive repo-owned golden equivalence test may still be missing
 
-`cmd_research_export_decisions()` may generate its own `profile_hash` from manifest/candidate/dataset fields, while `cmd_runtime_replay_decisions()` uses the approved profile’s `profile_content_hash`. If true, the official repo-owned commands can produce decision exports that cannot pass promotion-grade equivalence because the research and runtime decisions are bound to different profile hashes.
+Synthetic tests may prove that two handcrafted export artifacts can produce `promotion_grade_comparison=True`, but that does not prove the real loop works.
 
-Validate by inspecting `cmd_research_export_decisions()` and `cmd_runtime_replay_decisions()` in `profile_cli.py`.
-
-Falsify only if research export already accepts an approved profile or explicit approved profile hash and binds every exported decision to the same `profile_content_hash` used by runtime replay.
-
-### H2. Runtime replay does not pass the approved profile’s actual regime policy into the runtime strategy
-
-`cmd_runtime_replay_decisions()` may pass only a weak object such as `{"strategy_profile_hash": profile_hash}` as `candidate_regime_policy`. If true, replayed runtime decisions may differ from actual approved-profile runtime behavior, especially because existing runtime strategy tests fail-closed on missing or invalid candidate regime policy.
-
-Validate by inspecting how `create_sma_with_filter_strategy()` is called in `cmd_runtime_replay_decisions()` and how `SmaCrossStrategy` / `create_sma_with_filter_strategy` evaluate candidate regime policy.
-
-Falsify only if runtime replay passes the actual approved profile regime policy and audit fields in the shape expected by runtime strategy code.
-
-### H3. Decision-equivalence does not verify export artifact provenance
-
-`cmd_decision_equivalence()` may load only `decisions` arrays through `load_decision_list()` and compare them, without validating the surrounding export artifact wrapper:
+Validate whether there is a test that actually runs repo-owned research export and runtime replay generation on the same fixture and then asserts:
 
 ```text
-source
-content_hash
-decision_count
-profile_content_hash
-dataset_content_hash
-db_data_fingerprint
-market
-interval
+result.ok == True
+promotion_grade_comparison == True
+mismatch_count == 0
+missing_research_decisions == []
+missing_runtime_decisions == []
+research_export_content_hash present
+runtime_export_content_hash present
 ```
 
-If true, a manually prepared canonical-looking JSON list can still be used to produce a promotion-grade report, even if docs say manual JSON is diagnostic only.
+Falsify only if such a test exists and uses real `cmd_research_export_decisions` / `cmd_runtime_replay_decisions` or the same underlying repo-owned functions, not only synthetic dicts.
 
-Validate by inspecting `cmd_decision_equivalence()`, `load_decision_list()`, and any export artifact loader.
+### H2. CLI dispatch may still be untested or incomplete
 
-Falsify only if promotion-grade decision-equivalence requires validated repo-owned export artifacts from `source=research` and `source=runtime_replay`, with valid wrapper content hashes and metadata binding.
-
-### H4. Existing tests still prove “drift is visible” but not “aligned research/runtime equivalence can pass”
-
-A test named like `test_research_runtime_decision_generation_gap_is_visible_not_silent` is useful, but it proves failure visibility, not positive equivalence. The repo needs at least one positive golden test where research export and runtime replay generate equivalent canonical decisions for a supported simple state.
-
-Validate by inspecting current tests.
-
-Falsify only if at least one golden test runs both repo-owned research export and runtime replay, then produces a `compare_decision_equivalence(...).ok is True` report with `promotion_grade_comparison is True`.
-
-### H5. Research canonical state is still not aligned with runtime canonical state for even simple flat/no-dust cases
-
-Research decisions may use values such as:
+`profile_cli.py` may contain `cmd_research_export_decisions()` and `cmd_runtime_replay_decisions()`, and `app.py` may import them, but the public CLI may not dispatch:
 
 ```text
-dust_state="research_not_modeled"
-position_state_hash=hash({"research_position_model": ...})
-order_rules_hash=hash({"source": "research_execution_model", ...})
+bithumb-bot research-export-decisions
+bithumb-bot runtime-replay-decisions
+bithumb-bot decision-equivalence
 ```
 
-Runtime decisions may use actual runtime `position_gate`, actual dust state, and actual order rules. If these fields remain structurally different, promotion-grade equivalence cannot pass unless the comparison intentionally treats those fields as unsupported or normalizes the flat/no-dust/no-position abstraction.
+Validate parser registration and dispatch logic.
 
-Validate by comparing research decision payloads from `run_sma_backtest()` with runtime canonical events from `export_runtime_replay_decisions()` in a simple flat/no-dust/no-position fixture.
+Falsify only if there are tests proving that invoking these command names reaches the intended command functions with expected arguments.
 
-Falsify only if the supported simple state maps to the same canonical abstraction on both sides.
+### H3. Research export profile binding may not fully revalidate candidate identity
 
-### H6. CLI dispatch may import the new functions but not actually expose the new commands
+`_validate_research_export_profile_binding()` may verify strategy name, market, interval, manifest hash, dataset hash, strategy parameters, cost model, and candidate profile hash presence. It may not verify that the selected `candidate_id` is the same candidate represented by the approved profile, or that the candidate profile hash can be rebuilt from the selected candidate/profile payload.
 
-`app.py` may import `cmd_research_export_decisions` and `cmd_runtime_replay_decisions`, but `argparse` may not register or dispatch `research-export-decisions` / `runtime-replay-decisions`.
-
-Validate CLI command registration and add tests.
-
-Falsify only if invoking the command through the repo’s CLI entrypoint reaches the intended functions with expected args.
-
-### H7. Exit-rule scope likely remains sufficiently clarified
-
-The current strategy should still explicitly support `opposite_cross` and `max_holding_time` only. Standalone `stop_loss` and `take_profit` should remain unsupported unless explicitly introduced with profile settings, tests, docs, and canonical equivalence coverage.
-
-Verify this, but do not spend patch budget here unless it regressed.
-
-## Required design changes
-
-### P0: Bind research export to the approved profile
-
-Modify `research-export-decisions` so promotion-grade research exports are bound to the same approved profile as runtime replay.
-
-Preferred command shape:
-
-```bash
-bithumb-bot research-export-decisions \
-  --manifest <manifest.json> \
-  --candidate-id <candidate_id> \
-  --split validation \
-  --profile <approved_profile.json> \
-  --out <research_decisions.json>
-```
-
-Required behavior:
+Validate whether the current binding function checks:
 
 ```text
-load and validate the approved profile
-verify profile strategy_name, market, interval, strategy_parameters, cost_model, candidate_profile_hash, manifest_hash, and dataset_content_hash are compatible with the selected manifest/candidate/split
-use profile["profile_content_hash"] as profile_content_hash for every exported research decision
-use the approved profile’s dataset_content_hash where appropriate
-fail closed if manifest/candidate/profile mismatch
-do not generate a synthetic profile hash for promotion-grade exports
+candidate_id == approved profile / source promotion candidate id
+candidate_profile_hash == rebuilt candidate profile hash for selected candidate
 ```
 
-If backward compatibility requires keeping the old no-profile path, mark it diagnostic only:
+Falsify only if this is already guaranteed by the profile/source-promotion verification path used during research export.
+
+### H4. Profile transition evidence rejection tests may not cover the strengthened fields
+
+The decision-equivalence report now requires fields such as:
 
 ```text
-source="research_legacy_unbound"
-promotion_grade_export=false
-recommended_next_action="rerun_research_export_decisions_with_approved_profile"
+promotion_grade_comparison
+research_export_content_hash
+runtime_export_content_hash
+legacy_or_unverified_export
+canonical_incomplete_decision_count
+canonical_missing_field_count
+binding_validation
 ```
 
-Such output must not be accepted as promotion-grade evidence.
+Validate whether `tests/test_approved_profile.py` explicitly proves profile promotion fails when these fields are missing or bad.
 
-### P0: Pass the approved profile’s actual regime policy into runtime replay
+Falsify only if each required condition is covered by a regression test.
 
-Modify `runtime-replay-decisions` so it constructs `candidate_regime_policy` using the approved profile’s real `regime_policy` and audit fields, not a minimal placeholder.
+### H5. Operator recovery recommendations may lag behind the new design
 
-Expected shape should be compatible with runtime strategy code and existing tests. Include at least:
+`_recommended_next_action()` may still emit older generic actions instead of current repo-specific recovery steps.
 
-```python
-candidate_regime_policy = {
-    "live_regime_policy": profile["regime_policy"],
-    "strategy_profile_hash": profile["profile_content_hash"],
-    "approved_profile_hash": profile["profile_content_hash"],
-    "approved_profile_mode": profile["profile_mode"],
-    "approved_profile_verification_ok": True,
-    "approved_profile_block_reason": "ok",
-    "candidate_profile_hash": profile["candidate_profile_hash"],
-    "manifest_hash": profile["manifest_hash"],
-    "dataset_content_hash": profile["dataset_content_hash"],
-    "source_promotion_content_hash": profile["source_promotion_content_hash"],
-    "lineage_hash": profile.get("lineage_hash"),
-    "legacy_compatibility_used": bool(profile.get("legacy_compatibility_used")),
-}
-```
-
-If runtime strategy expects a different nesting, use the actual expected shape from `strategy/sma.py` and existing approved profile tests.
-
-Add tests proving:
-
-```text
-runtime replay with a valid approved profile can allow an otherwise valid BUY when regime policy permits it
-runtime replay blocks/fails closed when profile regime policy is missing or malformed
-runtime replay decision context includes approved profile audit fields
-```
-
-### P0: Validate decision export artifact provenance in `decision-equivalence`
-
-Do not let promotion-grade equivalence be produced from arbitrary canonical-looking decision lists.
-
-Implement a loader such as:
-
-```python
-load_decision_export_artifact(path: str | Path, *, expected_source: str | None = None) -> DecisionExportArtifact
-```
-
-It must validate:
-
-```text
-payload is an object
-schema_version present
-decision_contract_version present
-source present
-content_hash valid and recomputed excluding content_hash and generated_at
-decision_count == len(decisions)
-decisions is a list of objects
-profile_content_hash present
-market present
-interval present
-dataset_content_hash or db_data_fingerprint present
-each decision’s profile_content_hash/market/interval/data fingerprint matches wrapper metadata
-```
-
-Then update `cmd_decision_equivalence()` to use export artifact validation for promotion-grade comparison:
-
-```text
-research input source must be "research"
-runtime input source must be "runtime_replay"
-wrapper content_hash must be valid
-wrapper metadata must bind to CLI profile_hash, market, interval, data_fingerprint
-report should include research_export_content_hash and runtime_export_content_hash
-```
-
-Keep `load_decision_list()` only for legacy/diagnostic direct-list input. If direct-list inputs are still accepted by CLI, the report must set:
-
-```text
-promotion_grade_comparison=false
-legacy_or_unverified_export=true
-recommended_next_action="regenerate_decisions_with_repo_owned_export_commands"
-```
-
-Promotion evidence must reject direct-list/unverified exports.
-
-### P0: Add at least one positive golden equivalence test
-
-Add a test that proves a supported simple state can pass, not only fail visibly.
-
-Minimum supported positive case:
-
-```text
-flat/no-dust/no-position
-same approved profile hash
-same market/interval
-same closed candle timestamp
-filters disabled or aligned
-candidate regime policy permits entry
-research BUY == runtime BUY
-promotion_grade_comparison == true
-compare_decision_equivalence(...).ok == true
-```
-
-This can be implemented at the function level first if full CLI fixture is too heavy. Prefer a CLI-level or export-artifact-level integration test if feasible.
-
-If current research/runtime canonical fields cannot align even in this simple case, patch the canonical abstraction for flat/no-dust/no-position so it can align. Do not weaken comparison globally. Normalize only explicitly supported states.
-
-### P0: Align flat/no-dust/no-position canonical state between research and runtime
-
-For supported promotion-grade equivalence cases, research and runtime must use the same canonical abstraction for simple flat state.
-
-Recommended approach:
-
-```text
-For research flat/no-position:
-  dust_state = "flat"
-  effective_flat = true
-  normalized_exposure_active = false
-  entry_allowed = true
-  exit_allowed = false
-  position_state_hash should be based on a canonical flat exposure abstraction, not "research_position_model" only
-
-For runtime flat/no-dust:
-  use the same canonical flat exposure abstraction for comparison-relevant fields, while retaining richer runtime details in diagnostic-only fields if needed
-```
-
-Do not erase runtime safety details. Instead, separate:
-
-```text
-comparison-relevant canonical_position_state_hash
-diagnostic_runtime_position_state_hash
-```
-
-or document/encode which fields are promotion-grade comparable and which are runtime-only diagnostics.
-
-If research cannot model a runtime state, fail closed with reason:
-
-```text
-research_runtime_state_not_comparable
-research_model_lacks_lot_native_authority
-research_model_lacks_dust_state
-research_model_lacks_live_fee_authority
-```
-
-### P1: Add export/provenance and CLI dispatch tests
-
-Add tests proving:
-
-```text
-research-export-decisions requires or accepts --profile for promotion-grade output
-research export decision profile_content_hash equals approved profile hash
-runtime replay uses approved profile regime policy
-decision-equivalence validates wrapper content_hash
-decision-equivalence rejects source mismatch
-decision-equivalence rejects decision_count mismatch
-decision-equivalence rejects manual direct-list input as promotion-grade
-decision-equivalence report contains research_export_content_hash and runtime_export_content_hash
-CLI dispatch reaches research-export-decisions
-CLI dispatch reaches runtime-replay-decisions
-```
-
-### P1: Add negative and unsupported-scope tests
-
-Add tests proving unsupported runtime-only states do not silently pass:
-
-```text
-runtime has harmless dust but research export cannot model dust -> fail closed with research_model_lacks_dust_state or equivalent
-runtime has non-executable residue but research export cannot model lot-native authority -> fail closed
-runtime regime policy blocks entry while research would allow -> mismatch with regime reason
-runtime max_holding_time exit cannot be represented by current research decision path -> fail closed or explicitly modeled
-```
-
-If you choose to model these states in research, add positive equivalence tests for them. Otherwise, make the unsupported boundary explicit and promotion-safe.
-
-### P1: Strengthen promotion evidence validation
-
-Inspect `_validate_decision_equivalence_evidence()` in `approved_profile.py`.
-
-Ensure it fails closed on:
-
-```text
-missing decision_equivalence_report_path
-missing decision_equivalence_content_hash
-report hash mismatch
-ok != true
-comparison_contract_version != "canonical_decision_v1"
-canonical_schema != true
-legacy_schema == true
-promotion_grade_comparison != true
-canonical_incomplete_decision_count > 0
-canonical_missing_field_count > 0
-binding_validation non-empty
-research_export_content_hash missing
-runtime_export_content_hash missing
-legacy_or_unverified_export == true
-mismatch_count != 0
-mismatched_decision_count != 0, unless explicitly diagnostic-only and separated
-missing_research_decisions non-empty
-missing_runtime_decisions non-empty
-profile/market/interval/data fingerprint mismatch
-```
-
-Add tests in `tests/test_approved_profile.py` for these cases.
-
-### P2: Observability and recovery
-
-Enhance decision-equivalence reports so an operator can answer:
-
-```text
-Were both decision files generated by repo-owned export commands?
-Which approved profile hash was used?
-Do research and runtime export artifacts use the same profile hash?
-Did runtime replay use approved regime policy?
-Which states are comparable vs runtime-only?
-Which export artifact hash should be archived?
-What exact command should be rerun?
-```
-
-Add recommended next actions such as:
+Validate whether reason codes map to actions such as:
 
 ```text
 reexport_research_decisions_with_approved_profile_hash
 replay_runtime_with_approved_regime_policy
 regenerate_decisions_with_repo_owned_export_commands
-repair_decision_export_artifact_hash
+bind_decisions_to_requested_profile_market_interval_data_fingerprint
 align_flat_position_canonical_state
-state_not_supported_by_research_model_use_runtime_paper_validation
+scope_runtime_only_state_as_fail_closed_or_extend_research_model
+```
+
+Falsify only if reports already provide these specific actions.
+
+### H6. Exit-rule scope likely remains closed, but verify it
+
+Confirm the current SMA exit-rule set remains explicit:
+
+```text
+opposite_cross
+max_holding_time
+```
+
+Do not add hard `stop_loss` or standalone `take_profit` unless they are deliberately introduced as named rules with profile settings, docs, and research/runtime equivalence coverage.
+
+## Required patch priorities
+
+### P0: Prove the positive repo-owned loop
+
+Add or confirm a positive golden equivalence test using real repo-owned generation paths.
+
+The test must not be only synthetic. It should exercise one of these approaches:
+
+```text
+Preferred:
+  cmd_research_export_decisions(...)
+  cmd_runtime_replay_decisions(...)
+  load_decision_export_artifact(...)
+  compare_decision_export_artifacts(...)
+
+Acceptable if CLI artifacts are too heavy:
+  the exact same underlying repo-owned functions used by those commands
+  with validated export wrappers and content hashes
+```
+
+Minimum fixture:
+
+```text
+flat/no-dust/no-position
+same approved profile hash
+candidate regime allows entry
+same market and interval
+same data fingerprint
+same closed candle timestamp
+filters disabled or aligned
+golden cross or no-cross state that both research/runtime can represent
+```
+
+Assertions:
+
+```text
+research artifact source == "research"
+runtime artifact source == "runtime_replay"
+both export artifact content hashes validate
+every decision profile_content_hash == approved profile hash
+compare_decision_export_artifacts(...).ok is True
+promotion_grade_comparison is True
+legacy_or_unverified_export is False
+mismatch_count == 0
+missing_research_decisions == []
+missing_runtime_decisions == []
+```
+
+If the current code cannot make a simple flat/no-dust/no-position case pass, do not fake it. Identify the exact mismatched fields and implement the smallest canonical alignment needed.
+
+### P0: Test CLI dispatch for export/replay/equivalence
+
+Add a focused CLI dispatch test module if none exists, for example:
+
+```text
+tests/test_decision_export_cli.py
+```
+
+Test that the public CLI recognizes and dispatches:
+
+```text
+research-export-decisions
+runtime-replay-decisions
+decision-equivalence
+```
+
+Use monkeypatching or temporary fixtures to avoid live broker calls and real orders. It is acceptable to patch the underlying command functions and assert they are called with parsed arguments, as long as the test proves argparse/dispatch wiring is present.
+
+Also test that `research-export-decisions --profile` is accepted and passed through.
+
+### P1: Strengthen candidate/profile binding if not already guaranteed
+
+If research export does not already rebuild or verify the selected candidate identity against the approved profile/source promotion, add validation.
+
+The binding should verify as much as the current artifact model supports:
+
+```text
+selected candidate_id matches approved profile candidate id or source promotion candidate id
+selected candidate parameters match approved profile strategy_parameters
+selected cost model matches approved profile cost_model
+manifest hash matches approved profile manifest_hash
+dataset hash matches approved profile dataset_content_hash
+candidate_profile_hash is not only present but consistent with the selected candidate/profile representation
+```
+
+If full rebuild is not possible from the current profile artifact, fail closed or add a precise limitation field and test. Do not silently accept a profile that only has a `sha256:`-looking `candidate_profile_hash`.
+
+Add tests for:
+
+```text
+candidate id mismatch -> research export fails
+candidate profile hash mismatch -> research export fails
+strategy parameter mismatch -> research export fails
+cost model mismatch -> research export fails
+```
+
+### P1: Strengthen profile transition evidence rejection tests
+
+Inspect `_validate_decision_equivalence_evidence()` in `approved_profile.py`.
+
+Add tests proving profile promotion fails when any of these are true:
+
+```text
+promotion_grade_comparison != true
+legacy_or_unverified_export == true
+research_export_content_hash missing
+runtime_export_content_hash missing
+canonical_incomplete_decision_count > 0
+canonical_missing_field_count > 0
+binding_validation non-empty
+repo_owned_export_artifacts != true, if this field is required
+mismatch_count != 0
+missing_research_decisions non-empty
+missing_runtime_decisions non-empty
+comparison_contract_version != canonical_decision_v1
+canonical_schema != true
+legacy_schema == true
+```
+
+Keep fixtures deterministic. Recompute report hashes after mutation where necessary so the test proves semantic validation, not only hash mismatch.
+
+### P1: Preserve fail-closed handling for unsupported runtime-only states
+
+Do not weaken comparison to make tests pass.
+
+Runtime-only states that research cannot model must fail closed, for example:
+
+```text
+dust or harmless dust state
+non-executable residue
+lot-native SELL authority
+reserved exit quantity
+live fee-authority block
+```
+
+If these states are currently encoded through `runtime_position_state_not_research_comparable` or position/dust mismatches, add or keep tests proving they do not silently pass promotion-grade equivalence.
+
+### P2: Improve operator recovery actions
+
+Update `_recommended_next_action()` and/or report generation so operators get repo-specific recovery guidance.
+
+Recommended mappings:
+
+```text
+unverified/manual export -> regenerate_decisions_with_repo_owned_export_commands
+research export profile mismatch -> reexport_research_decisions_with_approved_profile_hash
+runtime replay regime policy mismatch -> replay_runtime_with_approved_regime_policy
+profile/market/interval/data binding mismatch -> bind_decisions_to_requested_profile_market_interval_data_fingerprint
+flat canonical state mismatch -> align_flat_position_canonical_state
+runtime-only state mismatch -> scope_runtime_only_state_as_fail_closed_or_extend_research_model
+timestamp/candle-basis mismatch -> align_candle_cutoff_through_ts_and_execution_timing_policy_then_replay
 ```
 
 Do not log secrets or broker credentials.
 
 ### P2: Documentation updates
 
-Update docs only after code/tests are changed.
+Update docs only after code/tests are updated.
 
-Clarify:
+Docs should state the actual supported scope:
 
 ```text
-research-export-decisions must be bound to an approved profile for promotion-grade evidence
-runtime-replay-decisions uses the approved profile regime policy
-decision-equivalence validates export artifact provenance, not just decision arrays
-manual decision JSON is diagnostic only
-flat/no-dust/no-position is the currently supported positive equivalence baseline if that is the chosen scope
+promotion-grade research export must use --profile
+runtime replay uses approved profile regime policy
+decision-equivalence requires validated repo-owned export wrappers
+manual JSON is diagnostic only
+positive equivalence is currently supported for flat/no-dust/no-position baseline
 runtime-only states fail closed unless explicitly modeled
 hard stop-loss and standalone take-profit remain unsupported unless added as named exit rules
 ```
 
-Keep documentation tied to actual repo commands and artifact fields.
-
 ## Scope rules
 
-Do not weaken existing safety or evidence gates.
+Do not weaken safety gates.
 
 Do not:
 
 ```text
-make comparison pass by dropping safety-critical fields globally
-accept arbitrary canonical-looking JSON as promotion-grade evidence
-synthesize research profile hashes for promotion-grade evidence
-pass placeholder regime policy into runtime replay
+make positive equivalence pass by dropping safety-critical fields globally
+allow manual canonical JSON as promotion-grade evidence
+allow profile hash mismatch between research export and runtime replay
+allow runtime replay to use a fake/minimal regime policy
+hide unsupported runtime-only states behind docs only
+bypass approved profile validation
+bypass evidence-chain validation
 call live broker APIs from tests
-submit orders
-mutate live runtime state from replay/export commands
-hide unsupported research/runtime state differences behind docs only
-add stop_loss or take_profit as hidden behavior
+submit real orders
+add hidden stop_loss or take_profit behavior
 ```
 
-If a full shared decision kernel is still too large, do not claim it is done. Make the supported equivalence scope explicit, add positive tests inside that scope, and fail closed outside it.
+If a shared decision kernel remains future work, explicitly report the file/function boundary where research and runtime logic are still separate.
 
 ## Tests to run
 
 Run targeted tests first:
 
 ```bash
-pytest -q tests/test_canonical_decision.py
 pytest -q tests/test_decision_equivalence_canonical.py
-pytest -q tests/test_approved_profile.py
 pytest -q tests/test_research_backtest_reproducibility.py
+pytest -q tests/test_approved_profile.py
 pytest -q tests/test_sma_with_filter_strategy.py
 pytest -q tests/test_strategy_exit_rules.py
+pytest -q tests/test_research_promotion_gate.py
 ```
 
-Add and run any new CLI/export tests.
+Add and run any new CLI/export tests, for example:
+
+```bash
+pytest -q tests/test_decision_export_cli.py
+```
 
 Then run the full suite if feasible:
 
@@ -476,23 +368,21 @@ Then run the full suite if feasible:
 pytest -q
 ```
 
-If the full suite is too slow or fails due to unrelated environment assumptions, run all changed tests and clearly report what was not run and why.
+If full pytest is too slow or fails due to unrelated environment assumptions, run all changed tests and clearly report what was not run and why.
 
 ## Acceptance criteria
 
 The patch is acceptable only if:
 
 ```text
-1. research-export-decisions can bind research decisions to the same approved profile hash used by runtime replay.
-2. runtime-replay-decisions passes the approved profile’s actual regime policy into runtime strategy construction.
-3. decision-equivalence validates export artifact source, wrapper hash, decision count, and wrapper/decision metadata binding.
-4. direct-list or manually prepared decision JSON cannot produce promotion-grade equivalence.
-5. at least one positive golden research/runtime equivalence test passes for a supported simple state.
-6. unsupported runtime-only states fail closed with explicit reason codes instead of silently passing.
-7. promotion evidence validation rejects non-promotion-grade or unverified decision-equivalence reports.
-8. CLI dispatch for research-export-decisions and runtime-replay-decisions is tested or otherwise verified.
-9. docs describe the actual supported scope and commands.
-10. existing exit-rule scope remains explicit and unchanged unless deliberately modified with tests and docs.
+1. A positive repo-owned research export + runtime replay golden equivalence test passes.
+2. The positive test uses validated export artifacts, not only synthetic decision dicts.
+3. CLI dispatch for research-export-decisions, runtime-replay-decisions, and decision-equivalence is tested or explicitly verified.
+4. Research export profile/candidate binding is either fully verified or fails closed with precise reason codes.
+5. Profile transition evidence rejects non-promotion-grade, unverified, incomplete, mismatched, or missing-export-hash decision-equivalence reports.
+6. Unsupported runtime-only states remain fail-closed.
+7. Operator recovery recommendations are actionable and repo-specific.
+8. Existing canonical completeness, export provenance, runtime order-rule hashing, approved regime policy, and exit-rule scope tests continue to pass.
 ```
 
 ## Final report format
@@ -503,6 +393,7 @@ At the end, provide a concise but complete report with these sections:
 Summary
 - What was fixed
 - Whether the latest review concerns were confirmed, partially confirmed, or falsified
+- Whether the repo now has a promotion-grade export/replay/equivalence success path
 
 Verified Findings
 - File-by-file findings
@@ -510,31 +401,27 @@ Verified Findings
 - Any stale assumptions from the review
 
 Design Changes
-- Research export profile binding
-- Runtime replay regime policy construction
-- Decision export artifact validation
-- Flat/no-dust canonical state alignment or explicit unsupported boundary
-- Any new dataclasses/functions/loaders/CLI changes
-
-Promotion/Evidence Changes
-- How decision-equivalence evidence validation changed
-- How unverified/manual JSON is handled
-- How export artifact hashes are recorded
+- Positive golden equivalence path
+- CLI dispatch wiring/tests
+- Research export profile/candidate binding
+- Evidence validation changes
+- Unsupported runtime-only state handling
+- Operator recovery/report changes
 
 Tests Added/Changed
-- Positive golden equivalence tests
-- Negative unsupported-state tests
-- Export provenance tests
+- Positive repo-owned golden equivalence test
 - CLI dispatch tests
-- Approved-profile evidence tests
+- Candidate/profile binding tests
+- Profile transition evidence rejection tests
+- Any unsupported-state fail-closed tests
 
 Exit Rule Scope
-- Confirm implemented exit rules
+- Confirm current implemented exit rules
 - Confirm stop_loss/take_profit status
 - State whether exit behavior changed
 
 Observability / Recovery
-- New report fields
+- New or changed report fields
 - New reason codes
 - Recommended next actions
 - Operator recovery commands
@@ -547,7 +434,8 @@ Commands Run
 Remaining Risks / Follow-up
 - Only repo-specific risks
 - No generic trading disclaimers
-- If shared decision kernel remains future work, identify the exact file/function boundary still split between research and runtime
+- If shared decision kernel remains future work, identify the exact split boundary
 ```
 
-Be explicit. Do not claim the problem class is solved unless the repo now has a tested, promotion-grade, repo-owned research export → runtime replay → decision-equivalence → evidence-validation path that can pass for supported states and fail closed for unsupported states.
+Be explicit. Do not claim the problem class is solved unless the repo now has a tested, fail-closed, repo-owned research-export -> runtime-replay -> canonical-equivalence -> promotion-evidence path that actually passes under the supported aligned flat/no-dust/no-position scope.
+

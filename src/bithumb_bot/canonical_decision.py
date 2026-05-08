@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Any
 
-from .research.hashing import sha256_prefixed
+
+def sha256_prefixed(payload: object) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 CANONICAL_DECISION_CONTRACT_VERSION = 1
@@ -211,6 +216,13 @@ def runtime_decision_to_canonical_event(
     order_rules = position_gate.get("order_rules") or context.get("order_rules") or {}
     market_regime = context.get("market_regime") if isinstance(context.get("market_regime"), dict) else {}
     fee_authority = context.get("fee_authority") if isinstance(context.get("fee_authority"), dict) else {}
+    stable_fee_model = {
+        "bid_fee": fee_authority.get("bid_fee"),
+        "ask_fee": fee_authority.get("ask_fee"),
+        "fee_source": fee_authority.get("fee_source"),
+        "degraded": fee_authority.get("degraded"),
+        "degraded_reason": fee_authority.get("degraded_reason"),
+    }
     blocked_filters = tuple(str(item) for item in context.get("blocked_filters") or ())
     blocked = bool(final_signal == "HOLD" and raw_signal in {"BUY", "SELL"})
     block_reason = str(
@@ -255,8 +267,8 @@ def runtime_decision_to_canonical_event(
         "range_ratio": _range_ratio_from_filters(filters),
         "expected_edge_ratio": cost_edge.get("value"),
         "required_edge_ratio": cost_edge.get("threshold"),
-        "fee_authority_hash": canonical_payload_hash(fee_authority),
-        "fee_model_hash": canonical_payload_hash({"fee_authority": fee_authority}),
+        "fee_authority_hash": canonical_payload_hash(stable_fee_model),
+        "fee_model_hash": canonical_payload_hash(stable_fee_model),
         "slippage_model_hash": canonical_payload_hash(context.get("position_lot_interpretation_costs") or {}),
         "order_rules_hash": canonical_payload_hash(order_rules),
         "market_regime": market_regime.get("composite_regime") or context.get("current_regime") or "",

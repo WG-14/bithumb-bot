@@ -180,7 +180,7 @@ def test_legacy_shallow_decisions_are_diagnostic_only() -> None:
     assert result.report["legacy_schema"] is True
     assert result.report["canonical_schema"] is False
     assert result.report["promotion_grade_comparison"] is False
-    assert result.report["recommended_next_action"] == "regenerate_decisions_with_canonical_schema_before_promotion"
+    assert result.report["recommended_next_action"] == "regenerate_decisions_with_repo_owned_export_commands"
 
 
 def _export_payload(source: str, decisions: list[dict[str, object]], **overrides: object) -> dict[str, object]:

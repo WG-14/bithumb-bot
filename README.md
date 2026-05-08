@@ -115,6 +115,8 @@ uv run bithumb-bot run --short 7 --long 30
 
 Root `backtest.py` is a smoke backtest only. It must not be used as evidence for strategy promotion, approved profiles, live readiness, or capital allocation. The official validation path is `uv run bithumb-bot research-backtest --manifest ...`, followed by walk-forward validation, lineage-backed promotion artifact review, `research-reproduce`, approved-profile generation or transition, mandatory decision-equivalence evidence, and separate paper/live-readiness checks. `--allow-legacy-lineage` is only an explicit compatibility escape hatch for reviewed historical artifacts, not the normal promotion path.
 
+Promotion-grade decision-equivalence evidence must be generated through the repo-owned `research-export-decisions --profile` and `runtime-replay-decisions` commands, then compared as validated export wrappers. Manual JSON decision arrays are diagnostic only. The currently supported positive equivalence baseline is flat/no-dust/no-position; runtime-only dust, residue, or lot-authority states fail closed unless explicitly modeled.
+
 Use `config-dump --masked` for operator config inspection. Direct Python imports of
 `bithumb_bot.config.settings` do not run the CLI bootstrap path and are not the
 supported way to validate `BITHUMB_ENV_FILE`-loaded runtime configuration.
