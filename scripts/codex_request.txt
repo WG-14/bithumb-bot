@@ -1,330 +1,322 @@
 You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-The latest patches appear to have closed the urgent P0 evidence-chain gaps and implemented the first top-of-book research data layer:
+Your task is to turn the current research backtest execution semantics into a verifiable, reproducible, operation-ready execution timing contract. Do not treat the current diagnosis as proven fact. Start from the hypotheses below, inspect the repository, verify or falsify each relevant hypothesis with code/tests, then implement design-level changes that prevent this entire class of backtest execution realism failures. Do not merely patch symptoms by changing `reference_price=candle.close` to another price in one place.
 
-* `orderbook_top_snapshots` schema exists.
-* top-of-book public quote validation/storage exists.
-* `sync-orderbook-top` exists.
-* `dataset.top_of_book` manifest parsing exists and fails closed on unsupported fields.
-* research dataset loading can join nearest top-of-book snapshots by candle timestamp and tolerance.
-* dataset quality reports include quote coverage when top-of-book is configured.
-* `ExecutionRequest` receives `best_bid`, `best_ask`, and `spread_bps` when joined quote data exists.
-* docs now correctly say top-of-book is not full depth and does not solve intra-candle path.
-* pytest reportedly passes.
+Core problem to investigate and fix:
 
-Your task is **not** to redo the top-of-book implementation. Your task is to perform the next small hardening pass:
+`run_sma_backtest()` appears to compute SMA signals using the current candle close and then simulate execution using that same candle close as `ExecutionRequest.reference_price`, with `signal_ts=candle.ts` and `decision_ts=candle.ts`. In this repository, `candles.ts` appears to be the candle bucket start timestamp, not the candle close timestamp. If true, the current backtest is not only same-close optimistic; it also records close-derived decisions at the candle start timestamp. This undermines execution realism, calibration, promotion, and reproducibility claims.
 
-1. Remove or isolate test-only strategy names from the production/operator-facing research strategy registry.
-2. Improve operator visibility for optional top-of-book quote coverage warnings.
-3. Keep quote-aware execution policy out of scope unless a minimal, fully tested hook already exists.
+Preserve this priority: the goal is not “make the backtest less optimistic by adding slippage.” The goal is to introduce a repository-wide contract for when a signal is knowable, when a decision is made, when an order is submitted, what market evidence is used as the fill reference, and whether a candidate is promotable under that execution realism level.
 
-Do not weaken the core problem statement:
+Inspect at least these files before implementing:
 
-This repository is becoming a reproducible, evidence-bound automatic trading experiment system. Candle-only research remains valid only for candle-appropriate strategies. Top-of-book metadata improves execution feasibility evidence, but it is still not full orderbook depth, queue position, tick data, market impact, or intra-candle path. Operator-facing research reports must make missing optional quote coverage visible without silently treating it as full evidence.
-
-Do not turn this into generic cleanup. Make concrete, testable repository changes.
-
-Inspect first:
-
-* `src/bithumb_bot/research/strategy_registry.py`
-* `src/bithumb_bot/research/validation_protocol.py`
-* `src/bithumb_bot/research/dataset_snapshot.py`
 * `src/bithumb_bot/research/backtest_engine.py`
-* `src/bithumb_bot/research/cli.py`
-* `src/bithumb_bot/research/experiment_manifest.py`
 * `src/bithumb_bot/research/execution_model/base.py`
-* `src/bithumb_bot/app.py`
-* `src/bithumb_bot/orderbook_top_store.py`
-* `tests/test_orderbook_top_store.py`
-* existing tests covering research backtest, dataset quality, CLI summaries, strategy registry, promotion, and reproducibility
-* `docs/research-validation.md`
+* `src/bithumb_bot/research/execution_model/fixed_bps.py`
+* `src/bithumb_bot/research/execution_model/stress.py`
+* `src/bithumb_bot/research/dataset_snapshot.py`
+* `src/bithumb_bot/research/experiment_manifest.py`
+* `src/bithumb_bot/research/validation_protocol.py`
+* `src/bithumb_bot/research/strategy_registry.py`
+* `src/bithumb_bot/research/promotion_gate.py`
+* `src/bithumb_bot/research/cli.py`
+* `src/bithumb_bot/marketdata.py`
+* `src/bithumb_bot/strategy/sma.py`
+* `src/bithumb_bot/broker/paper.py`
+* `src/bithumb_bot/execution_quality.py`
+* `src/bithumb_bot/research/execution_calibration.py`
+* Existing research tests, especially:
 
-Keep these as hypotheses until verified in code.
+  * `tests/test_research_backtest_reproducibility.py`
+  * `tests/test_orderbook_top_research.py`
+  * `tests/test_research_promotion_gate.py`
+  * `tests/test_dataset_quality_report.py`
 
-Hypothesis 1:
-A test-only strategy name such as `top_of_book_required_test` is exposed through the production research strategy registry and can be used in a real operator manifest.
+Hypotheses to keep as hypotheses until verified:
 
-Verification:
-Inspect `strategy_registry.py` and all tests that depend on this name. Determine whether it is intended to be a production-supported strategy or only a test hook.
+H1. The root issue is not only “same close fill”; it is the absence of a time-axis contract. `candles.ts` may be bucket start, while backtest decisions based on candle close are currently stamped at that same bucket start.
 
-Required behavior:
-Production/operator-facing strategy names must remain clean. Test-only strategy names must not look like real supported strategies.
+H2. `StressExecutionModel.latency_ms` may currently be metadata only for price purposes: it records `submit_ts_assumption`, but it may not shift the fill reference to a later candle or quote.
 
-Acceptable fixes:
+H3. Top-of-book data may currently be execution metadata only, not the actual fill anchor. The execution models may still compute price from `reference_price` rather than BUY=ask and SELL=bid.
 
-Option A — preferred:
-Rename the test-only strategy to a clearly private test hook, for example:
+H4. Dataset quality and CLI output may expose limitations such as `execution_reference_price=candle_close`, but promotion may not fail closed on candle-close execution realism.
 
-```python
-"__test_top_of_book_required__"
-```
+H5. Research backtest semantics may diverge materially from live/paper execution semantics. Live/paper paths appear to distinguish closed candles, orderbook bid/ask, submit/fill evidence, and latency more explicitly.
 
-and make the naming convention explicit in tests.
+H6. Current data granularity may not support full-depth or intra-candle path realism. This is acceptable, but the system must make that limitation explicit and non-promotable where appropriate.
 
-Option B:
-Remove the test-only strategy from `resolve_research_strategy()` and keep only a test helper for data requirement validation.
+Implementation goals, in priority order:
 
-Option C:
-Gate test-only strategy resolution behind an explicit internal/test flag, if such a pattern already exists in the repo.
+P0. Introduce an explicit execution timing and fill-reference contract.
 
-Constraints:
+Add an execution timing policy concept to the research layer. It must be explicit in manifests or derived with clear legacy behavior. It should support at least:
 
-* `sma_with_filter` must remain supported with `required_data=("candles",)` and `optional_data=("top_of_book",)`.
-* Unknown real strategy names must continue to fail with an operator-readable unsupported strategy error.
-* Do not add fake microstructure strategy support.
-* Do not make `top_of_book_required_test` appear in docs as a production strategy.
-* If any test-only strategy remains, its name must clearly communicate that it is not an operator strategy.
+* `signal_basis`: `closed_candle`
+* `decision_time`: `candle_close` or `candle_close_plus_guard`
+* `decision_guard_ms`: integer, default 0 unless configured
+* `fill_reference_policy`:
 
-Reason code requirement:
-If a strategy requires top-of-book and the manifest lacks `dataset.top_of_book`, fail closed with:
+  * `candle_close_legacy`
+  * `next_candle_open`
+  * `first_orderbook_after_decision`
+  * `latency_adjusted_orderbook`
+* `quote_selection`: at minimum `first_after_or_equal`
+* `max_quote_wait_ms`: integer
+* `missing_quote_policy`: `fail`, `skip`, or `warn`
+* `allow_same_candle_close_fill`: boolean
+* `min_execution_reality_level_for_promotion`: optional, for promotion checks
 
-```text
-research_data_requirement_top_of_book_missing
-```
+Do not silently preserve optimistic behavior as if it were realistic. If backward compatibility is necessary, retain legacy behavior only behind an explicit or clearly derived legacy policy, and label it in reports as optimistic and not promotable for live-ready profiles.
 
-or preserve this exact existing reason if already implemented.
+P1. Separate signal timing from execution timing in the backtest engine.
 
-Hypothesis 2:
-Optional top-of-book missing coverage currently appears inside split-level dataset quality reports as `top_of_book_gate_status="WARN"`, but may not be visible in candidate-level warnings or the CLI summary. Operators should not need to open raw JSON to notice optional quote coverage problems.
+Refactor `run_sma_backtest()` so that signal generation and execution simulation are no longer an implicit same-candle action. Add small, testable data structures or helper functions for:
 
-Verification:
-Inspect report payload construction and research CLI summary formatting. Determine whether optional quote WARN is propagated to:
+Signal event:
 
-* top-level report summary
-* candidate `warnings`
-* CLI output / operator next action
+* `signal_candle_start_ts`
+* `signal_candle_close_ts`
+* `decision_ts`
+* `side`
+* `signal_reference_price`
+* `signal_reference_source`
+* `feature_snapshot` or equivalent minimal metadata
+* `regime_snapshot`
 
-Required behavior:
-When `dataset.top_of_book` is configured with `required=false` and quote coverage is incomplete, research should still run, but the warning must be visible.
+Execution reference event:
 
-Add candidate warning, for example:
+* `submit_ts_assumption`
+* `fill_reference_ts`
+* `fill_reference_price`
+* `fill_reference_source`
+* `quote_ts`
+* `quote_age_ms`
+* `quote_source`
+* `best_bid`
+* `best_ask`
+* `spread_bps`
+* `execution_reality_level`
+* `intra_candle_policy`
+* failure reason if no valid reference exists
 
-```text
-top_of_book_optional_coverage_warning
-```
+For candle-only safe mode, implement `next_candle_open`. If a signal is generated on candle `i`, the fill reference must be candle `i+1.open`; do not create a fill for the final candle if there is no next candle. `decision_ts` must be at or after `signal_candle_close_ts`, not equal to bucket start unless the interval semantics truly prove that `ts` is already a close timestamp.
 
-Include enough context in report payload or CLI output to show:
+Derive interval milliseconds from the dataset interval, using existing helpers where possible. Do not hard-code one-minute behavior except in tests.
 
-* `top_of_book_gate_status`
-* `top_of_book_coverage_pct`
-* `top_of_book_missing_count`
-* affected split names
-* next action
+P2. Add quote-aware execution reference selection.
 
-Suggested next action text:
+For top-of-book based policies, do not use “nearest quote around candle timestamp” as a fill reference. Implement a directional selector for execution:
 
-```text
-collect orderbook top snapshots with sync-orderbook-top, rerun research-backtest, and verify top_of_book_coverage_pct
-```
+* Choose the first top-of-book snapshot with `quote.ts >= decision_ts` for `first_orderbook_after_decision`.
+* Choose the first top-of-book snapshot with `quote.ts >= submit_ts_assumption` for `latency_adjusted_orderbook`.
+* Enforce `max_quote_wait_ms`.
+* Respect `missing_quote_policy`.
+* Record quote age and source in every execution metadata object.
+* BUY fill reference must be `best_ask`.
+* SELL fill reference must be `best_bid`.
 
-Required behavior for required top-of-book:
-If `dataset.top_of_book.required=true` or `missing_policy=fail`, missing or insufficient quote coverage must remain fail-closed and must propagate deterministic reasons into candidate gates. Do not convert required failures into warnings.
+Keep the existing nearest-join behavior only for dataset quality/reporting if needed, but do not use it as execution fill evidence unless explicitly documented as a non-promotable legacy mode.
 
-Hypothesis 3:
-Top-of-book execution metadata is now carried through research trades, but fill pricing still uses candle close plus fixed/stress bps. This is acceptable for this patch, but docs and reports must not imply quote-aware execution pricing.
+P3. Make latency affect price reference, not only metadata.
 
-Verification:
-Inspect execution metadata and docs. Confirm that quote fields are metadata only unless an explicit execution model changes reference pricing.
+When a stress model has non-zero latency and the selected timing policy is latency-aware, the effective fill reference must be chosen after `decision_ts + latency_ms`. If latency changes and there are different later quotes or candle references, fill price must be able to change. Keep seeded randomness deterministic.
 
-Required behavior:
+P4. Add execution realism metadata and gates.
 
-* Keep `reference_price` as candle close unless there is already an explicit quote-aware execution model.
-* Continue recording `best_bid`, `best_ask`, and `spread_bps` when joined quotes exist.
-* Continue recording limitations when quotes are absent.
-* Do not implement spread gate or quote-aware execution pricing in this patch unless it is already partially implemented and can be finished safely with tests.
-* Do not claim full depth, market impact, queue position, or intra-candle path support.
+Every trade’s `execution` metadata must include enough information to audit the timing contract:
 
-Hypothesis 4:
-CLI coverage for `sync-orderbook-top` may be incomplete even if the command function exists.
+* `signal_candle_start_ts`
+* `signal_candle_close_ts`
+* `decision_ts`
+* `submit_ts_assumption`
+* `fill_reference_ts`
+* `fill_reference_price`
+* `fill_reference_source`
+* `signal_reference_price`
+* `signal_reference_source`
+* `execution_reality_level`
+* `allow_same_candle_close_fill`
+* `quote_selection`
+* `quote_age_ms`
+* `top_of_book_source`
+* `top_of_book_is_full_depth=false` when applicable
+* `intra_candle_policy`
 
-Verification:
-Inspect command registration in `app.py` and tests. Confirm whether `sync-orderbook-top` is registered, callable, and tested with mocked public API output.
+Update research reports, candidate profiles, and relevant hashes so that execution timing policy and execution reality level are part of reproducible lineage. Candidate profile hashes should change when execution timing policy changes.
 
-If missing or weak, add tests for:
+Promotion must refuse candidates that are only supported by `candle_close_legacy` / same-close optimistic execution when the candidate is being promoted as paper/live-ready. Add a fail-closed gate such as:
 
-* command registration
-* mocked successful quote fetch
-* DB row written
-* output includes pair, bid, ask, spread_bps, source, row_count
-* output includes next action
-* invalid quote fails before insert
-* no repo-local artifact writes
+* reject if `execution_reality_level` is below configured minimum
+* reject if `fill_reference_source=candle_close` and same-close fills are not explicitly allowed
+* reject if top-of-book policy is required but quote-after-decision signal coverage is below threshold
+* reject if latency-aware policy is configured but latency did not affect reference selection semantics
 
-Do not call the real Bithumb API in tests.
+P5. Improve observability and dataset quality around execution candidates.
 
-Hypothesis 5:
-The top-of-book feature is documented, but operator-facing failure modes may still be too buried.
+Add signal-event-level quote coverage metrics to reports. Do not rely only on all-candle quote coverage. Include:
 
-Verification:
-Inspect `docs/research-validation.md` and any runbook or operator reporting docs.
+* `signal_event_count`
+* `fillable_signal_event_count`
+* `missing_quote_on_signal_count`
+* `quote_after_decision_coverage_pct`
+* `median_quote_age_ms_on_signal`
+* `p95_quote_age_ms_on_signal`
+* `execution_reference_policy`
+* `execution_reality_level`
+* `execution_reality_gate_status`
+* `execution_reality_gate_reasons`
 
-Required docs updates:
-Only update docs to match implemented behavior.
+Update CLI summary output to surface these values when available. Keep existing limitation messages, but make them actionable and tied to promotion failure/warning status.
 
-Ensure docs clearly state:
+P6. Connect calibration semantics to execution policy.
 
-* `sma_with_filter` supports candle-only research.
-* `dataset.top_of_book` is optional unless required by strategy or manifest.
-* optional top-of-book missing coverage produces visible warning, not silent success.
-* required top-of-book missing coverage fails closed.
-* top-of-book is not full depth.
-* top-of-book does not solve intra-candle path.
-* `sync-orderbook-top` collects only current public best bid/ask snapshots.
-* research quote joins use nearest snapshot within tolerance.
-* operators should rerun research after collecting quote snapshots.
-* quote-aware execution pricing, spread gate, full depth, ticks, and path replay remain future work unless implemented.
+Update execution calibration artifacts and comparison logic so they include and validate price-source semantics, not only numeric slippage/latency thresholds. Add fields where appropriate:
 
-Scope limits:
+* `signal_reference_price_source`
+* `submit_reference_price_source`
+* `fill_price_source`
+* `backtest_fill_reference_policy`
+* `execution_reality_level`
 
-This is a hardening and observability patch, not a new execution model patch.
+`compare_calibration_to_scenario()` should fail or warn when the calibration artifact’s reference semantics are incompatible with the candidate’s backtest execution timing policy.
 
-Out of scope unless already trivial and fully tested:
+Scope constraints:
 
-* spread gate
-* quote-aware fill pricing
-* full orderbook depth
-* trade ticks
-* queue position
-* market impact
-* intra-candle path reconstruction
-* latency-aware quote replay
-* live order policy changes
-* live arming behavior changes
+* Do not implement full-depth orderbook replay unless the repository already has full-depth data structures available. If unavailable, explicitly mark `top_of_book_is_full_depth=false` and preserve that limitation in reports.
+* Do not use live network calls in tests.
+* Do not change live trading behavior except where metadata/reporting integration is clearly necessary and covered by tests.
+* Preserve deterministic reproducibility. Seeded stress results must remain deterministic for the same manifest, dataset, timing policy, and seed.
+* Preserve backward compatibility only through explicit legacy labeling. Do not allow legacy optimistic mode to appear as promotion-grade execution evidence.
+* Avoid large rewrites of unrelated OMS, broker, dust, or accounting logic.
 
-Testing requirements:
+Tests to add or update:
 
-Add or update tests. Do not rely on manual review.
+1. `test_sma_signal_close_executes_next_candle_open_not_same_close`
 
-Minimum tests:
+Create a synthetic candle dataset where the signal candle close is 100 and the next candle open is 130. With `fill_reference_policy=next_candle_open` and zero slippage/fees, a BUY fill must use 130, not 100. Verify execution metadata includes `fill_reference_source=next_candle_open`.
 
-Strategy registry / data requirements:
+2. `test_decision_ts_is_after_signal_candle_close`
 
-1. `sma_with_filter` remains a supported production research strategy.
-2. `sma_with_filter` has candles required and top-of-book optional.
-3. Unknown strategy names fail clearly.
-4. Any test-only top-of-book-required strategy name is clearly private or test-scoped.
-5. A top-of-book-required test hook fails closed when `dataset.top_of_book` is absent.
-6. The fail reason includes `research_data_requirement_top_of_book_missing`.
+For a dataset where `candles.ts` is bucket start and interval is `1m`, assert that `decision_ts >= signal_candle_start_ts + 60_000` for closed-candle signals. Also verify `signal_ts` is not misleadingly used as both bucket start and decision time unless explicitly documented.
 
-Optional quote warning visibility:
+3. `test_orderbook_policy_uses_first_quote_after_decision_not_nearest_before`
 
-7. Optional top-of-book configured but missing quotes does not fail candidate solely because quotes are missing.
-8. The report includes `top_of_book_gate_status="WARN"`.
-9. Candidate warnings include `top_of_book_optional_coverage_warning` or equivalent deterministic warning.
-10. CLI summary prints top-of-book coverage status, missing count, and next action.
-11. The warning is deterministic and included in content-hashed report payload if appropriate.
+Create top-of-book snapshots before and after decision time. Ensure execution selects the first quote after decision, not the nearest quote before decision. Verify BUY uses ask and SELL uses bid.
 
-Required quote fail-closed:
+4. `test_latency_changes_fill_reference_quote`
 
-12. Required top-of-book missing quotes fails dataset quality and candidate gate.
-13. Gate reasons include top-of-book missing or coverage-below-threshold reason.
-14. Promotion remains impossible for failed required quote coverage.
+Create multiple top-of-book snapshots after decision time. Run with latency 0 and with a larger latency. Assert that `submit_ts_assumption`, selected quote, and fill reference can differ when latency crosses quote timestamps.
 
-Execution metadata:
+5. `test_top_of_book_model_uses_ask_for_buy_bid_for_sell`
 
-15. When joined quotes exist, research trade execution metadata includes `best_bid`, `best_ask`, and `spread_bps`.
-16. When quotes are absent, execution metadata does not fabricate values.
-17. Existing candle-only research still works and records the correct limitations.
+Use close=100, ask=120, bid=80, slippage=0. BUY must fill from ask=120; SELL must fill from bid=80. A fill at 100 should fail the test.
 
-CLI / ingestion:
+6. `test_promotion_refuses_candle_close_execution_for_live_ready_candidate`
 
-18. `sync-orderbook-top` is registered and callable.
-19. Mocked quote fetch writes one DB row.
-20. CLI output includes pair, bid, ask, spread_bps, source, row_count, and next action.
-21. Tests do not hit the real network.
+Construct a candidate/report that otherwise passes but uses `execution_reality_level=candle_close_optimistic` or `fill_reference_source=candle_close`. Promotion must fail with an explicit reason such as `execution_reality_level_below_required` or `execution_reference_price_candle_close_not_promotable`.
 
-Regression:
+7. `test_execution_metadata_includes_reference_source_and_quote_age`
 
-22. Existing dataset quality, execution calibration, promotion, and research reproducibility tests still pass.
+Every trade execution metadata object must include reference source, reference timestamp, decision timestamp, submit timestamp, execution reality level, quote age, and quote source fields. Candle-only policies should use null quote fields but still include the keys.
 
-Run at least:
+8. `test_signal_event_quote_coverage_reported`
+
+For a dataset with some signal events missing valid quotes, assert report-level signal quote coverage fields are present and deterministic.
+
+9. Update existing reproducibility tests.
+
+Ensure content hashes remain deterministic for repeated runs and change when execution timing policy changes. Existing seeded stress tests must still be auditable and deterministic.
+
+10. Update existing top-of-book tests.
+
+Existing tests that expect top-of-book to be metadata only may need to be revised or split into:
+
+* legacy candle-close metadata behavior
+* new quote-aware execution behavior
+
+Recovery and migration expectations:
+
+* Existing manifests without an explicit execution timing policy may be parsed through a clearly labeled default. Prefer deriving `candle_close_legacy` only for legacy compatibility, with warnings and non-promotable status.
+* New manifests or promotion-grade workflows should default to `next_candle_open` when only candles exist, or quote-after-decision policies when top-of-book is required.
+* Reports must make legacy optimistic execution impossible to miss.
+* Add clear failure reasons rather than generic gate failures.
+* Do not break report JSON consumers unnecessarily; when adding fields, prefer additive changes unless a test proves old semantics are unsafe.
+
+Suggested implementation shape:
+
+* Add an `ExecutionTimingPolicy` dataclass and parser in `experiment_manifest.py`, either under `execution_model.execution_timing` or a top-level `execution_timing` section. Choose the least disruptive structure, but include it in `ExperimentManifest.canonical_payload()`.
+* Add helper functions in a new research module such as `src/bithumb_bot/research/execution_timing.py` or near `backtest_engine.py`:
+
+  * compute candle close timestamp from start timestamp and interval
+  * build signal event
+  * resolve candle-only next-open reference
+  * resolve first quote after decision/submit
+  * compute execution reality level
+  * compute signal-event quote coverage summary
+* Extend `ExecutionRequest` and `ExecutionFill` only as needed to carry audit metadata. Keep Fixed/Stress execution models deterministic.
+* Either add a new `TopOfBookMarketExecutionModel` or make fill-reference resolution occur before calling existing bps models. The final behavior must still guarantee BUY=ask and SELL=bid for quote-aware policies.
+* Update report generation and promotion gate logic so execution policy and reality level are included and enforced.
+* Update CLI summary output with execution realism and signal quote coverage.
+
+Run tests:
+
+At minimum, run:
 
 ```bash
-uv run pytest -q
+pytest -q tests/test_research_backtest_reproducibility.py tests/test_orderbook_top_research.py tests/test_research_promotion_gate.py tests/test_dataset_quality_report.py
 ```
 
-If full pytest is too slow, run targeted subsets first, then full pytest if feasible. In the final report, state exactly what was run.
+Also run any newly added tests. If the full test suite is feasible, run:
 
-Operational and recovery constraints:
-
-* Do not weaken live safety gates.
-* Do not change live arming behavior.
-* Do not change real order submission behavior.
-* Do not write runtime artifacts into the repository.
-* Use existing runtime DB/path policy.
-* Preserve deterministic hashing.
-* Do not silently ignore unsupported manifest fields.
-* Do not fabricate quote/depth/path data.
-* Keep new warnings and fail reasons deterministic, reason-coded, and searchable.
-* Avoid heavy dependencies.
-* Keep top-of-book optional for current SMA research unless explicitly required.
-
-Observability requirements:
-
-Research reports and CLI summaries should make the following visible when relevant:
-
-* top-of-book requested
-* top-of-book required
-* join tolerance
-* joined quote count
-* missing quote count
-* quote coverage percentage
-* quote gate status
-* affected split names
-* whether this is a warning or a fail-closed condition
-* next action for operators
-* explicit limitation that top-of-book is not full depth
-* explicit limitation that intra-candle path is still unavailable
+```bash
+pytest -q
+```
 
 Final report format:
 
-Return a concise engineering report with these sections:
+After implementation, provide a concise but complete report with exactly these sections:
 
-1. Summary
+1. `Hypotheses checked`
 
-   * What was verified.
-   * What was changed.
-   * What remains out of scope.
+   * For H1–H6, state verified, falsified, or partially verified.
+   * Include the concrete files/functions/tests used as evidence.
 
-2. Hypothesis Review
-   For each hypothesis 1–5:
+2. `Design changes made`
 
-   * status: verified / refuted / partially verified / not fully investigated
-   * code evidence
-   * resulting action
+   * Summarize the new timing policy, execution reference selection, metadata, gates, and calibration/report changes.
+   * Explicitly state how the change prevents the same class of bugs.
 
-3. Implemented Changes
+3. `Behavior before vs after`
 
-   * Files changed
-   * New or changed strategy names, warning codes, report fields, CLI output, tests
-   * Backward compatibility behavior
+   * Explain same-close legacy behavior.
+   * Explain `next_candle_open`.
+   * Explain `first_orderbook_after_decision`.
+   * Explain `latency_adjusted_orderbook`.
 
-4. Validation and Tests
+4. `Tests added/updated`
 
-   * Exact commands run
-   * Test results
-   * Any tests not run and why
+   * List each test name and what invariant it locks.
 
-5. Operational Impact
+5. `Promotion and safety impact`
 
-   * How operators see optional quote warnings
-   * How required quote failures surface
-   * How candle-only research behavior changes or does not change
-   * Whether promotion/live readiness behavior changed
+   * State when candle-close optimistic results are still allowed.
+   * State when they are blocked.
+   * State how operators will see this in reports/CLI.
 
-6. Remaining Risks / Follow-up
+6. `Observability and reproducibility`
 
-   * quote-aware execution pricing
-   * spread gate
-   * full depth
-   * trade ticks
-   * queue position
-   * market impact
-   * intra-candle path
-   * long-range quote backfill
+   * List new metadata/report fields.
+   * State how content hashes/profile hashes behave when execution timing policy changes.
 
-7. Suggested Next PRs
+7. `Limitations and follow-up`
 
-   * P1/P2/P3 priority list for anything not completed
+   * Explicitly mention no full-depth/intra-candle-path replay unless implemented.
+   * Mention any remaining assumptions.
 
-Do not produce a generic architecture essay. Make concrete repository changes where feasible, run tests, and report with exact file/function references.
+8. `Commands run`
+
+   * Include exact test commands and results.
+
+Do not submit a final answer that only says the code was changed. The final report must prove that the repository now has a verifiable execution timing contract rather than a one-off price substitution.
+

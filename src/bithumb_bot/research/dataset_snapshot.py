@@ -70,6 +70,7 @@ class DatasetSnapshot:
     date_range: DateRange
     candles: tuple[Candle, ...]
     top_of_book_quotes: tuple[TopOfBookQuote | None, ...] = ()
+    top_of_book_event_quotes: tuple[TopOfBookQuote, ...] = ()
     top_of_book_requested: bool = False
     top_of_book_required: bool = False
     top_of_book_missing_policy: str | None = None
@@ -90,6 +91,7 @@ class DatasetSnapshot:
                 quote.as_tuple() if quote is not None else None
                 for quote in self.top_of_book_quotes
             ],
+            "top_of_book_event_quotes": [quote.as_tuple() for quote in self.top_of_book_event_quotes],
             "top_of_book_config": {
                 "requested": self.top_of_book_requested,
                 "required": self.top_of_book_required,
@@ -110,6 +112,11 @@ class DatasetSnapshot:
             if candle.ts == ts:
                 return quote
         return None
+
+    def execution_top_of_book_quotes(self) -> tuple[TopOfBookQuote, ...]:
+        if self.top_of_book_event_quotes:
+            return self.top_of_book_event_quotes
+        return tuple(quote for quote in self.top_of_book_quotes if quote is not None)
 
 
 @dataclass(frozen=True)
@@ -176,6 +183,7 @@ def load_dataset_range(
         for row in rows
     )
     top_of_book_quotes: tuple[TopOfBookQuote | None, ...] = ()
+    top_of_book_event_quotes: tuple[TopOfBookQuote, ...] = ()
     top_of_book_spec = manifest.dataset.top_of_book
     if top_of_book_spec is not None:
         top_of_book_quotes = _load_top_of_book_quotes(
@@ -184,6 +192,18 @@ def load_dataset_range(
             candles=candles,
             join_tolerance_ms=top_of_book_spec.join_tolerance_ms,
             quote_source=top_of_book_spec.quote_source,
+        )
+        top_of_book_event_quotes = _load_top_of_book_event_quotes(
+            db_path=db_path,
+            market=manifest.market,
+            interval=manifest.interval,
+            candles=candles,
+            quote_source=top_of_book_spec.quote_source,
+            max_wait_ms=max(
+                int(top_of_book_spec.join_tolerance_ms),
+                int(manifest.execution_timing.max_quote_wait_ms),
+                int(max((scenario.latency_ms for scenario in manifest.execution_model.scenarios), default=0)),
+            ),
         )
     return DatasetSnapshot(
         snapshot_id=manifest.dataset.snapshot_id,
@@ -194,6 +214,7 @@ def load_dataset_range(
         date_range=date_range,
         candles=candles,
         top_of_book_quotes=top_of_book_quotes,
+        top_of_book_event_quotes=top_of_book_event_quotes,
         top_of_book_requested=top_of_book_spec is not None,
         top_of_book_required=bool(top_of_book_spec.required) if top_of_book_spec is not None else False,
         top_of_book_missing_policy=top_of_book_spec.missing_policy if top_of_book_spec is not None else None,
@@ -521,6 +542,61 @@ def _load_top_of_book_quotes(
         return tuple(out)
     finally:
         conn.close()
+
+
+def _load_top_of_book_event_quotes(
+    *,
+    db_path: str | Path,
+    market: str,
+    interval: str,
+    candles: tuple[Candle, ...],
+    quote_source: str | None,
+    max_wait_ms: int,
+) -> tuple[TopOfBookQuote, ...]:
+    if not candles:
+        return ()
+    start_ts = int(candles[0].ts)
+    end_ts = int(candles[-1].ts) + _interval_ms(interval) + int(max_wait_ms)
+    conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
+    try:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='orderbook_top_snapshots'"
+        ).fetchone()
+        if table is None:
+            return ()
+        params: list[object] = [market, start_ts, end_ts]
+        source_predicate = ""
+        if quote_source is not None:
+            source_predicate = "AND source=?"
+            params.append(quote_source)
+        rows = conn.execute(
+            f"""
+            SELECT ts, pair, bid_price, ask_price, spread_bps, source, observed_at_epoch_sec
+            FROM orderbook_top_snapshots
+            WHERE pair=?
+              AND ts >= ?
+              AND ts <= ?
+              {source_predicate}
+            ORDER BY ts ASC, source ASC
+            """,
+            tuple(params),
+        ).fetchall()
+    finally:
+        conn.close()
+    return tuple(
+        TopOfBookQuote(
+            ts=int(row[0]),
+            pair=str(row[1]),
+            bid_price=float(row[2]),
+            ask_price=float(row[3]),
+            spread_bps=float(row[4]),
+            source=str(row[5]),
+            observed_at_epoch_sec=(None if row[6] is None else float(row[6])),
+            matched_candle_ts=None,
+            age_ms=None,
+        )
+        for row in rows
+    )
 
 
 def _add_top_of_book_quality_fields(*, payload: dict[str, Any], snapshot: DatasetSnapshot) -> None:

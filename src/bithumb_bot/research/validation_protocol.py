@@ -21,6 +21,7 @@ from .dataset_snapshot import (
 )
 from .execution_calibration import compare_calibration_to_scenario
 from .execution_model import FixedBpsExecutionModel, StressExecutionModel, model_params_hash
+from .execution_timing import execution_reality_gate, signal_quote_coverage_summary
 from .experiment_manifest import DateRange, ExecutionScenario, ExperimentManifest
 from .hashing import sha256_prefixed
 from .lineage import build_research_lineage
@@ -174,6 +175,7 @@ def _evaluate_candidates(
             assumed_order_failure_rate=scenario.order_failure_rate,
             expected_market=manifest.market,
             expected_interval=manifest.interval,
+            expected_execution_timing_policy=manifest.execution_timing.as_dict(),
             require_content_hash=manifest.execution_model.calibration_required,
             min_sample_count=ExecutionQualityThresholds().min_sample,
             require_quality_gate_pass=(
@@ -200,6 +202,7 @@ def _evaluate_candidates(
                         split_name="train",
                     ),
                 ),
+                execution_timing_policy=manifest.execution_timing,
             )
             validation = runner(
                 dataset=snapshots["validation"],
@@ -217,6 +220,7 @@ def _evaluate_candidates(
                         split_name="validation",
                     ),
                 ),
+                execution_timing_policy=manifest.execution_timing,
             )
             final_holdout = (
                 runner(
@@ -225,7 +229,7 @@ def _evaluate_candidates(
                     fee_rate=scenario.fee_rate,
                     slippage_bps=float(scenario.slippage_bps),
                     parameter_stability_score=None,
-                    execution_model=_execution_model_from_scenario(
+                        execution_model=_execution_model_from_scenario(
                         scenario,
                         seed_context=_seed_context(
                             manifest_hash=manifest_hash,
@@ -234,8 +238,9 @@ def _evaluate_candidates(
                             parameter_candidate_id=param_candidate_id,
                             split_name="final_holdout",
                         ),
-                    ),
-                )
+                        ),
+                        execution_timing_policy=manifest.execution_timing,
+                    )
                 if "final_holdout" in snapshots
                 else None
             )
@@ -313,6 +318,17 @@ def _evaluate_candidates(
                 dataset_quality_status=dataset_quality_status,
                 dataset_quality_reasons=dataset_quality_reasons,
             )
+            execution_metadata = list(base.get("validation_execution_metadata") or [])
+            execution_reality_summary = _execution_reality_summary(
+                policy=manifest.execution_timing,
+                execution_metadata=execution_metadata,
+            )
+            if execution_reality_summary["execution_reality_gate_status"] == "FAIL":
+                gate_result = "FAIL"
+                fail_reasons = sorted(
+                    set(fail_reasons)
+                    | set(str(item) for item in execution_reality_summary["execution_reality_gate_reasons"])
+                )
             cost_model = {
                 "fee_rate": scenario.fee_rate,
                 "slippage_bps": float(scenario.slippage_bps),
@@ -329,6 +345,8 @@ def _evaluate_candidates(
                 "model_params_hash": execution_model_payload["model_params_hash"],
                 "cost_model": cost_model,
                 "execution_calibration_gate": calibration_gate,
+                "execution_timing_policy": manifest.execution_timing.as_dict(),
+                "execution_reality_summary": execution_reality_summary,
                 "train_metrics": train_metrics,
                 "validation_metrics": validation_metrics,
                 "final_holdout_metrics": final_holdout_metrics,
@@ -366,12 +384,13 @@ def _evaluate_candidates(
                         for split_name, report in sorted(quality_reports.items())
                     },
                     "top_of_book_quality_summary": top_of_book_quality_summary,
+                    "execution_timing_policy": manifest.execution_timing.as_dict(),
                     "strategy_name": manifest.strategy_name,
                     "parameter_candidate_id": base["candidate_id"],
                     "parameter_values": params,
                     "scenario_policy": manifest.execution_model.scenario_policy,
                     "scenario_results": [],
-                    "execution_model_source": manifest.execution_model.source,
+                "execution_model_source": manifest.execution_model.source,
                     "execution_calibration_required": manifest.execution_model.calibration_required,
                     "execution_calibration_strictness": manifest.execution_model.calibration_strictness,
                     "final_holdout_required_for_promotion": manifest.acceptance_gate.final_holdout_required_for_promotion,
@@ -379,7 +398,7 @@ def _evaluate_candidates(
                     "walk_forward_required": manifest.acceptance_gate.walk_forward_required,
                     "regime_classifier_version": MARKET_REGIME_VERSION,
                     "warnings": [],
-                    "repository_version": _repository_version(),
+                "repository_version": _repository_version(),
                 },
             )
             candidate_payload["scenario_results"].append(scenario_result)
@@ -418,6 +437,8 @@ def _evaluate_candidates(
                 "regime_evidence": dict(primary.get("regime_evidence") or {}),
                 "walk_forward_gate_result": primary.get("walk_forward_gate_result"),
                 "parameter_stability": primary.get("parameter_stability"),
+                "execution_timing_policy": manifest.execution_timing.as_dict(),
+                "execution_reality_summary": primary.get("execution_reality_summary"),
             }
         )
         warning_reasons = _execution_calibration_warning_reasons(candidate_payload)
@@ -671,6 +692,7 @@ def _walk_forward_metrics(
                     split_name=f"{window_id}_train",
                 ),
             ),
+            manifest.execution_timing,
         )
         test = runner(
             test_snapshot,
@@ -688,6 +710,7 @@ def _walk_forward_metrics(
                     split_name=f"{window_id}_test",
                 ),
             ),
+            manifest.execution_timing,
         )
         test_metrics = test.metrics.as_dict()
         pass_reasons: list[str] = []
@@ -860,13 +883,18 @@ def _report_payload(
             "top_of_book_is_full_depth": False,
             "orderbook_depth_available": False,
             "intra_candle_path_available": False,
-            "execution_reference_price": "candle_close",
-            "intra_candle_policy": "close_price_only_no_intracandle_path",
+            "execution_reference_price": manifest.execution_timing.fill_reference_policy,
+            "intra_candle_policy": _policy_intra_candle_limitation(manifest.execution_timing.fill_reference_policy),
             "top_of_book_join_tolerance_ms": (
                 manifest.dataset.top_of_book.join_tolerance_ms if manifest.dataset.top_of_book else None
             ),
         },
         "top_of_book_quality_summary": top_of_book_quality_summary,
+        "execution_timing_policy": manifest.execution_timing.as_dict(),
+        "execution_reality_level": _report_execution_reality_level(candidates),
+        "execution_reality_gate_status": _report_execution_reality_gate_status(candidates),
+        "execution_reality_gate_reasons": _report_execution_reality_gate_reasons(candidates),
+        "signal_quote_coverage_summary": _report_signal_quote_coverage_summary(candidates),
         "strategy_name": manifest.strategy_name,
         "regime_classifier_version": MARKET_REGIME_VERSION,
         "regime_acceptance_gate": manifest.acceptance_gate.regime_acceptance_gate.as_dict(),
@@ -962,6 +990,96 @@ def _execution_metadata(trades: Any) -> list[dict[str, Any]]:
         if isinstance(trade, dict) and isinstance(trade.get("execution"), dict):
             metadata.append(dict(trade["execution"]))
     return metadata
+
+
+def _execution_reality_summary(
+    *,
+    policy,
+    execution_metadata: list[dict[str, Any]],
+) -> dict[str, Any]:
+    coverage = signal_quote_coverage_summary(execution_metadata=execution_metadata, policy=policy)
+    observed_levels = [
+        str(item.get("execution_reality_level"))
+        for item in execution_metadata
+        if item.get("execution_reality_level")
+    ]
+    sources = [
+        str(item.get("fill_reference_source"))
+        for item in execution_metadata
+        if item.get("fill_reference_source")
+    ]
+    gate = execution_reality_gate(
+        policy=policy,
+        observed_levels=observed_levels,
+        fill_reference_sources=sources,
+        quote_coverage_pct=coverage.get("quote_after_decision_coverage_pct"),
+    )
+    return {
+        **coverage,
+        "execution_reality_gate_status": gate["status"],
+        "execution_reality_gate_reasons": gate["reasons"],
+        "execution_reality_gate": gate,
+    }
+
+
+def _report_execution_reality_level(candidates: list[dict[str, Any]]) -> str | None:
+    for candidate in candidates:
+        summary = candidate.get("execution_reality_summary")
+        if isinstance(summary, dict) and summary.get("execution_reality_level"):
+            return str(summary["execution_reality_level"])
+    return None
+
+
+def _report_execution_reality_gate_status(candidates: list[dict[str, Any]]) -> str:
+    statuses = {
+        str(summary.get("execution_reality_gate_status"))
+        for candidate in candidates
+        if isinstance((summary := candidate.get("execution_reality_summary")), dict)
+    }
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "PASS" in statuses:
+        return "PASS"
+    return "UNKNOWN"
+
+
+def _report_execution_reality_gate_reasons(candidates: list[dict[str, Any]]) -> list[str]:
+    return sorted(
+        {
+            str(reason)
+            for candidate in candidates
+            if isinstance((summary := candidate.get("execution_reality_summary")), dict)
+            for reason in summary.get("execution_reality_gate_reasons") or []
+        }
+    )
+
+
+def _report_signal_quote_coverage_summary(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for candidate in candidates:
+        summary = candidate.get("execution_reality_summary")
+        if isinstance(summary, dict):
+            return {
+                key: summary.get(key)
+                for key in (
+                    "signal_event_count",
+                    "fillable_signal_event_count",
+                    "missing_quote_on_signal_count",
+                    "quote_after_decision_coverage_pct",
+                    "median_quote_age_ms_on_signal",
+                    "p95_quote_age_ms_on_signal",
+                    "execution_reference_policy",
+                    "execution_reality_level",
+                )
+            }
+    return None
+
+
+def _policy_intra_candle_limitation(fill_reference_policy: str) -> str:
+    if fill_reference_policy == "next_candle_open":
+        return "next_candle_open_no_intracandle_path"
+    if fill_reference_policy in {"first_orderbook_after_decision", "latency_adjusted_orderbook"}:
+        return "top_of_book_snapshot_no_depth_no_queue"
+    return "same_candle_close_legacy_no_intracandle_path"
 
 
 def _execution_calibration_warning_reasons(candidate: dict[str, Any]) -> list[str]:
@@ -1114,7 +1232,7 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
             "market_impact_unavailable",
             "trade_ticks_unavailable",
             "intra_candle_path_unavailable",
-            "execution_reference_price_remains_candle_close",
+            "execution_reference_requires_execution_timing_policy",
         ],
     }
 

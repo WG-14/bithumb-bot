@@ -150,6 +150,36 @@ class ExecutionModelConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionTimingPolicy:
+    signal_basis: str = "closed_candle"
+    decision_time: str = "candle_close"
+    decision_guard_ms: int = 0
+    fill_reference_policy: str = "candle_close_legacy"
+    quote_selection: str = "first_after_or_equal"
+    max_quote_wait_ms: int = 3000
+    missing_quote_policy: str = "warn"
+    allow_same_candle_close_fill: bool = True
+    min_execution_reality_level_for_promotion: str | None = None
+    source: str = "legacy_default"
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "signal_basis": self.signal_basis,
+            "decision_time": self.decision_time,
+            "decision_guard_ms": self.decision_guard_ms,
+            "fill_reference_policy": self.fill_reference_policy,
+            "quote_selection": self.quote_selection,
+            "max_quote_wait_ms": self.max_quote_wait_ms,
+            "missing_quote_policy": self.missing_quote_policy,
+            "allow_same_candle_close_fill": self.allow_same_candle_close_fill,
+            "source": self.source,
+        }
+        if self.min_execution_reality_level_for_promotion is not None:
+            payload["min_execution_reality_level_for_promotion"] = self.min_execution_reality_level_for_promotion
+        return payload
+
+
+@dataclass(frozen=True)
 class AcceptanceGate:
     min_trade_count: int
     max_mdd_pct: float
@@ -200,6 +230,7 @@ class ExperimentManifest:
     parameter_space: dict[str, tuple[object, ...]]
     cost_model: CostModel
     execution_model: ExecutionModelConfig
+    execution_timing: ExecutionTimingPolicy
     acceptance_gate: AcceptanceGate
     walk_forward: WalkForwardConfig | None
     raw: dict[str, Any]
@@ -215,6 +246,7 @@ class ExperimentManifest:
             "parameter_space": {key: sorted(list(value), key=repr) for key, value in sorted(self.parameter_space.items())},
             "cost_model": self.cost_model.as_dict(),
             "execution_model": self.execution_model.as_dict(),
+            "execution_timing": self.execution_timing.as_dict(),
             "acceptance_gate": self.acceptance_gate.as_dict(),
             "walk_forward": self.walk_forward.as_dict() if self.walk_forward is not None else None,
         }
@@ -246,6 +278,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
         raise ManifestValidationError("manifest requires cost_model or execution_model")
     cost_model = _parse_cost_model(payload.get("cost_model"))
     execution_model = _parse_execution_model(payload.get("execution_model"), cost_model)
+    execution_timing = _parse_execution_timing(payload.get("execution_timing"))
     acceptance_gate = _parse_acceptance_gate(_required_dict(payload, "acceptance_gate"))
     walk_forward = _parse_walk_forward(payload.get("walk_forward"))
     if acceptance_gate.walk_forward_required and walk_forward is None:
@@ -263,6 +296,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
         parameter_space=parameter_space,
         cost_model=cost_model,
         execution_model=execution_model,
+        execution_timing=execution_timing,
         acceptance_gate=acceptance_gate,
         walk_forward=walk_forward,
         raw=dict(payload),
@@ -508,6 +542,74 @@ def _parse_execution_model(value: Any, cost_model: CostModel) -> ExecutionModelC
         scenario_policy=scenario_policy,
         calibration_required=bool(value.get("calibration_required", False)),
         calibration_strictness=strictness,
+    )
+
+
+def _parse_execution_timing(value: Any) -> ExecutionTimingPolicy:
+    if value is None:
+        return ExecutionTimingPolicy()
+    if not isinstance(value, dict):
+        raise ManifestValidationError("execution_timing must be an object")
+    allowed_fields = {
+        "signal_basis",
+        "decision_time",
+        "decision_guard_ms",
+        "fill_reference_policy",
+        "quote_selection",
+        "max_quote_wait_ms",
+        "missing_quote_policy",
+        "allow_same_candle_close_fill",
+        "min_execution_reality_level_for_promotion",
+    }
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"execution_timing unsupported fields: {','.join(unknown)}")
+    signal_basis = str(value.get("signal_basis") or "closed_candle").strip().lower()
+    if signal_basis != "closed_candle":
+        raise ManifestValidationError("execution_timing.signal_basis must be closed_candle")
+    decision_time = str(value.get("decision_time") or "candle_close").strip().lower()
+    if decision_time not in {"candle_close", "candle_close_plus_guard"}:
+        raise ManifestValidationError("execution_timing.decision_time must be candle_close or candle_close_plus_guard")
+    guard_ms = _positive_or_zero_int(value.get("decision_guard_ms", 0), "execution_timing.decision_guard_ms")
+    if decision_time == "candle_close" and guard_ms:
+        decision_time = "candle_close_plus_guard"
+    fill_policy = str(value.get("fill_reference_policy") or "next_candle_open").strip().lower()
+    if fill_policy not in {
+        "candle_close_legacy",
+        "next_candle_open",
+        "first_orderbook_after_decision",
+        "latency_adjusted_orderbook",
+    }:
+        raise ManifestValidationError("execution_timing.fill_reference_policy is unsupported")
+    quote_selection = str(value.get("quote_selection") or "first_after_or_equal").strip().lower()
+    if quote_selection != "first_after_or_equal":
+        raise ManifestValidationError("execution_timing.quote_selection must be first_after_or_equal")
+    max_wait = _positive_or_zero_int(value.get("max_quote_wait_ms", 3000), "execution_timing.max_quote_wait_ms")
+    missing_quote_policy = str(value.get("missing_quote_policy") or "warn").strip().lower()
+    if missing_quote_policy not in {"fail", "skip", "warn"}:
+        raise ManifestValidationError("execution_timing.missing_quote_policy must be fail, skip, or warn")
+    explicit_allow = value.get("allow_same_candle_close_fill")
+    allow_same = bool(explicit_allow) if explicit_allow is not None else fill_policy == "candle_close_legacy"
+    min_level_raw = value.get("min_execution_reality_level_for_promotion")
+    min_level = None if min_level_raw is None else str(min_level_raw).strip()
+    if min_level is not None and min_level not in {
+        "candle_close_optimistic",
+        "candle_next_open",
+        "top_of_book_after_decision",
+        "latency_adjusted_top_of_book",
+    }:
+        raise ManifestValidationError("execution_timing.min_execution_reality_level_for_promotion is unsupported")
+    return ExecutionTimingPolicy(
+        signal_basis=signal_basis,
+        decision_time=decision_time,
+        decision_guard_ms=guard_ms,
+        fill_reference_policy=fill_policy,
+        quote_selection=quote_selection,
+        max_quote_wait_ms=max_wait,
+        missing_quote_policy=missing_quote_policy,
+        allow_same_candle_close_fill=allow_same,
+        min_execution_reality_level_for_promotion=min_level,
+        source="manifest",
     )
 
 

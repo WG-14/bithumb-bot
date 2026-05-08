@@ -31,6 +31,29 @@ def _candidate(**overrides):
         "dataset_quality_gate_status": "PASS",
         "dataset_quality_gate_reasons": [],
         "dataset_quality_report_hashes": {"train": "sha256:quality-train", "validation": "sha256:quality-validation"},
+        "execution_timing_policy": {
+            "signal_basis": "closed_candle",
+            "decision_time": "candle_close",
+            "decision_guard_ms": 0,
+            "fill_reference_policy": "next_candle_open",
+            "quote_selection": "first_after_or_equal",
+            "max_quote_wait_ms": 3000,
+            "missing_quote_policy": "warn",
+            "allow_same_candle_close_fill": False,
+            "source": "test",
+        },
+        "execution_reality_summary": {
+            "signal_event_count": 4,
+            "fillable_signal_event_count": 4,
+            "missing_quote_on_signal_count": 0,
+            "quote_after_decision_coverage_pct": None,
+            "median_quote_age_ms_on_signal": None,
+            "p95_quote_age_ms_on_signal": None,
+            "execution_reference_policy": "next_candle_open",
+            "execution_reality_level": "candle_next_open",
+            "execution_reality_gate_status": "PASS",
+            "execution_reality_gate_reasons": [],
+        },
         "strategy_name": "sma_with_filter",
         "parameter_candidate_id": "candidate_001",
         "parameter_values": {"SMA_SHORT": 2, "SMA_LONG": 4},
@@ -769,6 +792,39 @@ def test_promotion_refuses_execution_calibration_breach(tmp_path, monkeypatch) -
     _write_report(manager, candidate)
 
     with pytest.raises(PromotionGateError, match="execution_calibration_p95_slippage_exceeds_assumption"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_candle_close_execution_for_live_ready_candidate(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _candidate(
+        execution_timing_policy={
+            "signal_basis": "closed_candle",
+            "decision_time": "candle_close",
+            "decision_guard_ms": 0,
+            "fill_reference_policy": "candle_close_legacy",
+            "quote_selection": "first_after_or_equal",
+            "max_quote_wait_ms": 3000,
+            "missing_quote_policy": "warn",
+            "allow_same_candle_close_fill": True,
+            "source": "legacy_default",
+        },
+        execution_reality_summary={
+            "signal_event_count": 4,
+            "fillable_signal_event_count": 4,
+            "missing_quote_on_signal_count": 0,
+            "quote_after_decision_coverage_pct": None,
+            "median_quote_age_ms_on_signal": None,
+            "p95_quote_age_ms_on_signal": None,
+            "execution_reference_policy": "candle_close_legacy",
+            "execution_reality_level": "candle_close_optimistic",
+            "execution_reality_gate_status": "PASS",
+            "execution_reality_gate_reasons": [],
+        },
+    )
+    _write_report(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="execution_reference_price_candle_close_not_promotable"):
         promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
 
 

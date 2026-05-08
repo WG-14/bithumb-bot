@@ -11,7 +11,7 @@ from bithumb_bot.research.backtest_engine import run_sma_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.execution_calibration import build_calibration_artifact
 from bithumb_bot.research.execution_model import FixedBpsExecutionModel, StressExecutionModel
-from bithumb_bot.research.experiment_manifest import parse_manifest
+from bithumb_bot.research.experiment_manifest import ExecutionTimingPolicy, parse_manifest
 from bithumb_bot.research.parameter_space import candidate_id
 from bithumb_bot.research.promotion_gate import PromotionGateError, promote_candidate
 from bithumb_bot.research.validation_protocol import run_research_backtest
@@ -249,6 +249,126 @@ def test_seeded_stress_execution_model_is_deterministic_and_auditable() -> None:
     assert execution["remaining_qty"] > 0.0
 
 
+def test_sma_signal_close_executes_next_candle_open_not_same_close() -> None:
+    manifest = parse_manifest(_manifest())
+    base_ts = 1_700_000_000_000
+    closes = [100, 90, 100, 80, 100, 130]
+    candles = tuple(
+        Candle(
+            ts=base_ts + index * 60_000,
+            open=130.0 if index == 5 else float(close),
+            high=max(float(close), 130.0 if index == 5 else float(close)) + 1.0,
+            low=min(float(close), 130.0 if index == 5 else float(close)) - 1.0,
+            close=float(close),
+            volume=1.0,
+        )
+        for index, close in enumerate(closes)
+    )
+    snapshot = DatasetSnapshot(
+        snapshot_id="unit",
+        source="sqlite_candles",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=manifest.dataset.split.validation,
+        candles=candles,
+    )
+
+    result = run_sma_backtest(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(
+            fill_reference_policy="next_candle_open",
+            allow_same_candle_close_fill=False,
+            source="test",
+        ),
+    )
+
+    assert result.trades
+    execution = result.trades[0]["execution"]
+    assert result.trades[0]["side"] == "BUY"
+    assert result.trades[0]["price"] == 130.0
+    assert execution["signal_reference_price"] == 100.0
+    assert execution["fill_reference_price"] == 130.0
+    assert execution["fill_reference_source"] == "next_candle_open"
+
+
+def test_decision_ts_is_after_signal_candle_close() -> None:
+    manifest = parse_manifest(_manifest())
+    base_ts = 1_700_000_000_000
+    snapshot = DatasetSnapshot(
+        snapshot_id="unit",
+        source="sqlite_candles",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=manifest.dataset.split.validation,
+        candles=tuple(
+            Candle(
+                ts=base_ts + index * 60_000,
+                open=float(close),
+                high=float(close) + 1.0,
+                low=float(close) - 1.0,
+                close=float(close),
+                volume=1.0,
+            )
+            for index, close in enumerate([100, 90, 100, 80, 100, 130])
+        ),
+    )
+
+    result = run_sma_backtest(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(
+            fill_reference_policy="next_candle_open",
+            allow_same_candle_close_fill=False,
+            source="test",
+        ),
+    )
+
+    execution = result.trades[0]["execution"]
+    assert execution["signal_candle_start_ts"] == base_ts + 4 * 60_000
+    assert execution["signal_candle_close_ts"] == base_ts + 5 * 60_000
+    assert execution["decision_ts"] >= execution["signal_candle_close_ts"]
+    assert execution["decision_ts"] != execution["signal_candle_start_ts"]
+
+
+def test_reproducibility_hash_changes_when_execution_timing_policy_changes(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    legacy_manifest = parse_manifest(_manifest())
+    next_open_payload = _manifest()
+    next_open_payload["execution_timing"] = {
+        "fill_reference_policy": "next_candle_open",
+        "allow_same_candle_close_fill": False,
+    }
+    next_open_manifest = parse_manifest(next_open_payload)
+
+    legacy = run_research_backtest(
+        manifest=legacy_manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    next_open = run_research_backtest(
+        manifest=next_open_manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert legacy["manifest_hash"] != next_open["manifest_hash"]
+    assert legacy["candidates"][0]["candidate_profile_hash"] != next_open["candidates"][0]["candidate_profile_hash"]
+
+
 def test_research_backtest_fails_candidate_when_calibration_breaches_assumptions(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -481,12 +601,17 @@ def test_research_backtest_promotes_candidate_when_base_and_stress_pass(
     manager = PathManager.from_env(Path.cwd())
     payload = _manifest()
     payload["experiment_id"] = "scenario_aggregation_positive_integration"
+    payload["acceptance_gate"]["max_mdd_pct"] = 99.9
     payload["execution_model"] = {
         "type": "stress",
         "fee_rate": [0.0],
         "slippage_bps": [0.0, 0.0],
         "order_failure_rate": [0.0],
         "seed": 42,
+    }
+    payload["execution_timing"] = {
+        "fill_reference_policy": "next_candle_open",
+        "allow_same_candle_close_fill": False,
     }
     manifest = parse_manifest(payload)
 

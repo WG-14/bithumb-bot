@@ -10,7 +10,8 @@ from bithumb_bot.orderbook_top_store import build_orderbook_top_snapshot, upsert
 from bithumb_bot.paths import PathManager
 from bithumb_bot.research.backtest_engine import run_sma_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot, build_dataset_quality_report, load_dataset_split
-from bithumb_bot.research.experiment_manifest import DateRange, ManifestValidationError, parse_manifest
+from bithumb_bot.research.execution_model import StressExecutionModel
+from bithumb_bot.research.experiment_manifest import DateRange, ExecutionTimingPolicy, ManifestValidationError, parse_manifest
 from bithumb_bot.research.strategy_registry import TEST_TOP_OF_BOOK_REQUIRED_STRATEGY
 from bithumb_bot.research.validation_protocol import ResearchValidationError, run_research_backtest
 
@@ -237,7 +238,7 @@ def test_research_backtest_metadata_includes_joined_top_of_book(tmp_path: Path, 
     assert report["dataset_quality_reports"]["train"]["top_of_book_gate_status"] == "PASS"
     assert report["data_limitations"]["top_of_book_available"] is True
     assert report["data_limitations"]["orderbook_depth_available"] is False
-    assert report["data_limitations"]["execution_reference_price"] == "candle_close"
+    assert report["data_limitations"]["execution_reference_price"] == "candle_close_legacy"
 
 
 def test_strategy_requiring_top_of_book_fails_closed_when_manifest_lacks_it(tmp_path: Path, monkeypatch) -> None:
@@ -321,6 +322,202 @@ def test_candle_only_execution_metadata_records_no_quote_data() -> None:
     assert result.trades[0]["execution"]["intra_candle_policy"] == "close_price_only_no_intracandle_path"
 
 
+def test_orderbook_policy_uses_first_quote_after_decision_not_nearest_before() -> None:
+    base_ts = 1_700_000_000_000
+    signal_start = base_ts + 4 * 60_000
+    decision_ts = signal_start + 60_000
+    dataset = _signal_dataset(
+        base_ts=base_ts,
+        quotes=(
+            build_dataset_quote(candle_ts=decision_ts - 100, bid=70.0, ask=71.0),
+            build_dataset_quote(candle_ts=decision_ts + 200, bid=90.0, ask=120.0),
+        ),
+    )
+
+    result = run_sma_backtest(
+        dataset=dataset,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(
+            fill_reference_policy="first_orderbook_after_decision",
+            max_quote_wait_ms=1000,
+            allow_same_candle_close_fill=False,
+            source="test",
+        ),
+    )
+
+    execution = result.trades[0]["execution"]
+    assert execution["quote_ts"] == decision_ts + 200
+    assert execution["fill_reference_price"] == 120.0
+    assert execution["fill_reference_source"] == "first_orderbook_after_decision"
+
+
+def test_latency_changes_fill_reference_quote() -> None:
+    base_ts = 1_700_000_000_000
+    decision_ts = base_ts + 5 * 60_000
+    dataset = _signal_dataset(
+        base_ts=base_ts,
+        quotes=(
+            build_dataset_quote(candle_ts=decision_ts, bid=90.0, ask=100.0),
+            build_dataset_quote(candle_ts=decision_ts + 800, bid=110.0, ask=130.0),
+        ),
+    )
+    policy = ExecutionTimingPolicy(
+        fill_reference_policy="latency_adjusted_orderbook",
+        max_quote_wait_ms=2000,
+        allow_same_candle_close_fill=False,
+        source="test",
+    )
+
+    fast = run_sma_backtest(
+        dataset=dataset,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_model=StressExecutionModel(fee_rate=0.0, slippage_bps=0.0, latency_ms=0, seed=1),
+        execution_timing_policy=policy,
+    )
+    slow = run_sma_backtest(
+        dataset=dataset,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_model=StressExecutionModel(fee_rate=0.0, slippage_bps=0.0, latency_ms=700, seed=1),
+        execution_timing_policy=policy,
+    )
+
+    assert fast.trades[0]["execution"]["submit_ts_assumption"] == decision_ts
+    assert fast.trades[0]["execution"]["quote_ts"] == decision_ts
+    assert fast.trades[0]["execution"]["fill_reference_price"] == 100.0
+    assert slow.trades[0]["execution"]["submit_ts_assumption"] == decision_ts + 700
+    assert slow.trades[0]["execution"]["quote_ts"] == decision_ts + 800
+    assert slow.trades[0]["execution"]["fill_reference_price"] == 130.0
+
+
+def test_top_of_book_model_uses_ask_for_buy_bid_for_sell() -> None:
+    base_ts = 1_700_000_000_000
+    quotes = []
+    for index in (4, 5, 6):
+        decision_ts = base_ts + index * 60_000 + 60_000
+        quotes.append(build_dataset_quote(candle_ts=decision_ts, bid=80.0, ask=120.0))
+    dataset = _signal_dataset(base_ts=base_ts, quotes=tuple(quotes), closes=(100, 90, 100, 80, 100, 80, 100, 130))
+
+    result = run_sma_backtest(
+        dataset=dataset,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(
+            fill_reference_policy="first_orderbook_after_decision",
+            max_quote_wait_ms=1000,
+            allow_same_candle_close_fill=False,
+            source="test",
+        ),
+    )
+
+    buy = next(trade for trade in result.trades if trade["side"] == "BUY")
+    sell = next(trade for trade in result.trades if trade["side"] == "SELL")
+    assert buy["execution"]["fill_reference_price"] == 120.0
+    assert buy["price"] == 120.0
+    assert sell["execution"]["fill_reference_price"] == 80.0
+    assert sell["price"] == 80.0
+
+
+def test_execution_metadata_includes_reference_source_and_quote_age() -> None:
+    base_ts = 1_700_000_000_000
+    decision_ts = base_ts + 5 * 60_000
+    dataset = _signal_dataset(
+        base_ts=base_ts,
+        quotes=(build_dataset_quote(candle_ts=decision_ts + 250, bid=90.0, ask=120.0),),
+    )
+
+    result = run_sma_backtest(
+        dataset=dataset,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(
+            fill_reference_policy="first_orderbook_after_decision",
+            max_quote_wait_ms=1000,
+            allow_same_candle_close_fill=False,
+            source="test",
+        ),
+    )
+
+    execution = result.trades[0]["execution"]
+    for key in (
+        "fill_reference_source",
+        "fill_reference_ts",
+        "decision_ts",
+        "submit_ts_assumption",
+        "execution_reality_level",
+        "quote_age_ms",
+        "quote_source",
+    ):
+        assert key in execution
+    assert execution["quote_age_ms"] == 250
+    assert execution["top_of_book_is_full_depth"] is False
+
+
+def test_signal_event_quote_coverage_reported(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "quotes.sqlite"
+    _create_candle_db(db_path)
+    conn = ensure_db(str(db_path))
+    try:
+        upsert_orderbook_top_snapshot(
+            conn,
+            build_orderbook_top_snapshot(
+                ts=_ts("2023-01-01", 6),
+                pair="KRW-BTC",
+                bid_price=90.0,
+                ask_price=110.0,
+                source="bithumb_public_v1_orderbook",
+            ),
+        )
+        upsert_orderbook_top_snapshot(
+            conn,
+            build_orderbook_top_snapshot(
+                ts=_ts("2023-01-02", 6),
+                pair="KRW-BTC",
+                bid_price=90.0,
+                ask_price=110.0,
+                source="bithumb_public_v1_orderbook",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    raw = _manifest(top_of_book={"source": "sqlite_orderbook_top_snapshots", "missing_policy": "warn"}).raw
+    raw["execution_timing"] = {
+        "fill_reference_policy": "first_orderbook_after_decision",
+        "max_quote_wait_ms": 1000,
+        "missing_quote_policy": "warn",
+        "allow_same_candle_close_fill": False,
+    }
+    manifest = parse_manifest(raw)
+
+    first = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=_manager(tmp_path, monkeypatch),
+        generated_at="2026-05-07T00:00:00+00:00",
+    )
+    second = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=_manager(tmp_path, monkeypatch),
+        generated_at="2026-05-07T00:00:00+00:00",
+    )
+
+    summary = first["signal_quote_coverage_summary"]
+    assert summary["signal_event_count"] > 0
+    assert "fillable_signal_event_count" in summary
+    assert "missing_quote_on_signal_count" in summary
+    assert "quote_after_decision_coverage_pct" in summary
+    assert first["content_hash"] == second["content_hash"]
+
+
 def test_manifest_rejects_unknown_dataset_and_top_of_book_fields() -> None:
     payload = _manifest().raw
     payload["dataset"]["unexpected"] = True
@@ -346,4 +543,34 @@ def build_dataset_quote(*, candle_ts: int, bid: float, ask: float):
         source="bithumb_public_v1_orderbook",
         matched_candle_ts=candle_ts,
         age_ms=0,
+    )
+
+
+def _signal_dataset(
+    *,
+    base_ts: int,
+    quotes,
+    closes=(100, 90, 100, 80, 100, 130),
+) -> DatasetSnapshot:
+    candles = tuple(
+        Candle(
+            ts=base_ts + index * 60_000,
+            open=float(close),
+            high=float(close) + 1.0,
+            low=float(close) - 1.0,
+            close=float(close),
+            volume=1.0,
+        )
+        for index, close in enumerate(closes)
+    )
+    return DatasetSnapshot(
+        snapshot_id="unit",
+        source="sqlite_candles",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="train",
+        date_range=DateRange(start="2023-01-01", end="2023-01-01"),
+        candles=candles,
+        top_of_book_event_quotes=tuple(quotes),
+        top_of_book_requested=True,
     )

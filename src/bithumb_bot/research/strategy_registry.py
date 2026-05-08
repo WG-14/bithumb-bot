@@ -6,10 +6,11 @@ from typing import Any, Callable
 from .backtest_engine import BacktestRun, run_sma_backtest
 from .dataset_snapshot import DatasetSnapshot
 from .execution_model import ExecutionModel
+from .experiment_manifest import ExecutionTimingPolicy
 
 
 ResearchStrategyRunner = Callable[
-    [DatasetSnapshot, dict[str, Any], float, float, float | None, ExecutionModel | None],
+    [DatasetSnapshot, dict[str, Any], float, float, float | None, ExecutionModel | None, ExecutionTimingPolicy | None],
     BacktestRun,
 ]
 
@@ -49,6 +50,7 @@ def _run_sma_with_filter(
     slippage_bps: float,
     parameter_stability_score: float | None = None,
     execution_model: ExecutionModel | None = None,
+    execution_timing_policy: ExecutionTimingPolicy | None = None,
 ) -> BacktestRun:
     _require_parameter(parameter_values, "SMA_SHORT")
     _require_parameter(parameter_values, "SMA_LONG")
@@ -59,6 +61,7 @@ def _run_sma_with_filter(
         slippage_bps=slippage_bps,
         parameter_stability_score=parameter_stability_score,
         execution_model=execution_model,
+        execution_timing_policy=execution_timing_policy,
     )
 
 

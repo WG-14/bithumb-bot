@@ -264,7 +264,7 @@ def test_print_report_summary_renders_top_of_book_warning_context(capsys) -> Non
     assert "joined_count=10 missing_count=10 join_tolerance_ms=3000 affected_splits=validation" in output
     assert (
         "top_of_book_limitations=best_bid_ask_only_not_full_depth,"
-        "intra_candle_path_unavailable,execution_reference_price_candle_close"
+        "intra_candle_path_unavailable"
     ) in output
     assert (
         "top_of_book_next_action=collect orderbook top snapshots with sync-orderbook-top, "

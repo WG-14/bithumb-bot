@@ -47,6 +47,8 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "dataset_quality_gate_reasons": candidate.get("dataset_quality_gate_reasons"),
         "dataset_quality_report_hashes": candidate.get("dataset_quality_report_hashes"),
         "top_of_book_quality_summary": candidate.get("top_of_book_quality_summary"),
+        "execution_timing_policy": candidate.get("execution_timing_policy"),
+        "execution_reality_summary": candidate.get("execution_reality_summary"),
         "regime_classifier_version": candidate.get("regime_classifier_version"),
         "allowed_live_regimes": candidate.get("allowed_live_regimes"),
         "blocked_live_regimes": candidate.get("blocked_live_regimes"),
@@ -92,6 +94,7 @@ def evaluate_candidate_for_promotion(candidate: dict[str, Any]) -> tuple[bool, l
     _extend_final_holdout_reasons(candidate, reasons)
     _extend_dataset_quality_reasons(candidate, reasons)
     _extend_scenario_policy_reasons(candidate, reasons)
+    _extend_execution_reality_reasons(candidate, reasons)
     _extend_execution_calibration_reasons(candidate, reasons)
     profile_hash = candidate.get("candidate_profile_hash")
     if not profile_hash:
@@ -125,6 +128,7 @@ def validate_backtest_candidate_for_promotion(candidate: dict[str, Any] | None) 
     _extend_final_holdout_reasons(candidate, reasons, prefix="backtest_")
     _extend_dataset_quality_reasons(candidate, reasons, prefix="backtest_")
     _extend_scenario_policy_reasons(candidate, reasons, prefix="backtest_")
+    _extend_execution_reality_reasons(candidate, reasons, prefix="backtest_")
     _extend_execution_calibration_reasons(candidate, reasons, prefix="backtest_")
     return not reasons, reasons
 
@@ -152,6 +156,37 @@ def _extend_execution_calibration_reasons(
         gate_reasons = [str(item) for item in gate.get("reasons") or ["execution_calibration_failed"]]
         reasons.extend([f"{prefix}{reason}" for reason in gate_reasons])
         reasons.extend(gate_reasons)
+
+
+def _extend_execution_reality_reasons(
+    candidate: dict[str, Any],
+    reasons: list[str],
+    *,
+    prefix: str = "",
+) -> None:
+    policy = candidate.get("execution_timing_policy")
+    summary = candidate.get("execution_reality_summary")
+    if not isinstance(policy, dict):
+        reasons.extend([f"{prefix}execution_timing_policy_missing", "execution_timing_policy_missing"])
+        return
+    if not isinstance(summary, dict):
+        reasons.extend([f"{prefix}execution_reality_summary_missing", "execution_reality_summary_missing"])
+        return
+    gate_reasons = [str(item) for item in summary.get("execution_reality_gate_reasons") or []]
+    if summary.get("execution_reality_gate_status") == "FAIL" and gate_reasons:
+        reasons.extend([f"{prefix}{reason}" for reason in gate_reasons])
+        reasons.extend(gate_reasons)
+    fill_policy = str(policy.get("fill_reference_policy") or "")
+    if fill_policy == "candle_close_legacy":
+        reasons.extend([
+            f"{prefix}execution_reference_price_candle_close_not_promotable",
+            "execution_reference_price_candle_close_not_promotable",
+        ])
+    if summary.get("execution_reality_level") == "candle_close_optimistic":
+        reasons.extend([
+            f"{prefix}execution_reality_level_below_required",
+            "execution_reality_level_below_required",
+        ])
 
 
 def _extend_final_holdout_reasons(
@@ -351,6 +386,8 @@ def promote_candidate(
         "final_holdout_present": candidate.get("final_holdout_present") is True,
         "final_holdout_metrics": candidate.get("final_holdout_metrics"),
         "scenario_policy": candidate.get("scenario_policy"),
+        "execution_timing_policy": candidate.get("execution_timing_policy"),
+        "execution_reality_summary": candidate.get("execution_reality_summary"),
         "scenario_pass_count": candidate.get("scenario_pass_count"),
         "scenario_fail_count": candidate.get("scenario_fail_count"),
         "required_scenario_count": candidate.get("required_scenario_count"),

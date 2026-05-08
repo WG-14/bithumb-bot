@@ -13,7 +13,14 @@ from bithumb_bot.market_regime import (
 from bithumb_bot.market_regime.thresholds import MarketRegimeThresholds
 
 from .dataset_snapshot import DatasetSnapshot
-from .execution_model import ExecutionModel, ExecutionRequest, FixedBpsExecutionModel
+from .execution_model import ExecutionFill, ExecutionModel, ExecutionRequest, FixedBpsExecutionModel, model_params_hash
+from .execution_timing import (
+    ExecutionReferenceEvent,
+    SignalEvent,
+    build_signal_event,
+    resolve_execution_reference,
+)
+from .experiment_manifest import ExecutionTimingPolicy
 from .metrics import ResearchMetrics
 
 
@@ -39,6 +46,7 @@ def run_sma_backtest(
     slippage_bps: float,
     parameter_stability_score: float | None = None,
     execution_model: ExecutionModel | None = None,
+    execution_timing_policy: ExecutionTimingPolicy | None = None,
 ) -> BacktestRun:
     short_n = int(parameter_values.get("SMA_SHORT", parameter_values.get("short_n", 0)))
     long_n = int(parameter_values.get("SMA_LONG", parameter_values.get("long_n", 0)))
@@ -84,6 +92,7 @@ def run_sma_backtest(
     closed_pnls: list[float] = []
     prev_above: bool | None = None
     model = execution_model or FixedBpsExecutionModel(fee_rate=fee_rate, slippage_bps=slippage_bps)
+    timing_policy = execution_timing_policy or ExecutionTimingPolicy()
 
     for index in range(long_n, len(candles)):
         candle = candles[index]
@@ -113,16 +122,50 @@ def run_sma_backtest(
                 action = "SELL"
 
         if action == "BUY":
+            signal = build_signal_event(
+                candle=candle,
+                interval=dataset.interval,
+                side="BUY",
+                policy=timing_policy,
+                feature_snapshot=_feature_snapshot(
+                    short_sma=curr_short,
+                    long_sma=curr_long,
+                    gap_ratio=gap_ratio,
+                    range_ratio=range_ratio,
+                    index=index,
+                ),
+                regime_snapshot=regime_snapshot,
+            )
+            reference = resolve_execution_reference(
+                dataset=dataset,
+                signal=signal,
+                signal_index=index,
+                policy=timing_policy,
+                model_latency_ms=_model_latency_ms(model),
+            )
+            if reference.fill_reference_price is None:
+                fill = _failed_fill(
+                    model=model,
+                    signal=signal,
+                    reference=reference,
+                    timing_policy=timing_policy,
+                    side="BUY",
+                    fee_rate=fee_rate,
+                    requested_notional=cash * BUY_FRACTION,
+                )
+                trades.append(_trade_from_fill(fill, cash=cash, asset_qty=qty, pnl=None))
+                prev_above = above
+                continue
             spend = cash * BUY_FRACTION
             fill = model.simulate(
                 ExecutionRequest(
-                    signal_ts=candle.ts,
-                    decision_ts=candle.ts,
+                    signal_ts=signal.signal_candle_start_ts,
+                    decision_ts=signal.decision_ts,
                     side="BUY",
-                    reference_price=candle.close,
+                    reference_price=float(reference.fill_reference_price),
                     requested_notional=spend,
                     fee_rate=fee_rate,
-                    **_quote_request_fields(dataset, candle.ts),
+                    **_timing_request_fields(signal, reference, timing_policy),
                 )
             )
             if fill.fill_status == "failed" or fill.avg_fill_price is None or fill.filled_qty <= 0.0:
@@ -133,7 +176,7 @@ def run_sma_backtest(
             fee = fill.fee
             received_qty = fill.filled_qty
             actual_spend = (exec_price * received_qty) + fee
-            reference_cost = candle.close * received_qty
+            reference_cost = float(fill.reference_price) * received_qty
             slipped_cost = exec_price * received_qty
             buy_slippage = max(0.0, slipped_cost - reference_cost)
             slippage_total += buy_slippage
@@ -158,15 +201,49 @@ def run_sma_backtest(
                 )
             )
         elif action == "SELL":
+            signal = build_signal_event(
+                candle=candle,
+                interval=dataset.interval,
+                side="SELL",
+                policy=timing_policy,
+                feature_snapshot=_feature_snapshot(
+                    short_sma=curr_short,
+                    long_sma=curr_long,
+                    gap_ratio=gap_ratio,
+                    range_ratio=range_ratio,
+                    index=index,
+                ),
+                regime_snapshot=regime_snapshot,
+            )
+            reference = resolve_execution_reference(
+                dataset=dataset,
+                signal=signal,
+                signal_index=index,
+                policy=timing_policy,
+                model_latency_ms=_model_latency_ms(model),
+            )
+            if reference.fill_reference_price is None:
+                fill = _failed_fill(
+                    model=model,
+                    signal=signal,
+                    reference=reference,
+                    timing_policy=timing_policy,
+                    side="SELL",
+                    fee_rate=fee_rate,
+                    requested_qty=qty,
+                )
+                trades.append(_trade_from_fill(fill, cash=cash, asset_qty=qty, pnl=None))
+                prev_above = above
+                continue
             fill = model.simulate(
                 ExecutionRequest(
-                    signal_ts=candle.ts,
-                    decision_ts=candle.ts,
+                    signal_ts=signal.signal_candle_start_ts,
+                    decision_ts=signal.decision_ts,
                     side="SELL",
-                    reference_price=candle.close,
+                    reference_price=float(reference.fill_reference_price),
                     requested_qty=qty,
                     fee_rate=fee_rate,
-                    **_quote_request_fields(dataset, candle.ts),
+                    **_timing_request_fields(signal, reference, timing_policy),
                 )
             )
             if fill.fill_status == "failed" or fill.avg_fill_price is None or fill.filled_qty <= 0.0:
@@ -177,7 +254,7 @@ def run_sma_backtest(
             sell_qty = fill.filled_qty
             gross = sell_qty * exec_price
             fee = fill.fee
-            reference_proceeds = candle.close * sell_qty
+            reference_proceeds = float(fill.reference_price) * sell_qty
             sell_slippage = max(0.0, reference_proceeds - gross)
             slippage_total += sell_slippage
             net_proceeds = gross - fee
@@ -242,15 +319,109 @@ def _sma(values: list[float], n: int, end: int) -> float:
     return sum(values[end - n : end]) / n
 
 
-def _quote_request_fields(dataset: DatasetSnapshot, ts: int) -> dict[str, object]:
-    quote = dataset.top_of_book_for_ts(ts)
-    if quote is None:
-        return {}
+def _timing_request_fields(
+    signal: SignalEvent,
+    reference: ExecutionReferenceEvent,
+    policy: ExecutionTimingPolicy,
+) -> dict[str, object]:
+    fields = reference.request_fields()
+    fields.update(
+        {
+            "signal_candle_start_ts": signal.signal_candle_start_ts,
+            "signal_candle_close_ts": signal.signal_candle_close_ts,
+            "signal_reference_price": signal.signal_reference_price,
+            "signal_reference_source": signal.signal_reference_source,
+            "allow_same_candle_close_fill": policy.allow_same_candle_close_fill,
+            "quote_selection": policy.quote_selection,
+            "fill_reference_policy": policy.fill_reference_policy,
+            "top_of_book_source": reference.quote_source,
+            "feature_snapshot": signal.feature_snapshot,
+            "regime_snapshot": signal.regime_snapshot,
+        }
+    )
+    return fields
+
+
+def _feature_snapshot(
+    *,
+    short_sma: float,
+    long_sma: float,
+    gap_ratio: float,
+    range_ratio: float,
+    index: int,
+) -> dict[str, object]:
     return {
-        "best_bid": quote.bid_price,
-        "best_ask": quote.ask_price,
-        "spread_bps": quote.spread_bps,
+        "short_sma": float(short_sma),
+        "long_sma": float(long_sma),
+        "gap_ratio": float(gap_ratio),
+        "range_ratio": float(range_ratio),
+        "candle_index": int(index),
     }
+
+
+def _model_latency_ms(model: ExecutionModel) -> int:
+    try:
+        return int(getattr(model, "latency_ms", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _failed_fill(
+    *,
+    model: ExecutionModel,
+    signal: SignalEvent,
+    reference: ExecutionReferenceEvent,
+    timing_policy: ExecutionTimingPolicy,
+    side: str,
+    fee_rate: float,
+    requested_qty: float | None = None,
+    requested_notional: float | None = None,
+) -> ExecutionFill:
+    request_qty = float(requested_qty or 0.0)
+    if request_qty <= 0.0 and requested_notional is not None and signal.signal_reference_price > 0:
+        request_qty = float(requested_notional) / float(signal.signal_reference_price)
+    return ExecutionFill(
+        signal_ts=signal.signal_candle_start_ts,
+        decision_ts=signal.decision_ts,
+        submit_ts_assumption=reference.submit_ts_assumption,
+        side=str(side).upper(),
+        order_type="market",
+        reference_price=float(signal.signal_reference_price),
+        fill_reference_ts=reference.fill_reference_ts,
+        fill_reference_price=reference.fill_reference_price,
+        fill_reference_source=reference.fill_reference_source,
+        signal_candle_start_ts=signal.signal_candle_start_ts,
+        signal_candle_close_ts=signal.signal_candle_close_ts,
+        signal_reference_price=signal.signal_reference_price,
+        signal_reference_source=signal.signal_reference_source,
+        quote_ts=reference.quote_ts,
+        quote_age_ms=reference.quote_age_ms,
+        quote_source=reference.quote_source,
+        requested_qty=request_qty,
+        filled_qty=0.0,
+        remaining_qty=request_qty,
+        avg_fill_price=None,
+        fee=0.0,
+        slippage_bps=0.0,
+        latency_ms=_model_latency_ms(model),
+        fill_status="failed",
+        model_name=getattr(model, "name", "unknown"),
+        model_version=getattr(model, "version", "unknown"),
+        model_params_hash=model_params_hash(model.params_payload()),
+        best_bid=reference.best_bid,
+        best_ask=reference.best_ask,
+        spread_bps=reference.spread_bps,
+        execution_reality_level=reference.execution_reality_level,
+        allow_same_candle_close_fill=timing_policy.allow_same_candle_close_fill,
+        quote_selection=timing_policy.quote_selection,
+        fill_reference_policy=timing_policy.fill_reference_policy,
+        top_of_book_source=reference.quote_source,
+        top_of_book_is_full_depth=reference.top_of_book_is_full_depth,
+        execution_reference_failure_reason=reference.failure_reason,
+        feature_snapshot=signal.feature_snapshot,
+        regime_snapshot=signal.regime_snapshot,
+        intra_candle_policy=reference.intra_candle_policy,
+    )
 
 
 def _trade(

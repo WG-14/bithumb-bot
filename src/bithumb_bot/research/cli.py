@@ -127,6 +127,24 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     )
     print(f"  walk_forward_window_summary={_format_walk_forward_window_summary(summary)}")
     print(f"  top_window_fail_reasons={_format_counts(summary.top_window_fail_reasons)}")
+    print(f"  execution_reference_policy={_nested(report, 'execution_timing_policy', 'fill_reference_policy') or 'unknown'}")
+    print(f"  execution_reality_level={report.get('execution_reality_level') or 'unknown'}")
+    print(f"  execution_reality_gate_status={report.get('execution_reality_gate_status') or 'unknown'}")
+    print(
+        "  execution_reality_gate_reasons="
+        f"{_format_items(tuple(str(item) for item in report.get('execution_reality_gate_reasons') or []))}"
+    )
+    signal_coverage = report.get("signal_quote_coverage_summary")
+    if isinstance(signal_coverage, dict):
+        print(
+            "  signal_quote_coverage="
+            f"signal_event_count={signal_coverage.get('signal_event_count')} "
+            f"fillable_signal_event_count={signal_coverage.get('fillable_signal_event_count')} "
+            f"missing_quote_on_signal_count={signal_coverage.get('missing_quote_on_signal_count')} "
+            f"quote_after_decision_coverage_pct={signal_coverage.get('quote_after_decision_coverage_pct')} "
+            f"median_quote_age_ms={signal_coverage.get('median_quote_age_ms_on_signal')} "
+            f"p95_quote_age_ms={signal_coverage.get('p95_quote_age_ms_on_signal')}"
+        )
     print(f"  next_action={summary.next_action}")
     print(f"  report_path={artifact_paths.get('report_path')}")
     print(f"  derived_path={artifact_paths.get('derived_path')}")
@@ -182,7 +200,16 @@ def _print_top_of_book_summary(report: dict[str, object]) -> None:
     )
     print(
         "  top_of_book_limitations="
-        "best_bid_ask_only_not_full_depth,intra_candle_path_unavailable,execution_reference_price_candle_close"
+        "best_bid_ask_only_not_full_depth,intra_candle_path_unavailable"
     )
     if summary.get("next_action"):
         print(f"  top_of_book_next_action={summary.get('next_action')}")
+
+
+def _nested(payload: dict[str, object], *keys: str) -> object | None:
+    current: object = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current

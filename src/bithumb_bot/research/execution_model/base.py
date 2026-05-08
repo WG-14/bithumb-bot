@@ -16,9 +16,29 @@ class ExecutionRequest:
     order_type: str = "market"
     requested_qty: float | None = None
     requested_notional: float | None = None
+    submit_ts_assumption: int | None = None
+    fill_reference_ts: int | None = None
+    fill_reference_price: float | None = None
+    fill_reference_source: str | None = None
+    signal_candle_start_ts: int | None = None
+    signal_candle_close_ts: int | None = None
+    signal_reference_price: float | None = None
+    signal_reference_source: str | None = None
+    quote_ts: int | None = None
+    quote_age_ms: int | None = None
+    quote_source: str | None = None
     best_bid: float | None = None
     best_ask: float | None = None
     spread_bps: float | None = None
+    execution_reality_level: str | None = None
+    allow_same_candle_close_fill: bool | None = None
+    quote_selection: str | None = None
+    fill_reference_policy: str | None = None
+    top_of_book_source: str | None = None
+    top_of_book_is_full_depth: bool | None = None
+    execution_reference_failure_reason: str | None = None
+    feature_snapshot: dict[str, Any] | None = None
+    regime_snapshot: dict[str, Any] | None = None
     intra_candle_policy: str = "close_price_only_no_intracandle_path"
 
 
@@ -30,21 +50,40 @@ class ExecutionFill:
     side: str
     order_type: str
     reference_price: float
-    requested_qty: float
-    filled_qty: float
-    remaining_qty: float
-    avg_fill_price: float | None
-    fee: float
-    slippage_bps: float
-    latency_ms: int
-    fill_status: str
-    model_name: str
-    model_version: str
-    model_params_hash: str
+    fill_reference_ts: int | None = None
+    fill_reference_price: float | None = None
+    fill_reference_source: str | None = None
+    signal_candle_start_ts: int | None = None
+    signal_candle_close_ts: int | None = None
+    signal_reference_price: float | None = None
+    signal_reference_source: str | None = None
+    quote_ts: int | None = None
+    quote_age_ms: int | None = None
+    quote_source: str | None = None
+    requested_qty: float = 0.0
+    filled_qty: float = 0.0
+    remaining_qty: float = 0.0
+    avg_fill_price: float | None = None
+    fee: float = 0.0
+    slippage_bps: float = 0.0
+    latency_ms: int = 0
+    fill_status: str = "filled"
+    model_name: str = ""
+    model_version: str = ""
+    model_params_hash: str = ""
     best_bid: float | None = None
     best_ask: float | None = None
     spread_bps: float | None = None
     orderbook_depth_ref: str | None = None
+    execution_reality_level: str | None = None
+    allow_same_candle_close_fill: bool | None = None
+    quote_selection: str | None = None
+    fill_reference_policy: str | None = None
+    top_of_book_source: str | None = None
+    top_of_book_is_full_depth: bool | None = None
+    execution_reference_failure_reason: str | None = None
+    feature_snapshot: dict[str, Any] | None = None
+    regime_snapshot: dict[str, Any] | None = None
     intra_candle_policy: str = "close_price_only_no_intracandle_path"
     base_seed: int | None = None
     derived_seed_hash: str | None = None
@@ -58,6 +97,16 @@ class ExecutionFill:
             "side": self.side,
             "order_type": self.order_type,
             "reference_price": self.reference_price,
+            "fill_reference_ts": self.fill_reference_ts,
+            "fill_reference_price": self.fill_reference_price,
+            "fill_reference_source": self.fill_reference_source,
+            "signal_candle_start_ts": self.signal_candle_start_ts,
+            "signal_candle_close_ts": self.signal_candle_close_ts,
+            "signal_reference_price": self.signal_reference_price,
+            "signal_reference_source": self.signal_reference_source,
+            "quote_ts": self.quote_ts,
+            "quote_age_ms": self.quote_age_ms,
+            "quote_source": self.quote_source,
             "requested_qty": self.requested_qty,
             "filled_qty": self.filled_qty,
             "remaining_qty": self.remaining_qty,
@@ -73,6 +122,15 @@ class ExecutionFill:
             "best_ask": self.best_ask,
             "spread_bps": self.spread_bps,
             "orderbook_depth_ref": self.orderbook_depth_ref,
+            "execution_reality_level": self.execution_reality_level,
+            "allow_same_candle_close_fill": self.allow_same_candle_close_fill,
+            "quote_selection": self.quote_selection,
+            "fill_reference_policy": self.fill_reference_policy,
+            "top_of_book_source": self.top_of_book_source,
+            "top_of_book_is_full_depth": self.top_of_book_is_full_depth,
+            "execution_reference_failure_reason": self.execution_reference_failure_reason,
+            "feature_snapshot": self.feature_snapshot,
+            "regime_snapshot": self.regime_snapshot,
             "intra_candle_policy": self.intra_candle_policy,
             "base_seed": self.base_seed,
             "derived_seed_hash": self.derived_seed_hash,
