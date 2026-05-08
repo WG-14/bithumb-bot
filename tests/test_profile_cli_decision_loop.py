@@ -117,6 +117,42 @@ def test_cli_dispatch_reaches_runtime_replay_decisions(monkeypatch) -> None:
     }
 
 
+def test_cli_dispatch_reaches_decision_equivalence(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_cmd(**kwargs):
+        calls.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(app, "cmd_decision_equivalence", fake_cmd)
+
+    assert app.main(
+        [
+            "decision-equivalence",
+            "--research-decisions",
+            "research.json",
+            "--runtime-decisions",
+            "runtime.json",
+            "--profile-hash",
+            "sha256:profile",
+            "--market",
+            "KRW-BTC",
+            "--interval",
+            "1m",
+            "--data-fingerprint",
+            "sha256:data",
+        ]
+    ) == 0
+    assert calls == {
+        "research_decisions_path": "research.json",
+        "runtime_decisions_path": "runtime.json",
+        "profile_hash": "sha256:profile",
+        "market": "KRW-BTC",
+        "interval": "1m",
+        "data_fingerprint": "sha256:data",
+    }
+
+
 def test_decision_equivalence_cli_marks_direct_lists_unverified(tmp_path, capsys) -> None:
     research_path = tmp_path / "research_list.json"
     runtime_path = tmp_path / "runtime_list.json"
@@ -428,6 +464,7 @@ def test_repo_owned_export_replay_artifacts_can_pass_positive_equivalence(
     assert {decision["profile_content_hash"] for decision in runtime_artifact.decisions} == {profile_hash}
     assert result.ok is True, result.report
     assert result.report["promotion_grade_comparison"] is True
+    assert result.report["repo_owned_export_artifacts"] is True
     assert result.report["legacy_or_unverified_export"] is False
     assert result.report["mismatch_count"] == 0
     assert result.report["missing_research_decisions"] == []
