@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from statistics import median
 from typing import Any
@@ -224,9 +225,10 @@ def first_quote_after_or_equal(
 ) -> TopOfBookQuote | None:
     quotes = dataset.sorted_execution_top_of_book_quotes()
     max_ts = int(target_ts) + int(max_wait_ms)
-    for quote in quotes:
-        if int(target_ts) <= int(quote.ts) <= max_ts:
-            return quote
+    timestamps = [int(quote.ts) for quote in quotes]
+    index = bisect_left(timestamps, int(target_ts))
+    if index < len(quotes) and int(quotes[index].ts) <= max_ts:
+        return quotes[index]
     return None
 
 

@@ -19,6 +19,7 @@ from .dataset_snapshot import (
     load_dataset_range,
     load_dataset_split,
 )
+from .backtest_engine import execution_event_summary
 from .execution_calibration import compare_calibration_to_scenario
 from .execution_model import FixedBpsExecutionModel, StressExecutionModel, model_params_hash
 from .execution_timing import execution_reality_gate, signal_quote_coverage_summary
@@ -268,6 +269,13 @@ def _evaluate_candidates(
                     "train_execution_metadata": _execution_metadata(train.trades),
                     "validation_execution_metadata": _execution_metadata(validation.trades),
                     "final_holdout_execution_metadata": _execution_metadata(final_holdout.trades) if final_holdout else None,
+                    "train_execution_event_summary": train.execution_event_summary or execution_event_summary(train.trades),
+                    "validation_execution_event_summary": validation.execution_event_summary or execution_event_summary(validation.trades),
+                    "final_holdout_execution_event_summary": (
+                        final_holdout.execution_event_summary or execution_event_summary(final_holdout.trades)
+                        if final_holdout
+                        else None
+                    ),
                     "train_regime_performance": [row.as_dict() for row in train.regime_performance],
                     "train_regime_coverage": [row.as_dict() for row in train.regime_coverage],
                     "validation_regime_performance": [row.as_dict() for row in validation.regime_performance],
@@ -322,7 +330,12 @@ def _evaluate_candidates(
             execution_reality_summary = _execution_reality_summary(
                 policy=manifest.execution_timing,
                 execution_metadata=execution_metadata,
+                execution_event_summary=dict(base.get("validation_execution_event_summary") or {}),
             )
+            execution_event_gate_reasons = _execution_event_gate_reasons(dict(base.get("validation_execution_event_summary") or {}))
+            if execution_event_gate_reasons:
+                gate_result = "FAIL"
+                fail_reasons = sorted(set(fail_reasons) | set(execution_event_gate_reasons))
             if execution_reality_summary["execution_reality_gate_status"] == "FAIL":
                 gate_result = "FAIL"
                 fail_reasons = sorted(
@@ -347,6 +360,10 @@ def _evaluate_candidates(
                 "execution_calibration_gate": calibration_gate,
                 "execution_timing_policy": manifest.execution_timing.as_dict(),
                 "execution_reality_summary": execution_reality_summary,
+                "train_execution_event_summary": base.get("train_execution_event_summary") or {},
+                "validation_execution_event_summary": base.get("validation_execution_event_summary") or {},
+                "final_holdout_execution_event_summary": base.get("final_holdout_execution_event_summary"),
+                "execution_event_summary": base.get("validation_execution_event_summary") or {},
                 "train_metrics": train_metrics,
                 "validation_metrics": validation_metrics,
                 "final_holdout_metrics": final_holdout_metrics,
@@ -439,6 +456,10 @@ def _evaluate_candidates(
                 "parameter_stability": primary.get("parameter_stability"),
                 "execution_timing_policy": manifest.execution_timing.as_dict(),
                 "execution_reality_summary": primary.get("execution_reality_summary"),
+                "execution_event_summary": primary.get("execution_event_summary"),
+                "train_execution_event_summary": primary.get("train_execution_event_summary"),
+                "validation_execution_event_summary": primary.get("validation_execution_event_summary"),
+                "final_holdout_execution_event_summary": primary.get("final_holdout_execution_event_summary"),
             }
         )
         warning_reasons = _execution_calibration_warning_reasons(candidate_payload)
@@ -896,6 +917,7 @@ def _report_payload(
         "execution_reality_gate_status": _report_execution_reality_gate_status(candidates),
         "execution_reality_gate_reasons": _report_execution_reality_gate_reasons(candidates),
         "signal_quote_coverage_summary": _report_signal_quote_coverage_summary(candidates),
+        "execution_event_summary": _report_execution_event_summary(candidates),
         "strategy_name": manifest.strategy_name,
         "regime_classifier_version": MARKET_REGIME_VERSION,
         "regime_acceptance_gate": manifest.acceptance_gate.regime_acceptance_gate.as_dict(),
@@ -994,10 +1016,17 @@ def _execution_metadata(trades: Any) -> list[dict[str, Any]]:
                 "record_type",
                 "is_execution_attempt",
                 "is_filled_trade",
+                "is_execution_filled",
+                "is_portfolio_applied_trade",
+                "is_effective_trade",
                 "is_skipped_execution",
                 "is_failed_execution",
                 "portfolio_effective_ts",
                 "portfolio_applied",
+                "portfolio_application_status",
+                "pending_execution_at_end",
+                "pending_execution_after_dataset_end",
+                "dataset_final_mark_ts",
             ):
                 if key in trade:
                     item[key] = trade[key]
@@ -1009,6 +1038,7 @@ def _execution_reality_summary(
     *,
     policy,
     execution_metadata: list[dict[str, Any]],
+    execution_event_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     coverage = signal_quote_coverage_summary(execution_metadata=execution_metadata, policy=policy)
     observed_levels = [
@@ -1032,25 +1062,51 @@ def _execution_reality_summary(
             if item.get("latency_reference_policy_warning")
         ],
     )
-    filled = [item for item in execution_metadata if bool(item.get("is_filled_trade"))]
-    skipped = [item for item in execution_metadata if bool(item.get("is_skipped_execution"))]
-    failed = [item for item in execution_metadata if bool(item.get("is_failed_execution"))]
-    closed = [
-        item
-        for item in filled
-        if str(item.get("side") or "").upper() == "SELL" and bool(item.get("portfolio_applied"))
-    ]
+    event_summary = execution_event_summary or _execution_event_summary_from_metadata(execution_metadata)
     return {
         **coverage,
-        "execution_attempt_count": len(execution_metadata),
-        "filled_execution_count": len(filled),
-        "skipped_execution_count": len(skipped),
-        "failed_execution_count": len(failed),
-        "closed_trade_count": len(closed),
+        **event_summary,
         "execution_reality_gate_status": gate["status"],
         "execution_reality_gate_reasons": gate["reasons"],
         "execution_reality_gate": gate,
     }
+
+
+def _execution_event_summary_from_metadata(execution_metadata: list[dict[str, Any]]) -> dict[str, object]:
+    filled = [item for item in execution_metadata if bool(item.get("is_execution_filled"))]
+    portfolio_applied = [item for item in execution_metadata if bool(item.get("is_portfolio_applied_trade"))]
+    pending = [
+        item
+        for item in execution_metadata
+        if bool(item.get("is_execution_filled")) and not bool(item.get("is_portfolio_applied_trade"))
+    ]
+    skipped = [item for item in execution_metadata if bool(item.get("is_skipped_execution"))]
+    failed = [item for item in execution_metadata if bool(item.get("is_failed_execution"))]
+    closed = [item for item in portfolio_applied if str(item.get("side") or "").upper() == "SELL"]
+    pending_at_end = [item for item in pending if bool(item.get("pending_execution_at_end"))]
+    pending_after_end = [item for item in pending if bool(item.get("pending_execution_after_dataset_end"))]
+    return {
+        "execution_attempt_count": len(execution_metadata),
+        "execution_filled_count": len(filled),
+        "filled_execution_count": len(filled),
+        "portfolio_applied_trade_count": len(portfolio_applied),
+        "pending_execution_count": len(pending),
+        "skipped_execution_count": len(skipped),
+        "failed_execution_count": len(failed),
+        "closed_trade_count": len(closed),
+        "pending_execution_at_end_count": len(pending_at_end),
+        "pending_execution_after_dataset_end_count": len(pending_after_end),
+        "execution_event_timeline_incomplete": bool(pending_after_end),
+    }
+
+
+def _execution_event_gate_reasons(summary: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if bool(summary.get("execution_event_timeline_incomplete")):
+        reasons.append("execution_event_timeline_incomplete")
+    if int(summary.get("pending_execution_after_dataset_end_count") or 0) > 0:
+        reasons.append("pending_execution_after_dataset_end")
+    return reasons
 
 
 def _report_execution_reality_level(candidates: list[dict[str, Any]]) -> str | None:
@@ -1105,10 +1161,42 @@ def _report_signal_quote_coverage_summary(candidates: list[dict[str, Any]]) -> d
                     "latency_applied_to_submit_ts_count",
                     "latency_applied_to_fill_reference_count",
                     "execution_attempt_count",
+                    "execution_filled_count",
                     "filled_execution_count",
+                    "portfolio_applied_trade_count",
+                    "pending_execution_count",
                     "skipped_execution_count",
                     "failed_execution_count",
                     "closed_trade_count",
+                    "pending_execution_at_end_count",
+                    "pending_execution_after_dataset_end_count",
+                    "execution_event_timeline_incomplete",
+                )
+            }
+    return None
+
+
+def _report_execution_event_summary(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for candidate in candidates:
+        summary = candidate.get("execution_event_summary")
+        if isinstance(summary, dict):
+            return dict(summary)
+        reality_summary = candidate.get("execution_reality_summary")
+        if isinstance(reality_summary, dict):
+            return {
+                key: reality_summary.get(key)
+                for key in (
+                    "execution_attempt_count",
+                    "execution_filled_count",
+                    "filled_execution_count",
+                    "portfolio_applied_trade_count",
+                    "pending_execution_count",
+                    "skipped_execution_count",
+                    "failed_execution_count",
+                    "closed_trade_count",
+                    "pending_execution_at_end_count",
+                    "pending_execution_after_dataset_end_count",
+                    "execution_event_timeline_incomplete",
                 )
             }
     return None

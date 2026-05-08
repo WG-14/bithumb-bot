@@ -37,6 +37,7 @@ class BacktestRun:
     warnings: tuple[str, ...]
     regime_performance: tuple[RegimePerformanceRow, ...] = ()
     regime_coverage: tuple[RegimeCoverageRow, ...] = ()
+    execution_event_summary: dict[str, object] | None = None
 
 
 @dataclass
@@ -375,6 +376,7 @@ def run_sma_backtest(
         slippage_total=slippage_total,
         closed_pnls=closed_pnls,
     )
+    _mark_pending_fills_at_end(pending_fills=pending_fills, trades=trades, final_mark_ts=last_mark_ts)
     final_equity = cash + qty * last.close
     return_pct = ((final_equity / START_CASH_KRW) - 1.0) * 100.0
     metrics = _metrics(
@@ -387,6 +389,7 @@ def run_sma_backtest(
     )
     coverage = aggregate_regime_coverage(snapshots=regime_snapshots, trades=trades)
     performance = aggregate_regime_performance(trades=trades, coverage=coverage, start_cash=START_CASH_KRW)
+    execution_summary = execution_event_summary(trades)
     return BacktestRun(
         metrics=metrics,
         trades=tuple(trades),
@@ -394,6 +397,7 @@ def run_sma_backtest(
         warnings=tuple(warnings),
         regime_performance=performance,
         regime_coverage=coverage,
+        execution_event_summary=execution_summary,
     )
 
 
@@ -668,14 +672,14 @@ def _trade_from_fill(
     trade["execution"] = fill.as_dict()
     _annotate_execution_record_type(trade, fill)
     trade["portfolio_effective_ts"] = fill.fill_reference_ts
-    trade["portfolio_applied"] = trade["is_filled_trade"]
+    _annotate_portfolio_application(trade, fill, portfolio_applied=bool(trade["is_execution_filled"]))
     return trade
 
 
 def _pending_trade_from_fill(fill: Any, *, cash: float, asset_qty: float) -> dict[str, object]:
     trade = _trade_from_fill(fill, cash=cash, asset_qty=asset_qty, pnl=None)
     trade["portfolio_effective_ts"] = _fill_effective_ts(fill)
-    trade["portfolio_applied"] = False
+    _annotate_portfolio_application(trade, fill, portfolio_applied=False)
     return trade
 
 
@@ -705,9 +709,9 @@ def _mark_trade_applied(
             "exit_regime": exit_regime,
             "entry_regime_snapshot": entry_regime_snapshot,
             "exit_regime_snapshot": exit_regime_snapshot,
-            "portfolio_applied": True,
         }
     )
+    _annotate_portfolio_application(trade, trade.get("execution") or {}, portfolio_applied=True)
 
 
 def _fill_effective_ts(fill: Any) -> int:
@@ -721,11 +725,117 @@ def _annotate_execution_record_type(trade: dict[str, object], fill: Any) -> None
     is_filled = float(getattr(fill, "filled_qty", 0.0) or 0.0) > 0.0 and status in {"filled", "partial"}
     is_skipped = status in {"skipped", "skipped_with_warning"}
     is_failed = status == "failed"
-    trade["record_type"] = "filled_trade" if is_filled else "execution_attempt"
+    if is_skipped:
+        record_type = "skipped_execution"
+    elif is_failed:
+        record_type = "failed_execution"
+    elif is_filled:
+        record_type = "portfolio_trade"
+    else:
+        record_type = "execution_attempt"
+    trade["record_type"] = record_type
     trade["is_execution_attempt"] = True
+    trade["is_execution_filled"] = is_filled
     trade["is_filled_trade"] = is_filled
     trade["is_skipped_execution"] = is_skipped
     trade["is_failed_execution"] = is_failed
+    trade["is_portfolio_applied_trade"] = is_filled
+    trade["is_effective_trade"] = is_filled
+    trade["portfolio_application_status"] = "applied" if is_filled else "not_applicable"
+
+
+def _annotate_portfolio_application(
+    trade: dict[str, object],
+    fill: Any,
+    *,
+    portfolio_applied: bool,
+) -> None:
+    if isinstance(fill, dict):
+        status = str(fill.get("fill_status") or "")
+        filled_qty = float(fill.get("filled_qty") or 0.0)
+    else:
+        status = str(getattr(fill, "fill_status", ""))
+        filled_qty = float(getattr(fill, "filled_qty", 0.0) or 0.0)
+    is_execution_filled = filled_qty > 0.0 and status in {"filled", "partial"}
+    is_skipped = status in {"skipped", "skipped_with_warning"}
+    is_failed = status == "failed"
+    is_portfolio_trade = bool(is_execution_filled and portfolio_applied)
+    if is_portfolio_trade:
+        record_type = "portfolio_trade"
+        application_status = "applied"
+    elif is_execution_filled:
+        record_type = "pending_execution"
+        application_status = "pending"
+    elif is_skipped:
+        record_type = "skipped_execution"
+        application_status = "not_applicable"
+    elif is_failed:
+        record_type = "failed_execution"
+        application_status = "not_applicable"
+    else:
+        record_type = "execution_attempt"
+        application_status = "not_applicable"
+    trade.update(
+        {
+            "record_type": record_type,
+            "is_execution_attempt": True,
+            "is_execution_filled": is_execution_filled,
+            "is_portfolio_applied_trade": is_portfolio_trade,
+            "is_effective_trade": is_portfolio_trade,
+            "is_filled_trade": is_portfolio_trade,
+            "is_skipped_execution": is_skipped,
+            "is_failed_execution": is_failed,
+            "portfolio_applied": is_portfolio_trade,
+            "portfolio_application_status": application_status,
+        }
+    )
+
+
+def _mark_pending_fills_at_end(
+    *,
+    pending_fills: list[_PendingFill],
+    trades: list[dict[str, object]],
+    final_mark_ts: int,
+) -> None:
+    for pending in pending_fills:
+        trade = trades[pending.trade_index]
+        trade["pending_execution_at_end"] = True
+        trade["pending_execution_after_dataset_end"] = int(pending.effective_ts) > int(final_mark_ts)
+        trade["dataset_final_mark_ts"] = int(final_mark_ts)
+
+
+def execution_event_summary(trades: Any) -> dict[str, object]:
+    rows = [trade for trade in trades if isinstance(trade, dict)]
+    attempts = [trade for trade in rows if bool(trade.get("is_execution_attempt"))]
+    execution_filled = [trade for trade in rows if bool(trade.get("is_execution_filled"))]
+    portfolio_applied = [trade for trade in rows if bool(trade.get("is_portfolio_applied_trade"))]
+    pending = [
+        trade
+        for trade in rows
+        if bool(trade.get("is_execution_filled")) and not bool(trade.get("is_portfolio_applied_trade"))
+    ]
+    skipped = [trade for trade in rows if bool(trade.get("is_skipped_execution"))]
+    failed = [trade for trade in rows if bool(trade.get("is_failed_execution"))]
+    closed = [
+        trade
+        for trade in portfolio_applied
+        if str(trade.get("side") or "").upper() == "SELL"
+    ]
+    pending_at_end = [trade for trade in pending if bool(trade.get("pending_execution_at_end"))]
+    pending_after_end = [trade for trade in pending if bool(trade.get("pending_execution_after_dataset_end"))]
+    return {
+        "execution_attempt_count": len(attempts),
+        "execution_filled_count": len(execution_filled),
+        "filled_execution_count": len(execution_filled),
+        "portfolio_applied_trade_count": len(portfolio_applied),
+        "pending_execution_count": len(pending),
+        "skipped_execution_count": len(skipped),
+        "failed_execution_count": len(failed),
+        "closed_trade_count": len(closed),
+        "pending_execution_at_end_count": len(pending_at_end),
+        "pending_execution_after_dataset_end_count": len(pending_after_end),
+        "execution_event_timeline_incomplete": bool(pending_after_end),
+    }
 
 
 def _execution_reference_warnings(fill: Any) -> list[str]:

@@ -51,8 +51,32 @@ def _candidate(**overrides):
             "p95_quote_age_ms_on_signal": None,
             "execution_reference_policy": "next_candle_open",
             "execution_reality_level": "candle_next_open",
+            "execution_attempt_count": 8,
+            "execution_filled_count": 8,
+            "filled_execution_count": 8,
+            "portfolio_applied_trade_count": 8,
+            "pending_execution_count": 0,
+            "skipped_execution_count": 0,
+            "failed_execution_count": 0,
+            "closed_trade_count": 4,
+            "pending_execution_at_end_count": 0,
+            "pending_execution_after_dataset_end_count": 0,
+            "execution_event_timeline_incomplete": False,
             "execution_reality_gate_status": "PASS",
             "execution_reality_gate_reasons": [],
+        },
+        "execution_event_summary": {
+            "execution_attempt_count": 8,
+            "execution_filled_count": 8,
+            "filled_execution_count": 8,
+            "portfolio_applied_trade_count": 8,
+            "pending_execution_count": 0,
+            "skipped_execution_count": 0,
+            "failed_execution_count": 0,
+            "closed_trade_count": 4,
+            "pending_execution_at_end_count": 0,
+            "pending_execution_after_dataset_end_count": 0,
+            "execution_event_timeline_incomplete": False,
         },
         "strategy_name": "sma_with_filter",
         "parameter_candidate_id": "candidate_001",
@@ -1025,6 +1049,102 @@ def test_allow_legacy_lineage_does_not_bypass_execution_reality_gate(tmp_path, m
         )
 
 
+def test_allow_legacy_lineage_does_not_bypass_pending_execution_refusal(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    summary = {
+        "execution_attempt_count": 1,
+        "execution_filled_count": 1,
+        "filled_execution_count": 1,
+        "portfolio_applied_trade_count": 0,
+        "pending_execution_count": 1,
+        "skipped_execution_count": 0,
+        "failed_execution_count": 0,
+        "closed_trade_count": 0,
+        "pending_execution_at_end_count": 1,
+        "pending_execution_after_dataset_end_count": 1,
+        "execution_event_timeline_incomplete": True,
+    }
+    candidate = _candidate(
+        acceptance_gate_result="PASS",
+        validation_metrics={
+            "trade_count": 0,
+            "max_drawdown_pct": 1.0,
+            "profit_factor": 2.0,
+            "return_pct": 1.0,
+        },
+        execution_event_summary=summary,
+    )
+    _write_report_without_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="pending_execution_after_dataset_end"):
+        promote_candidate(
+            experiment_id="promo_exp",
+            candidate_id="candidate_001",
+            manager=manager,
+            allow_legacy_lineage=True,
+        )
+
+
+def test_promotion_uses_portfolio_applied_trade_count_not_execution_filled_count(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    summary = {
+        "execution_attempt_count": 2,
+        "execution_filled_count": 2,
+        "filled_execution_count": 2,
+        "portfolio_applied_trade_count": 0,
+        "pending_execution_count": 2,
+        "skipped_execution_count": 0,
+        "failed_execution_count": 0,
+        "closed_trade_count": 0,
+        "pending_execution_at_end_count": 0,
+        "pending_execution_after_dataset_end_count": 0,
+        "execution_event_timeline_incomplete": False,
+    }
+    candidate = _candidate(
+        validation_metrics={
+            "trade_count": 0,
+            "max_drawdown_pct": 1.0,
+            "profit_factor": 2.0,
+            "return_pct": 1.0,
+        },
+        execution_event_summary=summary,
+    )
+    _write_report(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="portfolio_applied_trade_count_insufficient"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_execution_event_timeline_incomplete(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    summary = {
+        "execution_attempt_count": 1,
+        "execution_filled_count": 1,
+        "filled_execution_count": 1,
+        "portfolio_applied_trade_count": 0,
+        "pending_execution_count": 1,
+        "skipped_execution_count": 0,
+        "failed_execution_count": 0,
+        "closed_trade_count": 0,
+        "pending_execution_at_end_count": 1,
+        "pending_execution_after_dataset_end_count": 1,
+        "execution_event_timeline_incomplete": True,
+    }
+    candidate = _candidate(
+        validation_metrics={
+            "trade_count": 0,
+            "max_drawdown_pct": 1.0,
+            "profit_factor": 2.0,
+            "return_pct": 1.0,
+        },
+        execution_event_summary=summary,
+    )
+    _write_report(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="execution_event_timeline_incomplete"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
 def test_promotion_cli_argument_wires_allow_legacy_lineage(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -1066,6 +1186,26 @@ def test_candidate_profile_hash_changes_when_calibration_warning_evidence_change
     )
 
     assert clean["candidate_profile_hash"] != warned["candidate_profile_hash"]
+
+
+def test_candidate_profile_hash_changes_when_pending_execution_summary_changes() -> None:
+    complete = _candidate()
+    pending_summary = {
+        "execution_attempt_count": 8,
+        "execution_filled_count": 8,
+        "filled_execution_count": 8,
+        "portfolio_applied_trade_count": 7,
+        "pending_execution_count": 1,
+        "skipped_execution_count": 0,
+        "failed_execution_count": 0,
+        "closed_trade_count": 4,
+        "pending_execution_at_end_count": 1,
+        "pending_execution_after_dataset_end_count": 1,
+        "execution_event_timeline_incomplete": True,
+    }
+    pending = _candidate(execution_event_summary=pending_summary)
+
+    assert complete["candidate_profile_hash"] != pending["candidate_profile_hash"]
 
 
 def test_promotion_refuses_missing_final_holdout_evidence(tmp_path, monkeypatch) -> None:

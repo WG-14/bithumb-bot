@@ -11,6 +11,7 @@ from bithumb_bot.paths import PathManager
 from bithumb_bot.research.backtest_engine import run_sma_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot, build_dataset_quality_report, load_dataset_split
 from bithumb_bot.research.execution_model import StressExecutionModel
+from bithumb_bot.research.execution_timing import first_quote_after_or_equal
 from bithumb_bot.research.experiment_manifest import DateRange, ExecutionTimingPolicy, ManifestValidationError, parse_manifest
 from bithumb_bot.research.strategy_registry import TEST_TOP_OF_BOOK_REQUIRED_STRATEGY
 from bithumb_bot.research.validation_protocol import ResearchValidationError, run_research_backtest
@@ -353,6 +354,24 @@ def test_orderbook_policy_uses_first_quote_after_decision_not_nearest_before() -
     assert execution["fill_reference_source"] == "first_orderbook_after_decision"
 
 
+def test_quote_lookup_preserves_first_after_or_equal_tie_break() -> None:
+    base_ts = 1_700_000_000_000
+    dataset = _signal_dataset(
+        base_ts=base_ts,
+        quotes=(
+            build_dataset_quote(candle_ts=base_ts + 10_000, bid=99.0, ask=101.0),
+            build_dataset_quote(candle_ts=base_ts + 5_000, bid=98.0, ask=102.0),
+            build_dataset_quote(candle_ts=base_ts + 5_000, bid=97.0, ask=103.0),
+        ),
+    )
+
+    quote = first_quote_after_or_equal(dataset=dataset, target_ts=base_ts + 5_000, max_wait_ms=10_000)
+
+    assert quote is not None
+    assert quote.ts == base_ts + 5_000
+    assert quote.ask_price == 102.0
+
+
 def test_latency_changes_fill_reference_quote() -> None:
     base_ts = 1_700_000_000_000
     decision_ts = base_ts + 5 * 60_000
@@ -616,6 +635,11 @@ def test_latency_fill_after_next_candle_close_does_not_update_position_early() -
     buy = result.trades[0]
     assert buy["fill_reference_ts"] == decision_ts + 90_000
     assert buy["portfolio_applied"] is True
+    assert buy["record_type"] == "portfolio_trade"
+    assert buy["is_execution_filled"] is True
+    assert buy["is_portfolio_applied_trade"] is True
+    assert buy["is_effective_trade"] is True
+    assert buy["portfolio_application_status"] == "applied"
     assert buy["portfolio_effective_ts"] == decision_ts + 90_000
     assert result.metrics.max_drawdown_pct == 0.0
 
@@ -673,9 +697,21 @@ def test_delayed_fill_crossing_mark_boundary_is_pending_not_early_applied() -> N
     )
 
     assert result.trades[0]["portfolio_applied"] is False
+    assert result.trades[0]["record_type"] == "pending_execution"
+    assert result.trades[0]["is_execution_filled"] is True
+    assert result.trades[0]["is_portfolio_applied_trade"] is False
+    assert result.trades[0]["is_effective_trade"] is False
+    assert result.trades[0]["is_filled_trade"] is False
+    assert result.trades[0]["portfolio_application_status"] == "pending"
+    assert result.trades[0]["pending_execution_at_end"] is True
+    assert result.trades[0]["pending_execution_after_dataset_end"] is True
     assert result.trades[0]["asset_qty"] == 0.0
     assert result.metrics.return_pct == 0.0
     assert result.metrics.max_drawdown_pct == 0.0
+    assert result.execution_event_summary["pending_execution_at_end_count"] == 1
+    assert result.execution_event_summary["pending_execution_after_dataset_end_count"] == 1
+    assert result.execution_event_summary["execution_event_timeline_incomplete"] is True
+    assert all(row.trade_count == 0 for row in result.regime_coverage)
 
 
 def test_stress_latency_non_latency_policy_is_flagged_or_failed(tmp_path: Path, monkeypatch) -> None:
@@ -795,8 +831,11 @@ def test_missing_quote_policy_skip_records_skip_not_failed_fill() -> None:
     assert execution["fill_status"] == "skipped"
     assert execution["execution_reference_failure_reason"] == "missing_quote_skipped"
     assert execution["filled_qty"] == 0.0
-    assert result.trades[0]["record_type"] == "execution_attempt"
+    assert result.trades[0]["record_type"] == "skipped_execution"
     assert result.trades[0]["is_filled_trade"] is False
+    assert result.trades[0]["is_execution_filled"] is False
+    assert result.trades[0]["is_portfolio_applied_trade"] is False
+    assert result.trades[0]["portfolio_application_status"] == "not_applicable"
     assert result.trades[0]["is_skipped_execution"] is True
     assert result.trades[0]["asset_qty"] == 0.0
 
@@ -822,6 +861,32 @@ def test_skipped_execution_attempt_is_not_counted_as_filled_trade() -> None:
     assert result.metrics.trade_count == 0
     assert all(row.trade_count == 0 for row in result.regime_coverage)
     assert all(row.trade_count == 0 for row in result.regime_performance)
+
+
+def test_failed_execution_has_not_applicable_portfolio_application_status() -> None:
+    base_ts = 1_700_000_000_000
+    dataset = _signal_dataset(base_ts=base_ts, quotes=())
+
+    result = run_sma_backtest(
+        dataset=dataset,
+        parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(
+            fill_reference_policy="first_orderbook_after_decision",
+            max_quote_wait_ms=1000,
+            missing_quote_policy="fail",
+            allow_same_candle_close_fill=False,
+            source="test",
+        ),
+    )
+
+    trade = result.trades[0]
+    assert trade["record_type"] == "failed_execution"
+    assert trade["is_failed_execution"] is True
+    assert trade["is_execution_filled"] is False
+    assert trade["is_portfolio_applied_trade"] is False
+    assert trade["portfolio_application_status"] == "not_applicable"
 
 
 def test_missing_quote_policy_warn_records_warning_without_promotion_grade_pass(
@@ -881,7 +946,10 @@ def test_report_separates_execution_attempt_count_from_closed_trade_count(tmp_pa
     summary = report["candidates"][0]["execution_reality_summary"]
     assert summary["execution_attempt_count"] > 0
     assert summary["skipped_execution_count"] == summary["execution_attempt_count"]
+    assert summary["execution_filled_count"] == 0
     assert summary["filled_execution_count"] == 0
+    assert summary["portfolio_applied_trade_count"] == 0
+    assert summary["pending_execution_count"] == 0
     assert summary["closed_trade_count"] == 0
 
 

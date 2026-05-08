@@ -1,16 +1,16 @@
 You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Source context for this task is the attached post-patch review. Treat it as guidance, not as proven fact; verify every claim against the repository before changing code. 
+Use the attached post-patch review as source context, but do not treat it as proven fact. Verify every claim against the repository before changing code. 
 
-Your task is to harden the research backtest execution-timing system after the recent patches. The previous patches appear to have fixed many of the original issues: execution timing policy, signal/decision/fill reference separation, quote-after-decision selection, latency-adjusted top-of-book, promotion fail-closed behavior, dataset quality wording, missing quote semantics, trade timestamp disambiguation, and several regression tests. Do not revert that direction. Your job is to close the remaining gap: **future fill events can still update portfolio state too early**, which can corrupt strategy state, action gating, equity/MDD, and promotion-grade reproducibility.
+Your task is to harden the current research execution-timing system after the latest pending-fill patch. The repository has already moved in the right direction: `run_sma_backtest()` appears to use `_PendingFill`, delayed portfolio application, event-time boundaries, execution timing metadata, and explicit trade record annotations. Do not revert that architecture. Your job is to close the remaining semantic gap: **an exchange/execution fill and a backtest portfolio-applied trade must never be confused in regime evidence, reports, promotion gates, or operator-facing summaries.**
 
-Do not turn this into general advice. Inspect, patch, and test the actual code in `WG-14/bithumb-bot`.
+The core invariant to preserve is:
 
-Core problem to preserve:
+> A backtest must distinguish an execution attempt, an execution-side fill, a pending execution, and a portfolio-applied trade. Promotion evidence must be based on events that are actually effective in the simulated portfolio timeline, not merely on fills that occurred after the dataset’s final mark or before the portfolio state was updated.
 
-A backtest must prove when a signal became knowable, when the decision was made, when the order would be submitted, when the fill reference became available, what market evidence was used, how latency affected submit/reference timing, when portfolio state changed, and whether the resulting candidate is promotable. Passing `pytest` is not enough if `cash`, `qty`, action gating, or reports still behave as if a future fill already happened.
+Do not soften this into general advice. Inspect, patch, and test the actual `WG-14/bithumb-bot` code.
 
-Start by inspecting at least these files:
+Inspect at least these files first:
 
 * `src/bithumb_bot/research/backtest_engine.py`
 * `src/bithumb_bot/research/execution_timing.py`
@@ -18,192 +18,269 @@ Start by inspecting at least these files:
 * `src/bithumb_bot/research/execution_model/base.py`
 * `src/bithumb_bot/research/execution_model/fixed_bps.py`
 * `src/bithumb_bot/research/execution_model/stress.py`
-* `src/bithumb_bot/research/experiment_manifest.py`
 * `src/bithumb_bot/research/validation_protocol.py`
 * `src/bithumb_bot/research/promotion_gate.py`
-* `src/bithumb_bot/research/execution_calibration.py`
 * `src/bithumb_bot/research/cli.py`
-* `tests/test_research_backtest_reproducibility.py`
+* `src/bithumb_bot/market_regime/metrics.py`
 * `tests/test_orderbook_top_research.py`
+* `tests/test_research_backtest_reproducibility.py`
 * `tests/test_research_promotion_gate.py`
 * `tests/test_dataset_quality_report.py`
-* Any new tests related to execution timing, missing quote policy, latency, promotion, or MDD/equity timing
+* Any new execution timing / pending fill / promotion tests
 
 Keep the following as hypotheses until verified or falsified:
 
-H1. Delayed fills may still update `cash` and `qty` immediately inside the signal loop, even when `fill_reference_ts` is later than the current candle close or later than the next mark. This can make future fills affect current or next-candle strategy state too early.
+H1. `_pending_trade_from_fill()` may create records where `record_type="filled_trade"` and `is_filled_trade=True` while `portfolio_applied=False`. That may be technically true from an execution-fill perspective but semantically unsafe for portfolio/regime/promotion evidence.
 
-H2. The existing fix may protect only the signal candle close equity calculation by using pre-fill `mark_cash` and `mark_qty`, but may not implement true event-time portfolio state. If so, long-latency `latency_adjusted_orderbook` fills can still distort subsequent action gating and portfolio state.
+H2. `aggregate_regime_coverage()` may still count `portfolio_applied=False` pending fills as regime `trade_count` evidence because it filters on `_is_filled_trade()` but may not require portfolio application.
 
-H3. A pending BUY fill that is not yet effective may still set `qty > 0` immediately, thereby blocking subsequent BUY signals or allowing SELL logic before the fill timestamp.
+H3. `aggregate_regime_performance()` appears safer because it requires `portfolio_applied=True` for closed SELL performance, but coverage and performance may now disagree when pending fills exist.
 
-H4. A skipped execution currently enters the `trades` list as an execution attempt. That may be useful for observability, but downstream code may still interpret all entries as filled trades unless the record type is explicit.
+H4. Report-level and candidate-level summaries may not yet expose explicit counts for execution attempts, execution fills, portfolio-applied trades, pending executions, skipped executions, failed executions, and closed trades.
 
-H5. Latency metadata currently distinguishes `latency_applied_to_reference`, but operators may still not be able to tell whether latency was applied to submit time separately from fill-reference selection. This can obscure whether latency was modeled as timing-only or price-reference-moving.
+H5. Pending fills that remain unapplied after the final dataset mark may be safe for portfolio equity, but promotion-grade candidates should not silently ignore them. They should be visible and either fail-closed or be explicitly non-promotable.
 
-H6. `allow_legacy_lineage=True` may bypass lineage or dataset quality compatibility checks. It must not bypass execution reality refusal. Legacy lineage compatibility must not make candle-close or non-promotable execution evidence promotable.
+H6. Operator-facing CLI output may show signal quote coverage and skipped/warning counts, but may not yet show the new execution-event vs portfolio-trade distinction.
 
-H7. Quote lookup may still scan all sorted quotes for every signal. This is no longer the top correctness risk, but dense top-of-book data can make the backtest scale poorly.
+H7. Quote lookup may still be linear over sorted top-of-book quotes. This is lower priority than semantics, but dense top-of-book data can make research runs scale poorly.
 
 Implementation priorities:
 
-P0. Implement event-time-safe portfolio state for delayed fills, or fail closed when safe event-time accounting is not available.
+P0. Separate execution-fill semantics from portfolio-applied trade semantics.
 
-Inspect `run_sma_backtest()` carefully. If the engine updates `cash`, `qty`, `entry_cost_basis`, `entry_fee`, `entry_slippage`, or position state immediately after creating a fill whose `fill_reference_ts` is in the future relative to the current candle mark, fix it.
+Inspect `_trade_from_fill()`, `_pending_trade_from_fill()`, `_mark_trade_applied()`, and `_annotate_execution_record_type()` in `backtest_engine.py`.
 
-Preferred design:
-
-Introduce a minimal pending execution mechanism inside `run_sma_backtest()`:
-
-* When a fill is created and `fill_reference_ts` is greater than the current candle close timestamp, do not immediately apply its portfolio effects.
-* Store it as a pending fill event with:
-
-  * fill object
-  * side
-  * fill_reference_ts
-  * quantity
-  * cash/qty delta
-  * fee/slippage
-  * entry/exit regime snapshots
-  * accounting metadata needed to finalize the trade
-* At the beginning of each candle iteration, before computing action eligibility for that candle, apply all pending fills whose `fill_reference_ts` is at or before the current decision/mark boundary chosen by the timing model.
-* Action gating must use only effective portfolio state plus any explicitly tracked pending state. It must not treat a future BUY as current `qty > 0`.
-* SELL logic must not be enabled by a BUY fill before that BUY’s `fill_reference_ts`.
-* Equity/MDD marks must use portfolio state that is effective at that mark time, not state from future fills.
-* Preserve deterministic results.
-
-If implementing full pending-fill accounting is too invasive, add a fail-closed guard for promotion-grade evidence:
+If pending records can show:
 
 ```text
-if fill_reference_ts > next_candle_close_ts or fill_reference_ts crosses the next mark boundary:
-    do not apply the fill early
-    record delayed_fill_crosses_mark_boundary
-    fail the scenario/candidate when promotion-grade execution is required
+record_type = "filled_trade"
+is_filled_trade = true
+portfolio_applied = false
 ```
 
-Do not silently document this away unless there is a clear, tested non-promotable limitation in reports and candidate profiles. Prefer actual pending-fill handling.
+then fix the naming and metadata so the distinction is impossible to miss.
+
+Add or normalize these fields on every execution/trade record:
+
+```python
+trade["is_execution_attempt"] = True
+trade["is_execution_filled"] = bool(fill.filled_qty > 0 and fill.fill_status in {"filled", "partial"})
+trade["is_portfolio_applied_trade"] = bool(trade["is_execution_filled"] and trade.get("portfolio_applied") is True)
+trade["is_effective_trade"] = trade["is_portfolio_applied_trade"]
+trade["is_skipped_execution"] = bool(fill.fill_status in {"skipped", "skipped_with_warning"})
+trade["is_failed_execution"] = bool(fill.fill_status == "failed")
+trade["portfolio_application_status"] = "pending" | "applied" | "not_applicable"
+```
+
+Keep legacy fields such as `is_filled_trade` if existing consumers/tests depend on them, but either redefine them safely or add clear compatibility semantics. A safe compatibility approach is:
+
+```python
+trade["is_filled_trade"] = trade["is_portfolio_applied_trade"]
+trade["is_execution_filled"] = execution-side fill status
+```
+
+If that would break too much, keep `is_filled_trade` but add `is_portfolio_applied_trade` and make all internal evidence/gates use the portfolio-applied field.
+
+Use explicit `record_type` values, for example:
+
+```text
+portfolio_trade
+pending_execution
+skipped_execution
+failed_execution
+```
+
+Do not leave `pending_execution` rows labeled as `filled_trade` unless a separate field makes the portfolio distinction unambiguous.
 
 Add tests:
 
 ```text
-test_latency_fill_after_next_candle_close_does_not_update_position_early
-test_pending_buy_fill_does_not_enable_sell_before_fill_ts
-test_delayed_fill_crossing_mark_boundary_is_failed_or_pending_not_early_applied
+test_pending_execution_is_not_labeled_as_portfolio_trade
+test_pending_execution_has_execution_filled_but_not_portfolio_applied_trade
+test_applied_fill_becomes_portfolio_trade_after_effective_ts
+test_skipped_and_failed_executions_have_not_applicable_portfolio_application_status
 ```
 
-The tests must fail against an implementation that immediately updates `qty` before `fill_reference_ts`.
+P0. Ensure regime coverage excludes pending unapplied fills.
 
-P1. Make filled trades and execution attempts explicit.
+Inspect `aggregate_regime_coverage()` and `_is_filled_trade()` in `src/bithumb_bot/market_regime/metrics.py`.
 
-Inspect `_trade()`, `_trade_from_fill()`, report execution metadata extraction, regime aggregation, and run summaries. Skipped or failed execution attempts should remain observable, but downstream consumers must not confuse them with filled trades.
+If coverage uses execution-filled pending rows as regime trade evidence, change it. Regime evidence should count portfolio-effective trades, not merely execution fills that never affected portfolio state during the dataset.
 
-Add explicit fields to every trade/execution-attempt record:
+Add a helper such as:
 
 ```python
-trade["record_type"] = "filled_trade" | "execution_attempt"
-trade["is_execution_attempt"] = True
-trade["is_filled_trade"] = bool(fill.filled_qty > 0 and fill.fill_status in {"filled", "partial"})
-trade["is_skipped_execution"] = bool(fill.fill_status in {"skipped", "skipped_with_warning"})
-trade["is_failed_execution"] = bool(fill.fill_status == "failed")
+def _is_effective_trade(trade: dict[str, Any]) -> bool:
+    if "is_portfolio_applied_trade" in trade:
+        return bool(trade["is_portfolio_applied_trade"])
+    if "portfolio_applied" in trade:
+        return _is_filled_trade(trade) and bool(trade["portfolio_applied"])
+    return _is_filled_trade(trade)
 ```
 
-If the existing `trades` list is now actually a mixed execution-event log, keep the list for compatibility but make the distinction impossible to miss.
+Then use `_is_effective_trade()` in regime coverage and performance where appropriate. Coverage BUY counts must not include pending unapplied BUY fills. Performance SELL counts must continue to require portfolio-applied SELLs.
 
-Update report-level summaries where appropriate:
+Add tests:
+
+```text
+test_regime_coverage_excludes_pending_unapplied_fills
+test_pending_unapplied_fill_does_not_increase_regime_trade_count
+test_regime_coverage_and_performance_do_not_disagree_due_to_pending_execution
+```
+
+P0. Report pending executions at dataset end and fail or warn for promotion-grade evidence.
+
+Inspect `run_sma_backtest()` end-of-loop pending fill handling and report generation in `validation_protocol.py`.
+
+If fills remain pending after the final mark, they must be counted and surfaced. Add deterministic summary fields at run/candidate/report level:
+
+```text
+pending_execution_at_end_count
+pending_execution_after_dataset_end_count
+execution_event_timeline_incomplete
+```
+
+Promotion-grade candidates should not silently pass when they have pending executions after the dataset’s final effective mark. Implement one of the following:
+
+Preferred:
+
+```text
+fail candidate gate with pending_execution_after_dataset_end
+```
+
+Acceptable only for explicitly non-promotion research mode:
+
+```text
+warning pending_execution_after_dataset_end
+promotion_allowed = false
+```
+
+Do not let final pending executions disappear only because final equity ignores them.
+
+Add tests:
+
+```text
+test_pending_execution_after_final_mark_is_reported
+test_pending_execution_after_final_mark_is_not_promotable
+test_pending_execution_after_dataset_end_affects_candidate_profile_hash
+```
+
+P1. Add report-level execution event summaries.
+
+Inspect `_execution_metadata()`, `_report_payload()`, `_evaluate_candidates()`, run summary helpers, and CLI output.
+
+Add an `execution_event_summary` to scenario results, candidates, and top-level reports where useful. Include at least:
 
 ```text
 execution_attempt_count
-filled_execution_count
+execution_filled_count
+portfolio_applied_trade_count
+pending_execution_count
 skipped_execution_count
 failed_execution_count
 closed_trade_count
+pending_execution_at_end_count
+execution_event_timeline_incomplete
 ```
 
-Do not let skipped execution attempts inflate filled trade counts, closed trade counts, regime trade counts, win rate, profit factor, or promotion evidence.
+Make the source of truth explicit:
+
+* `execution_attempt_count`: all records with `is_execution_attempt=True`
+* `execution_filled_count`: execution-side fills, regardless of portfolio application
+* `portfolio_applied_trade_count`: fills applied to portfolio state
+* `closed_trade_count`: closed SELL trades counted in PnL metrics
+* `pending_execution_count`: execution-side fills not applied to portfolio
+* `skipped_execution_count`: skipped/skipped_with_warning
+* `failed_execution_count`: failed
+
+Include the summary in candidate profile hashing. A candidate with pending execution evidence must have a different profile hash than the same candidate with fully applied portfolio evidence.
 
 Add tests:
 
 ```text
-test_skipped_execution_attempt_is_not_counted_as_filled_trade
 test_report_separates_execution_attempt_count_from_closed_trade_count
-test_regime_coverage_does_not_treat_skipped_execution_as_filled_trade
+test_execution_event_summary_counts_pending_skipped_failed_and_applied_events
+test_candidate_profile_hash_changes_when_pending_execution_summary_changes
 ```
 
-P1. Split latency submit timing from latency fill-reference timing.
+P1. Update promotion gate to use portfolio-applied evidence, not execution-filled evidence.
 
-Inspect `ExecutionRequest`, `ExecutionFill`, `ExecutionReferenceEvent`, `FixedBpsExecutionModel`, `StressExecutionModel`, and report metadata.
+Inspect `promotion_gate.py`, especially:
 
-Add or verify separate fields:
+* `build_candidate_profile()`
+* `evaluate_candidate_for_promotion()`
+* `validate_backtest_candidate_for_promotion()`
+* `_extend_execution_reality_reasons()`
+* scenario policy handling
+
+Ensure promotion refuses or marks non-promotable candidates when:
 
 ```text
-latency_applied_to_submit_ts: true|false
-latency_applied_to_fill_reference: true|false
-latency_reference_policy_warning: null|string
+pending_execution_after_dataset_end_count > 0
+execution_event_timeline_incomplete is true
+portfolio_applied_trade_count is insufficient even if execution_filled_count is nonzero
+execution_reality_summary is missing or inconsistent
 ```
 
-If the current field is only `latency_applied_to_reference`, keep it for compatibility but add the clearer fields. Operators must be able to distinguish:
-
-* latency changed `submit_ts_assumption`;
-* latency changed quote/fill-reference selection;
-* latency was configured but did not affect reference selection.
-
-Update CLI/report output if needed so this distinction is visible in execution reality summaries or execution metadata.
+Do not allow `allow_legacy_lineage=True` to bypass execution event completeness or execution reality refusal.
 
 Add tests:
 
 ```text
-test_latency_submit_and_reference_application_are_reported_separately
-test_non_latency_policy_records_submit_latency_but_reference_latency_warning
-test_latency_adjusted_policy_records_submit_and_reference_latency_applied
+test_allow_legacy_lineage_does_not_bypass_pending_execution_refusal
+test_promotion_uses_portfolio_applied_trade_count_not_execution_filled_count
+test_promotion_refuses_execution_event_timeline_incomplete
 ```
 
-P1. Prove legacy lineage compatibility cannot bypass execution reality refusal.
+P1. Make CLI and operator summaries show execution-event distinction.
 
-Inspect `promotion_gate.py`, especially `promote_candidate(..., allow_legacy_lineage=True)`, `validate_backtest_candidate_for_promotion()`, `_extend_execution_reality_reasons()`, and report hash/profile validation.
+Inspect `research/cli.py` and `research/run_summary.py`.
 
-Add a regression test:
+Add concise CLI output fields:
 
 ```text
-test_allow_legacy_lineage_does_not_bypass_execution_reality_gate
+execution_attempt_count
+execution_filled_count
+portfolio_applied_trade_count
+pending_execution_count
+skipped_execution_count
+failed_execution_count
+closed_trade_count
+execution_event_timeline_incomplete
 ```
 
-Construct or reuse a candidate/report that has acceptable legacy lineage conditions but uses non-promotable execution evidence, such as:
+Keep existing signal quote coverage output, but do not rely on it as the only execution observability surface.
 
-* `fill_reference_policy="candle_close_legacy"`;
-* `execution_reality_level="candle_close_optimistic"`;
-* `execution_reality_gate_status="FAIL"`;
-* or missing execution reality summary.
-
-Then call promotion with `allow_legacy_lineage=True`. It must still refuse promotion with execution-reality reasons, not only lineage/dataset reasons.
-
-P2. Improve quote lookup scalability without changing semantics.
+P2. Improve quote lookup with bisect or cursor if low-risk.
 
 Inspect `first_quote_after_or_equal()` and `DatasetSnapshot.sorted_execution_top_of_book_quotes()`.
 
-If lookup still scans all quotes for every signal, replace it with a deterministic indexed lookup:
+If lookup still scans all sorted quotes for every signal, replace it with deterministic indexed lookup if low-risk:
 
-* sort execution top-of-book quotes once per dataset/run;
-* use `bisect` on `(quote.ts, quote.source)` or a cursor for monotonic signal times;
-* preserve deterministic tie-breaking by timestamp then source;
-* do not change quote selection semantics.
+* build sorted quote keys once;
+* use `bisect_left(target_ts)` or `(ts, source)` keys;
+* preserve first-after-or-equal semantics;
+* preserve deterministic tie-break by timestamp then source.
 
-This is lower priority than P0/P1. Do it only if it is low-risk. Add a test if the refactor is non-trivial:
+Add a focused test if changed:
 
 ```text
 test_quote_lookup_preserves_first_after_or_equal_tie_break
 ```
 
+Do not let this optimization distract from P0/P1 correctness.
+
 Scope rules:
 
-* Do not revert the `ExecutionTimingPolicy`, `SignalEvent`, `ExecutionReferenceEvent`, quote-after-decision, latency-adjusted reference, missing quote, or promotion fail-closed architecture.
-* Do not reintroduce same-close execution as promotion-grade evidence.
+* Do not revert the event-time execution architecture.
+* Do not reintroduce candle-close or same-candle execution as promotion-grade evidence.
+* Do not treat execution-side fill and portfolio-applied trade as the same concept.
 * Do not use live network calls in tests.
-* Do not modify live trading behavior except where metadata/reporting integration is clearly necessary and covered by tests.
-* Preserve deterministic reproducibility: same manifest + same dataset + same timing policy + same seed must produce the same report hashes.
-* Prefer additive fields over breaking existing JSON consumers.
-* If a field such as `trade["ts"]` is preserved for compatibility, add explicit replacement fields and clearly label legacy semantics.
-* If full event-time pending-fill accounting is not implemented, the fail-closed guard and report limitation must be explicit, tested, and included in candidate profile/hash inputs.
-* Do not implement full-depth orderbook replay unless the repository already has full-depth data structures and tests. If full depth is unavailable, keep `top_of_book_is_full_depth=false` visible.
+* Do not modify live trading behavior unless clearly necessary and covered by tests.
+* Preserve deterministic reproducibility.
+* Prefer additive fields over breaking JSON consumers, but do not preserve unsafe semantics internally.
+* If legacy fields remain, document their compatibility role in code/tests and route new internal logic through the safer fields.
+* Do not implement full-depth orderbook replay unless the repository already has full-depth structures and tests. Keep `top_of_book_is_full_depth=false` visible where applicable.
 
 Required tests to run:
 
@@ -213,7 +290,7 @@ At minimum run:
 pytest -q tests/test_research_backtest_reproducibility.py tests/test_orderbook_top_research.py tests/test_research_promotion_gate.py tests/test_dataset_quality_report.py
 ```
 
-Also run any new or modified tests.
+Also run every new or modified test.
 
 If feasible, run:
 
@@ -234,19 +311,20 @@ Return a concise but complete implementation report with exactly these sections:
 
 2. `Design changes made`
 
-   * Summarize pending-fill or delayed-fill fail-closed handling.
-   * Summarize execution-attempt vs filled-trade separation.
-   * Summarize latency submit/reference metadata changes.
-   * Summarize promotion legacy-lineage guard changes.
+   * Summarize execution-fill vs portfolio-applied trade separation.
+   * Summarize regime coverage/performance changes.
+   * Summarize pending execution end-of-dataset handling.
+   * Summarize execution event summaries and candidate profile hashing.
+   * Summarize promotion gate changes.
    * Summarize quote lookup optimization if implemented.
 
 3. `Behavior before vs after`
 
-   * Explain how delayed fills affected portfolio state before.
-   * Explain how portfolio state is now updated only at valid event time, or how future fills are fail-closed.
-   * Explain how skipped/failed/fill attempts are represented.
-   * Explain how latency submit timing differs from latency reference timing.
-   * Explain how legacy lineage compatibility interacts with execution reality gates.
+   * Explain how pending fills were represented before.
+   * Explain how pending, skipped, failed, execution-filled, and portfolio-applied records are represented now.
+   * Explain how regime coverage counts trade evidence now.
+   * Explain how final pending executions affect reports and promotion.
+   * Explain how CLI/operator summaries changed.
 
 4. `Tests added/updated`
 
@@ -255,25 +333,25 @@ Return a concise but complete implementation report with exactly these sections:
 
 5. `Promotion and safety impact`
 
-   * State when delayed fills, missing execution reality, candle-close legacy evidence, or non-applied latency causes candidate failure.
-   * State whether any legacy/non-promotable behavior is still allowed and how it is labeled.
-   * State what operators will see in reports and CLI.
+   * State when pending executions or incomplete execution timelines block promotion.
+   * State how portfolio-applied trade counts differ from execution-filled counts in promotion evidence.
+   * State whether any legacy/non-promotable behavior remains and how it is labeled.
 
 6. `Observability and reproducibility`
 
    * List new or changed metadata/report fields.
    * State whether manifest hash, dataset hash, candidate profile hash, or content hash behavior changed.
-   * State how pending, skipped, failed, and filled execution events remain observable.
+   * State how pending/skipped/failed/execution-filled/portfolio-applied events remain observable.
 
 7. `Limitations and follow-up`
 
    * Explicitly mention no full-depth or intra-candle-path replay unless implemented.
-   * Mention any remaining event-time accounting approximation if pending-fill handling is not fully implemented.
-   * Mention quote lookup performance tradeoffs if cursor/bisect optimization was deferred.
+   * Mention any remaining event-time accounting approximation.
+   * Mention quote lookup performance if optimization was deferred.
 
 8. `Commands run`
 
    * Include exact commands and pass/fail results.
    * If any command was not run, say so and why.
 
-Do not submit a final answer that only says tests pass. The final report must prove that portfolio state, execution evidence, promotion gates, and reports now obey the same event-time execution contract.
+Do not submit a final answer that only says tests pass. The final report must prove that execution-side fills and backtest portfolio-effective trades are no longer conflated in regime evidence, reports, promotion gates, or operator-facing summaries.

@@ -149,8 +149,27 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
             f"latency_submit_count={signal_coverage.get('latency_applied_to_submit_ts_count')} "
             f"latency_reference_count={signal_coverage.get('latency_applied_to_fill_reference_count')} "
             f"execution_attempt_count={signal_coverage.get('execution_attempt_count')} "
+            f"execution_filled_count={signal_coverage.get('execution_filled_count')} "
             f"filled_execution_count={signal_coverage.get('filled_execution_count')} "
-            f"closed_trade_count={signal_coverage.get('closed_trade_count')}"
+            f"portfolio_applied_trade_count={signal_coverage.get('portfolio_applied_trade_count')} "
+            f"pending_execution_count={signal_coverage.get('pending_execution_count')} "
+            f"skipped_execution_count={signal_coverage.get('skipped_execution_count')} "
+            f"failed_execution_count={signal_coverage.get('failed_execution_count')} "
+            f"closed_trade_count={signal_coverage.get('closed_trade_count')} "
+            f"execution_event_timeline_incomplete={signal_coverage.get('execution_event_timeline_incomplete')}"
+        )
+    execution_events = report.get("execution_event_summary")
+    if isinstance(execution_events, dict):
+        print(
+            "  execution_event_summary="
+            f"execution_attempt_count={execution_events.get('execution_attempt_count')} "
+            f"execution_filled_count={execution_events.get('execution_filled_count')} "
+            f"portfolio_applied_trade_count={execution_events.get('portfolio_applied_trade_count')} "
+            f"pending_execution_count={execution_events.get('pending_execution_count')} "
+            f"skipped_execution_count={execution_events.get('skipped_execution_count')} "
+            f"failed_execution_count={execution_events.get('failed_execution_count')} "
+            f"closed_trade_count={execution_events.get('closed_trade_count')} "
+            f"execution_event_timeline_incomplete={execution_events.get('execution_event_timeline_incomplete')}"
         )
     print(f"  next_action={summary.next_action}")
     print(f"  report_path={artifact_paths.get('report_path')}")

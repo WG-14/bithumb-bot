@@ -49,6 +49,10 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "top_of_book_quality_summary": candidate.get("top_of_book_quality_summary"),
         "execution_timing_policy": candidate.get("execution_timing_policy"),
         "execution_reality_summary": candidate.get("execution_reality_summary"),
+        "execution_event_summary": candidate.get("execution_event_summary"),
+        "train_execution_event_summary": candidate.get("train_execution_event_summary"),
+        "validation_execution_event_summary": candidate.get("validation_execution_event_summary"),
+        "final_holdout_execution_event_summary": candidate.get("final_holdout_execution_event_summary"),
         "regime_classifier_version": candidate.get("regime_classifier_version"),
         "allowed_live_regimes": candidate.get("allowed_live_regimes"),
         "blocked_live_regimes": candidate.get("blocked_live_regimes"),
@@ -95,6 +99,7 @@ def evaluate_candidate_for_promotion(candidate: dict[str, Any]) -> tuple[bool, l
     _extend_dataset_quality_reasons(candidate, reasons)
     _extend_scenario_policy_reasons(candidate, reasons)
     _extend_execution_reality_reasons(candidate, reasons)
+    _extend_execution_event_reasons(candidate, reasons)
     _extend_execution_calibration_reasons(candidate, reasons)
     profile_hash = candidate.get("candidate_profile_hash")
     if not profile_hash:
@@ -129,6 +134,7 @@ def validate_backtest_candidate_for_promotion(candidate: dict[str, Any] | None) 
     _extend_dataset_quality_reasons(candidate, reasons, prefix="backtest_")
     _extend_scenario_policy_reasons(candidate, reasons, prefix="backtest_")
     _extend_execution_reality_reasons(candidate, reasons, prefix="backtest_")
+    _extend_execution_event_reasons(candidate, reasons, prefix="backtest_")
     _extend_execution_calibration_reasons(candidate, reasons, prefix="backtest_")
     return not reasons, reasons
 
@@ -187,6 +193,37 @@ def _extend_execution_reality_reasons(
             f"{prefix}execution_reality_level_below_required",
             "execution_reality_level_below_required",
         ])
+
+
+def _extend_execution_event_reasons(
+    candidate: dict[str, Any],
+    reasons: list[str],
+    *,
+    prefix: str = "",
+) -> None:
+    summary = candidate.get("execution_event_summary")
+    if not isinstance(summary, dict):
+        summary = candidate.get("validation_execution_event_summary")
+    if not isinstance(summary, dict):
+        reasons.extend([f"{prefix}execution_event_summary_missing", "execution_event_summary_missing"])
+        return
+    if bool(summary.get("execution_event_timeline_incomplete")):
+        reasons.extend([f"{prefix}execution_event_timeline_incomplete", "execution_event_timeline_incomplete"])
+    if int(summary.get("pending_execution_after_dataset_end_count") or 0) > 0:
+        reasons.extend([f"{prefix}pending_execution_after_dataset_end", "pending_execution_after_dataset_end"])
+    execution_filled = int(summary.get("execution_filled_count") or summary.get("filled_execution_count") or 0)
+    portfolio_applied = int(summary.get("portfolio_applied_trade_count") or 0)
+    closed_trade_count = int(summary.get("closed_trade_count") or 0)
+    validation_metrics = candidate.get("validation_metrics")
+    validation_trade_count = (
+        int(validation_metrics.get("trade_count") or 0)
+        if isinstance(validation_metrics, dict)
+        else None
+    )
+    if execution_filled > 0 and portfolio_applied <= 0:
+        reasons.extend([f"{prefix}portfolio_applied_trade_count_insufficient", "portfolio_applied_trade_count_insufficient"])
+    if validation_trade_count is not None and closed_trade_count != validation_trade_count:
+        reasons.extend([f"{prefix}execution_event_closed_trade_count_mismatch", "execution_event_closed_trade_count_mismatch"])
 
 
 def _extend_final_holdout_reasons(
