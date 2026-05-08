@@ -19,6 +19,8 @@ CANONICAL_COMPARISON_CONTRACT_VERSION = "canonical_decision_v1"
 LEGACY_COMPARISON_CONTRACT_VERSION = "legacy_shallow_v1"
 DECISION_EQUIVALENCE_HASH_FIELD = "content_hash"
 DECISION_EQUIVALENCE_HASH_EXCLUDED_FIELDS = frozenset({DECISION_EQUIVALENCE_HASH_FIELD, "generated_at"})
+DECISION_EXPORT_HASH_FIELD = "content_hash"
+DECISION_EXPORT_HASH_EXCLUDED_FIELDS = frozenset({DECISION_EXPORT_HASH_FIELD, "generated_at"})
 LEGACY_DECISION_FIELDS = (
     "signal_timestamp",
     "candle_basis",
@@ -52,6 +54,20 @@ class DecisionEquivalenceResult:
     @property
     def ok(self) -> bool:
         return bool(self.report.get("ok"))
+
+
+@dataclass(frozen=True)
+class DecisionExportArtifact:
+    payload: dict[str, Any]
+    decisions: list[dict[str, Any]]
+    source: str
+    content_hash: str
+    profile_content_hash: str
+    market: str
+    interval: str
+    data_fingerprint: str
+    dataset_content_hash: str
+    db_data_fingerprint: str
 
 
 def compare_decision_equivalence(
@@ -175,6 +191,63 @@ def compare_decision_equivalence(
     return DecisionEquivalenceResult(report=report)
 
 
+def compare_decision_export_artifacts(
+    *,
+    research_artifact: DecisionExportArtifact,
+    runtime_artifact: DecisionExportArtifact,
+    profile_hash: str,
+    market: str,
+    interval: str,
+    data_fingerprint: str,
+    generated_at: str | None = None,
+) -> DecisionEquivalenceResult:
+    result = compare_decision_equivalence(
+        research_decisions=research_artifact.decisions,
+        runtime_decisions=runtime_artifact.decisions,
+        profile_hash=profile_hash,
+        market=market,
+        interval=interval,
+        data_fingerprint=data_fingerprint,
+        generated_at=generated_at,
+    )
+    report = dict(result.report)
+    artifact_binding = _artifact_binding_validation_items(
+        research_artifact=research_artifact,
+        runtime_artifact=runtime_artifact,
+        profile_hash=profile_hash,
+        market=market,
+        interval=interval,
+        data_fingerprint=data_fingerprint,
+    )
+    reason_codes = sorted(set(list(report.get("reason_codes") or ()) + [
+        str(code)
+        for item in artifact_binding
+        for code in (item.get("reason_codes") or [item.get("reason_code")])
+        if code
+    ]))
+    report.update(
+        {
+            "research_export_content_hash": research_artifact.content_hash,
+            "runtime_export_content_hash": runtime_artifact.content_hash,
+            "research_export_source": research_artifact.source,
+            "runtime_export_source": runtime_artifact.source,
+            "repo_owned_export_artifacts": True,
+            "legacy_or_unverified_export": False,
+            "artifact_binding_validation": artifact_binding,
+            "reason_codes": reason_codes,
+        }
+    )
+    if artifact_binding:
+        report["promotion_grade_comparison"] = False
+        report["ok"] = False
+        report["recommended_next_action"] = _recommended_next_action(
+            reason_codes=reason_codes,
+            canonical_comparison=bool(report.get("canonical_schema")),
+        )
+    report[DECISION_EQUIVALENCE_HASH_FIELD] = compute_decision_equivalence_hash(report)
+    return DecisionEquivalenceResult(report=report)
+
+
 def compute_decision_equivalence_hash(report: dict[str, Any]) -> str:
     payload = {
         key: value
@@ -197,6 +270,86 @@ def load_decision_list(path: str | Path) -> list[dict[str, Any]]:
             raise ValueError("decision_item_not_object")
         decisions.append(dict(item))
     return decisions
+
+
+def load_decision_export_artifact(
+    path: str | Path,
+    *,
+    expected_source: str | None = None,
+) -> DecisionExportArtifact:
+    with Path(path).expanduser().open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("decision_export_payload_not_object")
+    source = str(payload.get("source") or "").strip()
+    if expected_source is not None and source != expected_source:
+        raise ValueError(f"decision_export_source_mismatch:{source or 'missing'}")
+    if not source:
+        raise ValueError("decision_export_source_missing")
+    if int(payload.get("schema_version") or 0) <= 0:
+        raise ValueError("decision_export_schema_version_missing")
+    if int(payload.get("decision_contract_version") or 0) <= 0:
+        raise ValueError("decision_export_contract_version_missing")
+    if payload.get("promotion_grade_export") is not True:
+        raise ValueError("decision_export_not_promotion_grade")
+    recorded_hash = str(payload.get(DECISION_EXPORT_HASH_FIELD) or "").strip()
+    if not recorded_hash.startswith("sha256:"):
+        raise ValueError("decision_export_content_hash_missing")
+    actual_hash = compute_decision_export_hash(payload)
+    if actual_hash != recorded_hash:
+        raise ValueError("decision_export_content_hash_mismatch")
+    decisions_raw = payload.get("decisions")
+    if not isinstance(decisions_raw, list):
+        raise ValueError("decision_export_decisions_not_list")
+    if int(payload.get("decision_count") or -1) != len(decisions_raw):
+        raise ValueError("decision_export_decision_count_mismatch")
+    decisions: list[dict[str, Any]] = []
+    for item in decisions_raw:
+        if not isinstance(item, dict):
+            raise ValueError("decision_export_decision_item_not_object")
+        decisions.append(dict(item))
+    profile_hash = _required_export_text(payload, "profile_content_hash")
+    market = _required_export_text(payload, "market")
+    interval = _required_export_text(payload, "interval")
+    dataset_hash = str(payload.get("dataset_content_hash") or "").strip()
+    db_fingerprint = str(payload.get("db_data_fingerprint") or "").strip()
+    if not dataset_hash and not db_fingerprint:
+        raise ValueError("decision_export_data_fingerprint_missing")
+    data_fingerprint = dataset_hash or db_fingerprint
+    for decision in decisions:
+        _validate_decision_bound_to_export(
+            decision,
+            source=source,
+            profile_hash=profile_hash,
+            market=market,
+            interval=interval,
+            dataset_hash=dataset_hash,
+            db_fingerprint=db_fingerprint,
+        )
+    return DecisionExportArtifact(
+        payload=dict(payload),
+        decisions=decisions,
+        source=source,
+        content_hash=recorded_hash,
+        profile_content_hash=profile_hash,
+        market=market,
+        interval=interval,
+        data_fingerprint=data_fingerprint,
+        dataset_content_hash=dataset_hash,
+        db_data_fingerprint=db_fingerprint,
+    )
+
+
+def compute_decision_export_hash(payload: dict[str, Any]) -> str:
+    return sha256_prefixed(
+        content_hash_payload(
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in DECISION_EXPORT_HASH_EXCLUDED_FIELDS
+            }
+        )
+    )
 
 
 def _decision_key(item: dict[str, Any]) -> str:
@@ -300,6 +453,88 @@ def _binding_validation_items(
                     }
                 )
     return out
+
+
+def _artifact_binding_validation_items(
+    *,
+    research_artifact: DecisionExportArtifact,
+    runtime_artifact: DecisionExportArtifact,
+    profile_hash: str,
+    market: str,
+    interval: str,
+    data_fingerprint: str,
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    for label, artifact, expected_source in (
+        ("research", research_artifact, "research"),
+        ("runtime", runtime_artifact, "runtime_replay"),
+    ):
+        reasons: list[str] = []
+        if artifact.source != expected_source:
+            reasons.append(f"{label}_export_source_mismatch")
+        if artifact.profile_content_hash != str(profile_hash or "").strip():
+            reasons.append(f"{label}_export_profile_hash_mismatch")
+        if artifact.market != str(market or "").strip():
+            reasons.append(f"{label}_export_market_mismatch")
+        if artifact.interval != str(interval or "").strip():
+            reasons.append(f"{label}_export_interval_mismatch")
+        expected_data = str(data_fingerprint or "").strip()
+        if expected_data and expected_data not in {artifact.dataset_content_hash, artifact.db_data_fingerprint}:
+            reasons.append(f"{label}_export_data_fingerprint_mismatch")
+        if reasons:
+            out.append(
+                {
+                    "source": label,
+                    "reason_codes": reasons,
+                    "export_content_hash": artifact.content_hash,
+                    "profile_content_hash": artifact.profile_content_hash,
+                    "market": artifact.market,
+                    "interval": artifact.interval,
+                    "dataset_content_hash": artifact.dataset_content_hash,
+                    "db_data_fingerprint": artifact.db_data_fingerprint,
+                }
+            )
+    if research_artifact.profile_content_hash != runtime_artifact.profile_content_hash:
+        out.append(
+            {
+                "source": "artifact_pair",
+                "reason_codes": ["export_profile_hash_pair_mismatch"],
+                "research_profile_content_hash": research_artifact.profile_content_hash,
+                "runtime_profile_content_hash": runtime_artifact.profile_content_hash,
+            }
+        )
+    return out
+
+
+def _required_export_text(payload: dict[str, Any], field: str) -> str:
+    value = str(payload.get(field) or "").strip()
+    if not value:
+        raise ValueError(f"decision_export_{field}_missing")
+    return value
+
+
+def _validate_decision_bound_to_export(
+    decision: dict[str, Any],
+    *,
+    source: str,
+    profile_hash: str,
+    market: str,
+    interval: str,
+    dataset_hash: str,
+    db_fingerprint: str,
+) -> None:
+    if str(decision.get("profile_content_hash") or "").strip() != profile_hash:
+        raise ValueError(f"decision_export_{source}_decision_profile_hash_mismatch")
+    if str(decision.get("market") or "").strip() != market:
+        raise ValueError(f"decision_export_{source}_decision_market_mismatch")
+    if str(decision.get("interval") or "").strip() != interval:
+        raise ValueError(f"decision_export_{source}_decision_interval_mismatch")
+    decision_dataset = str(decision.get("dataset_content_hash") or "").strip()
+    decision_db = str(decision.get("db_data_fingerprint") or "").strip()
+    if dataset_hash and decision_dataset != dataset_hash:
+        raise ValueError(f"decision_export_{source}_decision_dataset_hash_mismatch")
+    if db_fingerprint and decision_db != db_fingerprint:
+        raise ValueError(f"decision_export_{source}_decision_db_fingerprint_mismatch")
 
 
 def _timestamp_only_diagnostics(

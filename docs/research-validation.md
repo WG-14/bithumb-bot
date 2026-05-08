@@ -243,9 +243,38 @@ Typed paper/live readiness evidence validation exists as a promotion contract. E
 
 `strategy_performance.py` remains an operational closed-lifecycle guard over `trade_lifecycles`; it is not a research approval mechanism and is not a substitute for research promotion, paper validation evidence, or live readiness evidence. Root/simple smoke backtests remain smoke-only and must not be used as promotion evidence.
 
-The decision loop is repo-owned. Use `bithumb-bot research-export-decisions --manifest <manifest.json> --candidate-id <candidate_id> --split validation --out <research_decisions.json>` to generate research decisions from the manifest, selected candidate, and research backtest path. Use `bithumb-bot runtime-replay-decisions --profile <approved_profile.json> --db <paper_or_runtime.sqlite> --through-ts-list <timestamps.json> --out <runtime_decisions.json>` to replay runtime SMA decisions at explicit closed-candle timestamps without live broker calls or order submission. Then run `bithumb-bot decision-equivalence --research-decisions <research_decisions.json> --runtime-decisions <runtime_decisions.json> --profile-hash <profile_hash> --market <market> --interval <interval> --data-fingerprint <dataset_or_db_hash>`.
+The decision loop is repo-owned. For promotion evidence, research export must be bound to the reviewed approved profile:
 
-The `decision-equivalence` command is a credential-free intermediate contract for comparing repo-generated research decisions with runtime replay decisions exported for the same candle snapshot and approved profile. Canonical decision events are represented by `decision_contract_version=1` and include candle/timestamp basis, raw and final signal, blocked filters and block reason, SMA features, edge/cost fields, fee/slippage/order-rule hashes, regime decision, position and dust hashes, entry/exit gates, exit rule/reason/evaluation hash, execution-timing policy hash, replay fingerprint hash, profile hash, and dataset or DB fingerprint. A canonical-looking payload is not promotion-grade unless required semantic fields are present and non-empty; `decision_contract_version=1` alone is insufficient. Runtime order-rule identity is part of the canonical decision contract and must be an actual non-empty order-rule snapshot hash, not the hash of `{}`. Manual decision JSON and legacy shallow inputs may be loaded for diagnostics, but legacy inputs emit `comparison_contract_version=legacy_shallow_v1`, recommend canonical regeneration, and are not accepted as promotion evidence. The command does not call live broker APIs and does not prove execution quality, orderbook/depth behavior, or intra-candle path behavior. Profile transition evidence fails closed when decision-equivalence evidence is missing, hash-mismatched, bound to the wrong profile or dataset, legacy/shallow, incomplete, blocked, not promotion-grade, not ok, or carries any nonzero mismatch count.
+```bash
+uv run bithumb-bot research-export-decisions \
+  --manifest <manifest.json> \
+  --candidate-id <candidate_id> \
+  --split validation \
+  --profile <approved_profile.json> \
+  --out <research_decisions.json>
+
+uv run bithumb-bot runtime-replay-decisions \
+  --profile <approved_profile.json> \
+  --db <paper_or_runtime.sqlite> \
+  --through-ts-list <timestamps.json> \
+  --out <runtime_decisions.json>
+
+uv run bithumb-bot decision-equivalence \
+  --research-decisions <research_decisions.json> \
+  --runtime-decisions <runtime_decisions.json> \
+  --profile-hash <same approved profile hash> \
+  --market <market> \
+  --interval <interval> \
+  --data-fingerprint <dataset_or_db_hash>
+```
+
+`research-export-decisions --profile` validates that the approved profile strategy, market, interval, manifest hash, dataset hash, strategy parameters, cost model, and candidate profile hash are compatible with the selected manifest/candidate/split, then writes every research decision with the approved profile's `profile_content_hash`. The legacy no-profile export path is diagnostic only and emits `source=research_legacy_unbound`, `promotion_grade_export=false`, and `recommended_next_action=rerun_research_export_decisions_with_approved_profile`.
+
+`runtime-replay-decisions` constructs the runtime SMA strategy from the approved profile and passes the approved profile's actual `regime_policy` plus approved-profile audit fields into candidate regime policy evaluation. It is read-only against SQLite, does not call live broker APIs, and does not submit orders.
+
+The `decision-equivalence` command is a credential-free intermediate contract for comparing repo-generated research decisions with runtime replay decisions exported for the same candle snapshot and approved profile. Promotion-grade comparison requires validated repo-owned export wrappers with `source=research` and `source=runtime_replay`, valid wrapper `content_hash`, matching decision counts, and wrapper/decision metadata bound to profile hash, market, interval, and dataset or DB fingerprint. Direct canonical-looking decision arrays and malformed wrappers are diagnostic only: the report sets `legacy_or_unverified_export=true`, `promotion_grade_comparison=false`, and recommends `regenerate_decisions_with_repo_owned_export_commands`.
+
+Canonical decision events are represented by `decision_contract_version=1` and include candle/timestamp basis, raw and final signal, blocked filters and block reason, SMA features, edge/cost fields, fee/slippage/order-rule hashes, regime decision, position and dust hashes, entry/exit gates, exit rule/reason/evaluation hash, execution-timing policy hash, replay fingerprint hash, profile hash, and dataset or DB fingerprint. A canonical-looking payload is not promotion-grade unless required semantic fields are present and non-empty; `decision_contract_version=1` alone is insufficient. Runtime order-rule identity is part of the canonical decision contract and must be an actual non-empty order-rule snapshot hash, not the hash of `{}`. The currently supported positive equivalence baseline is flat/no-dust/no-position state. Runtime-only states with dust, residue, or executable lot authority that research cannot model must fail closed with position/dust mismatch reason codes rather than being silently promoted. The command does not call live broker APIs and does not prove execution quality, orderbook/depth behavior, or intra-candle path behavior. Profile transition evidence fails closed when decision-equivalence evidence is missing, hash-mismatched, bound to the wrong profile or dataset, legacy/shallow, incomplete, blocked, unverified, missing research/runtime export hashes, not promotion-grade, not ok, or carries any nonzero mismatch count.
 
 The current SMA runtime exit-rule set is explicit: `opposite_cross` and `max_holding_time`. `opposite_cross` includes the configured minimum take-profit floor, round-trip fee floor, and small-loss tolerance band. There are no separate hard `stop_loss` or standalone `take_profit` exit rules in the current strategy contract; those names are rejected by the exit-rule factory and must not be implied in promotion evidence.
 

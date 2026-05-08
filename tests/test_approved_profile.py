@@ -271,6 +271,10 @@ def _attach_decision_equivalence_report(
         "canonical_incomplete_decision_count": 0,
         "canonical_missing_field_count": 0,
         "canonical_missing_fields_by_decision": {},
+        "binding_validation": [],
+        "research_export_content_hash": "sha256:research_export",
+        "runtime_export_content_hash": "sha256:runtime_export",
+        "legacy_or_unverified_export": False,
         "recommended_next_action": "none",
         "generated_at": "2026-05-03T00:00:00+00:00",
     }
@@ -1276,6 +1280,22 @@ def test_profile_promote_fails_when_decision_equivalence_mismatch_count_nonzero(
         (
             {"canonical_incomplete_decision_count": 1},
             "paper_validation_evidence_decision_equivalence_incomplete_canonical",
+        ),
+        (
+            {"legacy_or_unverified_export": True},
+            "paper_validation_evidence_decision_equivalence_unverified_export",
+        ),
+        (
+            {"research_export_content_hash": ""},
+            "paper_validation_evidence_decision_equivalence_research_export_hash_missing",
+        ),
+        (
+            {"runtime_export_content_hash": ""},
+            "paper_validation_evidence_decision_equivalence_runtime_export_hash_missing",
+        ),
+        (
+            {"binding_validation": [{"reason_codes": ["decision_profile_hash_not_bound_to_report"]}]},
+            "paper_validation_evidence_decision_equivalence_binding_validation_nonempty",
         ),
     ],
 )

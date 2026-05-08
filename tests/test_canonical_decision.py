@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bithumb_bot.canonical_decision import (
+    canonical_flat_position_state_hash,
     export_research_decisions,
     runtime_decision_to_canonical_event,
 )
@@ -111,6 +112,44 @@ def test_runtime_order_rules_hash_changes_with_rule_inputs() -> None:
         ).as_dict()
 
     assert event_for(0.0001)["order_rules_hash"] != event_for(0.0002)["order_rules_hash"]
+
+
+def test_runtime_flat_no_dust_position_uses_research_comparable_hash() -> None:
+    event = runtime_decision_to_canonical_event(
+        StrategyDecision(
+            signal="BUY",
+            reason="sma golden cross",
+            context={
+                "strategy": "sma_with_filter",
+                "ts": 1_714_521_660_000,
+                "raw_signal": "BUY",
+                "final_signal": "BUY",
+                "position_gate": {
+                    "entry_allowed": True,
+                    "exit_allowed": False,
+                    "dust_state": "no_dust",
+                    "effective_flat": True,
+                    "normalized_exposure_active": False,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                    "has_any_position_residue": False,
+                    "order_rules": {"source": "test", "min_qty": 0.0001},
+                },
+                "position_state": {"runtime_detail": "retained_for_diagnostics"},
+                "exit": {"evaluations": []},
+            },
+        ),
+        market="KRW-BTC",
+        interval="1m",
+        profile_content_hash="sha256:profile",
+        dataset_content_hash="sha256:data",
+        db_data_fingerprint="sha256:data",
+        execution_timing_policy_hash="sha256:timing",
+    ).as_dict()
+
+    assert event["dust_state"] == "flat"
+    assert event["position_state_hash"] == canonical_flat_position_state_hash()
 
 
 def test_research_decision_export_normalizes_to_canonical_schema() -> None:

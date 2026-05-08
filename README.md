@@ -100,6 +100,9 @@ uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-i
 uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id> --allow-legacy-lineage
 uv run bithumb-bot research-reproduce --promotion <promotion.json>
 uv run bithumb-bot profile-generate --promotion <promotion.json> --mode paper --out <profile.json>
+uv run bithumb-bot research-export-decisions --manifest <manifest.json> --candidate-id <id> --split validation --profile <profile.json> --out <research_decisions.json>
+uv run bithumb-bot runtime-replay-decisions --profile <profile.json> --db <paper_or_runtime.sqlite> --through-ts-list <timestamps.json> --out <runtime_decisions.json>
+uv run bithumb-bot decision-equivalence --research-decisions <research_decisions.json> --runtime-decisions <runtime_decisions.json> --profile-hash <profile_hash> --market <market> --interval <interval> --data-fingerprint <dataset_or_db_hash>
 uv run bithumb-bot profile-diff --profile <profile.json> --target-env <env-file> --json
 uv run bithumb-bot profile-verify --profile <profile.json> --env <env-file>
 uv run bithumb-bot config-dump --masked

@@ -7249,6 +7249,7 @@ def main(argv: list[str] | None = None) -> int:
     research_export_decisions.add_argument("--manifest", required=True)
     research_export_decisions.add_argument("--candidate-id", required=True)
     research_export_decisions.add_argument("--split", default="validation")
+    research_export_decisions.add_argument("--profile")
     research_export_decisions.add_argument("--out", required=True)
 
     runtime_replay_decisions = sub.add_parser(
@@ -7614,6 +7615,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_id_value=str(args.candidate_id),
             split=str(args.split),
             out_path=str(args.out),
+            profile_path=str(args.profile) if args.profile is not None else None,
         )
     elif args.cmd == "runtime-replay-decisions":
         return cmd_runtime_replay_decisions(

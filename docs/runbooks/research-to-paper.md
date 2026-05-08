@@ -143,7 +143,38 @@ Review paper behavior, suppressed decisions, order intent evidence, and operator
 
 Research promotion, paper validation, and live readiness are separate gates. Live execution still requires existing live safety configuration, explicit arming, notifier requirements, loss limits, order count limits, preflight checks, run locks, reconciliation, and operator intervention when consistency is unclear.
 
-`profile-promote` verifies the parent profile's source promotion and existing evidence artifacts before creating a child profile. Source promotion and new evidence artifacts are verified by path policy, existence, byte content hash, typed evidence schema, decision-equivalence report hash, and semantic readiness thresholds. Decision-equivalence is mandatory for both paper validation and live readiness; validation recomputes the report hash from canonical report body excluding embedded `content_hash`. Generate decisions with repo-owned commands: `bithumb-bot research-export-decisions --manifest <manifest.json> --candidate-id <candidate_id> --split validation --out <research_decisions.json>`, `bithumb-bot runtime-replay-decisions --profile <approved_profile.json> --db <paper_or_runtime.sqlite> --through-ts-list <timestamps.json> --out <runtime_decisions.json>`, then `bithumb-bot decision-equivalence ...`. The report must use `comparison_contract_version=canonical_decision_v1`, `canonical_schema=true`, and `promotion_grade_comparison=true`; legacy shallow or incomplete canonical decision-equivalence reports are diagnostic only and fail closed for promotion. A `decision_contract_version=1` payload is not promotion evidence unless required semantic fields are present, each decision is bound to the requested profile/market/interval/data fingerprint, and runtime order-rule identity is populated from an actual non-empty order-rule snapshot hash. The current custody policy rejects repository-local artifacts and accepts absolute repository-external artifacts, including managed `DATA_ROOT/<mode>/reports/...` paths; operators remain responsible for custody of external absolute source/evidence artifacts outside managed roots. It stores resolved evidence path, `sha256:` content hash, the decision-equivalence report path/hash, and the approved profile hash that the evidence validated, and those fields are included in the child profile hash. Promotion fails closed on malformed evidence, profile/source hash mismatch, insufficient observation window, insufficient decision or closed lifecycle count, execution-quality breaches, unresolved orders, recovery blockers, runtime/profile drift, missing decision-equivalence evidence, decision-equivalence hash mismatch, wrong decision-equivalence profile, market, interval, dataset or comparable DB fingerprint, legacy decision-equivalence schema, incomplete canonical decisions, non-promotion-grade decision-equivalence, blocked decision equivalence, non-empty missing research/runtime decision lists, or nonzero decision mismatch count. Rerun decision-equivalence if profile, market, interval, dataset, or DB fingerprints drift.
+`profile-promote` verifies the parent profile's source promotion and existing evidence artifacts before creating a child profile. Source promotion and new evidence artifacts are verified by path policy, existence, byte content hash, typed evidence schema, decision-equivalence report hash, and semantic readiness thresholds. Decision-equivalence is mandatory for both paper validation and live readiness; validation recomputes the report hash from canonical report body excluding embedded `content_hash`.
+
+Generate decisions with repo-owned, profile-bound commands:
+
+```bash
+uv run bithumb-bot research-export-decisions \
+  --manifest <manifest.json> \
+  --candidate-id <candidate_id> \
+  --split validation \
+  --profile <approved_profile.json> \
+  --out <research_decisions.json>
+
+uv run bithumb-bot runtime-replay-decisions \
+  --profile <approved_profile.json> \
+  --db <paper_or_runtime.sqlite> \
+  --through-ts-list <timestamps.json> \
+  --out <runtime_decisions.json>
+
+uv run bithumb-bot decision-equivalence \
+  --research-decisions <research_decisions.json> \
+  --runtime-decisions <runtime_decisions.json> \
+  --profile-hash <same approved profile hash> \
+  --market <market> \
+  --interval <interval> \
+  --data-fingerprint <dataset_or_db_hash>
+```
+
+The research export command validates the approved profile binding before writing promotion-grade research decisions. The runtime replay command uses the approved profile's actual `regime_policy`, not a placeholder policy. The decision-equivalence report must come from validated repo-owned export wrappers with valid wrapper hashes, `source=research`, `source=runtime_replay`, and matching wrapper/decision metadata. Direct decision arrays, manually prepared canonical-looking JSON, legacy shallow inputs, and legacy unbound research exports are diagnostic only and cannot satisfy profile transition evidence.
+
+The report must use `comparison_contract_version=canonical_decision_v1`, `canonical_schema=true`, and `promotion_grade_comparison=true`, and must include `research_export_content_hash` and `runtime_export_content_hash`. A `decision_contract_version=1` payload is not promotion evidence unless required semantic fields are present, each decision is bound to the requested profile/market/interval/data fingerprint, and runtime order-rule identity is populated from an actual non-empty order-rule snapshot hash. The current supported positive equivalence baseline is flat/no-dust/no-position state. Runtime-only states with dust, non-executable residue, or lot-native executable authority that research cannot represent must fail closed instead of being treated as equivalent.
+
+The current custody policy rejects repository-local artifacts and accepts absolute repository-external artifacts, including managed `DATA_ROOT/<mode>/reports/...` paths; operators remain responsible for custody of external absolute source/evidence artifacts outside managed roots. It stores resolved evidence path, `sha256:` content hash, the decision-equivalence report path/hash, and the approved profile hash that the evidence validated, and those fields are included in the child profile hash. Promotion fails closed on malformed evidence, profile/source hash mismatch, insufficient observation window, insufficient decision or closed lifecycle count, execution-quality breaches, unresolved orders, recovery blockers, runtime/profile drift, missing decision-equivalence evidence, decision-equivalence hash mismatch, wrong decision-equivalence profile, market, interval, dataset or comparable DB fingerprint, legacy or unverified decision-equivalence export, missing research/runtime export hashes, incomplete canonical decisions, non-promotion-grade decision-equivalence, blocked decision equivalence, non-empty missing research/runtime decision lists, or nonzero decision mismatch count. Rerun decision-equivalence if profile, market, interval, dataset, or DB fingerprints drift.
 
 To promote beyond paper, use explicit profile transitions. `profile-generate` creates paper profiles only; live-compatible profiles must be created with `profile-promote`.
 

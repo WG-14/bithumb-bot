@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .canonical_decision import export_runtime_replay_decisions
+from .canonical_decision import export_runtime_replay_decisions, order_rules_snapshot_payload
 from .approved_profile import (
     ApprovedProfileError,
     build_approved_profile,
@@ -21,7 +21,14 @@ from .approved_profile import (
 )
 from .config import PATH_MANAGER, settings
 from .evidence_chain import evidence_report_failure_payload
-from .decision_equivalence import compare_decision_equivalence, load_decision_list
+from .decision_equivalence import (
+    compare_decision_equivalence,
+    compare_decision_export_artifacts,
+    compute_decision_equivalence_hash,
+    compute_decision_export_hash,
+    load_decision_export_artifact,
+    load_decision_list,
+)
 from .research.dataset_snapshot import load_dataset_split
 from .research.experiment_manifest import load_manifest
 from .research.hashing import content_hash_payload, sha256_prefixed
@@ -29,6 +36,7 @@ from .research.parameter_space import candidate_id, iter_parameter_candidates
 from .research.promotion_gate import PromotionGateError
 from .research.strategy_registry import resolve_research_strategy
 from .storage_io import write_json_atomic
+from .broker.order_rules import get_effective_order_rules
 from .strategy.sma import create_sma_with_filter_strategy
 
 
@@ -212,14 +220,39 @@ def cmd_decision_equivalence(
     data_fingerprint: str,
 ) -> int:
     try:
-        result = compare_decision_equivalence(
-            research_decisions=load_decision_list(research_decisions_path),
-            runtime_decisions=load_decision_list(runtime_decisions_path),
-            profile_hash=profile_hash,
-            market=market,
-            interval=interval,
-            data_fingerprint=data_fingerprint,
-        )
+        try:
+            result = compare_decision_export_artifacts(
+                research_artifact=load_decision_export_artifact(research_decisions_path, expected_source="research"),
+                runtime_artifact=load_decision_export_artifact(runtime_decisions_path, expected_source="runtime_replay"),
+                profile_hash=profile_hash,
+                market=market,
+                interval=interval,
+                data_fingerprint=data_fingerprint,
+            )
+        except ValueError as artifact_exc:
+            result = compare_decision_equivalence(
+                research_decisions=load_decision_list(research_decisions_path),
+                runtime_decisions=load_decision_list(runtime_decisions_path),
+                profile_hash=profile_hash,
+                market=market,
+                interval=interval,
+                data_fingerprint=data_fingerprint,
+            )
+            report = dict(result.report)
+            reason_codes = sorted(set(list(report.get("reason_codes") or ()) + ["decision_export_artifact_unverified"]))
+            report.update(
+                {
+                    "ok": False,
+                    "promotion_grade_comparison": False,
+                    "legacy_or_unverified_export": True,
+                    "repo_owned_export_artifacts": False,
+                    "export_artifact_validation_error": str(artifact_exc),
+                    "reason_codes": reason_codes,
+                    "recommended_next_action": "regenerate_decisions_with_repo_owned_export_commands",
+                }
+            )
+            report["content_hash"] = compute_decision_equivalence_hash(report)
+            result = type(result)(report=report)
     except (OSError, ValueError) as exc:
         _print_json({"ok": False, "error": str(exc), "command": "decision-equivalence"})
         return 1
@@ -233,11 +266,21 @@ def cmd_research_export_decisions(
     candidate_id_value: str,
     split: str,
     out_path: str,
+    profile_path: str | None = None,
 ) -> int:
     try:
         manifest = load_manifest(manifest_path)
         snapshot = load_dataset_split(db_path=settings.DB_PATH, manifest=manifest, split_name=split)
         params = _candidate_params_from_manifest(manifest, candidate_id_value)
+        profile = load_approved_profile(profile_path) if profile_path else None
+        promotion_grade_export = profile is not None
+        profile_hash = _research_export_profile_hash(
+            manifest=manifest,
+            snapshot=snapshot,
+            params=params,
+            candidate_id_value=candidate_id_value,
+            profile=profile,
+        )
         scenario = manifest.execution_model.scenarios[0]
         run = resolve_research_strategy(manifest.strategy_name)(
             snapshot,
@@ -248,15 +291,8 @@ def cmd_research_export_decisions(
             None,
             manifest.execution_timing,
         )
-        profile_hash = sha256_prefixed(
-            {
-                "strategy_name": manifest.strategy_name,
-                "candidate_id": candidate_id_value,
-                "parameter_values": params,
-                "market": manifest.market,
-                "interval": manifest.interval,
-                "dataset_content_hash": snapshot.content_hash(),
-            }
+        order_rules_hash = sha256_prefixed(
+            order_rules_snapshot_payload(get_effective_order_rules(manifest.market), pair=manifest.market)
         )
         decisions = [
             {
@@ -264,16 +300,23 @@ def cmd_research_export_decisions(
                 "profile_content_hash": profile_hash,
                 "dataset_content_hash": snapshot.content_hash(),
                 "db_data_fingerprint": snapshot.content_hash(),
+                "order_rules_hash": order_rules_hash,
             }
             for item in run.decisions
         ]
         payload = _decision_export_payload(
-            source="research",
+            source="research" if promotion_grade_export else "research_legacy_unbound",
             profile_content_hash=profile_hash,
             data_fingerprint=snapshot.content_hash(),
             market=manifest.market,
             interval=manifest.interval,
             decisions=decisions,
+            promotion_grade_export=promotion_grade_export,
+            recommended_next_action=(
+                "none"
+                if promotion_grade_export
+                else "rerun_research_export_decisions_with_approved_profile"
+            ),
         )
         write_json_atomic(Path(out_path).expanduser(), payload)
     except (OSError, ValueError) as exc:
@@ -286,6 +329,8 @@ def cmd_research_export_decisions(
             "out": str(Path(out_path).expanduser()),
             "decision_count": len(decisions),
             "content_hash": payload["content_hash"],
+            "profile_hash": profile_hash,
+            "promotion_grade_export": promotion_grade_export,
         }
     )
     return 0
@@ -322,7 +367,7 @@ def cmd_runtime_replay_decisions(
             exit_max_holding_min=int(params.get("STRATEGY_EXIT_MAX_HOLDING_MIN", settings.STRATEGY_EXIT_MAX_HOLDING_MIN)),
             exit_min_take_profit_ratio=float(params.get("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO)),
             exit_small_loss_tolerance_ratio=float(params.get("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO", settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO)),
-            candidate_regime_policy={"strategy_profile_hash": profile.get("profile_content_hash")},
+            candidate_regime_policy=_candidate_regime_policy_from_approved_profile(profile),
         )
         db_fingerprint = sha256_prefixed({"db_path": str(Path(db_path).expanduser().resolve()), "through_ts": through_ts_list})
         conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
@@ -343,11 +388,13 @@ def cmd_runtime_replay_decisions(
         payload = _decision_export_payload(
             source="runtime_replay",
             profile_content_hash=str(profile.get("profile_content_hash") or ""),
-            data_fingerprint=db_fingerprint,
+            data_fingerprint=str(profile.get("dataset_content_hash") or ""),
             market=str(profile.get("market") or settings.PAIR),
             interval=str(profile.get("interval") or settings.INTERVAL),
             decisions=decisions,
             db_data_fingerprint=db_fingerprint,
+            promotion_grade_export=True,
+            recommended_next_action="none",
         )
         write_json_atomic(Path(out_path).expanduser(), payload)
     except (OSError, ValueError, sqlite3.Error) as exc:
@@ -372,6 +419,109 @@ def _candidate_params_from_manifest(manifest: object, wanted_candidate_id: str) 
     raise ValueError("candidate_id_not_found")
 
 
+def _research_export_profile_hash(
+    *,
+    manifest: object,
+    snapshot: object,
+    params: dict[str, object],
+    candidate_id_value: str,
+    profile: dict[str, object] | None,
+) -> str:
+    if profile is None:
+        return sha256_prefixed(
+            {
+                "strategy_name": manifest.strategy_name,  # type: ignore[attr-defined]
+                "candidate_id": candidate_id_value,
+                "parameter_values": params,
+                "market": manifest.market,  # type: ignore[attr-defined]
+                "interval": manifest.interval,  # type: ignore[attr-defined]
+                "dataset_content_hash": snapshot.content_hash(),  # type: ignore[attr-defined]
+            }
+        )
+    _validate_research_export_profile_binding(
+        manifest=manifest,
+        snapshot=snapshot,
+        params=params,
+        profile=profile,
+    )
+    return str(profile.get("profile_content_hash") or "")
+
+
+def _validate_research_export_profile_binding(
+    *,
+    manifest: object,
+    snapshot: object,
+    params: dict[str, object],
+    profile: dict[str, object],
+) -> None:
+    checks = {
+        "strategy_name": (profile.get("strategy_name"), manifest.strategy_name),  # type: ignore[attr-defined]
+        "market": (profile.get("market"), manifest.market),  # type: ignore[attr-defined]
+        "interval": (profile.get("interval"), manifest.interval),  # type: ignore[attr-defined]
+        "manifest_hash": (profile.get("manifest_hash"), manifest.manifest_hash()),  # type: ignore[attr-defined]
+        "dataset_content_hash": (profile.get("dataset_content_hash"), snapshot.content_hash()),  # type: ignore[attr-defined]
+    }
+    for field, (left, right) in checks.items():
+        if str(left or "").strip() != str(right or "").strip():
+            raise ValueError(f"research_export_profile_{field}_mismatch")
+    profile_params = profile.get("strategy_parameters") if isinstance(profile.get("strategy_parameters"), dict) else {}
+    for key, expected in profile_params.items():
+        if key not in params:
+            raise ValueError(f"research_export_profile_strategy_parameter_missing:{key}")
+        if str(params[key]).strip() != str(expected).strip():
+            try:
+                if abs(float(params[key]) - float(expected)) <= 1e-12:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            raise ValueError(f"research_export_profile_strategy_parameter_mismatch:{key}")
+    cost = profile.get("cost_model")
+    if not isinstance(cost, dict):
+        raise ValueError("research_export_profile_cost_model_missing")
+    scenario = manifest.execution_model.scenarios[0]  # type: ignore[attr-defined]
+    for key, actual in {
+        "fee_rate": scenario.fee_rate,
+        "slippage_bps": scenario.slippage_bps,
+    }.items():
+        if key not in cost:
+            raise ValueError(f"research_export_profile_cost_model_missing:{key}")
+        try:
+            if abs(float(cost[key]) - float(actual)) <= 1e-12:
+                continue
+        except (TypeError, ValueError):
+            pass
+        raise ValueError(f"research_export_profile_cost_model_mismatch:{key}")
+    if not str(profile.get("candidate_profile_hash") or "").startswith("sha256:"):
+        raise ValueError("research_export_profile_candidate_profile_hash_missing")
+
+
+def _candidate_regime_policy_from_approved_profile(profile: dict[str, object]) -> dict[str, object]:
+    return {
+        "live_regime_policy": dict(profile.get("regime_policy") if isinstance(profile.get("regime_policy"), dict) else {}),
+        "strategy_profile_hash": profile.get("profile_content_hash"),
+        "approved_profile_hash": profile.get("profile_content_hash"),
+        "approved_profile_mode": profile.get("profile_mode"),
+        "approved_profile_verification_ok": True,
+        "approved_profile_block_reason": "ok",
+        "approved_profile_loaded": True,
+        "approved_profile_schema_hash_valid": True,
+        "approved_profile_source_verified": True,
+        "approved_profile_evidence_verified": True,
+        "approved_profile_runtime_verified": True,
+        "approved_profile_contract_scope": "full_approved_profile",
+        "legacy_candidate_profile_path_used": False,
+        "candidate_profile_hash": profile.get("candidate_profile_hash"),
+        "manifest_hash": profile.get("manifest_hash"),
+        "dataset_content_hash": profile.get("dataset_content_hash"),
+        "source_promotion_content_hash": profile.get("source_promotion_content_hash"),
+        "source_promotion_artifact_path": profile.get("source_promotion_artifact_path"),
+        "lineage_hash": profile.get("lineage_hash"),
+        "legacy_compatibility_used": bool(profile.get("legacy_compatibility_used")),
+        "decision_equivalence_report_path": profile.get("decision_equivalence_report_path"),
+        "decision_equivalence_content_hash": profile.get("decision_equivalence_content_hash"),
+    }
+
+
 def _load_through_ts_list(path: str) -> list[int]:
     with Path(path).expanduser().open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -391,6 +541,8 @@ def _decision_export_payload(
     interval: str,
     decisions: list[dict[str, object]],
     db_data_fingerprint: str = "",
+    promotion_grade_export: bool = True,
+    recommended_next_action: str = "none",
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -402,12 +554,12 @@ def _decision_export_payload(
         "market": market,
         "interval": interval,
         "decision_count": len(decisions),
+        "promotion_grade_export": bool(promotion_grade_export),
+        "recommended_next_action": recommended_next_action,
         "decisions": decisions,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    payload["content_hash"] = sha256_prefixed(
-        content_hash_payload({key: value for key, value in payload.items() if key not in {"content_hash", "generated_at"}})
-    )
+    payload["content_hash"] = compute_decision_export_hash(payload)
     return payload
 
 

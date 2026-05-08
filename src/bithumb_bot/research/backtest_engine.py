@@ -11,7 +11,7 @@ from bithumb_bot.market_regime import (
     classify_market_regime,
 )
 from bithumb_bot.market_regime.thresholds import MarketRegimeThresholds
-from bithumb_bot.canonical_decision import canonical_payload_hash
+from bithumb_bot.canonical_decision import canonical_flat_position_state_hash, canonical_payload_hash
 
 from .dataset_snapshot import DatasetSnapshot
 from .execution_model import ExecutionFill, ExecutionModel, ExecutionRequest, FixedBpsExecutionModel, model_params_hash
@@ -589,11 +589,24 @@ def _research_decision_payload(
     qty: float,
     sellable_qty: float,
 ) -> dict[str, object]:
-    position_state = {
-        "research_position_model": "cash_qty_simulation_v1",
-        "qty": float(qty),
-        "sellable_qty": float(sellable_qty),
-    }
+    flat_no_position = float(qty) <= 0.0 and float(sellable_qty) <= 0.0
+    position_state = (
+        {
+            "comparison_state": "flat_no_dust_no_position",
+            "entry_allowed": True,
+            "exit_allowed": False,
+            "dust_state": "flat",
+            "effective_flat": True,
+            "normalized_exposure_active": False,
+        }
+        if flat_no_position
+        else {
+            "research_position_model": "cash_qty_simulation_v1",
+            "unsupported_reason": "research_model_lacks_lot_native_authority",
+            "qty": float(qty),
+            "sellable_qty": float(sellable_qty),
+        }
+    )
     order_rules = {
         "source": "research_execution_model",
         "fee_rate": float(fee_rate),
@@ -645,10 +658,12 @@ def _research_decision_payload(
         "market_regime": str(regime_snapshot.get("composite_regime") or ""),
         "regime_decision": "allowed",
         "regime_block_reason": "",
-        "position_state_hash": canonical_payload_hash(position_state),
+        "position_state_hash": canonical_flat_position_state_hash()
+        if flat_no_position
+        else canonical_payload_hash(position_state),
         "entry_allowed": bool(qty <= 0.0),
         "exit_allowed": bool(sellable_qty > 0.0),
-        "dust_state": "research_not_modeled",
+        "dust_state": "flat" if flat_no_position else "research_not_modeled",
         "effective_flat": bool(qty <= 0.0),
         "normalized_exposure_active": bool(qty > 0.0),
         "exit_rule": "opposite_cross" if final_signal == "SELL" and raw_signal == "SELL" else "",

@@ -84,6 +84,14 @@ PROMOTION_REQUIRED_CANONICAL_FIELDS = (
 )
 PROMOTION_REQUIRED_ONE_OF_CANONICAL_FIELDS = (("signal_timestamp", "candle_ts"),)
 EMPTY_ORDER_RULES_HASH = sha256_prefixed({})
+CANONICAL_FLAT_POSITION_STATE = {
+    "comparison_state": "flat_no_dust_no_position",
+    "entry_allowed": True,
+    "exit_allowed": False,
+    "dust_state": "flat",
+    "effective_flat": True,
+    "normalized_exposure_active": False,
+}
 
 
 @dataclass(frozen=True)
@@ -212,6 +220,11 @@ def runtime_decision_to_canonical_event(
         or getattr(decision, "reason", "")
         or ""
     )
+    comparison_position_state = _runtime_comparison_position_state(
+        position_gate=position_gate,
+        position_state=context.get("position_state") if isinstance(context.get("position_state"), dict) else {},
+    )
+    flat_comparison_state = comparison_position_state == CANONICAL_FLAT_POSITION_STATE
     payload = {
         "decision_contract_version": CANONICAL_DECISION_CONTRACT_VERSION,
         "strategy_contract_version": STRATEGY_CONTRACT_VERSION,
@@ -249,10 +262,12 @@ def runtime_decision_to_canonical_event(
         "market_regime": market_regime.get("composite_regime") or context.get("current_regime") or "",
         "regime_decision": context.get("regime_decision") or "",
         "regime_block_reason": context.get("regime_block_reason") or "",
-        "position_state_hash": canonical_payload_hash(context.get("position_state") or {}),
+        "position_state_hash": canonical_payload_hash(comparison_position_state),
         "entry_allowed": position_gate.get("entry_allowed"),
         "exit_allowed": position_gate.get("exit_allowed"),
-        "dust_state": position_gate.get("dust_state") or context.get("dust_classification") or "",
+        "dust_state": "flat"
+        if flat_comparison_state
+        else position_gate.get("dust_state") or context.get("dust_classification") or "",
         "effective_flat": position_gate.get("effective_flat") if "effective_flat" in position_gate else context.get("effective_flat"),
         "normalized_exposure_active": position_gate.get("normalized_exposure_active")
         if "normalized_exposure_active" in position_gate
@@ -282,6 +297,48 @@ def research_decision_to_canonical_event(
         payload.get("execution_timing_policy_hash") or ""
     )
     return CanonicalDecisionEvent(normalize_canonical_decision(payload))
+
+
+def canonical_flat_position_state_hash() -> str:
+    return canonical_payload_hash(CANONICAL_FLAT_POSITION_STATE)
+
+
+def _runtime_comparison_position_state(
+    *,
+    position_gate: dict[str, Any],
+    position_state: dict[str, Any],
+) -> dict[str, Any]:
+    if _is_flat_no_dust_position_gate(position_gate):
+        return dict(CANONICAL_FLAT_POSITION_STATE)
+    return {
+        "comparison_state": "runtime_position_state_not_research_comparable",
+        "unsupported_reason": _unsupported_position_reason(position_gate),
+        "runtime_position_state": _stable_value(position_state),
+    }
+
+
+def _is_flat_no_dust_position_gate(position_gate: dict[str, Any]) -> bool:
+    return (
+        bool(position_gate.get("entry_allowed")) is True
+        and bool(position_gate.get("exit_allowed")) is False
+        and str(position_gate.get("dust_state") or "") in {"flat", "no_dust"}
+        and bool(position_gate.get("effective_flat")) is True
+        and bool(position_gate.get("normalized_exposure_active")) is False
+        and int(position_gate.get("open_lot_count") or 0) == 0
+        and int(position_gate.get("dust_tracking_lot_count") or 0) == 0
+        and int(position_gate.get("sellable_executable_lot_count") or 0) == 0
+        and bool(position_gate.get("has_any_position_residue")) is False
+    )
+
+
+def _unsupported_position_reason(position_gate: dict[str, Any]) -> str:
+    if str(position_gate.get("dust_state") or "") not in {"", "flat"} or bool(position_gate.get("has_dust_only_remainder")):
+        return "research_model_lacks_dust_state"
+    if bool(position_gate.get("normalized_exposure_active")) or int(position_gate.get("sellable_executable_lot_count") or 0) > 0:
+        return "research_model_lacks_lot_native_authority"
+    if bool(position_gate.get("has_any_position_residue")):
+        return "research_runtime_state_not_comparable"
+    return "research_runtime_state_not_comparable"
 
 
 def export_runtime_replay_decisions(

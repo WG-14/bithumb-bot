@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from bithumb_bot.canonical_decision import EMPTY_ORDER_RULES_HASH, validate_canonical_decision_payload
-from bithumb_bot.decision_equivalence import compare_decision_equivalence
+from bithumb_bot.decision_equivalence import (
+    compare_decision_export_artifacts,
+    compare_decision_equivalence,
+    compute_decision_export_hash,
+    load_decision_export_artifact,
+)
 
 
 def _decision(**overrides: object) -> dict[str, object]:
@@ -174,3 +181,83 @@ def test_legacy_shallow_decisions_are_diagnostic_only() -> None:
     assert result.report["canonical_schema"] is False
     assert result.report["promotion_grade_comparison"] is False
     assert result.report["recommended_next_action"] == "regenerate_decisions_with_canonical_schema_before_promotion"
+
+
+def _export_payload(source: str, decisions: list[dict[str, object]], **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "decision_contract_version": 1,
+        "source": source,
+        "profile_content_hash": "sha256:profile",
+        "dataset_content_hash": "sha256:data",
+        "db_data_fingerprint": "sha256:data",
+        "market": "KRW-BTC",
+        "interval": "1m",
+        "decision_count": len(decisions),
+        "promotion_grade_export": True,
+        "recommended_next_action": "none",
+        "decisions": decisions,
+        "generated_at": "2026-05-08T00:00:00+00:00",
+    }
+    payload.update(overrides)
+    payload["content_hash"] = compute_decision_export_hash(payload)
+    return payload
+
+
+def test_decision_export_artifacts_can_produce_promotion_grade_report(tmp_path) -> None:
+    research_path = tmp_path / "research.json"
+    runtime_path = tmp_path / "runtime.json"
+    research_path.write_text(
+        json.dumps(_export_payload("research", [_decision()]), sort_keys=True),
+        encoding="utf-8",
+    )
+    runtime_path.write_text(
+        json.dumps(_export_payload("runtime_replay", [_decision()]), sort_keys=True),
+        encoding="utf-8",
+    )
+
+    result = compare_decision_export_artifacts(
+        research_artifact=load_decision_export_artifact(research_path, expected_source="research"),
+        runtime_artifact=load_decision_export_artifact(runtime_path, expected_source="runtime_replay"),
+        profile_hash="sha256:profile",
+        market="KRW-BTC",
+        interval="1m",
+        data_fingerprint="sha256:data",
+    )
+
+    assert result.ok is True
+    assert result.report["promotion_grade_comparison"] is True
+    assert result.report["research_export_content_hash"].startswith("sha256:")
+    assert result.report["runtime_export_content_hash"].startswith("sha256:")
+
+
+def test_decision_export_loader_rejects_tampered_hash(tmp_path) -> None:
+    path = tmp_path / "research.json"
+    payload = _export_payload("research", [_decision()])
+    payload["decision_count"] = 2
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="decision_export_content_hash_mismatch"):
+        load_decision_export_artifact(path, expected_source="research")
+
+
+def test_decision_export_loader_rejects_decision_count_mismatch(tmp_path) -> None:
+    path = tmp_path / "research.json"
+    payload = _export_payload("research", [_decision()])
+    payload["decision_count"] = 2
+    payload["content_hash"] = compute_decision_export_hash(payload)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="decision_export_decision_count_mismatch"):
+        load_decision_export_artifact(path, expected_source="research")
+
+
+def test_decision_export_loader_rejects_source_mismatch(tmp_path) -> None:
+    path = tmp_path / "research.json"
+    path.write_text(
+        json.dumps(_export_payload("runtime_replay", [_decision()]), sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="decision_export_source_mismatch"):
+        load_decision_export_artifact(path, expected_source="research")
