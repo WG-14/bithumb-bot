@@ -655,6 +655,11 @@ def build_runtime_schema_diagnostics(conn: sqlite3.Connection) -> dict[str, obje
                 "accounting_projection_model": _row_value(row, "accounting_projection_model", 3),
                 "updated_ts": _row_value(row, "updated_ts", 4),
             }
+    observed_schema_version = None
+    observed_accounting_projection_model = None
+    if schema_meta is not None:
+        observed_schema_version = schema_meta["schema_version"]
+        observed_accounting_projection_model = schema_meta["accounting_projection_model"]
     recommendation = "schema_current"
     if legacy_schema_detected:
         recommendation = "restore_current_backup_or_run_reviewed_legacy_cash_qty_migration_before_operating"
@@ -665,7 +670,11 @@ def build_runtime_schema_diagnostics(conn: sqlite3.Connection) -> dict[str, obje
 
     return {
         "status": "PASS" if not errors else "FAIL",
+        "expected_schema_version": OPERATIONAL_SCHEMA_VERSION,
+        "observed_schema_version": observed_schema_version,
         "schema_version": OPERATIONAL_SCHEMA_VERSION,
+        "expected_accounting_projection_model": ACCOUNTING_PROJECTION_MODEL,
+        "observed_accounting_projection_model": observed_accounting_projection_model,
         "accounting_projection_model": ACCOUNTING_PROJECTION_MODEL,
         "schema_fingerprint": runtime_schema_fingerprint(conn),
         "schema_meta": schema_meta,

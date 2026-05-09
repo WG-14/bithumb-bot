@@ -5,6 +5,8 @@ import sqlite3
 import pytest
 
 from bithumb_bot import db_schema
+from bithumb_bot.app import cmd_validate_db
+from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
     ACCOUNTING_PROJECTION_MODEL,
     OPERATIONAL_SCHEMA_VERSION,
@@ -49,6 +51,12 @@ def test_empty_db_opened_by_ensure_db_produces_validated_current_schema(tmp_path
         conn.close()
 
     assert diagnostics["status"] == "PASS"
+    assert diagnostics["schema_version"] == OPERATIONAL_SCHEMA_VERSION
+    assert diagnostics["expected_schema_version"] == OPERATIONAL_SCHEMA_VERSION
+    assert diagnostics["observed_schema_version"] == OPERATIONAL_SCHEMA_VERSION
+    assert diagnostics["accounting_projection_model"] == ACCOUNTING_PROJECTION_MODEL
+    assert diagnostics["expected_accounting_projection_model"] == ACCOUNTING_PROJECTION_MODEL
+    assert diagnostics["observed_accounting_projection_model"] == ACCOUNTING_PROJECTION_MODEL
 
 
 def test_current_db_reopened_by_ensure_db_still_validates(tmp_path):
@@ -181,6 +189,11 @@ def test_old_cash_qty_portfolio_schema_is_rejected_before_runtime_use(tmp_path):
 
     assert diagnostics["legacy_schema_detected"] is True
     assert diagnostics["status"] == "FAIL"
+    assert diagnostics["expected_schema_version"] == OPERATIONAL_SCHEMA_VERSION
+    assert diagnostics["observed_schema_version"] is None
+    assert diagnostics["expected_accounting_projection_model"] == ACCOUNTING_PROJECTION_MODEL
+    assert diagnostics["observed_accounting_projection_model"] is None
+    assert "restore_current_backup_or_run_reviewed_legacy_cash_qty_migration" in diagnostics["recommended_action"]
     with pytest.raises(SchemaValidationError, match=r"portfolio\(cash, qty\)"):
         ensure_db(str(db_path))
 
@@ -201,6 +214,62 @@ def test_malformed_partial_portfolio_schema_fails_with_clear_schema_error(tmp_pa
 
     with pytest.raises(SchemaValidationError, match="portfolio table is missing required aggregate column"):
         ensure_db(str(db_path))
+
+    malformed = sqlite3.connect(str(db_path))
+    malformed.row_factory = sqlite3.Row
+    try:
+        diagnostics = build_runtime_schema_diagnostics(malformed)
+    finally:
+        malformed.close()
+
+    assert diagnostics["status"] == "FAIL"
+    assert diagnostics["malformed_portfolio_detected"] is True
+    assert "portfolio" in diagnostics["missing_columns"]
+    assert "asset_qty" in diagnostics["missing_columns"]["portfolio"]
+    assert diagnostics["observed_schema_version"] is None
+
+
+def test_schema_diagnostics_report_observed_metadata_mismatch_without_repairing(tmp_path):
+    db_path = tmp_path / "metadata-mismatch.sqlite"
+    conn = ensure_db(str(db_path))
+    conn.execute(
+        """
+        UPDATE schema_meta
+        SET schema_version = ?, accounting_projection_model = ?
+        WHERE key = ?
+        """,
+        (OPERATIONAL_SCHEMA_VERSION + 1, "unexpected_projection_model", "operational_schema"),
+    )
+    conn.commit()
+
+    try:
+        diagnostics = build_runtime_schema_diagnostics(conn)
+    finally:
+        conn.close()
+
+    assert diagnostics["status"] == "FAIL"
+    assert diagnostics["expected_schema_version"] == OPERATIONAL_SCHEMA_VERSION
+    assert diagnostics["observed_schema_version"] == OPERATIONAL_SCHEMA_VERSION + 1
+    assert diagnostics["expected_accounting_projection_model"] == ACCOUNTING_PROJECTION_MODEL
+    assert diagnostics["observed_accounting_projection_model"] == "unexpected_projection_model"
+    assert any("schema_meta version mismatch" in error for error in diagnostics["validation_errors"])
+    assert any("schema_meta accounting projection model mismatch" in error for error in diagnostics["validation_errors"])
+
+
+def test_validate_db_cli_plain_output_includes_expected_and_observed_metadata(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "validate-db.sqlite")
+    ensure_db(db_path).close()
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    exit_code = cmd_validate_db(as_json=False)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"expected_schema_version={OPERATIONAL_SCHEMA_VERSION}" in out
+    assert f"observed_schema_version={OPERATIONAL_SCHEMA_VERSION}" in out
+    assert f"expected_accounting_projection_model={ACCOUNTING_PROJECTION_MODEL}" in out
+    assert f"observed_accounting_projection_model={ACCOUNTING_PROJECTION_MODEL}" in out
 
 
 def test_portfolio_total_mismatch_fails_schema_validation_before_runtime_use(tmp_path):

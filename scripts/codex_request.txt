@@ -1,281 +1,304 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+You are Codex working directly inside the GitHub repository `WG-14/bithumb-bot`.
 
-Use the prior DB schema duplication analysis as the source context: 
+Continue from the completed DB schema-duplication patch. Pytest reportedly passes, but do not treat the patch as complete merely because tests pass. Inspect the actual repository state and determine whether any additional patch is still needed.
 
-Your task is to directly inspect, verify, patch, and test the repository around the DB schema duplication problem. Do not treat the initial diagnosis as proven. Start from it as a set of hypotheses, then confirm, refine, or falsify them from the actual code.
+The core issue remains operational DB safety for an automated trading experiment system: schema creation, migration, validation, recovery diagnostics, and operator-facing observability must make it impossible to silently operate on a stale or malformed DB. The previous high-priority problem was the old `db_schema.py` path that could create `portfolio(cash, qty)`. That appears to be fixed, but verify it directly.
 
-Core problem to investigate:
+Do not ask clarification questions. Inspect, patch only if needed, test, and report.
 
-The repository appears to contain two competing DB schema authorities:
+## Current context to verify
 
-* `src/bithumb_bot/db_schema.py` appears to define an older schema where `portfolio` uses `cash` and `qty`, and `trades` uses older accounting columns.
-* `src/bithumb_bot/db_core.py` appears to define the current runtime schema where `portfolio` uses `cash_krw`, `asset_qty`, `cash_available`, `cash_locked`, `asset_available`, `asset_locked`, plus order/fill/repair/observation tables.
-* Runtime code appears to use `db_core.ensure_db()`, but the old `db_schema.py` module may still allow stale scripts or experiments to create a structurally wrong database.
+The latest repo state appears to have addressed the major DB schema duplication issue:
 
-Do not solve this as a cosmetic cleanup. The goal is to make the repository more robust, reproducible, recoverable, and operational as an automated trading experiment system. Prioritize design-level prevention of the whole problem family over symptom patches.
+* `src/bithumb_bot/db_schema.py` no longer owns old DDL.
+* `db_schema.ensure_schema()` appears to warn and delegate to `db_core.ensure_schema()`.
+* `db_schema.init_portfolio()` appears to initialize the current `cash_krw`, `asset_qty`, available/locked portfolio shape.
+* `src/bithumb_bot/db_core.py` appears to define:
 
-Required investigation:
+  * `SchemaValidationError`
+  * `OPERATIONAL_SCHEMA_VERSION`
+  * `OPERATIONAL_SCHEMA_META_KEY`
+  * required runtime table/column contracts
+  * required trigger contracts
+  * runtime schema fingerprinting
+  * schema diagnostics
+  * `assert_current_schema()`
+  * fail-fast rejection for old `portfolio(cash, qty)`
+* `tests/test_portfolio_schema.py` appears to cover:
 
-1. Search the full repository for all references to:
+  * empty DB bootstrap
+  * current DB reopen
+  * deprecated `db_schema` shim behavior
+  * aggregate legacy `portfolio(cash_krw, asset_qty)` backfill
+  * old `portfolio(cash, qty)` rejection
+  * malformed partial portfolio rejection
+  * portfolio available/locked total mismatch rejection
 
-   * `db_schema`
-   * `ensure_schema`
-   * `init_portfolio`
-   * `ensure_db`
-   * `portfolio`
-   * `cash`
-   * `qty`
-   * `cash_krw`
-   * `asset_qty`
-   * `cash_available`
-   * `asset_available`
-   * raw `sqlite3.connect`
+Treat all of this as a hypothesis until verified from the code.
 
-2. Determine whether `db_schema.py` is still imported or used by any production, script, test, CLI, or migration path.
+## Primary task
 
-3. Compare the schema created by `db_schema.py` against the schema expected by `db_core.py`.
+Determine whether the DB schema duplication problem needs any additional patch.
 
-4. Specifically verify what happens when a database is first created using the old `db_schema.py` path and then later opened through `db_core.ensure_db()`.
+My current hypothesis is:
 
-5. Inspect whether `db_core.ensure_schema()` currently performs a safe migration from:
+> No additional large structural patch is needed for the original DB schema duplication issue. The remaining useful patch, if not already implemented, is a small observability fix in `build_runtime_schema_diagnostics()`: it currently reports `"schema_version": OPERATIONAL_SCHEMA_VERSION` and `"accounting_projection_model": ACCOUNTING_PROJECTION_MODEL`, which are expected code-side values, not necessarily DB-observed values. This can confuse operators when diagnosing malformed or legacy DBs because a failing DB may still show `"schema_version": 1`.
 
-   * empty database
-   * current database
-   * aggregate-only legacy database with `cash_krw` / `asset_qty`
-   * older legacy database with `cash` / `qty`
-   * partially malformed database
+Keep this hypothesis as a hypothesis. Verify it directly.
 
-6. Check whether runtime startup has a fail-fast schema validation gate, or whether a bad DB can partially initialize and fail later in trading/reporting/repair logic.
+## Inspect first
 
-7. Check whether the repository has explicit schema versioning, schema metadata, schema migration registry, or runtime schema fingerprinting for the operational accounting schema.
+Inspect at least:
 
-Root-cause hypotheses to validate or falsify:
+* `src/bithumb_bot/db_schema.py`
+* `src/bithumb_bot/db_core.py`
+* `tests/test_portfolio_schema.py`
+* any tests touching schema diagnostics
+* any CLI or reporting command that exposes `diagnose_db_path()` or `build_runtime_schema_diagnostics()`
+* all usages of:
 
-Hypothesis 1:
-The repository has split schema authority. `db_schema.py` and `db_core.py` both expose schema/portfolio initialization responsibility, but they create incompatible schema shapes.
+  * `build_runtime_schema_diagnostics`
+  * `diagnose_db_path`
+  * `schema_version`
+  * `accounting_projection_model`
+  * `schema_meta`
+  * `ensure_schema_ready=False`
+  * `db_schema`
 
-Verification:
-Create or simulate a DB using `db_schema.ensure_schema()` and `db_schema.init_portfolio()`, then run `db_core.ensure_db(path)` against it. The result must be either a fully migrated current schema or an explicit unsupported-schema error. Silent partial success, generic SQLite `OperationalError`, or a DB left with mixed old/new columns confirms the hypothesis.
+Confirm whether the old `portfolio(cash, qty)` DDL is fully gone from production code. It may remain only as a test fixture or simulated legacy DB shape.
 
-Hypothesis 2:
-The current migration approach relies too heavily on `CREATE TABLE IF NOT EXISTS` and incremental `ALTER TABLE ADD COLUMN`, which does not safely detect or repair pre-existing incompatible tables.
+## Hypotheses to verify or refute
 
-Verification:
-Build tests around legacy fixture matrices and inspect the resulting table definitions, required columns, and portfolio invariants after `ensure_db()`.
+### H1: The original high-risk schema duplication path is now blocked
 
-Hypothesis 3:
-Current tests cover only a newer legacy schema generation, likely `cash_krw` / `asset_qty`, but not the older `cash` / `qty` schema still constructible from `db_schema.py`.
+Verify:
 
-Verification:
-Inspect existing tests, especially portfolio schema tests. Add a failing regression test for the `cash` / `qty` legacy DB path before patching.
+* `db_schema.py` cannot create `portfolio(cash, qty)`.
+* It either delegates to `db_core` or fails explicitly.
+* Tests prove the deprecated module no longer creates old columns.
+* Old `portfolio(cash, qty)` DBs are rejected before trading/reporting/repair runtime use.
 
-Hypothesis 4:
-The repository has evolved into an event/repair/observation-based accounting system, but DB schema management has not evolved to the same operational rigor.
+If false, fix this first. Do not proceed to minor observability work until this is safe.
 
-Verification:
-Inspect accounting replay, reporting, repair, order/fill, and observation code. Determine whether schema readiness, portfolio projection consistency, repair table existence, and trigger existence are enforced before runtime operations.
+### H2: Runtime schema validation now fails fast on unsupported or malformed schemas
 
-Implementation priorities:
+Verify:
 
-Priority 1 — eliminate the ability to create a new stale DB from `db_schema.py`.
+* `db_core.ensure_db()` with normal defaults runs schema creation/migration and validation.
+* `portfolio(cash, qty)` is rejected with `SchemaValidationError`, not a late generic SQLite failure.
+* malformed portfolio schemas fail early with clear messages.
+* valid current DBs still pass.
+* aggregate legacy `cash_krw` / `asset_qty` DBs still upgrade correctly.
 
-Preferred design:
+If false, patch validation and tests before any cosmetic diagnostics work.
 
-* If `db_schema.py` has no legitimate internal use, remove it or convert it into a non-DDL compatibility layer.
-* It must no longer contain executable old DDL that creates `portfolio(cash, qty)`.
-* If deleting it would break imports, replace it with a thin shim that delegates to `db_core` or raises a clear deprecation error.
-* In either case, it must be impossible for this module to create the old `cash` / `qty` schema.
+### H3: No production path normally bypasses schema validation
 
-Acceptable outcomes:
+Verify usage of `ensure_schema_ready=False`.
 
-* Delete `db_schema.py` and update imports/tests accordingly.
-* Or replace it with a compatibility wrapper:
+Allowed:
 
-  * `ensure_schema = db_core.ensure_schema`
-  * `init_portfolio = db_core.init_portfolio`
-* Or make it fail explicitly with an actionable message:
+* tests
+* explicit diagnostics
+* controlled low-level internals, if justified
 
-  * “`bithumb_bot.db_schema` is deprecated. Use `bithumb_bot.db_core.ensure_db()`. Run the DB migration/doctor command before operating.”
+Not allowed:
 
-Do not leave the old DDL in place.
+* normal trading
+* reporting
+* repair
+* live startup
+* runtime commands that can operate on DB state
 
-Priority 2 — add explicit legacy schema regression tests.
+If a production path bypasses validation, either remove that bypass or add a clear test proving it is safe and cannot operate on malformed DBs.
 
-Add tests that cover at least:
+### H4: Diagnostics currently blur expected schema version and observed DB schema version
 
-* Empty DB opened by `db_core.ensure_db()`
-* Current DB reopened by `db_core.ensure_db()`
-* Legacy aggregate DB with `portfolio(cash_krw, asset_qty)` upgraded to current available/locked columns
-* Old DB with `portfolio(cash, qty)` created from the old schema shape
-* Malformed/partial `portfolio` table
+Verify `build_runtime_schema_diagnostics()`.
 
-For the old `cash` / `qty` path, choose one policy and test it explicitly:
+If it returns:
 
-Policy A: migrate it safely to the current schema.
-Required behavior:
+```python
+"schema_version": OPERATIONAL_SCHEMA_VERSION
+"accounting_projection_model": ACCOUNTING_PROJECTION_MODEL
+```
 
-* `cash` maps to `cash_krw`
-* `qty` maps to `asset_qty`
-* `cash_available = cash_krw`
-* `cash_locked = 0`
-* `asset_available = asset_qty`
-* `asset_locked = 0`
-* no old `cash` / `qty` dependency remains in runtime logic
+then this is expected/code-side information, not necessarily observed DB metadata.
 
-Policy B: reject it explicitly.
-Required behavior:
+This is not a large blocking safety bug, but it is an operator observability problem. A malformed, legacy, or metadata-mismatched DB should not appear to have schema version `1` unless that is clearly labeled as the expected version.
 
-* `ensure_db()` fails before trading/reporting/repair code runs
-* error message clearly identifies legacy `portfolio(cash, qty)`
-* error message gives an actionable recovery path
+## Patch requirements if H4 is confirmed
 
-Do not allow:
+Make a small, backward-compatible diagnostics patch.
 
-* silent mixed schema
-* generic `sqlite3.OperationalError`
-* later runtime failure
-* partial migration without invariant validation
+Do not remove existing fields yet if downstream code or tests may rely on them.
 
-Priority 3 — add a runtime schema validation gate.
+Add explicit expected vs observed fields:
 
-Implement or strengthen a function such as:
+```python
+"expected_schema_version": OPERATIONAL_SCHEMA_VERSION
+"observed_schema_version": <schema_meta.schema_version if present else None>
+"expected_accounting_projection_model": ACCOUNTING_PROJECTION_MODEL
+"observed_accounting_projection_model": <schema_meta.accounting_projection_model if present else None>
+```
 
-* `assert_current_schema(conn)`
-* `validate_runtime_schema(conn)`
-* or equivalent inside `db_core.py`
+Recommended compatibility policy:
 
-It should verify, at minimum:
+* Keep `"schema_version"` for now as a compatibility alias for `expected_schema_version`.
+* Keep `"accounting_projection_model"` for now as a compatibility alias for `expected_accounting_projection_model`.
+* Do not let those legacy names be the only version/model signals.
+* If the DB has no `schema_meta` row, observed values must be `None`.
+* If the DB has a mismatched `schema_meta` row, diagnostics must show the observed mismatched value and include a validation error.
+* If the DB is current, expected and observed values should match.
 
-* `portfolio` exists
-* `portfolio` has required current columns:
+Make the diagnostic output operator-safe:
 
-  * `cash_krw`
-  * `asset_qty`
-  * `cash_available`
-  * `cash_locked`
-  * `asset_available`
-  * `asset_locked`
-* old-only `portfolio(cash, qty)` is not accepted as current schema
-* `trades` has current accounting columns such as `cash_after` and `asset_after`
-* required order/fill/repair/observation tables exist if they are part of the current operational schema
-* required triggers exist, especially open-position/lot invariant triggers if applicable
-* portfolio totals are internally consistent:
+* legacy `portfolio(cash, qty)` DB:
 
-  * `cash_krw == cash_available + cash_locked` within tolerance
-  * `asset_qty == asset_available + asset_locked` within tolerance
-* schema validation errors are typed or at least clear, specific, and actionable
+  * `status == "FAIL"`
+  * `legacy_schema_detected == True`
+  * `expected_schema_version == OPERATIONAL_SCHEMA_VERSION`
+  * `observed_schema_version is None` unless schema_meta exists
+  * `recommended_action` should remain recovery-oriented
+* malformed portfolio DB:
 
-Wire this validation into `ensure_db()` after schema creation/migration, unless there is already a well-defined reason to skip it. If a skip flag exists or is added, it must not be used by normal trading/reporting/repair entrypoints.
+  * `status == "FAIL"`
+  * `malformed_portfolio_detected == True`
+  * observed version should not pretend the DB is current
+* valid current DB:
 
-Priority 4 — introduce minimal schema metadata or lay the foundation for it.
+  * `status == "PASS"`
+  * expected and observed schema version match
+  * expected and observed accounting projection model match
 
-If the repository already has schema metadata, use it. Otherwise, add a minimal operational schema metadata mechanism if feasible within this patch:
+## Optional CLI exposure
 
-* `schema_meta`
-* `schema_version`
-* `schema_fingerprint`
-* `accounting_projection_model`
-* migration/applied timestamp
+Inspect whether there is an existing DB doctor / validate-db / diagnostics CLI command.
 
-Do not over-engineer a large migration framework if that would exceed the scope, but do not ignore the design issue. If a full migration registry is too large for this patch, implement a small current-version marker and document the next step.
+If a command already exists, update its output/tests to include expected vs observed fields.
 
-Priority 5 — improve recovery and observability.
+If no command exists, do not add a large new CLI framework for this task. It is acceptable to keep the patch limited to the reusable diagnostics function, unless adding a small command is trivial and consistent with existing CLI structure.
 
-Add or extend a DB diagnostic path if the repository has an existing CLI/reporting structure. Prefer a command or function with JSON-friendly output such as:
+## Scope boundaries
 
-* `db-doctor`
-* `doctor-db`
-* `validate-db`
-* or equivalent naming consistent with the repo
+Do not rewrite the DB layer.
 
-It should report:
+Do not introduce a full migration framework in this patch.
 
-* current schema version or absence of schema metadata
-* schema fingerprint or required-table/column status
-* legacy schema detected
-* missing tables
-* missing columns
-* portfolio total consistency
-* accounting projection consistency if already available
-* open orders / recovery-required count if already available
-* unresolved fee pending count if already available
-* repair/observation table availability
-* recommended action
+Do not change trading logic, broker behavior, live config, `.env`, secrets, or external artifacts.
 
-If adding a CLI command is too large, at least add a reusable diagnostic function and tests, then explain in the final report why CLI integration was deferred.
+Do not silently migrate `portfolio(cash, qty)` unless the repo already explicitly chose that policy. The current preferred policy appears to be explicit rejection with recovery guidance.
 
-Scope constraints:
+Do not remove compatibility fields from diagnostics unless all callers/tests prove it is safe.
 
-* Do not rewrite the whole DB layer.
-* Do not make speculative trading logic changes.
-* Do not weaken accounting invariants to make tests pass.
-* Do not hide legacy schema problems by renaming columns without verifying downstream expectations.
-* Do not silently drop operational data.
-* Any destructive migration must require an explicit backup/recovery path.
-* Preserve existing behavior for valid current DBs.
-* Keep research-only read-only SQLite access separate from operational DB access.
-* Raw `sqlite3.connect` may remain in tests, fixtures, migrations, and read-only research loaders, but production trading/reporting/repair paths should use the canonical DB gateway.
+Do not weaken existing schema validation to make diagnostics easier.
 
-Testing requirements:
+Do not make destructive DB changes.
 
-Run the relevant test suite. At minimum:
+## Tests to add or update
 
-* run existing DB/portfolio/accounting tests
-* run new legacy schema tests
-* run any reporting/repair tests affected by schema validation
-* run full `pytest` if practical
+Add targeted tests if missing.
 
-Add tests that prove:
+At minimum, ensure tests prove:
 
-1. `db_schema.py` can no longer create `portfolio(cash, qty)`.
-2. A DB with `portfolio(cash, qty)` is either safely migrated or explicitly rejected.
-3. `ensure_db()` produces a validated current schema.
-4. Valid current DBs still pass.
-5. Legacy aggregate DBs with `cash_krw` / `asset_qty` still upgrade correctly.
-6. Portfolio available/locked totals are preserved and validated.
-7. Bad schemas fail early with clear messages.
-8. Observability/doctor output identifies legacy or malformed schema states.
+1. Current DB diagnostics:
 
-Expected final design direction:
+   * `status == "PASS"`
+   * `expected_schema_version == OPERATIONAL_SCHEMA_VERSION`
+   * `observed_schema_version == OPERATIONAL_SCHEMA_VERSION`
+   * `expected_accounting_projection_model == ACCOUNTING_PROJECTION_MODEL`
+   * `observed_accounting_projection_model == ACCOUNTING_PROJECTION_MODEL`
+   * legacy compatibility fields still exist if preserved
 
-The canonical DB authority must be `db_core.ensure_db()` and the current schema definitions behind it. `db_schema.py` must not remain an independent executable schema source. `ensure_db()` should become an operational safety gate, not just a best-effort table creator.
+2. Old `portfolio(cash, qty)` diagnostics:
 
-The intended long-term model is:
+   * `status == "FAIL"`
+   * `legacy_schema_detected is True`
+   * `expected_schema_version == OPERATIONAL_SCHEMA_VERSION`
+   * `observed_schema_version is None` unless test explicitly creates schema_meta
+   * recommended action points to restore backup or reviewed migration/repair before operating
 
-* DB schema creation, migration, validation, and recovery diagnostics live behind one canonical path.
-* `portfolio` is treated as a materialized projection of authoritative accounting events, not as an unconstrained primary source of truth.
-* Repairs, observations, fills, and projections are tied to explicit schema/version assumptions.
-* Any legacy schema is either migrated deterministically or rejected before runtime automation starts.
+3. Malformed portfolio diagnostics:
 
-Final report format:
+   * `status == "FAIL"`
+   * `malformed_portfolio_detected is True`
+   * missing columns are reported
+   * observed schema version is not falsely presented as current unless metadata truly says so
 
-After making changes, report in this exact structure:
+4. Schema metadata mismatch diagnostics:
+
+   * create a valid current DB
+   * mutate `schema_meta.schema_version` or `accounting_projection_model`
+   * call diagnostics without repairing metadata
+   * assert:
+
+     * `status == "FAIL"`
+     * expected value and observed value differ
+     * validation errors mention metadata mismatch
+
+5. Existing schema tests still pass:
+
+   * old `cash/qty` rejection
+   * aggregate legacy backfill
+   * current DB reopen
+   * deprecated `db_schema` shim
+
+Run relevant tests:
+
+```bash
+pytest tests/test_portfolio_schema.py
+```
+
+Also run any diagnostics/CLI tests if present.
+
+Run full pytest if practical:
+
+```bash
+pytest
+```
+
+## Expected outcome
+
+If the inspection confirms the original issue is already fixed and only the diagnostics ambiguity remains, implement only the small observability patch.
+
+If inspection finds a deeper remaining issue, prioritize safety in this order:
+
+1. prevent old schema creation
+2. fail fast on unsupported/malformed DBs
+3. prevent runtime validation bypass
+4. clarify diagnostics expected vs observed fields
+5. update tests and docs only as needed
+
+## Final report format
+
+Report in this exact structure:
 
 1. Summary
 
+   * Whether additional large DB schema patch was needed
    * What was changed
-   * Whether the original diagnosis was confirmed, refined, or falsified
+   * Whether the original risk remains blocked
 
-2. Root-cause hypotheses
+2. Hypothesis results
 
-   * Hypothesis 1 result: confirmed/refined/falsified
+   * H1 result: confirmed/refined/falsified
    * Evidence
-   * Patch or mitigation
+   * Patch or no patch
    * Remaining risk
 
-   Repeat for each hypothesis.
+   Repeat for H2, H3, and H4.
 
-3. Design changes
+3. Design/observability changes
 
-   * Canonical schema authority
-   * Legacy schema handling
-   * Runtime validation
-   * Migration/versioning metadata
-   * Observability/recovery additions
+   * Expected vs observed schema version behavior
+   * Expected vs observed accounting projection model behavior
+   * Backward compatibility fields retained or removed
+   * Recovery/diagnostics behavior for legacy and malformed DBs
 
 4. Tests added or changed
 
-   * List each new test and what failure mode it prevents
+   * List each test
+   * State what failure mode it prevents
 
 5. Commands run
 
@@ -284,13 +307,14 @@ After making changes, report in this exact structure:
 
 6. Operational impact
 
-   * What happens now if an old `cash` / `qty` DB appears
-   * What happens now on a valid current DB
-   * How an operator should diagnose or recover
+   * What an operator now sees for a valid DB
+   * What an operator now sees for old `portfolio(cash, qty)`
+   * What an operator now sees for malformed or metadata-mismatched DBs
+   * How this improves recovery and prevents false confidence
 
 7. Deferred work
 
-   * Only include real deferred work
-   * Do not use this section to hide required fixes
+   * Include only real deferred work
+   * Do not hide required safety fixes here
 
-Be strict. The patch is successful only if it prevents the old schema path from recurring and makes schema mismatch detectable before live trading, repair, or reporting logic can operate on a bad DB.
+The patch is successful only if it preserves the previous schema-safety guarantees and makes diagnostics unambiguous about the difference between code-expected schema metadata and DB-observed schema metadata.
