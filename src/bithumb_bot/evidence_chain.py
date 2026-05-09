@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -78,7 +79,10 @@ def validate_evidence_content_hash(payload: dict[str, Any], *, label: str) -> st
     expected = payload.get(EVIDENCE_HASH_FIELD)
     if not isinstance(expected, str) or not expected.startswith("sha256:"):
         raise EvidenceValidationError(f"{label}_schema_invalid:content_hash_missing")
-    actual = compute_evidence_content_hash(payload)
+    try:
+        actual = compute_evidence_content_hash(payload)
+    except ValueError as exc:
+        raise EvidenceValidationError(f"{label}_schema_invalid:non_finite_json") from exc
     if actual != expected:
         raise EvidenceValidationError(f"{label}_content_hash_mismatch")
     return actual
@@ -339,6 +343,6 @@ def _number(value: object, reason: str) -> float:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise EvidenceValidationError(reason) from exc
-    if parsed != parsed:
+    if not math.isfinite(parsed):
         raise EvidenceValidationError(reason)
     return parsed

@@ -1,257 +1,309 @@
 You are Codex operating directly inside GitHub repository `WG-14/bithumb-bot`.
 
-Continue from the latest metrics-contract patches. Do not treat the current state as complete merely because pytest passed. The previous high-priority items around non-finite JSON, metrics gate policy binding, failed/skipped execution equity marking, partial SELL residual-position testing, and promotion artifact observability appear to have been addressed, but you must verify that directly in the repo before relying on it.
+Continue from the latest metrics-contract and fee-drag-basis patches. Do not treat the current state as complete merely because pytest passed. The larger design goal remains: this repo must maintain one coherent, reproducible performance/evidence contract across research, promotion, runtime reports, and typed paper/live readiness evidence. This is not about adding isolated fields; it is about making artifacts safe, deterministic, operator-readable, and fail-closed when external evidence is malformed.
 
-The remaining issue to investigate and patch is narrower but still important: the repository is trying to become a reproducible, promotion-grade automated-trading research system with one coherent metrics contract across research, promotion, reporting, and runtime evidence. A metric with the same name must not silently mean different things in research artifacts and runtime artifacts.
+The latest review suggests the `fee_drag_ratio` denominator/basis inconsistency has been fixed. The remaining recommended hardening is narrower but important: typed evidence validation should reject non-finite numeric values with explicit `EvidenceValidationError` reason codes, not leak generic `ValueError` from JSON hashing or silently accept `Infinity` / `-Infinity`.
 
-The current working hypothesis is:
+Treat this as a hypothesis until verified in the repo.
 
-`fee_drag_ratio` is still semantically inconsistent across layers. In `research/metrics_contract.py`, `metrics_v2.cost_execution.fee_drag_ratio` appears to use total traded notional as the denominator. In `strategy_performance.py`, runtime `StrategyPerformanceSummary.fee_drag_ratio` appears to use `fee_total / abs(gross_pnl)`. If true, this conflicts with the repository’s metrics-contract goal because operators may compare two fields with the same name while they use different bases.
-
-Treat this as a hypothesis until verified.
-
-Do not ask clarification questions. Inspect, patch, test, and report.
+Do not ask clarification questions. Inspect, verify, patch, test, and report.
 
 ## Inspect first
 
 Before modifying code, inspect at least:
 
+* `src/bithumb_bot/evidence_chain.py`
+* `src/bithumb_bot/research/hashing.py`
+* `src/bithumb_bot/storage_io.py`
 * `src/bithumb_bot/research/metrics_contract.py`
 * `src/bithumb_bot/strategy_performance.py`
-* `src/bithumb_bot/market_regime/metrics.py`
-* `src/bithumb_bot/research/validation_protocol.py`
 * `src/bithumb_bot/research/promotion_gate.py`
-* `src/bithumb_bot/research/cli.py`
-* `src/bithumb_bot/reporting.py`
-* `src/bithumb_bot/storage_io.py`
-* `src/bithumb_bot/research/hashing.py`
+* `src/bithumb_bot/approved_profile.py`
+* `src/bithumb_bot/profile_cli.py` or other profile promotion/verification code if present
 * `docs/research-validation.md`
-* `docs/OPERATOR_REPORTING.md` if relevant
-* tests touching research metrics, runtime strategy performance, operator reports, promotion gates, and strict JSON behavior.
+* `docs/OPERATOR_REPORTING.md`
+* tests covering evidence validation, approved profiles, profile promotion, strict JSON, research metrics, and strategy performance.
 
-Also check whether `trade_lifecycles` or any runtime tables contain enough notional information to calculate a traded-notional fee drag ratio in runtime.
+Search the repo for:
 
-## Hypotheses to verify or refute
+```text
+validate_profile_transition_evidence
+compute_evidence_content_hash
+validate_evidence_content_hash
+EvidenceValidationError
+fee_drag_ratio
+allow_nan
+math.isfinite
+float("inf")
+Infinity
+NaN
+```
 
-### H1: Research `fee_drag_ratio` and runtime `fee_drag_ratio` use different denominators
+## Current working hypotheses
 
-Verify:
+### H1: `fee_drag_ratio` basis inconsistency is fixed
 
-* `metrics_v2.cost_execution.fee_drag_ratio`
-* `metrics_v2.cost_execution.slippage_drag_ratio`
-* `StrategyPerformanceSummary.fee_drag_ratio`
-* any operator report fields named `fee_drag_ratio`
-* any readiness/promotion evidence fields named `fee_drag_ratio`
+Verify but do not repatch unless needed.
 
-Confirm each field’s denominator and unit.
+Expected current behavior:
 
-### H2: The same field name is exposed without an explicit basis
+* Research `metrics_v2.cost_execution.fee_drag_ratio` uses `traded_notional`.
+* Research `metrics_v2.cost_execution.fee_drag_ratio_basis == "traded_notional"`.
+* Runtime `StrategyPerformanceSummary.fee_drag_ratio` either also uses `traded_notional` when lifecycle notional fields exist, or explicitly states its basis.
+* Historical runtime gross-PnL-based fee ratio is separated as `fee_to_gross_pnl_ratio` with `fee_to_gross_pnl_ratio_basis == "gross_pnl_abs"`.
+* Runtime gate compatibility threshold clearly states the basis it uses.
 
-If the repo emits `fee_drag_ratio` without a companion basis such as `fee_drag_ratio_basis`, determine where that happens:
+If this is already true, leave it alone except for any tests impacted by this task.
 
-* research reports
-* candidate profiles
-* promotion artifacts
-* CLI output
-* runtime reports
-* strategy performance gate output
-* operator reporting docs
+### H2: Typed evidence numeric validation does not consistently reject non-finite values with `EvidenceValidationError`
 
-### H3: Existing tests may prove parity for expectancy/PF/win rate but not fee-drag basis
+Inspect `evidence_chain.py`.
 
-Inspect tests such as `tests/test_strategy_performance_gate.py` and `tests/test_research_metrics_contract.py`. Determine whether they explicitly verify fee-drag basis consistency or only compare other metrics.
+The likely issue is:
 
-### H4: Runtime may not have enough information to compute research-equivalent traded-notional fee drag
+* `_number()` may reject `NaN` via `parsed != parsed`.
+* `_number()` may not reject `inf` or `-inf`.
+* `compute_evidence_content_hash()` / `validate_evidence_content_hash()` may fail on non-finite floats because canonical JSON uses `allow_nan=False`, but that failure may surface as a generic `ValueError`, not a stable `EvidenceValidationError`.
+* Operator-facing profile promotion failures may therefore be less recoverable and less reason-coded than the rest of the evidence contract.
 
-If runtime `trade_lifecycles` does not carry enough fields, do not fabricate an equivalent value. Instead, name and expose the basis precisely.
+### H3: String forms like `"Infinity"` may bypass JSON strictness and only fail if `_number()` is finite-aware
+
+Python `json.dumps(..., allow_nan=False)` rejects non-finite float values, but a string such as `"Infinity"` is valid JSON. If `_number("Infinity", ...)` converts to `float("inf")`, it must be rejected as non-finite with the supplied schema reason.
+
+### H4: Current tests may cover strict JSON in research artifacts but not typed paper/live evidence validation
+
+Inspect tests. If no test pins `validate_profile_transition_evidence()` behavior for non-finite evidence fields, add one.
 
 ## Design goal
 
-Do not merely rename a variable in one place. Fix the metrics contract so every ratio with “drag” semantics is either:
+Do not add a one-off check only for `fee_drag_ratio`.
 
-1. computed with the same basis across layers, or
-2. explicitly basis-tagged so operators cannot mistake one basis for another.
+Patch the typed evidence validation boundary so all numeric fields parsed through the evidence schema are finite and reason-coded. This should cover:
 
-The preferred design is to add explicit basis fields everywhere the ratios are emitted.
+* `gross_pnl`
+* `fee_total`
+* `net_pnl`
+* `expectancy_per_trade`
+* `profit_factor`
+* `fee_drag_ratio`
+* observation duration
+* thresholds
+* any other numeric field passed through `_number()`
 
-For research metrics v2:
+The solution should be small but structural:
 
-```text
-cost_execution.fee_drag_ratio_basis = "traded_notional"
-cost_execution.slippage_drag_ratio_basis = "traded_notional"
-```
-
-For runtime strategy performance, if the current denominator remains `abs(gross_pnl)`:
-
-```text
-summary.fee_drag_ratio_basis = "gross_pnl_abs"
-```
-
-If you decide to preserve the old runtime `fee_drag_ratio` field for backward compatibility, add a clearly named alias:
-
-```text
-fee_to_gross_pnl_ratio = same value as current fee_drag_ratio
-fee_to_gross_pnl_ratio_basis = "gross_pnl_abs"
-```
-
-Then either:
-
-* keep `fee_drag_ratio` with `fee_drag_ratio_basis="gross_pnl_abs"` for compatibility, or
-* if all downstream callers can safely migrate, rename runtime `fee_drag_ratio` to `fee_to_gross_pnl_ratio`.
-
-Prefer backward compatibility unless the repo already has an explicit fail-closed contract requiring a rename.
-
-If runtime can compute traded notional safely from `trade_lifecycles`, then add:
-
-```text
-fee_drag_ratio = fee_total / total_traded_notional
-fee_drag_ratio_basis = "traded_notional"
-fee_to_gross_pnl_ratio = fee_total / abs(gross_pnl)
-fee_to_gross_pnl_ratio_basis = "gross_pnl_abs"
-```
-
-Only do this if the data is genuinely available and the formula is deterministic. Do not invent notional from incomplete data.
+1. `_number()` must reject `NaN`, `Infinity`, and `-Infinity`.
+2. Content-hash validation should convert canonical JSON non-finite failures into `EvidenceValidationError` with a stable reason.
+3. Tests should prove both raw float non-finite values and string non-finite values fail with operator-readable reason codes.
 
 ## Implementation requirements
 
-### 1. Add ratio basis fields to the research metrics contract
+### 1. Harden `_number()`
 
-Update `MetricContractV2` / `CostExecutionMetrics` so `as_dict()` emits explicit basis fields.
+In `src/bithumb_bot/evidence_chain.py`, update `_number()` to use `math.isfinite()`.
 
-Expected fields:
+Expected shape:
+
+```python
+import math
+
+def _number(value: object, reason: str) -> float:
+    if isinstance(value, bool):
+        raise EvidenceValidationError(reason)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise EvidenceValidationError(reason) from exc
+    if not math.isfinite(parsed):
+        raise EvidenceValidationError(reason)
+    return parsed
+```
+
+Preserve existing behavior for valid integers/floats/numeric strings.
+
+Do not accept booleans.
+
+### 2. Harden content-hash validation boundary
+
+Inspect `compute_evidence_content_hash()` and `validate_evidence_content_hash()`.
+
+If `sha256_prefixed(...)` or canonical JSON serialization can raise `ValueError` on non-finite payload values, catch it and raise `EvidenceValidationError` with a stable reason.
+
+Recommended reason code:
 
 ```text
-fee_drag_ratio_basis
-slippage_drag_ratio_basis
+<label>_schema_invalid:non_finite_json
 ```
 
-For current research metrics, the basis should be:
+or, if the codebase already prefers a different style, use the closest existing schema-invalid pattern. Keep it stable and test it.
 
-```text
-"traded_notional"
+Suggested shape:
+
+```python
+def validate_evidence_content_hash(payload: dict[str, Any], *, label: str) -> str:
+    expected = payload.get(EVIDENCE_HASH_FIELD)
+    if not isinstance(expected, str) or not expected.startswith("sha256:"):
+        raise EvidenceValidationError(f"{label}_schema_invalid:content_hash_missing")
+    try:
+        actual = compute_evidence_content_hash(payload)
+    except ValueError as exc:
+        raise EvidenceValidationError(f"{label}_schema_invalid:non_finite_json") from exc
+    if actual != expected:
+        raise EvidenceValidationError(f"{label}_content_hash_mismatch")
+    return actual
 ```
 
-If `fee_drag_ratio` or `slippage_drag_ratio` is `None` because there is no traded notional, the basis should still be explicit unless there is a strong reason not to. Recommended:
+If `compute_evidence_content_hash()` is used elsewhere and should also fail with `EvidenceValidationError`, consider adding a helper rather than duplicating behavior. Avoid broad exception swallowing.
 
-```json
-{
-  "fee_drag_ratio": null,
-  "fee_drag_ratio_basis": "traded_notional",
-  "slippage_drag_ratio": null,
-  "slippage_drag_ratio_basis": "traded_notional"
-}
-```
+### 3. Preserve strict JSON behavior
 
-Keep strict JSON compatibility.
+Do not weaken `allow_nan=False` in hashing or storage. If anything, keep it strict.
 
-### 2. Add ratio basis fields to runtime strategy performance
+Do not allow non-finite values into persisted artifacts just to make validation pass.
 
-Update `StrategyPerformanceSummary` and `as_dict()` in `strategy_performance.py`.
+### 4. Keep scope narrow
 
-If current runtime denominator remains `abs(gross_pnl)`, add:
+Do not change strategy logic, research metrics formulas, runtime performance gate thresholds, live arming, broker behavior, `.env`, secrets, path policy, or external artifacts.
 
-```text
-fee_drag_ratio_basis = "gross_pnl_abs"
-fee_to_gross_pnl_ratio = <same numeric value>
-fee_to_gross_pnl_ratio_basis = "gross_pnl_abs"
-```
+Do not claim this task makes the system live-ready.
 
-Decide whether to keep `fee_drag_ratio` for backward compatibility. If kept, its basis must be emitted.
-
-Update `evaluate_strategy_performance_gate()` threshold naming and output if needed, but do not break existing environment variable names unless there is already a migration pattern. If the gate still uses `LIVE_PERFORMANCE_GATE_MAX_FEE_DRAG_RATIO`, document that it applies to the runtime basis currently used.
-
-### 3. Update operator/reporting outputs
-
-Search for all emitted `fee_drag_ratio` fields and ensure each one has a basis or a clearly distinct name.
-
-Update any CLI/report output that prints fee drag so the operator can see the basis, for example:
-
-```text
-fee_drag_ratio=0.004 fee_drag_ratio_basis=traded_notional
-```
-
-For runtime strategy performance:
-
-```text
-fee_drag_ratio=0.25 fee_drag_ratio_basis=gross_pnl_abs
-```
-
-Do not spam low-value fields, but do not hide the basis.
-
-### 4. Update promotion/readiness docs where needed
-
-Update `docs/research-validation.md` and any operator reporting docs so they explicitly state:
-
-* research `metrics_v2.cost_execution.fee_drag_ratio` uses total traded notional
-* research `metrics_v2.cost_execution.slippage_drag_ratio` uses total traded notional
-* runtime strategy performance may expose `fee_to_gross_pnl_ratio` or `fee_drag_ratio` with basis `gross_pnl_abs`
-* same-named ratio fields must always include a basis
-* values with different bases must not be compared as equivalent
-* this patch improves metric-contract observability but does not imply live readiness
-
-### 5. Preserve backward compatibility
-
-* Do not remove existing `fee_drag_ratio` unless all callers/tests are updated and no compatibility contract is broken.
-* Existing tests should continue to pass.
-* Existing runtime gates should not silently change denominator unless you explicitly add a new denominator and update docs/tests.
-* Do not mutate `.env`, secrets, live config, broker code, or external artifacts.
+This is a typed-evidence validation hardening patch.
 
 ## Testing requirements
 
-Add or update tests proving the basis contract.
+Add or update tests that directly exercise `validate_profile_transition_evidence()` or the evidence validation function used by profile transitions.
 
-### Research metrics tests
+Use the repo’s existing test style and fixtures. If a helper already builds valid paper/live evidence payloads, reuse it.
 
-In `tests/test_research_metrics_contract.py` or an equivalent file, assert:
+At minimum add tests for:
 
-* `metrics_v2.cost_execution.fee_drag_ratio_basis == "traded_notional"`
-* `metrics_v2.cost_execution.slippage_drag_ratio_basis == "traded_notional"`
-* basis fields are present when ratios are numeric
-* basis fields are still present when ratios are `None`
-* `json.dumps(metrics_v2.as_dict(), allow_nan=False)` passes
+### 1. Raw non-finite float in typed evidence
 
-### Runtime performance tests
+Create a valid typed evidence payload, then set:
 
-In `tests/test_strategy_performance_gate.py` or equivalent, assert:
+```python
+payload["fee_drag_ratio"] = float("inf")
+```
 
-* runtime summary includes `fee_drag_ratio_basis`
-* if current denominator remains gross PnL, basis is `"gross_pnl_abs"`
-* if an alias is added, `fee_to_gross_pnl_ratio` equals the old value
-* `summary.as_dict()` includes the basis fields
-* gate output remains backward-compatible
+or another optional numeric field. Ensure the payload has a content hash state that reaches validation in a meaningful way.
 
-### Parity / non-equivalence tests
+Expected:
 
-Add a test that intentionally demonstrates the distinction:
+* `validate_profile_transition_evidence(...)` raises `EvidenceValidationError`
+* it does not leak plain `ValueError`
+* the reason is stable, ideally:
 
-* Construct data where total traded notional and absolute gross PnL are very different.
-* Assert that research-style fee drag and runtime gross-PnL fee ratio are not treated as the same metric unless basis matches.
-* This test should prevent future accidental comparisons of `fee_drag_ratio` without checking basis.
+  * `<label>_schema_invalid:non_finite_json` if failure occurs during content-hash validation, or
+  * `<label>_schema_invalid:fee_drag_ratio` if failure occurs during numeric field validation.
 
-### Promotion/report observability tests
+Be explicit in the assertion.
 
-If promotion artifacts include metrics v2, assert that the cost execution block includes ratio basis fields.
+### 2. String `"Infinity"` in typed evidence
 
-If CLI summary prints fee drag, update the summary test to check basis output.
+Create a valid payload with:
 
-### Strict JSON regression
+```python
+payload["fee_drag_ratio"] = "Infinity"
+```
 
-Run or update strict JSON tests to ensure the new basis fields do not reintroduce non-finite values.
+Because this is JSON-valid as a string, content hashing may succeed if the content hash is recomputed. Validation must still reject it when `_number()` parses the field.
+
+Expected:
+
+* `EvidenceValidationError`
+* reason includes `<label>_schema_invalid:fee_drag_ratio`
+
+Also test `"-Infinity"` if easy.
+
+### 3. String `"NaN"` in typed evidence
+
+Same as above, but with:
+
+```python
+payload["expectancy_per_trade"] = "NaN"
+```
+
+or another numeric field.
+
+Expected:
+
+* `EvidenceValidationError`
+* field-specific schema-invalid reason.
+
+### 4. Valid finite numeric string still works
+
+Use a numeric string such as:
+
+```python
+payload["fee_drag_ratio"] = "0.001"
+```
+
+Expected:
+
+* validation does not fail because of numeric parsing
+* content hash remains deterministic if recomputed properly.
+
+### 5. Strict JSON regression
+
+Ensure existing strict JSON tests still pass.
+
+If relevant, add an evidence-specific strict JSON test:
+
+```python
+json.dumps(valid_evidence_payload, allow_nan=False)
+```
+
+### 6. Existing evidence/profile tests remain green
+
+Run profile/evidence-related tests in addition to targeted new tests.
+
+## Suggested test locations
+
+Likely files:
+
+* `tests/test_approved_profile.py`
+* `tests/test_evidence_chain.py` if it exists
+* `tests/test_profile_cli.py` or profile promotion tests if present
+* create `tests/test_evidence_chain.py` if no focused file exists.
+
+Prefer focused unit tests over large integration tests unless the repo already has good fixtures for profile promotion evidence.
 
 ## Suggested commands
 
-Run targeted tests first, then broader tests.
+Run targeted tests first, then broader suite:
 
 ```bash
+uv run pytest tests/test_evidence_chain.py
+uv run pytest tests/test_approved_profile.py
 uv run pytest tests/test_research_metrics_contract.py
 uv run pytest tests/test_strategy_performance_gate.py
-uv run pytest tests/test_research_backtest_reproducibility.py
 uv run pytest tests/test_research_promotion_gate.py
-uv run pytest tests/test_research_cli_summary.py
 uv run pytest
 ```
 
-If the full suite is unavailable or too slow, run the closest relevant subset and report exactly what was not run and why.
+Adjust file names to the actual repo. If a command is unavailable or the full suite is too slow, run the closest relevant subset and report exactly what was not run and why.
+
+## Documentation updates
+
+Update docs only if behavior or reason codes change.
+
+At minimum, if you add `non_finite_json` or similar, update `docs/research-validation.md` or the relevant evidence/profile section to state:
+
+* typed paper/live readiness evidence rejects `Infinity`, `-Infinity`, `NaN`, and numeric strings that parse to non-finite values
+* failures are reported with stable schema-invalid reason codes
+* evidence artifacts remain strict JSON and deterministic-hash artifacts
+* this hardening improves artifact recoverability and operator diagnosis, not live readiness.
+
+Keep documentation concise.
+
+## Backward compatibility and recovery requirements
+
+* Existing valid evidence artifacts must continue to validate.
+* Invalid non-finite evidence artifacts should fail earlier and more clearly.
+* Failure must be `EvidenceValidationError`, not generic `ValueError`, when going through evidence validation.
+* Do not change evidence schema version unless absolutely necessary.
+* Do not change content hash semantics except to wrap non-finite serialization failures in a stable evidence-validation error.
+* Do not change runtime strategy behavior.
 
 ## Final report format
 
@@ -268,17 +320,16 @@ Hypotheses verified/refuted
 - H4:
 
 Design decisions
-- Research fee/slippage drag basis:
-- Runtime fee drag basis:
-- Whether existing fee_drag_ratio was preserved:
-- Any aliases added:
+- Numeric validation boundary:
+- Content-hash non-finite handling:
+- Reason-code choice:
 - Backward compatibility choices:
 
 Files changed
 - path: purpose
 
-New/changed fields
-- field: meaning
+New/changed reason codes
+- code: meaning
 
 Tests added/updated
 - test path/name: what it proves
@@ -288,13 +339,13 @@ Commands run
 - command not run: reason
 
 Operational impact
-- What operators will now see in reports/CLI/promotion artifacts.
-- What comparisons are now safer.
+- What operators will now see when malformed typed evidence contains Infinity/NaN.
+- What recovery action is clearer now.
 - What remains out of scope.
 
 Risks and follow-up
-- Any remaining metric-definition inconsistencies.
-- Any future work needed to compute traded-notional fee drag from runtime trade_lifecycles, if not implemented.
+- Any remaining evidence validation edge cases.
+- Any future work needed for automated paper/live evidence artifact generation.
 ```
 
-Do not claim live readiness. This patch is about making the metrics contract unambiguous and safer for research, promotion, and runtime evidence comparison.
+Do not claim live readiness. This patch is about making typed evidence validation more deterministic, recoverable, and operator-readable.

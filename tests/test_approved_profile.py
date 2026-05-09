@@ -23,7 +23,11 @@ from bithumb_bot.approved_profile import (
     validate_approved_profile,
     write_approved_profile_atomic,
 )
-from bithumb_bot.evidence_chain import compute_evidence_content_hash
+from bithumb_bot.evidence_chain import (
+    EvidenceValidationError,
+    compute_evidence_content_hash,
+    validate_profile_transition_evidence,
+)
 from bithumb_bot.decision_equivalence import compare_decision_equivalence, compute_decision_equivalence_hash
 from bithumb_bot.profile_cli import cmd_profile_diff, cmd_profile_generate, cmd_profile_promote, cmd_profile_verify
 from bithumb_bot.paths import PathConfig, PathManager, PathPolicyError
@@ -287,6 +291,72 @@ def _write_evidence_payload(tmp_path: Path, name: str, payload: dict[str, object
     payload["content_hash"] = compute_evidence_content_hash(payload)
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def _validate_evidence_payload(profile: dict[str, object], payload: dict[str, object]) -> str:
+    return validate_profile_transition_evidence(
+        payload,
+        label="paper_validation_evidence",
+        expected_type="paper_validation",
+        expected_mode="paper",
+        parent_profile=profile,
+    )
+
+
+def test_profile_transition_evidence_rejects_non_finite_float_with_reason_code(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    profile = load_approved_profile(profile_path)
+    payload = _evidence_payload(profile)
+    payload["fee_drag_ratio"] = float("inf")
+
+    with pytest.raises(
+        EvidenceValidationError,
+        match="paper_validation_evidence_schema_invalid:non_finite_json",
+    ):
+        _validate_evidence_payload(profile, payload)
+
+
+@pytest.mark.parametrize("bad_value", ["Infinity", "-Infinity"])
+def test_profile_transition_evidence_rejects_string_infinity_with_field_reason(
+    tmp_path: Path,
+    bad_value: str,
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    profile = load_approved_profile(profile_path)
+    payload = _evidence_payload(profile)
+    payload["fee_drag_ratio"] = bad_value
+    payload["content_hash"] = compute_evidence_content_hash(payload)
+
+    with pytest.raises(
+        EvidenceValidationError,
+        match="paper_validation_evidence_schema_invalid:fee_drag_ratio",
+    ):
+        _validate_evidence_payload(profile, payload)
+
+
+def test_profile_transition_evidence_rejects_string_nan_with_field_reason(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    profile = load_approved_profile(profile_path)
+    payload = _evidence_payload(profile)
+    payload["expectancy_per_trade"] = "NaN"
+    payload["content_hash"] = compute_evidence_content_hash(payload)
+
+    with pytest.raises(
+        EvidenceValidationError,
+        match="paper_validation_evidence_schema_invalid:expectancy_per_trade",
+    ):
+        _validate_evidence_payload(profile, payload)
+
+
+def test_profile_transition_evidence_accepts_finite_numeric_string(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    profile = load_approved_profile(profile_path)
+    payload = _evidence_payload(profile)
+    payload["fee_drag_ratio"] = "0.001"
+    payload["content_hash"] = compute_evidence_content_hash(payload)
+
+    assert json.dumps(payload, allow_nan=False)
+    assert _validate_evidence_payload(profile, payload) == payload["content_hash"]
 
 
 def _attach_decision_equivalence_report(
