@@ -19,7 +19,7 @@ from .dataset_snapshot import (
     load_dataset_range,
     load_dataset_split,
 )
-from .backtest_engine import execution_event_summary
+from .backtest_engine import BacktestRun, execution_event_summary
 from .deployment_policy import validate_production_calibration_policy
 from .execution_calibration import compare_calibration_to_scenario
 from .execution_model import FixedBpsExecutionModel, StressExecutionModel, model_params_hash
@@ -27,6 +27,7 @@ from .execution_timing import execution_reality_gate, signal_quote_coverage_summ
 from .experiment_manifest import DateRange, ExecutionScenario, ExperimentManifest
 from .hashing import sha256_prefixed
 from .lineage import build_research_lineage
+from .metrics_contract import METRICS_SCHEMA_VERSION
 from .parameter_space import candidate_id, iter_parameter_candidates
 from .promotion_gate import build_candidate_profile
 from .report_writer import ResearchReportPaths, write_research_report
@@ -267,6 +268,9 @@ def _evaluate_candidates(
                     "train_metrics": train.metrics.as_dict(),
                     "validation_metrics": validation.metrics.as_dict(),
                     "final_holdout_metrics": final_holdout.metrics.as_dict() if final_holdout else None,
+                    "train_metrics_v2": _metrics_v2_payload(train),
+                    "validation_metrics_v2": _metrics_v2_payload(validation),
+                    "final_holdout_metrics_v2": _metrics_v2_payload(final_holdout) if final_holdout else None,
                     "train_execution_metadata": _execution_metadata(train.trades),
                     "validation_execution_metadata": _execution_metadata(validation.trades),
                     "final_holdout_execution_metadata": _execution_metadata(final_holdout.trades) if final_holdout else None,
@@ -303,8 +307,13 @@ def _evaluate_candidates(
             stability_score = stability_payload["score"]
             train_metrics = dict(base["train_metrics"])
             validation_metrics = dict(base["validation_metrics"])
+            train_metrics_v2 = dict(base["train_metrics_v2"])
+            validation_metrics_v2 = dict(base["validation_metrics_v2"])
             final_holdout_metrics = (
                 dict(base["final_holdout_metrics"]) if isinstance(base.get("final_holdout_metrics"), dict) else None
+            )
+            final_holdout_metrics_v2 = (
+                dict(base["final_holdout_metrics_v2"]) if isinstance(base.get("final_holdout_metrics_v2"), dict) else None
             )
             train_metrics["parameter_stability_score"] = stability_score
             validation_metrics["parameter_stability_score"] = stability_score
@@ -318,7 +327,9 @@ def _evaluate_candidates(
             gate_result, fail_reasons = _gate_result(
                 manifest=manifest,
                 validation_metrics=validation_metrics,
+                validation_metrics_v2=validation_metrics_v2,
                 final_holdout_metrics=final_holdout_metrics,
+                final_holdout_metrics_v2=final_holdout_metrics_v2,
                 walk_forward_metrics=walk_forward,
                 stability_score=stability_score,
                 include_walk_forward=include_walk_forward,
@@ -368,6 +379,10 @@ def _evaluate_candidates(
                 "train_metrics": train_metrics,
                 "validation_metrics": validation_metrics,
                 "final_holdout_metrics": final_holdout_metrics,
+                "metrics_schema_version": METRICS_SCHEMA_VERSION,
+                "train_metrics_v2": train_metrics_v2,
+                "validation_metrics_v2": validation_metrics_v2,
+                "final_holdout_metrics_v2": final_holdout_metrics_v2,
                 "walk_forward_metrics": walk_forward,
                 "regime_gate_result": regime_gate.as_dict(),
                 "market_regime_bucket_performance": base["validation_regime_performance"],
@@ -443,6 +458,10 @@ def _evaluate_candidates(
                 "train_metrics": primary.get("train_metrics"),
                 "validation_metrics": primary.get("validation_metrics"),
                 "final_holdout_metrics": primary.get("final_holdout_metrics"),
+                "metrics_schema_version": primary.get("metrics_schema_version"),
+                "train_metrics_v2": primary.get("train_metrics_v2"),
+                "validation_metrics_v2": primary.get("validation_metrics_v2"),
+                "final_holdout_metrics_v2": primary.get("final_holdout_metrics_v2"),
                 "walk_forward_metrics": primary.get("walk_forward_metrics"),
                 "market_regime_bucket_performance": primary.get("market_regime_bucket_performance"),
                 "market_regime_coverage": primary.get("market_regime_coverage"),
@@ -578,6 +597,8 @@ def _gate_result(
     walk_forward_metrics: dict[str, Any] | None,
     stability_score: float | None,
     include_walk_forward: bool,
+    validation_metrics_v2: dict[str, Any] | None = None,
+    final_holdout_metrics_v2: dict[str, Any] | None = None,
     regime_gate_result: dict[str, Any] | None = None,
     execution_calibration_gate: dict[str, Any] | None = None,
     dataset_quality_status: str = "PASS",
@@ -598,6 +619,9 @@ def _gate_result(
         reasons.append("validation_return_not_positive")
     if final_holdout_metrics and gate.oos_return_must_be_positive and float(final_holdout_metrics.get("return_pct") or 0.0) <= 0.0:
         reasons.append("final_holdout_return_not_positive")
+    reasons.extend(_metrics_v2_gate_reasons(gate=gate, metrics_v2=validation_metrics_v2, prefix=""))
+    if final_holdout_metrics_v2 is not None:
+        reasons.extend(_metrics_v2_gate_reasons(gate=gate, metrics_v2=final_holdout_metrics_v2, prefix="final_holdout_"))
     if gate.parameter_stability_required and (stability_score is None or stability_score < 0.5):
         reasons.append("parameter_stability_failed")
     if gate.walk_forward_required:
@@ -622,6 +646,120 @@ def _gate_result(
     ):
         reasons.extend(str(reason) for reason in execution_calibration_gate.get("reasons") or ["execution_calibration_failed"])
     return ("PASS" if not reasons else "FAIL", reasons)
+
+
+def _metrics_v2_gate_reasons(*, gate, metrics_v2: dict[str, Any] | None, prefix: str) -> list[str]:
+    has_v2_gate = any(
+        value is not None
+        for value in (
+            gate.min_cagr_pct,
+            gate.min_expectancy_per_trade_krw,
+            gate.min_expectancy_per_trade_pct,
+            gate.max_exposure_time_pct,
+            gate.max_avg_holding_time_minutes,
+            gate.max_fee_drag_ratio,
+            gate.max_slippage_drag_ratio,
+        )
+    ) or gate.reject_open_position_at_end or gate.metrics_contract_required
+    if not has_v2_gate:
+        return []
+    if not isinstance(metrics_v2, dict):
+        return [f"{prefix}metrics_v2_missing" if prefix else "metrics_v2_missing"]
+    if int(metrics_v2.get("metrics_schema_version") or 0) != METRICS_SCHEMA_VERSION:
+        return [f"{prefix}metrics_contract_missing" if prefix else "metrics_contract_missing"]
+    return_risk = metrics_v2.get("return_risk") if isinstance(metrics_v2.get("return_risk"), dict) else {}
+    trade_quality = metrics_v2.get("trade_quality") if isinstance(metrics_v2.get("trade_quality"), dict) else {}
+    time_exposure = metrics_v2.get("time_exposure") if isinstance(metrics_v2.get("time_exposure"), dict) else {}
+    cost_execution = metrics_v2.get("cost_execution") if isinstance(metrics_v2.get("cost_execution"), dict) else {}
+    reasons: list[str] = []
+    _append_min_reason(
+        reasons,
+        value=return_risk.get("cagr_pct"),
+        threshold=gate.min_cagr_pct,
+        missing_code=f"{prefix}metrics_v2_required_field_missing",
+        failed_code=f"{prefix}min_cagr_failed",
+    )
+    _append_min_reason(
+        reasons,
+        value=trade_quality.get("expectancy_per_trade_krw"),
+        threshold=gate.min_expectancy_per_trade_krw,
+        missing_code=f"{prefix}metrics_v2_required_field_missing",
+        failed_code=f"{prefix}min_expectancy_per_trade_krw_failed",
+    )
+    _append_min_reason(
+        reasons,
+        value=trade_quality.get("expectancy_per_trade_pct"),
+        threshold=gate.min_expectancy_per_trade_pct,
+        missing_code=f"{prefix}metrics_v2_required_field_missing",
+        failed_code=f"{prefix}min_expectancy_per_trade_pct_failed",
+    )
+    _append_max_reason(
+        reasons,
+        value=time_exposure.get("exposure_time_pct"),
+        threshold=gate.max_exposure_time_pct,
+        missing_code=f"{prefix}metrics_v2_required_field_missing",
+        failed_code=f"{prefix}max_exposure_time_failed",
+    )
+    avg_holding_ms = time_exposure.get("avg_holding_time_ms")
+    avg_holding_minutes = (float(avg_holding_ms) / 60_000.0) if avg_holding_ms is not None else None
+    _append_max_reason(
+        reasons,
+        value=avg_holding_minutes,
+        threshold=gate.max_avg_holding_time_minutes,
+        missing_code=f"{prefix}metrics_v2_required_field_missing",
+        failed_code=f"{prefix}max_avg_holding_time_failed",
+    )
+    _append_max_reason(
+        reasons,
+        value=cost_execution.get("fee_drag_ratio"),
+        threshold=gate.max_fee_drag_ratio,
+        missing_code=f"{prefix}metrics_v2_required_field_missing",
+        failed_code=f"{prefix}max_fee_drag_ratio_failed",
+    )
+    _append_max_reason(
+        reasons,
+        value=cost_execution.get("slippage_drag_ratio"),
+        threshold=gate.max_slippage_drag_ratio,
+        missing_code=f"{prefix}metrics_v2_required_field_missing",
+        failed_code=f"{prefix}max_slippage_drag_ratio_failed",
+    )
+    if gate.reject_open_position_at_end and bool(return_risk.get("open_position_at_end")):
+        reasons.append(f"{prefix}open_position_at_end_failed")
+    return reasons
+
+
+def _append_min_reason(
+    reasons: list[str],
+    *,
+    value: Any,
+    threshold: float | None,
+    missing_code: str,
+    failed_code: str,
+) -> None:
+    if threshold is None:
+        return
+    if value is None:
+        reasons.append(missing_code)
+        return
+    if float(value) < float(threshold):
+        reasons.append(failed_code)
+
+
+def _append_max_reason(
+    reasons: list[str],
+    *,
+    value: Any,
+    threshold: float | None,
+    missing_code: str,
+    failed_code: str,
+) -> None:
+    if threshold is None:
+        return
+    if value is None:
+        reasons.append(missing_code)
+        return
+    if float(value) > float(threshold):
+        reasons.append(failed_code)
 
 
 def _parameter_stability_scores(
@@ -778,6 +916,8 @@ def _walk_forward_metrics(
                 "test_candle_count": len(test_snapshot.candles),
                 "train_metrics": train.metrics.as_dict(),
                 "test_metrics": test_metrics,
+                "train_metrics_v2": _metrics_v2_payload(train),
+                "test_metrics_v2": _metrics_v2_payload(test),
                 "train_market_regime_coverage": [row.as_dict() for row in train.regime_coverage],
                 "test_market_regime_coverage": [row.as_dict() for row in test.regime_coverage],
                 "test_market_regime_bucket_performance": [row.as_dict() for row in test.regime_performance],
@@ -824,6 +964,12 @@ def _worst_regime_metric(rows: Any, key: str) -> float | None:
         if getattr(row, "dimension", "") == "composite_regime" and getattr(row, key) is not None
     ]
     return min(float(value) for value in values) if values else None
+
+
+def _metrics_v2_payload(run: BacktestRun | None) -> dict[str, Any] | None:
+    if run is None or run.metrics_v2 is None:
+        return None
+    return run.metrics_v2.as_dict()
 
 
 def _report_payload(
@@ -953,6 +1099,7 @@ def _report_payload(
         "regime_acceptance_gate": manifest.acceptance_gate.regime_acceptance_gate.as_dict(),
         "execution_model": manifest.execution_model.as_dict(),
         "execution_model_source": manifest.execution_model.source,
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
         "deployment_tier": manifest.deployment_tier,
         "execution_calibration_required": manifest.execution_model.calibration_required,
         "market_regime_bucket_performance": (
@@ -978,6 +1125,8 @@ def _report_payload(
         "holdout_reuse_count": lineage.get("holdout_reuse_count"),
         "dataset_reuse_policy": lineage.get("dataset_reuse_policy"),
         "best_candidate_id": best.get("parameter_candidate_id") if best else None,
+        "best_validation_metrics_v2": best.get("validation_metrics_v2") if best else None,
+        "best_final_holdout_metrics_v2": best.get("final_holdout_metrics_v2") if best else None,
         "gate_result": "PASS" if best else "FAIL",
         "warnings": warnings,
         "candidates": candidates,
@@ -1252,10 +1401,30 @@ def _execution_calibration_warning_reasons(candidate: dict[str, Any]) -> list[st
     return [str(reason) for reason in gate.get("reasons") or ["execution_calibration_failed"]]
 
 
-def _candidate_rank_key(candidate: dict[str, Any]) -> tuple[int, float, float]:
+def _candidate_rank_key(candidate: dict[str, Any]) -> tuple[int, int, float, float, int, float, float, float, float]:
     passed = 0 if candidate.get("acceptance_gate_result") == "PASS" else 1
     validation = candidate.get("validation_metrics") or {}
-    return (passed, -float(validation.get("return_pct") or 0.0), float(validation.get("max_drawdown_pct") or 0.0))
+    metrics_v2 = candidate.get("validation_metrics_v2") if isinstance(candidate.get("validation_metrics_v2"), dict) else {}
+    return_risk = metrics_v2.get("return_risk") if isinstance(metrics_v2.get("return_risk"), dict) else {}
+    trade_quality = metrics_v2.get("trade_quality") if isinstance(metrics_v2.get("trade_quality"), dict) else {}
+    cost_execution = metrics_v2.get("cost_execution") if isinstance(metrics_v2.get("cost_execution"), dict) else {}
+    open_position_rank = 1 if bool(return_risk.get("open_position_at_end")) else 0
+    expectancy = trade_quality.get("expectancy_per_trade_krw")
+    fee_drag = cost_execution.get("fee_drag_ratio")
+    slippage_drag = cost_execution.get("slippage_drag_ratio")
+    cagr = return_risk.get("cagr_pct")
+    dependency = trade_quality.get("single_trade_dependency_score")
+    return (
+        passed,
+        open_position_rank,
+        float(validation.get("max_drawdown_pct") or 0.0),
+        -float(expectancy) if expectancy is not None else 0.0,
+        -int(validation.get("trade_count") or 0),
+        float(fee_drag) if fee_drag is not None else 0.0,
+        float(slippage_drag) if slippage_drag is not None else 0.0,
+        -float(cagr) if cagr is not None else -float(validation.get("return_pct") or 0.0),
+        float(dependency) if dependency is not None else 0.0,
+    )
 
 
 def _path_payload(paths: ResearchReportPaths) -> dict[str, str]:

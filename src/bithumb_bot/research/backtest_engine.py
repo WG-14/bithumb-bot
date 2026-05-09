@@ -24,6 +24,14 @@ from .execution_timing import (
 )
 from .experiment_manifest import ExecutionTimingPolicy
 from .metrics import ResearchMetrics
+from .metrics_contract import (
+    ClosedTradeRecord,
+    EquityPoint,
+    ExecutionRecord,
+    MetricContractV2,
+    PositionInterval,
+    build_metrics_v2,
+)
 
 
 START_CASH_KRW = 1_000_000.0
@@ -40,6 +48,10 @@ class BacktestRun:
     regime_coverage: tuple[RegimeCoverageRow, ...] = ()
     execution_event_summary: dict[str, object] | None = None
     decisions: tuple[dict[str, object], ...] = ()
+    equity_curve: tuple[EquityPoint, ...] = ()
+    position_intervals: tuple[PositionInterval, ...] = ()
+    closed_trades: tuple[ClosedTradeRecord, ...] = ()
+    metrics_v2: MetricContractV2 | None = None
 
 
 @dataclass
@@ -83,6 +95,7 @@ def run_sma_backtest(
     if len(candles) < long_n + 2:
         return BacktestRun(
             metrics=_empty_metrics(parameter_stability_score),
+            metrics_v2=_empty_metrics_v2(),
             trades=(),
             candle_count=len(candles),
             warnings=("not_enough_candles",),
@@ -110,6 +123,14 @@ def run_sma_backtest(
     trades: list[dict[str, object]] = []
     pending_fills: list[_PendingFill] = []
     decisions: list[dict[str, object]] = []
+    equity_curve: list[EquityPoint] = [
+        EquityPoint(
+            ts=candle_close_ts(candles[0], interval=dataset.interval),
+            equity=START_CASH_KRW,
+            cash=START_CASH_KRW,
+            asset_qty=0.0,
+        )
+    ]
     closed_pnls: list[float] = []
     prev_above: bool | None = None
     model = execution_model or FixedBpsExecutionModel(fee_rate=fee_rate, slippage_bps=slippage_bps)
@@ -401,6 +422,14 @@ def run_sma_backtest(
             )
 
         equity = mark_cash + mark_qty * candle.close
+        equity_curve.append(
+            EquityPoint(
+                ts=mark_boundary_ts,
+                equity=equity,
+                cash=mark_cash,
+                asset_qty=mark_qty,
+            )
+        )
         peak = max(peak, equity)
         if peak > 0.0:
             max_drawdown = max(max_drawdown, (peak - equity) / peak)
@@ -424,6 +453,14 @@ def run_sma_backtest(
     )
     _mark_pending_fills_at_end(pending_fills=pending_fills, trades=trades, final_mark_ts=last_mark_ts)
     final_equity = cash + qty * last.close
+    equity_curve.append(
+        EquityPoint(
+            ts=last_mark_ts,
+            equity=final_equity,
+            cash=cash,
+            asset_qty=qty,
+        )
+    )
     return_pct = ((final_equity / START_CASH_KRW) - 1.0) * 100.0
     metrics = _metrics(
         return_pct=return_pct,
@@ -433,11 +470,26 @@ def run_sma_backtest(
         slippage_total=slippage_total,
         parameter_stability_score=parameter_stability_score,
     )
+    position_intervals, closed_trade_records, execution_records, derived_open_cost_basis = _metrics_v2_ledgers_from_trades(
+        trades=trades,
+    )
     coverage = aggregate_regime_coverage(snapshots=regime_snapshots, trades=trades)
     performance = aggregate_regime_performance(trades=trades, coverage=coverage, start_cash=START_CASH_KRW)
     execution_summary = execution_event_summary(trades)
+    metrics_v2 = build_metrics_v2(
+        starting_cash=START_CASH_KRW,
+        final_cash=cash,
+        final_asset_qty=qty,
+        final_mark_price=last.close,
+        final_open_cost_basis=entry_cost_basis if qty > 0.0 else derived_open_cost_basis,
+        equity_curve=tuple(equity_curve),
+        position_intervals=position_intervals,
+        closed_trades=closed_trade_records,
+        execution_records=execution_records,
+    )
     return BacktestRun(
         metrics=metrics,
+        metrics_v2=metrics_v2,
         trades=tuple(trades),
         candle_count=len(candles),
         warnings=tuple(warnings),
@@ -445,6 +497,9 @@ def run_sma_backtest(
         regime_coverage=coverage,
         execution_event_summary=execution_summary,
         decisions=tuple(decisions),
+        equity_curve=tuple(equity_curve),
+        position_intervals=position_intervals,
+        closed_trades=closed_trade_records,
     )
 
 
@@ -1004,6 +1059,113 @@ def execution_event_summary(trades: Any) -> dict[str, object]:
 
 def empty_execution_event_summary() -> dict[str, object]:
     return execution_event_summary(())
+
+
+def _empty_metrics_v2() -> MetricContractV2:
+    return build_metrics_v2(
+        starting_cash=START_CASH_KRW,
+        final_cash=START_CASH_KRW,
+        final_asset_qty=0.0,
+        final_mark_price=0.0,
+        equity_curve=(),
+        position_intervals=(),
+        closed_trades=(),
+        execution_records=(),
+    )
+
+
+def _metrics_v2_ledgers_from_trades(
+    *,
+    trades: list[dict[str, object]],
+) -> tuple[tuple[PositionInterval, ...], tuple[ClosedTradeRecord, ...], tuple[ExecutionRecord, ...], float]:
+    execution_records = tuple(_execution_record_from_trade(trade) for trade in trades if isinstance(trade, dict))
+    applied = sorted(
+        [trade for trade in trades if isinstance(trade, dict) and bool(trade.get("is_portfolio_applied_trade"))],
+        key=lambda trade: (
+            int(trade.get("portfolio_effective_ts") or trade.get("fill_ts") or trade.get("ts") or 0),
+            str(trade.get("side") or ""),
+        ),
+    )
+    intervals: list[PositionInterval] = []
+    closed: list[ClosedTradeRecord] = []
+    open_ts: int | None = None
+    open_qty = 0.0
+    open_cost_basis = 0.0
+    for trade in applied:
+        side = str(trade.get("side") or "").upper()
+        ts = int(trade.get("portfolio_effective_ts") or trade.get("fill_ts") or trade.get("ts") or 0)
+        qty = float(trade.get("qty") or 0.0)
+        price = float(trade.get("price") or 0.0)
+        fee = float(trade.get("fee") or 0.0)
+        if side == "BUY" and qty > 0.0:
+            if open_qty <= 1e-12:
+                open_ts = ts
+                open_cost_basis = 0.0
+            open_qty += qty
+            open_cost_basis += qty * price + fee
+        elif side == "SELL" and qty > 0.0:
+            basis_fraction = min(1.0, qty / open_qty) if open_qty > 1e-12 else 0.0
+            allocated_basis = open_cost_basis * basis_fraction
+            pnl = trade.get("net_pnl") if trade.get("net_pnl") is not None else trade.get("closed_trade_pnl")
+            if pnl is not None:
+                closed.append(
+                    ClosedTradeRecord(
+                        entry_ts=open_ts,
+                        exit_ts=ts,
+                        entry_notional=allocated_basis if allocated_basis > 0.0 else None,
+                        net_pnl=float(pnl),
+                        return_pct=(float(pnl) / allocated_basis * 100.0) if allocated_basis > 0.0 else None,
+                        fee_total=float(trade.get("fee_total") or fee),
+                        slippage_total=float(trade.get("slippage_total") or 0.0),
+                    )
+                )
+            open_qty = max(0.0, open_qty - qty)
+            open_cost_basis = max(0.0, open_cost_basis - allocated_basis)
+            if open_qty <= 1e-12:
+                if open_ts is not None:
+                    intervals.append(PositionInterval(open_ts=open_ts, close_ts=ts))
+                open_ts = None
+                open_cost_basis = 0.0
+    if open_ts is not None:
+        intervals.append(PositionInterval(open_ts=open_ts, close_ts=None))
+    return tuple(intervals), tuple(closed), execution_records, open_cost_basis
+
+
+def _execution_record_from_trade(trade: dict[str, object]) -> ExecutionRecord:
+    execution = trade.get("execution") if isinstance(trade.get("execution"), dict) else {}
+    assert isinstance(execution, dict)
+    return ExecutionRecord(
+        side=str(trade.get("side") or execution.get("side") or ""),
+        status=str(execution.get("fill_status") or ""),
+        filled_qty=float(execution.get("filled_qty") or trade.get("qty") or 0.0),
+        price=(
+            float(execution.get("avg_fill_price"))
+            if execution.get("avg_fill_price") is not None
+            else (float(trade.get("price")) if trade.get("price") is not None else None)
+        ),
+        fee=float(execution.get("fee") or trade.get("fee") or 0.0),
+        slippage=float(_trade_execution_slippage(trade)),
+        quote_age_ms=int(execution["quote_age_ms"]) if execution.get("quote_age_ms") is not None else None,
+    )
+
+
+def _trade_execution_slippage(trade: dict[str, object]) -> float:
+    execution = trade.get("execution") if isinstance(trade.get("execution"), dict) else {}
+    assert isinstance(execution, dict)
+    status = str(execution.get("fill_status") or "")
+    if status not in {"filled", "partial"}:
+        return 0.0
+    side = str(execution.get("side") or trade.get("side") or "").upper()
+    qty = float(execution.get("filled_qty") or trade.get("qty") or 0.0)
+    avg_price = execution.get("avg_fill_price")
+    ref_price = execution.get("reference_price")
+    if avg_price is None or ref_price is None or qty <= 0.0:
+        return 0.0
+    if side == "BUY":
+        return max(0.0, (float(avg_price) - float(ref_price)) * qty)
+    if side == "SELL":
+        return max(0.0, (float(ref_price) - float(avg_price)) * qty)
+    return 0.0
 
 
 def _execution_reference_warnings(fill: Any) -> list[str]:

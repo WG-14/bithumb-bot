@@ -70,6 +70,9 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "final_holdout_required_for_promotion": candidate.get("final_holdout_required_for_promotion"),
         "final_holdout_metrics": candidate.get("final_holdout_metrics"),
         "validation_metrics": candidate.get("validation_metrics"),
+        "metrics_schema_version": candidate.get("metrics_schema_version"),
+        "validation_metrics_v2": candidate.get("validation_metrics_v2"),
+        "final_holdout_metrics_v2": candidate.get("final_holdout_metrics_v2"),
         "walk_forward_metrics": candidate.get("walk_forward_metrics"),
     }
     if candidate.get("execution_model") is not None:

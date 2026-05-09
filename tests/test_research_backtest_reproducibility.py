@@ -114,6 +114,10 @@ def test_same_manifest_and_dataset_produce_same_content_hash(tmp_path, monkeypat
     assert first["content_hash"] == second["content_hash"]
     assert first["candidates"][0]["candidate_profile_hash"] == second["candidates"][0]["candidate_profile_hash"]
     assert first["candidates"][0]["regime_classifier_version"] == "market_regime_v2"
+    assert first["metrics_schema_version"] == 2
+    assert first["candidates"][0]["validation_metrics_v2"]["metrics_schema_version"] == 2
+    assert first["candidates"][0]["final_holdout_metrics_v2"]["metrics_schema_version"] == 2
+    assert first["best_validation_metrics_v2"]["metrics_schema_version"] == 2
     assert first["candidates"][0]["market_regime_bucket_performance"]
     assert first["candidates"][0]["market_regime_coverage"]
     assert "regime_gate_result" in first["candidates"][0]
@@ -158,6 +162,11 @@ def test_sma_backtest_attaches_entry_and_exit_regime_snapshots() -> None:
     assert isinstance(closed[0]["exit_regime_snapshot"], dict)
     assert result.regime_performance
     assert result.regime_coverage
+    assert result.metrics_v2 is not None
+    assert result.metrics_v2.metrics_schema_version == 2
+    assert result.metrics_v2.trade_quality.closed_trade_count == result.metrics.trade_count
+    assert result.metrics_v2.trade_quality.execution_count == len(result.trades)
+    assert result.metrics_v2.time_exposure.exposure_time_pct is not None
     assert result.decisions
     assert {"raw_signal", "final_signal", "position_state_hash"} <= set(result.decisions[0])
 

@@ -172,6 +172,7 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
             f"closed_trade_count={execution_events.get('closed_trade_count')} "
             f"execution_event_timeline_incomplete={execution_events.get('execution_event_timeline_incomplete')}"
         )
+    _print_metrics_v2_summary(report)
     print(f"  next_action={summary.next_action}")
     print(f"  report_path={artifact_paths.get('report_path')}")
     print(f"  derived_path={artifact_paths.get('derived_path')}")
@@ -179,6 +180,34 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     warnings = report.get("warnings") or []
     print(f"  warnings={','.join(str(item) for item in warnings) if warnings else 'none'}")
     _print_top_of_book_summary(report)
+
+
+def _print_metrics_v2_summary(report: dict[str, object]) -> None:
+    metrics = report.get("best_validation_metrics_v2")
+    if not isinstance(metrics, dict):
+        candidates = report.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("acceptance_gate_result") == "PASS":
+                    metrics = candidate.get("validation_metrics_v2")
+                    break
+    if not isinstance(metrics, dict):
+        return
+    return_risk = metrics.get("return_risk") if isinstance(metrics.get("return_risk"), dict) else {}
+    trade_quality = metrics.get("trade_quality") if isinstance(metrics.get("trade_quality"), dict) else {}
+    time_exposure = metrics.get("time_exposure") if isinstance(metrics.get("time_exposure"), dict) else {}
+    cost_execution = metrics.get("cost_execution") if isinstance(metrics.get("cost_execution"), dict) else {}
+    print(
+        "  metrics_v2_summary="
+        f"schema={metrics.get('metrics_schema_version')} "
+        f"cagr_pct={return_risk.get('cagr_pct')} "
+        f"expectancy_per_trade_krw={trade_quality.get('expectancy_per_trade_krw')} "
+        f"exposure_time_pct={time_exposure.get('exposure_time_pct')} "
+        f"avg_holding_time_ms={time_exposure.get('avg_holding_time_ms')} "
+        f"open_position_at_end={return_risk.get('open_position_at_end')} "
+        f"fee_drag_ratio={cost_execution.get('fee_drag_ratio')} "
+        f"slippage_drag_ratio={cost_execution.get('slippage_drag_ratio')}"
+    )
 
 
 def _print_execution_event_summary(summary: object) -> None:

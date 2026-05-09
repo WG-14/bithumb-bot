@@ -226,6 +226,32 @@ def test_print_report_summary_renders_operator_diagnostics(capsys) -> None:
     assert "next_action=do_not_promote_review_walk_forward_windows" in output
 
 
+def test_print_report_summary_renders_metrics_v2_for_passing_candidate(capsys) -> None:
+    report = _report(
+        candidates=[
+            {
+                **_candidate("candidate_001", gate="PASS"),
+                "validation_metrics_v2": {
+                    "metrics_schema_version": 2,
+                    "return_risk": {"cagr_pct": 12.5, "open_position_at_end": False},
+                    "trade_quality": {"expectancy_per_trade_krw": 250.0},
+                    "time_exposure": {"exposure_time_pct": 25.0, "avg_holding_time_ms": 600000.0},
+                    "cost_execution": {"fee_drag_ratio": 0.001, "slippage_drag_ratio": 0.002},
+                },
+            }
+        ],
+        best_candidate_id="candidate_001",
+        gate_result="PASS",
+    )
+
+    _print_report_summary("RESEARCH-BACKTEST", report)
+
+    output = capsys.readouterr().out
+    assert "metrics_v2_summary=schema=2 cagr_pct=12.5 expectancy_per_trade_krw=250.0" in output
+    assert "exposure_time_pct=25.0 avg_holding_time_ms=600000.0 open_position_at_end=False" in output
+    assert "fee_drag_ratio=0.001 slippage_drag_ratio=0.002" in output
+
+
 def test_print_report_summary_renders_top_of_book_warning_context(capsys) -> None:
     report = _report(
         candidates=[

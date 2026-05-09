@@ -1,428 +1,514 @@
-You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
+You are Codex operating directly inside the GitHub repository `WG-14/bithumb-bot`.
 
-Use this as a repo-specific hardening task, not a general review. Inspect the current repository state before changing anything. Treat the review context below as a starting hypothesis only: the major production-bound execution calibration policy patch appears mostly complete, but one promotion-time fail-fast hardening gap may remain.
+Context source: this task is based on the prior repository review and root-cause analysis supplied by the user. Keep the core concern and priorities intact: the likely issue is not merely that a few metrics are missing, but that the repository does not yet have one unified, promotion-grade performance metrics contract spanning research, promotion, reporting, and runtime evidence. Treat this as a hypothesis to verify in the repo, not as a fact. 
 
-The core invariant must not be weakened:
+Your job is to inspect, verify, design, implement, test, and report changes that move the repo toward a more robust, reproducible, and operationally usable automated-trading research system.
 
-```text
-A production-bound trading candidate must treat execution calibration as mandatory promotion evidence, not as an optional warning path.
-```
+Do not turn this into generic advice. Work against the actual repository. Do not ask clarification questions. Make reasonable implementation choices, document them, and preserve backward compatibility unless the repo already has an explicit fail-closed contract requiring otherwise.
 
-The existing large design appears to have been mostly implemented:
+## Primary problem statement
 
-* central production calibration policy
-* `deployment_tier` / production-bound distinction
-* research-only vs production-bound manifest separation
-* production-safe example manifest
-* candidate/profile/promotion calibration fields
-* approved profile generation/promotion enforcement
-* warn-mode rejection for production-bound transitions
-* calibration artifact hash propagation from combined scenario gates
-* tests for production policy and approved profile rejection cases
-* docs clarifying telemetry-only execution-quality output is not live readiness.
+The current working hypothesis is:
 
-Do not reopen the entire design unless your direct inspection disproves the above. The intended next step is a small fail-fast reproducibility hardening patch: ensure promotion refuses calibration lineage/hash drift before writing a promotion artifact.
+`ResearchMetrics` and the research acceptance/promotion flow already include important fields such as total return, MDD, profit factor, win rate, trade count, max consecutive losses, fees, slippage, and stability. However, promotion-grade research metrics do not clearly include CAGR, average holding time, exposure/time-in-market, global expectancy per trade, open-position-at-end state, and realized/unrealized separation. More importantly, research metrics, regime metrics, runtime performance metrics, acceptance gates, candidate profiles, and promotion artifacts appear to use related but not fully unified metric definitions.
 
-## Primary objective
+The goal is not a symptom patch such as “add CAGR as one extra field.” The goal is to introduce a non-breaking metrics contract and shared calculation path that makes these metrics first-class, deterministic, observable, testable, and safe for future promotion/readiness gates.
 
-Verify and, if confirmed necessary, patch promotion-time calibration lineage binding.
+## Files and areas to inspect first
 
-The suspected gap:
+Inspect the repo directly before modifying anything. At minimum inspect:
 
-`src/bithumb_bot/research/lineage.py` has `execution_calibration_artifact_hash` in research lineage and `research-reproduce` can detect missing or mismatched calibration hashes later. `promotion_gate.py` also records `execution_calibration_artifact_hash` in the promotion artifact. However, `promote_candidate()` may not explicitly pass the candidate calibration hash into `build_promotion_lineage()` or fail immediately when the base research lineage calibration hash disagrees with the candidate calibration hash.
-
-This means a bad or stale base lineage calibration hash could possibly survive until `research-reproduce` or approved-profile verification catches it. That is too late. Promotion should fail closed before writing the promotion artifact.
-
-Keep this as a hypothesis until verified.
-
-## Files to inspect first
-
-Inspect at least:
-
-* `src/bithumb_bot/research/deployment_policy.py`
+* `src/bithumb_bot/research/metrics.py`
+* `src/bithumb_bot/research/backtest_engine.py`
 * `src/bithumb_bot/research/validation_protocol.py`
-* `src/bithumb_bot/research/promotion_gate.py`
-* `src/bithumb_bot/research/lineage.py`
-* `src/bithumb_bot/research/execution_calibration.py`
 * `src/bithumb_bot/research/experiment_manifest.py`
-* `src/bithumb_bot/approved_profile.py`
-* `src/bithumb_bot/profile_cli.py`
-* `tests/test_research_promotion_gate.py`
-* `tests/test_research_execution_calibration_policy.py`
-* `tests/test_approved_profile.py`
+* `src/bithumb_bot/research/promotion_gate.py`
+* `src/bithumb_bot/research/report_writer.py`
+* `src/bithumb_bot/research/run_summary.py`
+* `src/bithumb_bot/research/cli.py`
+* `src/bithumb_bot/research/execution_model/`
+* `src/bithumb_bot/research/execution_timing.py`
+* `src/bithumb_bot/market_regime/metrics.py`
+* `src/bithumb_bot/strategy_performance.py`
 * `docs/research-validation.md`
-* `docs/runbooks/research-to-paper.md`
+* `examples/research/*.json`
+* relevant tests under `tests/`, especially research backtest, walk-forward, promotion, manifest, reproducibility, operator reporting, regime, and strategy performance tests.
 
-Search for:
+Also confirm that root `backtest.py` and `backtest2.py` remain smoke/compatibility paths and are not used as promotion-grade evidence.
 
-```text
-execution_calibration_artifact_hash
-execution_calibration_artifact_hashes
-build_research_lineage
-build_promotion_lineage
-reproduce_promotion
-_candidate_calibration_hash
-_candidate_calibration_hashes
-validate_production_calibration_policy
-production_calibration_policy_result
-calibration_hash_missing
-calibration_hash_mismatch
-lineage_execution_calibration_artifact_hash_mismatch
-```
+## Hypotheses to verify or refute
 
-## Hypotheses to verify, not assume
+Keep these hypotheses as hypotheses until you verify them in code and tests.
 
-### H1: The major production-bound calibration policy is already implemented
+### H1: Research core metrics are narrower than the operational metric set required for automated trading
 
-Verify that the current repo already has:
+Check whether `ResearchMetrics` and generated `train_metrics`, `validation_metrics`, `final_holdout_metrics`, and walk-forward metrics include:
 
-* central production calibration policy module
-* explicit deployment tiers such as `research_only`, `paper_candidate`, `live_dry_run_candidate`, `small_live_candidate`
-* manifest parsing and canonical hash inclusion for `deployment_tier`
-* production-bound policy requiring explicit `execution_model`
-* production-bound policy requiring `execution_calibration_required=true`
-* production-bound policy requiring `execution_calibration_strictness="fail"`
-* production-bound policy rejecting missing/hashless/multiple calibration hashes
-* approved profile generation/promotion enforcing production-bound calibration policy
-* tests for warn-mode rejection and legacy `cost_model` rejection.
+* CAGR
+* average/median/max holding time
+* exposure time / time in market
+* global expectancy per closed trade
+* open position at end
+* realized vs unrealized PnL separation
+* fee drag ratio
+* slippage drag ratio
+* execution count vs closed trade count separation
 
-If any of these are missing or broken, fix the missing core policy before doing the smaller lineage hardening.
+If these are absent or only available in another subsystem, document that.
 
-### H2: Candidate calibration hash and promotion artifact calibration hash are now populated
+### H2: Acceptance gates do not currently evaluate time-normalized return, capital exposure, or expectancy
 
-Verify that a candidate with valid calibration evidence produces:
+Inspect `AcceptanceGate`, `_parse_acceptance_gate`, `_gate_result`, candidate ranking, and promotion validation. Determine whether candidates with equal total return/PF but very different duration, exposure, holding time, or expectancy would be treated equivalently.
 
-* `candidate.execution_calibration_artifact_hash`
-* `candidate.execution_calibration_artifact_hashes`
-* `promotion.execution_calibration_artifact_hash`
-* `promotion.execution_calibration_artifact_hashes`
-* candidate profile hash including calibration policy/hash fields.
+### H3: Metric definitions are fragmented across research, regime, and runtime layers
 
-If this is not true, fix candidate/promotion hash propagation first.
+Compare definitions in research metrics, `market_regime/metrics.py`, `strategy_performance.py`, and reporting/evidence code. Identify whether expectancy, profit factor, win rate, fee drag, and drawdown use identical units and formulas.
 
-### H3: Promotion lineage may still rely only on base research lineage calibration hash
+### H4: Execution realism is improved but still limited by data availability
 
-Verify whether `promote_candidate()` passes the candidate calibration hash into `build_promotion_lineage()`.
+Confirm what is currently supported: candle close, next candle open, top-of-book after decision, latency-adjusted top-of-book, stress execution, calibration, quote coverage, and dataset quality. Also confirm limitations around full depth, queue position, trade ticks, market impact, and intra-candle path.
 
-Risk:
+Do not implement full-depth/tick replay unless it is already in scope and infrastructure exists. This task is metrics-contract-first.
+
+### H5: Open position, holding time, and exposure are not first-class ledgers
+
+Inspect whether `run_sma_backtest` has a durable equity curve, position timeline, closed trade ledger, and fill ledger sufficient for deterministic metrics. If not, implement the minimum first-class structures needed.
+
+### H6: Naively changing metrics could break report hashes, candidate profile hashes, promotion artifacts, and reproducibility
+
+Before changing profile/hash payloads, inspect how `content_hash`, `candidate_profile_hash`, lineage, and promotion verification are computed. Preserve backward compatibility for old artifacts where possible. New metrics must be deterministic and hash-safe.
+
+## Design priority
+
+Prefer a structural change over symptom patches.
+
+The preferred direction is:
 
 ```text
-candidate execution_calibration_artifact_hash = sha256:correct
-base lineage execution_calibration_artifact_hash = sha256:stale
-promotion artifact top-level hash = sha256:correct
-promotion lineage hash = sha256:stale
-promotion artifact is written
-research-reproduce later fails with calibration_hash_mismatch
+execution/fill events
+-> closed trade ledger
+-> position timeline
+-> equity curve
+-> shared metrics calculator
+-> metrics_v2 / metrics contract
+-> report artifacts
+-> optional acceptance gate extensions
+-> promotion/profile observability
+-> runtime parity groundwork
 ```
 
-Desired behavior:
+Do not only add fields directly to `ResearchMetrics` unless the repo structure makes that the safest bridge. Keep the existing `ResearchMetrics` / `metrics` output backward-compatible. Add a non-breaking `metrics_v2`, `metrics_schema_version`, or similarly explicit contract.
+
+## Implementation requirements
+
+### 1. Add a deterministic metrics contract
+
+Add a new research metrics contract in an appropriate module, for example:
+
+* `src/bithumb_bot/research/metrics_contract.py`, or
+* an extension of `src/bithumb_bot/research/metrics.py` if that is cleaner.
+
+The contract should support at least the following fields, either as nested dataclasses or a stable dictionary schema:
 
 ```text
-promotion refuses before writing artifact:
-promotion refused: lineage_execution_calibration_artifact_hash_mismatch
+metrics_schema_version: 2
+
+return_risk:
+  total_return_pct
+  cagr_pct
+  max_drawdown_pct
+  realized_return_pct
+  unrealized_pnl_end
+  open_position_at_end
+
+trade_quality:
+  closed_trade_count
+  execution_count
+  win_rate
+  avg_win
+  avg_loss
+  payoff_ratio
+  profit_factor
+  expectancy_per_trade_krw
+  expectancy_per_trade_pct
+  max_consecutive_losses
+  single_trade_dependency_score
+
+time_exposure:
+  period_start_ts
+  period_end_ts
+  elapsed_ms
+  calendar_days
+  active_bar_count
+  exposure_time_pct
+  avg_holding_time_ms
+  median_holding_time_ms
+  max_holding_time_ms
+
+cost_execution:
+  fee_total
+  slippage_total
+  fee_drag_ratio
+  slippage_drag_ratio
+  filled_execution_count
+  partial_fill_count
+  failed_execution_count
+  skipped_execution_count
+  quote_coverage_pct
+  median_quote_age_ms
+  p95_quote_age_ms
 ```
 
-### H4: Required calibration with missing lineage calibration hash should fail closed early
+If any field cannot be computed safely from current data, expose it as `None` and add a clear limitation/reason field rather than fabricating it.
 
-If the candidate requires execution calibration and has a candidate calibration hash, but base lineage lacks `execution_calibration_artifact_hash`, decide whether promotion should:
+### 2. Define formulas explicitly in code and docs
 
-* write the candidate calibration hash into promotion lineage, or
-* refuse if current-generation base lineage is missing that field.
+Use deterministic, documented formulas. Suggested definitions:
 
-Preferred behavior:
+* `total_return_pct`: same meaning as current `return_pct`.
+* `cagr_pct`: annualized return over elapsed calendar time; return `None` if elapsed time is zero or invalid.
+* `realized_return_pct`: realized closed-trade net PnL divided by starting cash.
+* `unrealized_pnl_end`: final equity minus cash minus realized basis as appropriate; if exact basis is not safely available, compute from final mark and open position cost basis and document the formula.
+* `open_position_at_end`: true if the simulation ends with nonzero asset quantity or an open position interval.
+* `expectancy_per_trade_krw`: mean net PnL over closed trades.
+* `expectancy_per_trade_pct`: mean closed-trade return percentage using entry notional/cost basis if available; otherwise `None` with a limitation reason.
+* `payoff_ratio`: `avg_win / abs(avg_loss)`, `None` if no losses or no wins unless the repo already has a preferred convention.
+* `exposure_time_pct`: total time with active position divided by elapsed evaluation window.
+* `avg/median/max_holding_time_ms`: computed over closed position intervals only; open interval should be separately represented and should not silently contaminate closed holding-time stats.
+* `fee_drag_ratio` and `slippage_drag_ratio`: define against a stable denominator; prefer absolute gross PnL or total traded notional if available. Choose one, document it, and test it.
+* `execution_count`: execution attempts, not closed trades.
+* `closed_trade_count`: closed SELL-side realized trades/position closures.
 
-* If base lineage has no calibration hash but candidate has required calibration evidence, `build_promotion_lineage()` should bind the candidate calibration hash into promotion lineage.
-* If base lineage has a calibration hash and it differs from candidate hash, fail closed.
-* If candidate requires calibration but candidate hash itself is missing, promotion should already fail through existing calibration/policy gates; keep or strengthen that behavior.
+Align these definitions with `strategy_performance.py` and `market_regime/metrics.py` where possible. If formulas diverge, either unify them or explicitly document why.
 
-### H5: `research-reproduce` still catches missing/mismatched calibration hash
+### 3. Add first-class ledgers or timeline data needed for metrics_v2
 
-Even after promotion-time hardening, `research-reproduce` must keep detecting:
+Modify `run_sma_backtest` and `BacktestRun` carefully so metrics can be calculated from deterministic structures, not ad hoc counters only.
 
-* required calibration but missing promotion calibration hash
-* required calibration but missing lineage calibration hash
-* promotion calibration hash mismatching lineage calibration hash.
+At minimum, expose or internally build:
 
-Do not remove late-stage detection just because promotion now fails earlier.
+* an equity curve or equity checkpoint list
+* a position timeline / exposure intervals
+* a closed trade ledger or closed position records
+* enough fill/execution metadata to distinguish:
 
-### H6: Scenario-gate hardening may still be worthwhile but is optional
+  * attempted execution
+  * filled execution
+  * partial fill
+  * failed execution
+  * skipped execution
+  * portfolio-applied trade
+  * closed trade
 
-`deployment_policy.py` may already inspect scenario gate content hash, quality status, sample count, market/interval mismatch, and fill-reference mismatch. Verify whether scenario gate status and binding-field missing cases are directly checked.
+Avoid a large rewrite if unnecessary, but do not hide the problem by deriving holding/exposure from incomplete data.
 
-Optional hardening if small and safe:
+Existing `trades`, `execution_event_summary`, and pending-fill logic may be reused, but make the data model clear and testable.
 
-* If `scenario_gate.status != "PASS"`, add `production_execution_calibration_scenario_gate_not_passed`.
-* Include scenario gate reasons in production policy reasons.
-* If production-bound scenario gate is missing `market`, `expected_market`, `interval`, or `expected_interval`, add stable missing-binding reason codes.
-* If production-bound scenario gate is missing `expected_fill_reference_policy`, add a stable missing-policy reason if compatible with existing artifact schema.
+### 4. Preserve existing metrics and reports
 
-Do not over-scope this optional patch if the primary lineage fail-fast patch is still missing.
+Do not remove or rename the current `metrics` / `ResearchMetrics` fields. Existing code and tests should still pass.
 
-## Required patch: promotion-time calibration lineage fail-fast
+Add new fields as additional output:
 
-If H3 or H4 is confirmed, patch the code so promotion fails closed before writing a promotion artifact when candidate calibration hash and base lineage calibration hash disagree.
+* `train_metrics_v2`
+* `validation_metrics_v2`
+* `final_holdout_metrics_v2`
+* per-window walk-forward `metrics_v2` where appropriate
+* top-level schema metadata such as `metrics_schema_version`
+* candidate/profile fields only in a backward-compatible way
 
-Preferred implementation shape:
+If `build_candidate_profile()` includes new metrics, do it conditionally or with schema-version care so historical artifacts do not break unexpectedly. Promotion for new production-bound candidates may fail closed on missing metrics contract, but old legacy compatibility behavior should remain explicit and reason-coded.
 
-1. Extend `build_promotion_lineage()` in `src/bithumb_bot/research/lineage.py` with an optional parameter:
+### 5. Extend acceptance gates without breaking old manifests
 
-```python
-execution_calibration_artifact_hash: str | None = None
+Add optional acceptance gate fields. Suggested optional keys:
+
+```json
+{
+  "min_cagr_pct": null,
+  "min_expectancy_per_trade_krw": null,
+  "min_expectancy_per_trade_pct": null,
+  "max_exposure_time_pct": null,
+  "max_avg_holding_time_minutes": null,
+  "max_fee_drag_ratio": null,
+  "max_slippage_drag_ratio": null,
+  "reject_open_position_at_end": false,
+  "metrics_contract_required": false
+}
 ```
 
-2. Inside `build_promotion_lineage()`:
+Implementation rules:
 
-* validate the base lineage first as it currently does
-* read existing base lineage `execution_calibration_artifact_hash`
-* normalize empty strings to `None`
-* if both base lineage calibration hash and supplied candidate calibration hash exist and differ:
+* If a new gate field is absent or `null`, preserve existing behavior.
+* If a new gate field is present, evaluate it using `metrics_v2`.
+* Missing required metric values should fail with stable reason codes, not silently pass.
+* For `deployment_tier` values beyond `research_only`, consider fail-closed behavior if `metrics_contract_required=true` or if production policy already indicates that missing evidence should fail.
+* Keep manifest parsing strict: reject unsupported new fields if the repo’s parser is strict elsewhere.
+* Add `as_dict()` support and docs.
 
-  * raise `LineageValidationError("lineage_execution_calibration_artifact_hash_mismatch")`
-* if supplied candidate calibration hash exists:
-
-  * set `lineage["execution_calibration_artifact_hash"] = supplied_hash`
-* if no supplied hash exists:
-
-  * preserve existing base lineage hash if present
-* recompute `lineage_hash` after the update.
-
-3. In `promote_candidate()`:
-
-* compute `candidate_calibration_hash = _candidate_calibration_hash(candidate)` once.
-* use that value for:
-
-  * promotion artifact `execution_calibration_artifact_hash`
-  * `build_promotion_lineage(..., execution_calibration_artifact_hash=candidate_calibration_hash, ...)`
-* avoid repeated `validate_production_calibration_policy(candidate)` calls if possible; store the result once for clarity and deterministic artifact construction.
-* if `build_promotion_lineage()` raises `LineageValidationError`, surface it as:
-
-  * `promotion refused: lineage_execution_calibration_artifact_hash_mismatch`
-  * or the existing `promotion refused: {exc}` pattern if that is already the repo convention.
-
-4. Preserve existing behavior for research-only candidates without calibration hashes.
-
-5. Preserve current `research-reproduce` calibration hash checks. Do not weaken them.
-
-## Optional patch: stronger scenario gate validation
-
-Apply only if it is small, does not break current generated artifacts, and can be tested.
-
-In `src/bithumb_bot/research/deployment_policy.py`, strengthen `_extend_scenario_gate_reasons()` so production-bound policy does not blindly trust the gate producer.
-
-Suggested stable reason codes:
+Use stable reason codes such as:
 
 ```text
-production_execution_calibration_scenario_gate_not_passed
-production_execution_calibration_binding_missing:market
-production_execution_calibration_binding_missing:expected_market
-production_execution_calibration_binding_missing:interval
-production_execution_calibration_binding_missing:expected_interval
-production_execution_calibration_binding_missing:expected_fill_reference_policy
+metrics_contract_missing
+metrics_v2_missing
+metrics_v2_required_field_missing
+min_cagr_failed
+min_expectancy_per_trade_krw_failed
+min_expectancy_per_trade_pct_failed
+max_exposure_time_failed
+max_avg_holding_time_failed
+max_fee_drag_ratio_failed
+max_slippage_drag_ratio_failed
+open_position_at_end_failed
 ```
 
-Keep existing reason codes intact. Do not rename existing reasons unless absolutely necessary.
+Adapt names to existing reason-code style.
 
-## Required tests
+### 6. Improve candidate ranking if the repo has a ranking key
 
-Add focused tests that would fail before the patch.
+Inspect candidate ranking. If ranking currently overweights raw return, update it carefully so passing candidates are ordered by operational robustness. A reasonable priority is:
 
-### Promotion lineage hash binding tests
+1. scenario policy pass
+2. validation/final-holdout/walk-forward pass
+3. no open position at end
+4. lower MDD
+5. higher expectancy
+6. sufficient trade count
+7. lower fee/slippage drag
+8. better CAGR or exposure-adjusted return
+9. lower single-trade dependency
 
-Add or extend tests in `tests/test_research_promotion_gate.py`.
+Do not break deterministic sorting. Add tests if ranking behavior changes.
 
-Required cases:
+### 7. Add observability
 
-1. Successful required-calibration promotion binds calibration hash into promotion lineage.
+Update CLI/report summaries to expose the new contract without overwhelming output. At minimum show:
 
-Test shape:
+* `metrics_schema_version`
+* validation/final-holdout `cagr_pct`
+* `expectancy_per_trade_krw`
+* `exposure_time_pct`
+* `avg_holding_time_ms` or minutes
+* `open_position_at_end`
+* fee/slippage drag if available
+* new gate fail reasons
 
-```text
-Given:
-- candidate has execution_calibration_required=true
-- execution_calibration_strictness="fail"
-- execution_calibration_gate.status="PASS"
-- gate has artifact_hash="sha256:calibration"
-- base research lineage either has no calibration hash or matching calibration hash
+Reports must carry enough data for an operator to understand why a candidate passed or failed without manually recomputing metrics.
 
-When:
-- promote_candidate(...)
+### 8. Document scope and limitations
 
-Assert:
-- artifact["execution_calibration_artifact_hash"] == "sha256:calibration"
-- artifact["lineage"]["execution_calibration_artifact_hash"] == "sha256:calibration"
-- artifact["lineage_hash"] starts with "sha256:"
-- research-reproduce on the promotion returns ok=true if the fixture writes source reports correctly.
-```
+Update `docs/research-validation.md` and example manifests.
 
-2. Promotion refuses stale base lineage calibration hash before writing artifact.
+Docs must state:
 
-Test shape:
+* root/simple smoke backtests are still not promotion evidence
+* `metrics_v2` is the promotion-grade metrics contract extension
+* exact formulas for CAGR, expectancy, exposure, holding time, fee drag, and slippage drag
+* how new acceptance gate fields behave
+* what remains out of scope:
 
-```text
-Given:
-- candidate calibration hash is "sha256:calibration-correct"
-- base report lineage contains execution_calibration_artifact_hash="sha256:calibration-stale"
-- report content hash is recomputed so only semantic lineage mismatch remains
+  * full orderbook depth
+  * queue position
+  * tick replay
+  * market impact
+  * intra-candle path reconstruction
+* how production-bound candidates should require stronger execution timing / top-of-book / calibration evidence
 
-When:
-- promote_candidate(...)
+Do not claim execution realism that the repo does not implement.
 
-Assert:
-- raises PromotionGateError
-- error contains "lineage_execution_calibration_artifact_hash_mismatch"
-- no promotion_<candidate_id>.json artifact is written.
-```
+## Testing requirements
 
-3. Required calibration missing from promotion/lineage still fails reproduce.
+Add or update tests before considering the task complete. Use deterministic synthetic data where possible.
 
-If a test already exists, verify it. If not, add a small reproduce test in the appropriate lineage/promotion test file.
+### Golden metrics tests
 
-Test shape:
+Create unit tests for the shared metrics calculator covering:
 
-```text
-Given:
-- a promotion artifact claims execution_calibration_required=true
-- promotion execution_calibration_artifact_hash is missing OR lineage execution_calibration_artifact_hash is missing
+1. Same total return over different elapsed periods:
 
-When:
-- reproduce_promotion(path)
+   * 1 month +10% vs 1 year +10%
+   * total return may match; CAGR must differ.
 
-Assert:
-- ok is false
-- reason is "calibration_hash_missing"
-```
+2. Same return with different exposure:
 
-### Optional scenario gate hardening tests
+   * always in position vs only 10% of the period in position
+   * `exposure_time_pct` must differ.
 
-If you implement the optional scenario gate hardening, add tests in `tests/test_research_execution_calibration_policy.py`.
+3. Open position at end:
 
-Suggested cases:
+   * `open_position_at_end=true`
+   * unrealized PnL separated
+   * closed-trade stats do not falsely count the open position as closed.
 
-```text
-production-bound scenario gate with status="FAIL" but top-level gate status="PASS"
--> policy FAIL
--> reason includes production_execution_calibration_scenario_gate_not_passed
+4. Trade quality:
 
-production-bound scenario gate missing expected_market or expected_interval
--> policy FAIL
--> stable binding-missing reason present
-```
+   * 10 small wins and 1 large loss
+   * verify PF, expectancy, payoff ratio, max consecutive losses, single-trade dependency.
 
-## Tests to run
+5. Cost drag:
 
-Run at least:
+   * zero-fee/zero-slippage vs stressed fee/slippage
+   * verify fee/slippage totals and drag ratios.
+
+6. Execution count vs closed trade count:
+
+   * include partial fills, failed executions, and skipped executions
+   * ensure counts do not collapse into one ambiguous trade count.
+
+### Backtest integration tests
+
+Add or update tests that run `run_sma_backtest` on synthetic candles and verify:
+
+* `metrics` remains present and backward-compatible
+* `metrics_v2` is present
+* `train_metrics_v2`, `validation_metrics_v2`, and `final_holdout_metrics_v2` appear in reports where applicable
+* open positions and exposure are reported correctly
+* report content hash remains deterministic
+
+### Gate tests
+
+Add tests for new acceptance gate fields:
+
+* missing optional fields preserve old behavior
+* explicit `min_cagr_pct` can fail a candidate
+* explicit expectancy threshold can fail a candidate
+* explicit exposure threshold can fail a candidate
+* `reject_open_position_at_end=true` fails when appropriate
+* missing required `metrics_v2` fails with stable reason code when contract is required
+* old manifests still parse and run
+
+### Parity tests
+
+Where feasible, add a test that uses the same closed-trade ledger to compare common definitions with runtime/regime performance calculations. At minimum ensure expectancy, PF, win rate, and fee drag are not silently inconsistent across research and runtime-style calculations.
+
+### Reproducibility/hash tests
+
+Run and update relevant tests around:
+
+* research backtest reproducibility
+* report content hashes
+* candidate profile hashes
+* promotion gate validation
+* walk-forward
+* manifest parsing
+* CLI summary if existing tests assert output
+
+Make sure generated timestamps do not enter deterministic hashes unless the repo already intentionally includes them.
+
+## Backward compatibility and recovery requirements
+
+* Existing `ResearchMetrics` must remain available.
+* Existing manifests without new fields must continue to work.
+* Existing smoke backtest isolation must remain intact.
+* Existing promotion/reproduce behavior should not break for historical artifacts unless there is already an explicit fail-closed policy. If historical compatibility is limited, expose a stable reason code and document it.
+* New production-bound metrics contract enforcement must fail closed only where explicitly configured or clearly required by repository policy.
+* If a report hash or candidate profile hash changes for new reports, this is acceptable only if deterministic and documented.
+* Do not edit secrets, `.env`, live runtime configuration, or external artifacts.
+* Do not move research artifacts into the repository.
+
+## Suggested implementation shape
+
+You may choose a different shape if the repo structure demands it, but prefer this direction:
+
+1. Introduce a shared metrics module:
+
+   * `MetricContractV2`
+   * `EquityPoint`
+   * `PositionInterval`
+   * `ClosedTradeRecord`
+   * `build_metrics_v2(...)`
+   * stable `as_dict()`
+
+2. Extend `BacktestRun`:
+
+   * keep existing fields
+   * add `metrics_v2`
+   * optionally add `equity_curve`, `position_intervals`, `closed_trades` if useful and not too invasive
+
+3. Update `run_sma_backtest`:
+
+   * record enough equity/position/closed-trade data
+   * compute old metrics as before
+   * compute `metrics_v2` from shared calculator
+
+4. Update `validation_protocol.py`:
+
+   * propagate `*_metrics_v2`
+   * use new gate checks only when configured
+   * preserve old gate behavior otherwise
+
+5. Update `experiment_manifest.py`:
+
+   * parse optional new gate fields
+   * strict validation
+   * `as_dict()` support
+
+6. Update promotion/profile code:
+
+   * include metrics contract metadata in new candidate profiles in a backward-compatible way
+   * add fail-closed reason codes only when required
+
+7. Update CLI/report docs/tests.
+
+## Commands to run
+
+Run the smallest relevant test slice first, then the broader suite. Use the repo’s existing tooling. Likely commands include:
 
 ```bash
-uv run pytest -q tests/test_research_promotion_gate.py
-uv run pytest -q tests/test_research_execution_calibration_policy.py
-uv run pytest -q tests/test_approved_profile.py
+uv run pytest tests/test_research_manifest.py
+uv run pytest tests/test_research_walk_forward.py
+uv run pytest tests/test_research_backtest_reproducibility.py
+uv run pytest tests/test_experiment_report.py
+uv run pytest tests/test_strategy_performance_gate.py
+uv run pytest tests/test_market_regime.py
+uv run pytest
 ```
 
-If `uv` is unavailable:
+If any command is unavailable or too slow in the environment, run the closest feasible subset and report exactly what was and was not run.
 
-```bash
-python -m pytest -q tests/test_research_promotion_gate.py
-python -m pytest -q tests/test_research_execution_calibration_policy.py
-python -m pytest -q tests/test_approved_profile.py
-```
+## Final report format
 
-If practical, also run:
-
-```bash
-uv run pytest -q
-```
-
-or:
-
-```bash
-python -m pytest -q
-```
-
-Do not hide failing tests. If any failure is unrelated, report the exact command, failure, and why it is unrelated.
-
-## Recovery and observability requirements
-
-The patch must improve fail-fast behavior without weakening late-stage recovery checks.
-
-Required properties:
-
-* Promotion must refuse mismatched calibration lineage before writing a promotion artifact.
-* `research-reproduce` must still detect calibration hash missing/mismatch.
-* Approved profile verification must still detect source promotion and calibration hash drift.
-* Production-bound `warn` strictness must remain non-promotable.
-* Legacy `cost_model`-only artifacts must remain research diagnostic only and non-production-bound.
-* Research-only candidates without calibration must remain possible where existing behavior allows them.
-* Stable reason codes must be machine-testable.
-* Operator-facing errors should be clear enough to tell the operator to regenerate calibration/research reports rather than edit hashes.
-
-Do not:
-
-* edit env files
-* touch secrets
-* change live order behavior
-* weaken dataset quality, lineage, candidate profile hash, final holdout, walk-forward, regime, execution reality, or approved-profile gates
-* remove existing reproducibility checks
-* treat telemetry-only execution quality as calibration PASS evidence
-* implement automatic paper/live typed evidence generation in this patch.
-
-## Documentation
-
-Docs update is optional for the primary patch if existing docs already mention `calibration_hash_missing` and `calibration_hash_mismatch`.
-
-If you update docs, keep it precise and small. Suggested sentence for `docs/research-validation.md` or the runbook:
-
-```text
-Promotion fails before writing an artifact when the candidate calibration hash and recorded research lineage calibration hash disagree; regenerate the research report from the manifest and calibration artifact instead of editing recorded hashes.
-```
-
-Do not imply that calibration solves full-depth order book, queue position, trade tick, or intra-candle path limitations.
-
-## Expected final report format
-
-When finished, report exactly in this structure:
+At the end, provide a concise but complete report with these sections:
 
 ```text
 Summary
-- What changed.
-- Whether this was a code patch, test patch, documentation patch, or no-op after verification.
-- Whether the production-bound calibration invariant remains enforced.
-- Whether promotion now fails fast on calibration lineage drift.
+- What changed and why.
 
-Hypothesis Review
-- H1: confirmed/refined/refuted, with repo evidence.
-- H2: confirmed/refined/refuted, with repo evidence.
-- H3: confirmed/refined/refuted, with repo evidence.
-- H4: confirmed/refined/refuted, with repo evidence.
-- H5: confirmed/refined/refuted, with repo evidence.
-- H6: confirmed/refined/refuted, with repo evidence.
+Hypotheses verified/refuted
+- H1:
+- H2:
+- H3:
+- H4:
+- H5:
+- H6:
 
-Implementation Details
-- Files changed.
-- How candidate calibration hash is passed into promotion lineage.
-- How mismatch is detected before artifact write.
-- Whether scenario gate hardening was applied or deferred.
-- Any docs updated.
+Design decisions
+- Metrics contract shape:
+- Formula definitions:
+- Backward compatibility choices:
+- Hash/reproducibility choices:
 
-Behavioral Guarantees
-- What happens when base lineage calibration hash matches candidate calibration hash.
-- What happens when base lineage calibration hash differs.
-- What happens when required calibration hash is missing.
-- What happens for research-only candidates.
-- What remains enforced later by research-reproduce and approved profile verification.
+Files changed
+- path: purpose
 
-Tests
-- Exact commands run.
-- Pass/fail results.
-- Any tests not run and why.
+New/changed reason codes
+- code: meaning
 
-Files Changed
-- List files with one-line purpose for each.
+Tests added/updated
+- test name/path: what it proves
 
-Remaining Gaps / Follow-ups
-- State explicitly whether automatic paper/live typed evidence generation remains future work.
-- State explicitly that calibration still does not create full-depth/queue/tick/intra-candle execution evidence.
-- State any optional scenario-gate hardening not implemented.
+Commands run
+- command: pass/fail
+- command not run: reason
+
+Operational impact
+- What operators will now see in reports/CLI.
+- What new gates can prevent.
+- What remains out of scope.
+
+Risks and follow-up
+- Any remaining limitations around top-of-book, depth, tick replay, queue position, market impact, or intra-candle path.
+- Any future work needed to connect runtime trade_lifecycles to the same metrics contract.
 ```
 
-Do not overclaim. If the current repo already implements the promotion-time calibration lineage fail-fast check, do not patch unnecessarily; add missing regression tests only if needed and report that the code path was already safe.
-
+Do not claim the system is live-ready merely because tests pass. The expected outcome is a safer, more reproducible research/promotion metrics foundation, not a live-trading endorsement.

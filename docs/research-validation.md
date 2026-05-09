@@ -80,8 +80,50 @@ DATA_ROOT/<mode>/reports/research/<experiment_id>/...
 ```
 
 Reports include manifest hash, dataset fingerprint, dataset quality reports and hashes, candidate profile hash, content hash, repository version, metrics, gate results, and artifact paths.
-Reports aggregate by stable `parameter_candidate_id`; they do not treat each execution scenario as a separate promotion candidate. Each top-level candidate contains `scenario_policy`, pass/fail counts, required scenario count, required scenario ids, `final_holdout_present`, `final_holdout_required_for_promotion`, `candidate_profile_hash`, and `scenario_results[]`. Each scenario result records scenario identity, `scenario_role`, `scenario_role_source`, execution model payload/hash, cost model, train/validation/final-holdout/walk-forward metrics when present, regime gate result, execution-calibration gate, scenario acceptance result, fail reasons, and execution metadata. Candle-only datasets do not contain top-of-book, orderbook depth, or intra-candle path data; trade metadata records that limitation instead of fabricating quotes or depth. When top-of-book is configured and joined, execution metadata carries `best_bid`, `best_ask`, and `spread_bps`, while `reference_price` remains candle close.
+Reports aggregate by stable `parameter_candidate_id`; they do not treat each execution scenario as a separate promotion candidate. Each top-level candidate contains `scenario_policy`, pass/fail counts, required scenario count, required scenario ids, `final_holdout_present`, `final_holdout_required_for_promotion`, `candidate_profile_hash`, legacy `metrics`, `metrics_schema_version=2`, `train_metrics_v2`, `validation_metrics_v2`, `final_holdout_metrics_v2` when present, and `scenario_results[]`. Each scenario result records scenario identity, `scenario_role`, `scenario_role_source`, execution model payload/hash, cost model, train/validation/final-holdout/walk-forward metrics when present, regime gate result, execution-calibration gate, scenario acceptance result, fail reasons, and execution metadata. Candle-only datasets do not contain top-of-book, orderbook depth, or intra-candle path data; trade metadata records that limitation instead of fabricating quotes or depth. When top-of-book is configured and joined, execution metadata carries `best_bid`, `best_ask`, and `spread_bps`, while `reference_price` remains candle close.
 `generated_at` is included for operator context but excluded from the deterministic `content_hash`.
+
+## Metrics Contract V2
+
+`metrics_v2` is the promotion-grade metrics contract extension. The legacy `metrics` object remains present for compatibility and keeps its existing field names and formulas. New reports and candidate profiles include `metrics_schema_version=2` and nested sections:
+
+- `return_risk`: total return, CAGR, max drawdown, realized return, ending unrealized PnL, and whether an open position remains at the end.
+- `trade_quality`: closed trade count, execution attempt count, win rate, average win/loss, payoff ratio, profit factor, expectancy in KRW and percent, max consecutive losses, and single-trade dependency.
+- `time_exposure`: evaluation start/end, elapsed time, calendar days, active bar count, exposure time percentage, and closed-position holding-time statistics.
+- `cost_execution`: total fees, total slippage, fee/slippage drag ratios, filled/partial/failed/skipped execution counts, quote coverage, and quote-age percentiles.
+
+Formula definitions are deterministic:
+
+- `total_return_pct` is the same portfolio-level final-equity return represented by legacy `return_pct`.
+- `cagr_pct` annualizes `total_return_pct` over elapsed calendar time; it is `null` when elapsed time is zero, invalid, or numerically unsafe.
+- `realized_return_pct` is closed-trade net PnL divided by starting cash.
+- `unrealized_pnl_end` is final marked asset value minus the open position cost basis. `open_position_at_end=true` keeps that state explicit.
+- `expectancy_per_trade_krw` is mean net PnL over closed SELL-side realized records.
+- `expectancy_per_trade_pct` is mean closed-trade return percentage over allocated entry notional. It is `null` and reason-coded when entry notional is unavailable.
+- `payoff_ratio` is average win divided by absolute average loss; it is `null` when wins or losses are missing.
+- `profit_factor` uses gross winning PnL divided by absolute gross losing PnL. All-win samples use `Infinity`; no-win/no-loss samples use `null`. Research, runtime strategy performance, and market-regime aggregation now share this convention.
+- `exposure_time_pct` is time with an active position divided by elapsed evaluation time.
+- Holding-time metrics use closed position intervals only. Open intervals are reported through `open_position_at_end` and `limitation_reasons`; they do not contaminate closed holding-time stats.
+- `fee_drag_ratio` and `slippage_drag_ratio` use total traded notional as denominator. If no traded notional exists, the ratios are `null` with a limitation reason.
+- `execution_count` means execution attempts. `closed_trade_count` means realized closed SELL-side trade records.
+
+Acceptance gates can optionally evaluate `metrics_v2` with these fields:
+
+```json
+{
+  "min_cagr_pct": null,
+  "min_expectancy_per_trade_krw": null,
+  "min_expectancy_per_trade_pct": null,
+  "max_exposure_time_pct": null,
+  "max_avg_holding_time_minutes": null,
+  "max_fee_drag_ratio": null,
+  "max_slippage_drag_ratio": null,
+  "reject_open_position_at_end": false,
+  "metrics_contract_required": false
+}
+```
+
+Absent or `null` fields preserve old behavior. When a field is configured, it is evaluated from `validation_metrics_v2` and, when present, `final_holdout_metrics_v2`. Missing required v2 values fail with stable reason codes such as `metrics_v2_missing`, `metrics_contract_missing`, `metrics_v2_required_field_missing`, `min_cagr_failed`, `min_expectancy_per_trade_krw_failed`, `min_expectancy_per_trade_pct_failed`, `max_exposure_time_failed`, `max_avg_holding_time_failed`, `max_fee_drag_ratio_failed`, `max_slippage_drag_ratio_failed`, and `open_position_at_end_failed`.
 
 Current-generation research reports also carry one deterministic `dataset_quality_report` payload per split. Each report records expected candle count from the manifest date range and interval, actual candle row count, expected buckets actually present, coverage percentage, missing bucket count/ranges/sample, duplicate-key diagnostics, timestamp monotonicity and interval consistency diagnostics, OHLC invariant violations, non-positive prices, negative volume, first/last timestamp, the candle-table schema fingerprint, the split dataset content hash, quality gate status, quality gate reasons, and a deterministic report `content_hash`. `coverage_pct` is based on expected buckets actually present, not raw row count, so duplicates or unexpected buckets cannot push coverage above 100%. Missing diagnostics are bounded for long 1m historical splits. When `dataset.top_of_book` is configured, the report also records `top_of_book_requested`, `top_of_book_required`, source, join tolerance, expected signal/candle count, joined count, missing count/sample, coverage percentage, quote gate status, and reason codes. Reports also include a deterministic top-level `top_of_book_quality_summary` with requested/required flags, joined and missing quote counts, aggregate coverage, affected split names, quote gate status, limitations, and operator next action. Optional missing quote coverage is `WARN`, adds candidate/report warning code `top_of_book_optional_coverage_warning`, and is printed in the CLI summary; required or fail-policy missing coverage fails closed. The combined `dataset_quality_hash` is included in research lineage, candidate profiles, and promotion artifacts. Unsupported interval formats fail closed instead of being treated as zero-coverage data.
 

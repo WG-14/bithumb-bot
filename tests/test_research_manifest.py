@@ -46,6 +46,40 @@ def test_manifest_parses_required_contract() -> None:
     assert manifest.execution_model.scenarios[0].slippage_bps == 0.0
 
 
+def test_manifest_parses_optional_metrics_v2_gate_fields() -> None:
+    payload = _manifest()
+    payload["acceptance_gate"].update(
+        {
+            "min_cagr_pct": 5.0,
+            "min_expectancy_per_trade_krw": 100.0,
+            "min_expectancy_per_trade_pct": 0.5,
+            "max_exposure_time_pct": 80.0,
+            "max_avg_holding_time_minutes": 60.0,
+            "max_fee_drag_ratio": 0.01,
+            "max_slippage_drag_ratio": 0.02,
+            "reject_open_position_at_end": True,
+            "metrics_contract_required": True,
+        }
+    )
+
+    manifest = parse_manifest(payload)
+    gate = manifest.acceptance_gate
+
+    assert gate.min_cagr_pct == 5.0
+    assert gate.min_expectancy_per_trade_krw == 100.0
+    assert gate.max_exposure_time_pct == 80.0
+    assert gate.reject_open_position_at_end is True
+    assert manifest.canonical_payload()["acceptance_gate"]["metrics_contract_required"] is True
+
+
+def test_manifest_rejects_unknown_acceptance_gate_fields() -> None:
+    payload = _manifest()
+    payload["acceptance_gate"]["unexpected_metric_gate"] = 1
+
+    with pytest.raises(ManifestValidationError, match="acceptance_gate unsupported fields"):
+        parse_manifest(payload)
+
+
 def test_manifest_parses_execution_model_scenarios() -> None:
     payload = _manifest()
     payload["execution_model"] = {

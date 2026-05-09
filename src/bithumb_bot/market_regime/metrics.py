@@ -124,7 +124,7 @@ def aggregate_regime_performance(
             largest_abs = max((abs(value) for value in values), default=0.0)
             gross_profit = sum(wins)
             gross_loss = abs(sum(losses))
-            profit_factor = (gross_profit / gross_loss) if gross_loss > 0.0 else (None if not wins else None)
+            profit_factor = (gross_profit / gross_loss) if gross_loss > 0.0 else (float("inf") if wins else None)
             running = 0.0
             peak = 0.0
             max_dd = 0.0

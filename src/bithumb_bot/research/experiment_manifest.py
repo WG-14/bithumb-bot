@@ -189,10 +189,19 @@ class AcceptanceGate:
     parameter_stability_required: bool
     walk_forward_required: bool = False
     final_holdout_required_for_promotion: bool = True
+    min_cagr_pct: float | None = None
+    min_expectancy_per_trade_krw: float | None = None
+    min_expectancy_per_trade_pct: float | None = None
+    max_exposure_time_pct: float | None = None
+    max_avg_holding_time_minutes: float | None = None
+    max_fee_drag_ratio: float | None = None
+    max_slippage_drag_ratio: float | None = None
+    reject_open_position_at_end: bool = False
+    metrics_contract_required: bool = False
     regime_acceptance_gate: RegimeAcceptanceGate = field(default_factory=RegimeAcceptanceGate)
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "min_trade_count": self.min_trade_count,
             "max_mdd_pct": self.max_mdd_pct,
             "min_profit_factor": self.min_profit_factor,
@@ -202,6 +211,19 @@ class AcceptanceGate:
             "final_holdout_required_for_promotion": self.final_holdout_required_for_promotion,
             "regime_acceptance_gate": self.regime_acceptance_gate.as_dict(),
         }
+        optional_fields = {
+            "min_cagr_pct": self.min_cagr_pct,
+            "min_expectancy_per_trade_krw": self.min_expectancy_per_trade_krw,
+            "min_expectancy_per_trade_pct": self.min_expectancy_per_trade_pct,
+            "max_exposure_time_pct": self.max_exposure_time_pct,
+            "max_avg_holding_time_minutes": self.max_avg_holding_time_minutes,
+            "max_fee_drag_ratio": self.max_fee_drag_ratio,
+            "max_slippage_drag_ratio": self.max_slippage_drag_ratio,
+        }
+        payload.update(optional_fields)
+        payload["reject_open_position_at_end"] = self.reject_open_position_at_end
+        payload["metrics_contract_required"] = self.metrics_contract_required
+        return payload
 
 
 @dataclass(frozen=True)
@@ -682,6 +704,28 @@ def _int_array(payload: dict[str, Any], key: str, *, default: tuple[int, ...]) -
 
 
 def _parse_acceptance_gate(payload: dict[str, Any]) -> AcceptanceGate:
+    allowed_fields = {
+        "min_trade_count",
+        "max_mdd_pct",
+        "min_profit_factor",
+        "oos_return_must_be_positive",
+        "parameter_stability_required",
+        "walk_forward_required",
+        "final_holdout_required_for_promotion",
+        "regime_acceptance_gate",
+        "min_cagr_pct",
+        "min_expectancy_per_trade_krw",
+        "min_expectancy_per_trade_pct",
+        "max_exposure_time_pct",
+        "max_avg_holding_time_minutes",
+        "max_fee_drag_ratio",
+        "max_slippage_drag_ratio",
+        "reject_open_position_at_end",
+        "metrics_contract_required",
+    }
+    unknown = sorted(set(payload) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"acceptance_gate unsupported fields: {','.join(unknown)}")
     min_trade_count = _positive_int(payload.get("min_trade_count"), "acceptance_gate.min_trade_count")
     max_mdd_pct = _finite_non_negative_float(payload.get("max_mdd_pct"), "acceptance_gate.max_mdd_pct")
     min_profit_factor = _finite_non_negative_float(
@@ -697,6 +741,30 @@ def _parse_acceptance_gate(payload: dict[str, Any]) -> AcceptanceGate:
         parameter_stability_required=bool(payload.get("parameter_stability_required", False)),
         walk_forward_required=bool(payload.get("walk_forward_required", False)),
         final_holdout_required_for_promotion=bool(payload.get("final_holdout_required_for_promotion", True)),
+        min_cagr_pct=_optional_finite_float(payload.get("min_cagr_pct"), "acceptance_gate.min_cagr_pct"),
+        min_expectancy_per_trade_krw=_optional_finite_float(
+            payload.get("min_expectancy_per_trade_krw"),
+            "acceptance_gate.min_expectancy_per_trade_krw",
+        ),
+        min_expectancy_per_trade_pct=_optional_finite_float(
+            payload.get("min_expectancy_per_trade_pct"),
+            "acceptance_gate.min_expectancy_per_trade_pct",
+        ),
+        max_exposure_time_pct=_optional_pct(payload.get("max_exposure_time_pct"), "acceptance_gate.max_exposure_time_pct"),
+        max_avg_holding_time_minutes=_optional_finite_non_negative_float(
+            payload.get("max_avg_holding_time_minutes"),
+            "acceptance_gate.max_avg_holding_time_minutes",
+        ),
+        max_fee_drag_ratio=_optional_finite_non_negative_float(
+            payload.get("max_fee_drag_ratio"),
+            "acceptance_gate.max_fee_drag_ratio",
+        ),
+        max_slippage_drag_ratio=_optional_finite_non_negative_float(
+            payload.get("max_slippage_drag_ratio"),
+            "acceptance_gate.max_slippage_drag_ratio",
+        ),
+        reject_open_position_at_end=bool(payload.get("reject_open_position_at_end", False)),
+        metrics_contract_required=bool(payload.get("metrics_contract_required", False)),
         regime_acceptance_gate=_parse_regime_acceptance_gate(payload.get("regime_acceptance_gate")),
     )
 
@@ -804,6 +872,35 @@ def _finite_non_negative_float(value: Any, field: str) -> float:
         raise ManifestValidationError(f"{field} must be a number") from exc
     if parsed < 0.0 or parsed != parsed or parsed in {float("inf"), float("-inf")}:
         raise ManifestValidationError(f"{field} must be a finite value >= 0")
+    return parsed
+
+
+def _optional_finite_float(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ManifestValidationError(f"{field} must be a number") from exc
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        raise ManifestValidationError(f"{field} must be finite")
+    return parsed
+
+
+def _optional_finite_non_negative_float(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
+    parsed = _optional_finite_float(value, field)
+    assert parsed is not None
+    if parsed < 0.0:
+        raise ManifestValidationError(f"{field} must be >= 0")
+    return parsed
+
+
+def _optional_pct(value: Any, field: str) -> float | None:
+    parsed = _optional_finite_non_negative_float(value, field)
+    if parsed is not None and parsed > 100.0:
+        raise ManifestValidationError(f"{field} must be <= 100")
     return parsed
 
 

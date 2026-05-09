@@ -6,6 +6,7 @@ from bithumb_bot.strategy_performance import (
     fetch_strategy_performance_summary,
     evaluate_strategy_performance_gate,
 )
+from bithumb_bot.research.metrics_contract import ClosedTradeRecord, EquityPoint, ExecutionRecord, build_metrics_v2
 
 
 def _insert_lifecycle(conn, *, idx: int, net_pnl: float, fee_total: float = 10.0, exit_rule_name: str = "opposite_cross") -> None:
@@ -50,6 +51,38 @@ def test_strategy_performance_summary_exposes_fee_adjusted_breakdown(tmp_path) -
     assert summary.fee_total == 90.0
     assert summary.expectancy_per_trade == -15.0
     assert summary.by_exit_rule_name["opposite_cross"]["net_pnl"] == -50.0
+
+
+def test_research_metrics_contract_matches_runtime_closed_lifecycle_core_definitions(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "performance-parity.sqlite"))
+    try:
+        _insert_lifecycle(conn, idx=1, net_pnl=100.0, fee_total=10.0)
+        _insert_lifecycle(conn, idx=2, net_pnl=-50.0, fee_total=10.0)
+        conn.commit()
+        runtime = fetch_strategy_performance_summary(conn, strategy_name="sma_with_filter", pair="KRW-BTC")
+    finally:
+        conn.close()
+    research = build_metrics_v2(
+        starting_cash=1000.0,
+        final_cash=1050.0,
+        final_asset_qty=0.0,
+        final_mark_price=0.0,
+        equity_curve=(EquityPoint(ts=0, equity=1000.0, cash=1000.0, asset_qty=0.0), EquityPoint(ts=1, equity=1050.0, cash=1050.0, asset_qty=0.0)),
+        position_intervals=(),
+        closed_trades=(
+            ClosedTradeRecord(exit_ts=1, net_pnl=100.0, return_pct=10.0),
+            ClosedTradeRecord(exit_ts=2, net_pnl=-50.0, return_pct=-5.0),
+        ),
+        execution_records=(
+            ExecutionRecord(side="SELL", status="filled", filled_qty=1.0, price=110.0, fee=10.0),
+            ExecutionRecord(side="SELL", status="filled", filled_qty=1.0, price=50.0, fee=10.0),
+        ),
+    )
+
+    assert research.trade_quality.closed_trade_count == runtime.sample_count
+    assert research.trade_quality.expectancy_per_trade_krw == runtime.expectancy_per_trade
+    assert research.trade_quality.win_rate == runtime.win_rate
+    assert research.trade_quality.profit_factor == runtime.profit_factor
 
 
 def test_strategy_performance_gate_blocks_negative_expectancy(tmp_path) -> None:

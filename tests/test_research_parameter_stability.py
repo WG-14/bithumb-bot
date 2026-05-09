@@ -79,7 +79,7 @@ def test_isolated_spike_has_low_parameter_stability_score() -> None:
 
 
 def test_too_few_neighbors_reports_none_when_stability_required() -> None:
-    manifest = _manifest({"SMA_SHORT": [2], "SMA_LONG": [8]})
+    manifest = _manifest({"SMA_SHORT": [2], "SMA_LONG": [8]}, required=False)
     candidates = iter_parameter_candidates(manifest.parameter_space)
 
     scores = _parameter_stability_scores(
@@ -117,3 +117,120 @@ def test_required_parameter_stability_fails_low_or_missing_scores() -> None:
     assert none_result == "FAIL"
     assert "parameter_stability_failed" in low_reasons
     assert "parameter_stability_failed" in none_reasons
+
+
+def _metrics_v2(
+    *,
+    cagr: float | None = 10.0,
+    expectancy_krw: float | None = 100.0,
+    expectancy_pct: float | None = 1.0,
+    exposure: float | None = 50.0,
+    avg_holding_ms: float | None = 600_000.0,
+    fee_drag: float | None = 0.001,
+    slippage_drag: float | None = 0.001,
+    open_position: bool = False,
+) -> dict[str, object]:
+    return {
+        "metrics_schema_version": 2,
+        "return_risk": {
+            "cagr_pct": cagr,
+            "open_position_at_end": open_position,
+        },
+        "trade_quality": {
+            "expectancy_per_trade_krw": expectancy_krw,
+            "expectancy_per_trade_pct": expectancy_pct,
+        },
+        "time_exposure": {
+            "exposure_time_pct": exposure,
+            "avg_holding_time_ms": avg_holding_ms,
+        },
+        "cost_execution": {
+            "fee_drag_ratio": fee_drag,
+            "slippage_drag_ratio": slippage_drag,
+        },
+    }
+
+
+def test_optional_metrics_v2_gate_fields_preserve_old_behavior_when_absent() -> None:
+    manifest = _manifest({"SMA_SHORT": [2], "SMA_LONG": [8]}, required=False)
+    metrics = {"return_pct": 2.0, "trade_count": 2, "max_drawdown_pct": 1.0, "profit_factor": 2.0}
+
+    result, reasons = _gate_result(
+        manifest=manifest,
+        validation_metrics=metrics,
+        final_holdout_metrics=None,
+        walk_forward_metrics=None,
+        stability_score=None,
+        include_walk_forward=False,
+    )
+
+    assert result == "PASS"
+    assert reasons == []
+
+
+def test_metrics_v2_gate_fields_fail_with_stable_reason_codes() -> None:
+    payload = _manifest({"SMA_SHORT": [2], "SMA_LONG": [8]}).raw
+    payload["acceptance_gate"].update(
+        {
+            "min_cagr_pct": 5.0,
+            "min_expectancy_per_trade_krw": 50.0,
+            "min_expectancy_per_trade_pct": 0.5,
+            "max_exposure_time_pct": 25.0,
+            "max_avg_holding_time_minutes": 5.0,
+            "max_fee_drag_ratio": 0.005,
+            "max_slippage_drag_ratio": 0.005,
+            "reject_open_position_at_end": True,
+        }
+    )
+    manifest = parse_manifest(payload)
+    metrics = {"return_pct": 2.0, "trade_count": 2, "max_drawdown_pct": 1.0, "profit_factor": 2.0}
+
+    result, reasons = _gate_result(
+        manifest=manifest,
+        validation_metrics=metrics,
+        validation_metrics_v2=_metrics_v2(
+            cagr=1.0,
+            expectancy_krw=10.0,
+            expectancy_pct=0.1,
+            exposure=50.0,
+            avg_holding_ms=600_000.0,
+            fee_drag=0.01,
+            slippage_drag=0.02,
+            open_position=True,
+        ),
+        final_holdout_metrics=None,
+        walk_forward_metrics=None,
+        stability_score=None,
+        include_walk_forward=False,
+    )
+
+    assert result == "FAIL"
+    assert {
+        "min_cagr_failed",
+        "min_expectancy_per_trade_krw_failed",
+        "min_expectancy_per_trade_pct_failed",
+        "max_exposure_time_failed",
+        "max_avg_holding_time_failed",
+        "max_fee_drag_ratio_failed",
+        "max_slippage_drag_ratio_failed",
+        "open_position_at_end_failed",
+    } <= set(reasons)
+
+
+def test_metrics_contract_required_fails_when_missing() -> None:
+    payload = _manifest({"SMA_SHORT": [2], "SMA_LONG": [8]}).raw
+    payload["acceptance_gate"]["metrics_contract_required"] = True
+    manifest = parse_manifest(payload)
+    metrics = {"return_pct": 2.0, "trade_count": 2, "max_drawdown_pct": 1.0, "profit_factor": 2.0}
+
+    result, reasons = _gate_result(
+        manifest=manifest,
+        validation_metrics=metrics,
+        final_holdout_metrics=None,
+        walk_forward_metrics=None,
+        stability_score=None,
+        include_walk_forward=False,
+    )
+
+    assert result == "FAIL"
+    assert "metrics_v2_missing" in reasons
