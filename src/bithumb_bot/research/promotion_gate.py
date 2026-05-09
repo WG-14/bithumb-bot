@@ -386,6 +386,9 @@ def promote_candidate(
     profile = backtest.profile
     verified_profile_hash = backtest.profile_hash
     walk_forward_required = bool(candidate.get("walk_forward_required"))
+    production_calibration_policy_result = validate_production_calibration_policy(candidate)
+    candidate_calibration_hash = _candidate_calibration_hash(candidate)
+    candidate_calibration_hashes = _candidate_calibration_hashes(candidate)
     calibration_warning_reasons = _execution_calibration_warning_reasons(candidate)
     promotion_warnings = sorted(
         set(str(item) for item in candidate.get("promotion_warnings") or [])
@@ -423,16 +426,16 @@ def promote_candidate(
         "walk_forward_report_hash": None,
         "deployment_tier": candidate.get("deployment_tier") or "research_only",
         "production_calibration_policy_result": candidate.get("production_calibration_policy_result")
-        or validate_production_calibration_policy(candidate).as_dict(),
+        or production_calibration_policy_result.as_dict(),
         "production_calibration_policy_reasons": candidate.get("production_calibration_policy_reasons")
-        or list(validate_production_calibration_policy(candidate).reasons),
+        or list(production_calibration_policy_result.reasons),
         "execution_calibration_policy_source": candidate.get("execution_calibration_policy_source")
-        or validate_production_calibration_policy(candidate).policy_source,
+        or production_calibration_policy_result.policy_source,
         "execution_calibration_required": candidate.get("execution_calibration_required"),
         "execution_calibration_strictness": candidate.get("execution_calibration_strictness"),
         "execution_calibration_gate": candidate.get("execution_calibration_gate"),
-        "execution_calibration_artifact_hash": _candidate_calibration_hash(candidate),
-        "execution_calibration_artifact_hashes": _candidate_calibration_hashes(candidate),
+        "execution_calibration_artifact_hash": candidate_calibration_hash,
+        "execution_calibration_artifact_hashes": candidate_calibration_hashes,
         "experiment_family_id": report.get("experiment_family_id"),
         "hypothesis_id": report.get("hypothesis_id"),
         "hypothesis_status": report.get("hypothesis_status"),
@@ -491,17 +494,21 @@ def promote_candidate(
         artifact["walk_forward_report_hash"] = walk_forward.source_report_hash if walk_forward else None
     path = manager.data_dir() / "reports" / "research" / experiment_id / f"promotion_{candidate_id}.json"
     if base_lineage is not None:
-        lineage = build_promotion_lineage(
-            base_lineage=base_lineage,
-            backtest_report_path=str(candidate_report_path.resolve()),
-            backtest_report_hash=backtest_report_hash,
-            walk_forward_report_path=artifact["walk_forward_report_path"],
-            walk_forward_report_hash=artifact["walk_forward_report_hash"],
-            candidate_id=candidate_id,
-            candidate_profile_hash=verified_profile_hash,
-            promotion_artifact_path=str(path.resolve()),
-            created_at=artifact["generated_at"],
-        )
+        try:
+            lineage = build_promotion_lineage(
+                base_lineage=base_lineage,
+                backtest_report_path=str(candidate_report_path.resolve()),
+                backtest_report_hash=backtest_report_hash,
+                walk_forward_report_path=artifact["walk_forward_report_path"],
+                walk_forward_report_hash=artifact["walk_forward_report_hash"],
+                candidate_id=candidate_id,
+                candidate_profile_hash=verified_profile_hash,
+                promotion_artifact_path=str(path.resolve()),
+                execution_calibration_artifact_hash=candidate_calibration_hash,
+                created_at=artifact["generated_at"],
+            )
+        except LineageValidationError as exc:
+            raise PromotionGateError(f"promotion refused: {exc}") from exc
         artifact["lineage"] = lineage
         artifact["lineage_hash"] = lineage["lineage_hash"]
     content_hash = sha256_prefixed(content_hash_payload(artifact))

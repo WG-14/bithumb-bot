@@ -1,357 +1,332 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Use this task as a repo-specific engineering assignment, not a general review. Inspect the current repository directly before changing code. Treat the following source context as the starting analysis, but do not assume every hypothesis is true until you verify it in the code and tests: the current concern is that production-bound trading candidates should treat execution calibration as mandatory promotion evidence, not as an optional warning path. The repository already appears to contain execution calibration fields, strictness, promotion gate handling, lineage/hash/reproducibility, and execution-quality reporting, but the suspected structural weakness is that “production-bound candidate” status is not yet centrally tied to mandatory calibration across the full lifecycle. 
+Use this as a repo-specific hardening task, not a general review. Inspect the current repository state before changing anything. Treat the review context below as a starting hypothesis only: the major production-bound execution calibration policy patch appears mostly complete, but one promotion-time fail-fast hardening gap may remain.
 
-Your goal is to make the repository more robust, reproducible, and operationally safe as an automated trading experiment system. Prioritize design changes that prevent an entire class of failures over symptom-level patches.
+The core invariant must not be weakened:
 
-Do not reduce the strength of existing gates. Do not silently bypass lineage, dataset quality, candidate profile hash, walk-forward, final holdout, regime policy, execution reality, approved-profile, or runtime safety checks. Do not edit env files, secrets, live credentials, or operator-local runtime state.
+```text
+A production-bound trading candidate must treat execution calibration as mandatory promotion evidence, not as an optional warning path.
+```
 
-## Core problem statement
+The existing large design appears to have been mostly implemented:
 
-The repository must fail closed for production-bound candidates unless execution calibration evidence is present, hash-bound, semantically valid, and passing. A production-bound candidate means a candidate intended to move beyond diagnostic research into paper/live transition paths such as `live_dry_run`, `small_live`, or equivalent profile/promotion states.
+* central production calibration policy
+* `deployment_tier` / production-bound distinction
+* research-only vs production-bound manifest separation
+* production-safe example manifest
+* candidate/profile/promotion calibration fields
+* approved profile generation/promotion enforcement
+* warn-mode rejection for production-bound transitions
+* calibration artifact hash propagation from combined scenario gates
+* tests for production policy and approved profile rejection cases
+* docs clarifying telemetry-only execution-quality output is not live readiness.
 
-A minimal fix that merely sets `execution_calibration_required=true` in one manifest is insufficient. The expected outcome is a repo-owned policy surface that makes production-bound calibration requirements explicit, testable, reproducible, and visible.
+Do not reopen the entire design unless your direct inspection disproves the above. The intended next step is a small fail-fast reproducibility hardening patch: ensure promotion refuses calibration lineage/hash drift before writing a promotion artifact.
 
-## Files and areas to inspect first
+## Primary objective
 
-Inspect at least these files before implementing changes:
+Verify and, if confirmed necessary, patch promotion-time calibration lineage binding.
 
-* `src/bithumb_bot/research/experiment_manifest.py`
+The suspected gap:
+
+`src/bithumb_bot/research/lineage.py` has `execution_calibration_artifact_hash` in research lineage and `research-reproduce` can detect missing or mismatched calibration hashes later. `promotion_gate.py` also records `execution_calibration_artifact_hash` in the promotion artifact. However, `promote_candidate()` may not explicitly pass the candidate calibration hash into `build_promotion_lineage()` or fail immediately when the base research lineage calibration hash disagrees with the candidate calibration hash.
+
+This means a bad or stale base lineage calibration hash could possibly survive until `research-reproduce` or approved-profile verification catches it. That is too late. Promotion should fail closed before writing the promotion artifact.
+
+Keep this as a hypothesis until verified.
+
+## Files to inspect first
+
+Inspect at least:
+
+* `src/bithumb_bot/research/deployment_policy.py`
 * `src/bithumb_bot/research/validation_protocol.py`
 * `src/bithumb_bot/research/promotion_gate.py`
-* `src/bithumb_bot/research/execution_calibration.py`
-* `src/bithumb_bot/research/execution_timing.py`
 * `src/bithumb_bot/research/lineage.py`
-* `src/bithumb_bot/evidence_chain.py`
+* `src/bithumb_bot/research/execution_calibration.py`
+* `src/bithumb_bot/research/experiment_manifest.py`
 * `src/bithumb_bot/approved_profile.py`
 * `src/bithumb_bot/profile_cli.py`
-* `src/bithumb_bot/config.py`
-* `src/bithumb_bot/execution_quality.py`
-* `examples/research/sma_filter_manifest.example.json`
+* `tests/test_research_promotion_gate.py`
+* `tests/test_research_execution_calibration_policy.py`
+* `tests/test_approved_profile.py`
 * `docs/research-validation.md`
 * `docs/runbooks/research-to-paper.md`
-* `docs/OPERATOR_REPORTING.md`
-* Existing tests, especially:
 
-  * `tests/test_research_promotion_gate.py`
-  * `tests/test_execution_quality.py`
-  * `tests/test_approved_profile.py`
-  * any tests covering research validation, profile generation, profile promotion, lineage reproduction, and CLI behavior.
+Search for:
 
-## Keep these hypotheses as hypotheses until verified
+```text
+execution_calibration_artifact_hash
+execution_calibration_artifact_hashes
+build_research_lineage
+build_promotion_lineage
+reproduce_promotion
+_candidate_calibration_hash
+_candidate_calibration_hashes
+validate_production_calibration_policy
+production_calibration_policy_result
+calibration_hash_missing
+calibration_hash_mismatch
+lineage_execution_calibration_artifact_hash_mismatch
+```
 
-Verify or falsify each hypothesis by inspecting code and, where appropriate, adding tests. Do not present them as facts unless your work confirms them.
+## Hypotheses to verify, not assume
 
-### H1
+### H1: The major production-bound calibration policy is already implemented
 
-Production-bound manifests or artifacts may not consistently require:
+Verify that the current repo already has:
 
-* `execution_model.calibration_required=true`
-* `execution_model.calibration_strictness="fail"`
-* candidate/profile-level `execution_calibration_required=true`
-* `execution_calibration_gate.status="PASS"`
-* calibration artifact content hash presence.
+* central production calibration policy module
+* explicit deployment tiers such as `research_only`, `paper_candidate`, `live_dry_run_candidate`, `small_live_candidate`
+* manifest parsing and canonical hash inclusion for `deployment_tier`
+* production-bound policy requiring explicit `execution_model`
+* production-bound policy requiring `execution_calibration_required=true`
+* production-bound policy requiring `execution_calibration_strictness="fail"`
+* production-bound policy rejecting missing/hashless/multiple calibration hashes
+* approved profile generation/promotion enforcing production-bound calibration policy
+* tests for warn-mode rejection and legacy `cost_model` rejection.
 
-Verification: inspect examples, manifest parsing, research report generation, promotion artifacts, profile generation/promotion, and tests.
+If any of these are missing or broken, fix the missing core policy before doing the smaller lineage hardening.
 
-### H2
+### H2: Candidate calibration hash and promotion artifact calibration hash are now populated
 
-The boundary between research-only candidates and production-bound candidates may not be explicit enough in manifest/report/profile state.
+Verify that a candidate with valid calibration evidence produces:
 
-Verification: look for an existing `deployment_tier`, `promotion_target`, `profile_mode`, or equivalent state and whether it centrally enforces calibration requirements for live/paper transition paths.
+* `candidate.execution_calibration_artifact_hash`
+* `candidate.execution_calibration_artifact_hashes`
+* `promotion.execution_calibration_artifact_hash`
+* `promotion.execution_calibration_artifact_hashes`
+* candidate profile hash including calibration policy/hash fields.
 
-### H3
+If this is not true, fix candidate/promotion hash propagation first.
 
-Calibration artifact hash binding may be incomplete at the promotion artifact top level.
+### H3: Promotion lineage may still rely only on base research lineage calibration hash
 
-Verification: run or create an end-to-end test where a valid calibration artifact is supplied to `research-backtest`, then the candidate is promoted and reproduced. Compare nested `scenario_gates[].artifact_hash` with `promotion.execution_calibration_artifact_hash` and lineage/reproduction behavior.
+Verify whether `promote_candidate()` passes the candidate calibration hash into `build_promotion_lineage()`.
 
-### H4
+Risk:
 
-Live execution quality may currently be telemetry by default rather than a blocking runtime gate.
+```text
+candidate execution_calibration_artifact_hash = sha256:correct
+base lineage execution_calibration_artifact_hash = sha256:stale
+promotion artifact top-level hash = sha256:correct
+promotion lineage hash = sha256:stale
+promotion artifact is written
+research-reproduce later fails with calibration_hash_mismatch
+```
 
-Verification: inspect `LIVE_EXECUTION_QUALITY_GATE_ENABLED`, `LIVE_EXECUTION_QUALITY_GATE_MODE`, startup guard usage, `ops-report`, and profile transition requirements. Do not automatically turn all live telemetry into blocking behavior unless the design explicitly scopes this and tests it.
+Desired behavior:
 
-### H5
+```text
+promotion refuses before writing artifact:
+promotion refused: lineage_execution_calibration_artifact_hash_mismatch
+```
 
-The current canonical example manifest may teach unsafe defaults by using legacy `cost_model` only and omitting required execution calibration.
+### H4: Required calibration with missing lineage calibration hash should fail closed early
 
-Verification: inspect `examples/research/*.json` and docs. Determine whether production-safe examples are separated from research-only or legacy examples.
+If the candidate requires execution calibration and has a candidate calibration hash, but base lineage lacks `execution_calibration_artifact_hash`, decide whether promotion should:
 
-### H6
+* write the candidate calibration hash into promotion lineage, or
+* refuse if current-generation base lineage is missing that field.
 
-Typed paper/live evidence generation may be manual or not fully integrated with operational execution-quality telemetry.
+Preferred behavior:
 
-Verification: inspect evidence generation and validation commands. If the repo lacks a generation command, document the gap and only implement it if the scope is small, testable, and fits existing architecture.
+* If base lineage has no calibration hash but candidate has required calibration evidence, `build_promotion_lineage()` should bind the candidate calibration hash into promotion lineage.
+* If base lineage has a calibration hash and it differs from candidate hash, fail closed.
+* If candidate requires calibration but candidate hash itself is missing, promotion should already fail through existing calibration/policy gates; keep or strengthen that behavior.
 
-### H7
+### H5: `research-reproduce` still catches missing/mismatched calibration hash
 
-Execution calibration may be treated as if it solves all execution realism gaps, while the current research engine may still be limited to candle and optional top-of-book simulation.
+Even after promotion-time hardening, `research-reproduce` must keep detecting:
 
-Verification: inspect execution timing, top-of-book support, docs, and manifest expressiveness. Ensure production-bound policy can require an explicit minimum execution reality level and does not accidentally bless candle-only evidence for strategies that require stronger execution data.
+* required calibration but missing promotion calibration hash
+* required calibration but missing lineage calibration hash
+* promotion calibration hash mismatching lineage calibration hash.
 
-## Required design direction
+Do not remove late-stage detection just because promotion now fails earlier.
 
-Implement a central policy layer rather than scattering one-off checks.
+### H6: Scenario-gate hardening may still be worthwhile but is optional
 
-Preferred shape:
+`deployment_policy.py` may already inspect scenario gate content hash, quality status, sample count, market/interval mismatch, and fill-reference mismatch. Verify whether scenario gate status and binding-field missing cases are directly checked.
 
-Create or extend a module such as:
+Optional hardening if small and safe:
 
-* `src/bithumb_bot/deployment_policy.py`, or
-* `src/bithumb_bot/research/deployment_policy.py`, if research-local placement fits better.
+* If `scenario_gate.status != "PASS"`, add `production_execution_calibration_scenario_gate_not_passed`.
+* Include scenario gate reasons in production policy reasons.
+* If production-bound scenario gate is missing `market`, `expected_market`, `interval`, or `expected_interval`, add stable missing-binding reason codes.
+* If production-bound scenario gate is missing `expected_fill_reference_policy`, add a stable missing-policy reason if compatible with existing artifact schema.
 
-The policy should express production-bound requirements in one place. Suggested concepts:
+Do not over-scope this optional patch if the primary lineage fail-fast patch is still missing.
 
-* `deployment_tier` or `promotion_target`
-* allowed values such as:
+## Required patch: promotion-time calibration lineage fail-fast
 
-  * `research_only`
-  * `paper_candidate`
-  * `live_dry_run_candidate`
-  * `small_live_candidate`
-* a function that returns required execution-calibration policy for a given target/profile mode
-* fail-closed validation helpers with stable reason codes.
+If H3 or H4 is confirmed, patch the code so promotion fails closed before writing a promotion artifact when candidate calibration hash and base lineage calibration hash disagree.
 
-Production-bound tiers should require, at minimum:
+Preferred implementation shape:
 
-* explicit `execution_model`, not only legacy `cost_model`
-* `calibration_required=true`
-* `calibration_strictness="fail"`
-* calibration artifact content hash
-* calibration artifact market and interval matching the manifest/profile
-* calibration artifact fill reference policy matching execution timing when available
-* calibration artifact execution reality level matching the expected policy when available
-* `quality_gate_status="PASS"` when production-bound
-* minimum sample count from existing calibration comparison policy
-* no insufficient evidence
-* no slippage/latency/partial-fill/unfilled/model-breach violation against the scenario assumptions.
+1. Extend `build_promotion_lineage()` in `src/bithumb_bot/research/lineage.py` with an optional parameter:
 
-Do not make `warn` strictness production-promotable. `warn` may remain acceptable for research-only diagnostics, but production-bound profile generation or profile promotion should reject it with an explicit reason code.
+```python
+execution_calibration_artifact_hash: str | None = None
+```
 
-## Scope requirements
+2. Inside `build_promotion_lineage()`:
 
-### P0: Central production-bound calibration policy
+* validate the base lineage first as it currently does
+* read existing base lineage `execution_calibration_artifact_hash`
+* normalize empty strings to `None`
+* if both base lineage calibration hash and supplied candidate calibration hash exist and differ:
 
-Add or reuse a central policy validator and wire it into the lifecycle at the earliest correct points.
+  * raise `LineageValidationError("lineage_execution_calibration_artifact_hash_mismatch")`
+* if supplied candidate calibration hash exists:
 
-At minimum, production-bound policy should be enforced before any artifact can be treated as eligible for `live_dry_run` or `small_live` profile transition.
+  * set `lineage["execution_calibration_artifact_hash"] = supplied_hash`
+* if no supplied hash exists:
 
-Do not make research-only experimentation impossible. Research diagnostics may still run with legacy cost models, optional calibration, or warn-mode calibration, but such artifacts must not be accepted as production-bound evidence.
+  * preserve existing base lineage hash if present
+* recompute `lineage_hash` after the update.
 
-### P1: Calibration hash binding and reproducibility
+3. In `promote_candidate()`:
 
-Ensure calibration evidence is first-class and reproducible.
+* compute `candidate_calibration_hash = _candidate_calibration_hash(candidate)` once.
+* use that value for:
 
-Specifically verify and, if needed, fix:
+  * promotion artifact `execution_calibration_artifact_hash`
+  * `build_promotion_lineage(..., execution_calibration_artifact_hash=candidate_calibration_hash, ...)`
+* avoid repeated `validate_production_calibration_policy(candidate)` calls if possible; store the result once for clarity and deterministic artifact construction.
+* if `build_promotion_lineage()` raises `LineageValidationError`, surface it as:
 
-* combined calibration gates should expose top-level calibration artifact hash information, not only nested scenario gates
-* promotion artifacts should bind calibration artifact hash consistently
-* lineage should carry the same calibration artifact hash or an explicitly deterministic artifact hash set
-* `research-reproduce` should detect calibration hash mismatch when calibration was required or bound
-* if multiple scenarios reference calibration artifacts:
+  * `promotion refused: lineage_execution_calibration_artifact_hash_mismatch`
+  * or the existing `promotion refused: {exc}` pattern if that is already the repo convention.
 
-  * either require a single consistent calibration artifact for production-bound candidates, or
-  * explicitly support and hash a deterministic sorted artifact hash set
-* add stable reason codes for missing, inconsistent, hashless, or mismatched calibration artifacts.
+4. Preserve existing behavior for research-only candidates without calibration hashes.
 
-### P2: Manifest/profile target boundary
+5. Preserve current `research-reproduce` calibration hash checks. Do not weaken them.
 
-Introduce or strengthen explicit target/tier semantics if the repo does not already have them.
+## Optional patch: stronger scenario gate validation
 
-Potential places:
+Apply only if it is small, does not break current generated artifacts, and can be tested.
 
-* manifest parsing and canonical hash payload
-* research report candidate profile
-* promotion artifact
-* approved profile generation/promotion
-* profile verification.
+In `src/bithumb_bot/research/deployment_policy.py`, strengthen `_extend_scenario_gate_reasons()` so production-bound policy does not blindly trust the gate producer.
 
-Be conservative. If adding a new manifest field is too invasive, implement a backward-compatible policy where absent target defaults to `research_only`, while profile generation/promotion to live-compatible modes requires production-bound calibration policy.
+Suggested stable reason codes:
 
-### P3: Production-safe examples and documentation
+```text
+production_execution_calibration_scenario_gate_not_passed
+production_execution_calibration_binding_missing:market
+production_execution_calibration_binding_missing:expected_market
+production_execution_calibration_binding_missing:interval
+production_execution_calibration_binding_missing:expected_interval
+production_execution_calibration_binding_missing:expected_fill_reference_policy
+```
 
-Do not leave unsafe examples as the only obvious path.
+Keep existing reason codes intact. Do not rename existing reasons unless absolutely necessary.
 
-Add a production-grade example manifest such as:
+## Required tests
 
-* `examples/research/sma_filter_manifest.production.example.json`
+Add focused tests that would fail before the patch.
 
-It should include:
+### Promotion lineage hash binding tests
 
-* explicit `execution_model`
-* `calibration_required=true`
-* `calibration_strictness="fail"`
-* `execution_timing.min_execution_reality_level_for_promotion`
-* top-of-book dataset requirements if needed for the selected reality level
-* clear target/tier metadata if you add such a field.
+Add or extend tests in `tests/test_research_promotion_gate.py`.
 
-Keep the existing example if needed, but label it as research-only or legacy/diagnostic if it is not production-promotable.
+Required cases:
 
-Update docs:
+1. Successful required-calibration promotion binds calibration hash into promotion lineage.
 
-* `docs/research-validation.md`
-* `docs/runbooks/research-to-paper.md`
-* `docs/OPERATOR_REPORTING.md` only if operational interpretation changes.
+Test shape:
 
-Docs must state clearly:
+```text
+Given:
+- candidate has execution_calibration_required=true
+- execution_calibration_strictness="fail"
+- execution_calibration_gate.status="PASS"
+- gate has artifact_hash="sha256:calibration"
+- base research lineage either has no calibration hash or matching calibration hash
 
-* research-only calibration warnings are not approval signals
-* production-bound candidates require calibration PASS
-* `warn` strictness cannot satisfy production-bound promotion/profile transition
-* telemetry-only execution quality does not equal live readiness
-* calibration does not remove execution-reality limitations such as missing full depth, queue position, trade ticks, or intra-candle path.
+When:
+- promote_candidate(...)
 
-### P4: Tests
+Assert:
+- artifact["execution_calibration_artifact_hash"] == "sha256:calibration"
+- artifact["lineage"]["execution_calibration_artifact_hash"] == "sha256:calibration"
+- artifact["lineage_hash"] starts with "sha256:"
+- research-reproduce on the promotion returns ok=true if the fixture writes source reports correctly.
+```
 
-Add targeted tests before or alongside code changes. Prefer small deterministic unit/integration tests using existing test helpers.
+2. Promotion refuses stale base lineage calibration hash before writing artifact.
 
-At minimum, add or extend tests covering this matrix:
+Test shape:
 
-1. `calibration_required=true` plus missing calibration artifact:
+```text
+Given:
+- candidate calibration hash is "sha256:calibration-correct"
+- base report lineage contains execution_calibration_artifact_hash="sha256:calibration-stale"
+- report content hash is recomputed so only semantic lineage mismatch remains
 
-   * research candidate is not production-promotable
-   * promotion or profile transition refuses with explicit reason.
+When:
+- promote_candidate(...)
 
-2. `calibration_required=true` plus artifact without content hash:
+Assert:
+- raises PromotionGateError
+- error contains "lineage_execution_calibration_artifact_hash_mismatch"
+- no promotion_<candidate_id>.json artifact is written.
+```
 
-   * fail closed.
+3. Required calibration missing from promotion/lineage still fails reproduce.
 
-3. `calibration_required=true` plus insufficient sample count:
+If a test already exists, verify it. If not, add a small reproduce test in the appropriate lineage/promotion test file.
 
-   * fail closed.
+Test shape:
 
-4. `calibration_required=true` plus `quality_gate_status` not `PASS`:
+```text
+Given:
+- a promotion artifact claims execution_calibration_required=true
+- promotion execution_calibration_artifact_hash is missing OR lineage execution_calibration_artifact_hash is missing
 
-   * fail closed.
+When:
+- reproduce_promotion(path)
 
-5. `calibration_strictness="fail"` plus failing calibration:
+Assert:
+- ok is false
+- reason is "calibration_hash_missing"
+```
 
-   * fail closed.
+### Optional scenario gate hardening tests
 
-6. `calibration_strictness="warn"` plus failing calibration:
+If you implement the optional scenario gate hardening, add tests in `tests/test_research_execution_calibration_policy.py`.
 
-   * research-only artifact may produce warnings if current behavior supports this
-   * production-bound profile generation or profile promotion must fail closed.
+Suggested cases:
 
-7. Valid calibration:
+```text
+production-bound scenario gate with status="FAIL" but top-level gate status="PASS"
+-> policy FAIL
+-> reason includes production_execution_calibration_scenario_gate_not_passed
 
-   * research report candidate gate passes
-   * promotion artifact includes calibration hash
-   * lineage includes calibration hash or deterministic artifact hash set
-   * `research-reproduce` passes.
+production-bound scenario gate missing expected_market or expected_interval
+-> policy FAIL
+-> stable binding-missing reason present
+```
 
-8. Tampered calibration evidence:
-
-   * reproduce or verification fails with a calibration-specific reason.
-
-9. Legacy `cost_model`-only manifest:
-
-   * research diagnostic path remains possible
-   * production-bound profile transition fails closed.
-
-10. Production example manifest:
-
-* parses successfully
-* canonical payload includes target/tier and calibration policy if you add those fields
-* does not silently degrade to legacy `cost_model`.
-
-11. No regression for existing promotion gates:
-
-* validation evidence
-* candidate profile hash
-* lineage
-* final holdout
-* walk-forward
-* dataset quality
-* execution reality
-* regime policy.
-
-Suggested test files:
-
-* extend `tests/test_research_promotion_gate.py`
-* add `tests/test_research_execution_calibration_policy.py`
-* add or extend profile transition tests in `tests/test_approved_profile.py`
-* add reproduce/hash tests near existing lineage tests.
-
-Use existing test utilities where possible. Avoid brittle assertions on full JSON if stable reason codes or key fields can be asserted instead.
-
-### P5: Recovery and operational observability
-
-Add operator-visible fields only where useful and deterministic.
-
-Artifacts should expose, where applicable:
-
-* `deployment_tier` or `promotion_target`
-* `execution_calibration_required`
-* `execution_calibration_strictness`
-* `execution_calibration_gate.status`
-* `execution_calibration_gate.reasons`
-* `execution_calibration_artifact_hash`
-* `execution_calibration_artifact_hashes` if multiple are supported
-* `execution_calibration_policy_source`
-* `production_calibration_policy_result`
-* `production_calibration_policy_reasons`
-* `operator_next_step`.
-
-CLI output should surface production-bound calibration failure reasons clearly. Do not bury them only in JSON.
-
-If a failure is detected, recommended next action should be operationally actionable, e.g.:
-
-* regenerate execution-quality calibration artifact
-* collect more live/paper execution-quality samples
-* rerun research backtest with `--execution-calibration`
-* do not edit recorded hashes
-* do not promote warn-mode calibration to live-compatible profile.
-
-## Implementation constraints
-
-* Preserve backward compatibility for research-only artifacts unless this conflicts with production-bound safety.
-* Do not mutate env files.
-* Do not introduce network calls in tests.
-* Do not require live exchange access.
-* Keep path-policy protections intact.
-* Use deterministic hashing and sorted collections where artifact hashes or sets are serialized.
-* Use stable reason codes, not prose-only failures.
-* Keep schemas explicit and versioned if you add schema fields.
-* Do not hide production-bound failures behind `promotion_warnings`.
-* Do not downgrade required calibration failures to warnings.
-
-## Suggested execution plan
-
-1. Inspect current code paths and write a short internal note identifying where calibration policy is currently enforced and where it is not.
-2. Add failing tests for the highest-risk gaps, especially hash binding and production-bound warn-mode rejection.
-3. Implement central policy.
-4. Wire central policy into promotion/profile transition paths.
-5. Fix calibration artifact hash binding if your tests confirm the suspected issue.
-6. Add production-safe example manifest.
-7. Update docs.
-8. Run focused tests.
-9. Run the broader test suite if practical.
-
-## Test commands
+## Tests to run
 
 Run at least:
 
 ```bash
 uv run pytest -q tests/test_research_promotion_gate.py
-uv run pytest -q tests/test_execution_quality.py
+uv run pytest -q tests/test_research_execution_calibration_policy.py
 uv run pytest -q tests/test_approved_profile.py
 ```
 
-Also run any new test files you add, for example:
+If `uv` is unavailable:
 
 ```bash
-uv run pytest -q tests/test_research_execution_calibration_policy.py
+python -m pytest -q tests/test_research_promotion_gate.py
+python -m pytest -q tests/test_research_execution_calibration_policy.py
+python -m pytest -q tests/test_approved_profile.py
 ```
 
-If `uv` is unavailable in the environment, use:
-
-```bash
-python -m pytest -q <same test paths>
-```
-
-If a full suite is practical, run:
+If practical, also run:
 
 ```bash
 uv run pytest -q
@@ -363,48 +338,91 @@ or:
 python -m pytest -q
 ```
 
-## Expected final report format
+Do not hide failing tests. If any failure is unrelated, report the exact command, failure, and why it is unrelated.
 
-When finished, report in exactly this structure:
+## Recovery and observability requirements
+
+The patch must improve fail-fast behavior without weakening late-stage recovery checks.
+
+Required properties:
+
+* Promotion must refuse mismatched calibration lineage before writing a promotion artifact.
+* `research-reproduce` must still detect calibration hash missing/mismatch.
+* Approved profile verification must still detect source promotion and calibration hash drift.
+* Production-bound `warn` strictness must remain non-promotable.
+* Legacy `cost_model`-only artifacts must remain research diagnostic only and non-production-bound.
+* Research-only candidates without calibration must remain possible where existing behavior allows them.
+* Stable reason codes must be machine-testable.
+* Operator-facing errors should be clear enough to tell the operator to regenerate calibration/research reports rather than edit hashes.
+
+Do not:
+
+* edit env files
+* touch secrets
+* change live order behavior
+* weaken dataset quality, lineage, candidate profile hash, final holdout, walk-forward, regime, execution reality, or approved-profile gates
+* remove existing reproducibility checks
+* treat telemetry-only execution quality as calibration PASS evidence
+* implement automatic paper/live typed evidence generation in this patch.
+
+## Documentation
+
+Docs update is optional for the primary patch if existing docs already mention `calibration_hash_missing` and `calibration_hash_mismatch`.
+
+If you update docs, keep it precise and small. Suggested sentence for `docs/research-validation.md` or the runbook:
 
 ```text
-## Summary
-- What changed, in one concise paragraph.
-- Whether the production-bound calibration invariant is now enforced.
-
-## Hypotheses Checked
-- H1: confirmed/refuted/partially confirmed. Evidence and changed files.
-- H2: confirmed/refuted/partially confirmed. Evidence and changed files.
-- H3: confirmed/refuted/partially confirmed. Evidence and changed files.
-- H4: confirmed/refuted/partially confirmed. Evidence and changed files.
-- H5: confirmed/refuted/partially confirmed. Evidence and changed files.
-- H6: confirmed/refuted/partially confirmed. Evidence and changed files.
-- H7: confirmed/refuted/partially confirmed. Evidence and changed files.
-
-## Design Changes
-- Central policy changes.
-- Lifecycle wiring changes.
-- Hash/lineage/reproducibility changes.
-- Docs/example changes.
-
-## Safety Properties
-- How research-only behavior remains possible.
-- How production-bound behavior fails closed.
-- How warn-mode calibration is handled.
-- How tampering or hash drift is detected.
-- How operator-visible reason codes are exposed.
-
-## Tests
-- Exact commands run.
-- Pass/fail status.
-- Any tests not run and why.
-
-## Files Changed
-- List files with a one-line purpose for each.
-
-## Remaining Risks / Follow-ups
-- Be explicit about limitations, especially full-depth/queue/tick/intra-candle execution realism and any typed evidence generation still not implemented.
+Promotion fails before writing an artifact when the candidate calibration hash and recorded research lineage calibration hash disagree; regenerate the research report from the manifest and calibration artifact instead of editing recorded hashes.
 ```
 
-Do not claim a hypothesis is resolved unless tests or direct code inspection support that conclusion.
+Do not imply that calibration solves full-depth order book, queue position, trade tick, or intra-candle path limitations.
+
+## Expected final report format
+
+When finished, report exactly in this structure:
+
+```text
+Summary
+- What changed.
+- Whether this was a code patch, test patch, documentation patch, or no-op after verification.
+- Whether the production-bound calibration invariant remains enforced.
+- Whether promotion now fails fast on calibration lineage drift.
+
+Hypothesis Review
+- H1: confirmed/refined/refuted, with repo evidence.
+- H2: confirmed/refined/refuted, with repo evidence.
+- H3: confirmed/refined/refuted, with repo evidence.
+- H4: confirmed/refined/refuted, with repo evidence.
+- H5: confirmed/refined/refuted, with repo evidence.
+- H6: confirmed/refined/refuted, with repo evidence.
+
+Implementation Details
+- Files changed.
+- How candidate calibration hash is passed into promotion lineage.
+- How mismatch is detected before artifact write.
+- Whether scenario gate hardening was applied or deferred.
+- Any docs updated.
+
+Behavioral Guarantees
+- What happens when base lineage calibration hash matches candidate calibration hash.
+- What happens when base lineage calibration hash differs.
+- What happens when required calibration hash is missing.
+- What happens for research-only candidates.
+- What remains enforced later by research-reproduce and approved profile verification.
+
+Tests
+- Exact commands run.
+- Pass/fail results.
+- Any tests not run and why.
+
+Files Changed
+- List files with one-line purpose for each.
+
+Remaining Gaps / Follow-ups
+- State explicitly whether automatic paper/live typed evidence generation remains future work.
+- State explicitly that calibration still does not create full-depth/queue/tick/intra-candle execution evidence.
+- State any optional scenario-gate hardening not implemented.
+```
+
+Do not overclaim. If the current repo already implements the promotion-time calibration lineage fail-fast check, do not patch unnecessarily; add missing regression tests only if needed and report that the code path was already safe.
 

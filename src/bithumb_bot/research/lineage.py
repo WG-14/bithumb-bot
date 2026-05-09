@@ -144,9 +144,18 @@ def build_promotion_lineage(
     live_readiness_evidence_hash: str | None = None,
     decision_equivalence_report_path: str | None = None,
     decision_equivalence_report_hash: str | None = None,
+    execution_calibration_artifact_hash: str | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     lineage = validate_lineage_artifact(base_lineage)
+    base_calibration_hash = _normalized_sha256(lineage.get("execution_calibration_artifact_hash"))
+    candidate_calibration_hash = _normalized_sha256(execution_calibration_artifact_hash)
+    if (
+        base_calibration_hash is not None
+        and candidate_calibration_hash is not None
+        and base_calibration_hash != candidate_calibration_hash
+    ):
+        raise LineageValidationError("lineage_execution_calibration_artifact_hash_mismatch")
     lineage.update(
         {
             "backtest_report_path": backtest_report_path,
@@ -165,12 +174,20 @@ def build_promotion_lineage(
             "live_readiness_evidence_hash": live_readiness_evidence_hash,
             "decision_equivalence_report_path": decision_equivalence_report_path,
             "decision_equivalence_report_hash": decision_equivalence_report_hash,
+            "execution_calibration_artifact_hash": candidate_calibration_hash or base_calibration_hash,
             "created_at": created_at or datetime.now(timezone.utc).isoformat(),
         }
     )
     lineage.pop(LINEAGE_HASH_FIELD, None)
     lineage[LINEAGE_HASH_FIELD] = compute_lineage_hash(lineage)
     return lineage
+
+
+def _normalized_sha256(value: object) -> str | None:
+    text = str(value or "").strip()
+    if text.startswith("sha256:"):
+        return text
+    return None
 
 
 def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:

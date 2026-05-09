@@ -9,7 +9,7 @@ from bithumb_bot.paths import PathManager
 from bithumb_bot import app as app_module
 from bithumb_bot.research import cli as research_cli
 from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
-from bithumb_bot.research.lineage import build_research_lineage, reproduce_promotion
+from bithumb_bot.research.lineage import build_research_lineage, compute_lineage_hash, reproduce_promotion
 from bithumb_bot.research.promotion_gate import PromotionGateError, build_candidate_profile, promote_candidate
 from bithumb_bot.storage_io import write_json_atomic
 
@@ -270,12 +270,23 @@ def _write_report_without_lineage(manager: PathManager, candidate: dict[str, obj
     write_json_atomic(path, payload)
 
 
-def _write_report_with_lineage(manager: PathManager, candidate: dict[str, object]) -> None:
+def _write_report_with_lineage(
+    manager: PathManager,
+    candidate: dict[str, object],
+    *,
+    lineage_calibration_hash: str | None | object = ...,
+) -> None:
     path = manager.data_dir() / "reports" / "research" / "promo_exp" / "backtest_report.json"
-    lineage = _lineage(
-        execution_calibration_artifact_hash=(
+    if lineage_calibration_hash is ...:
+        lineage_calibration_hash = (
             str(candidate.get("execution_calibration_artifact_hash"))
             if str(candidate.get("execution_calibration_artifact_hash") or "").startswith("sha256:")
+            else None
+        )
+    lineage = _lineage(
+        execution_calibration_artifact_hash=(
+            str(lineage_calibration_hash)
+            if str(lineage_calibration_hash or "").startswith("sha256:")
             else None
         )
     )
@@ -1423,6 +1434,78 @@ def test_production_bound_promotion_binds_calibration_hash_into_lineage_and_repr
     assert summary["execution_calibration_artifact_hash"] == "sha256:calibration"
 
 
+def test_production_bound_promotion_binds_calibration_hash_when_base_lineage_lacks_it(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate, lineage_calibration_hash=None)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert result.artifact["execution_calibration_artifact_hash"] == "sha256:calibration"
+    assert result.artifact["lineage"]["execution_calibration_artifact_hash"] == "sha256:calibration"
+    assert result.artifact["lineage_hash"].startswith("sha256:")
+    assert summary["ok"] is True
+
+
+def test_production_bound_promotion_refuses_stale_base_lineage_calibration_hash_before_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate(
+        execution_calibration_artifact_hash="sha256:calibration-correct",
+        execution_calibration_artifact_hashes=["sha256:calibration-correct"],
+        execution_calibration_gate={
+            "status": "PASS",
+            "reasons": [],
+            "artifact_hash": "sha256:calibration-correct",
+            "artifact_hashes": ["sha256:calibration-correct"],
+            "scenario_gates": [
+                {
+                    "status": "PASS",
+                    "reasons": [],
+                    "artifact_hash": "sha256:calibration-correct",
+                    "content_hash_present": True,
+                    "market": "KRW-BTC",
+                    "interval": "1m",
+                    "expected_market": "KRW-BTC",
+                    "expected_interval": "1m",
+                    "expected_fill_reference_policy": "next_candle_open",
+                    "artifact_fill_reference_policy": "next_candle_open",
+                    "artifact_execution_reality_level": "candle_next_open",
+                    "sample_count": 30,
+                    "min_sample_count": 30,
+                    "quality_gate_status": "PASS",
+                }
+            ],
+        },
+        production_calibration_policy_result={
+            "target": "paper_candidate",
+            "production_bound": True,
+            "required": True,
+            "status": "PASS",
+            "reasons": [],
+            "artifact_hash": "sha256:calibration-correct",
+            "artifact_hashes": ["sha256:calibration-correct"],
+            "policy_source": "repo_production_calibration_policy_v1",
+            "operator_next_step": "none",
+        },
+        candidate_profile_hash=None,
+    )
+    _write_report_with_lineage(
+        manager,
+        candidate,
+        lineage_calibration_hash="sha256:calibration-stale",
+    )
+    artifact_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "promotion_candidate_001.json"
+
+    with pytest.raises(PromotionGateError, match="lineage_execution_calibration_artifact_hash_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert not artifact_path.exists()
+
+
 def test_reproduce_fails_when_required_calibration_hash_drifts(tmp_path, monkeypatch) -> None:
     manager = _manager(tmp_path, monkeypatch)
     candidate = _production_candidate()
@@ -1438,6 +1521,26 @@ def test_reproduce_fails_when_required_calibration_hash_drifts(tmp_path, monkeyp
 
     assert summary["ok"] is False
     assert summary["reason"] == "calibration_hash_mismatch"
+
+
+def test_reproduce_fails_when_required_lineage_calibration_hash_missing(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    path = result.artifact_path
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["lineage"]["execution_calibration_artifact_hash"] = None
+    payload["lineage"].pop("lineage_hash", None)
+    payload["lineage"]["lineage_hash"] = compute_lineage_hash(payload["lineage"])
+    payload["lineage_hash"] = payload["lineage"]["lineage_hash"]
+    payload["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in payload.items() if k != "content_hash"}))
+    write_json_atomic(path, payload)
+
+    summary = reproduce_promotion(path).summary
+
+    assert summary["ok"] is False
+    assert summary["reason"] == "calibration_hash_missing"
 
 
 def test_candidate_profile_hash_changes_when_pending_execution_summary_changes() -> None:
