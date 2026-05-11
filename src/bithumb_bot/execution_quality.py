@@ -55,6 +55,8 @@ class ExecutionQualityRecord:
     market: str | None
     side: str | None
     order_type: str | None
+    exchange: str | None
+    submit_contract_kind: str | None
     canonical_execution_kind: str
     market_equivalent: bool
     legacy_unknown_order_type: bool
@@ -79,6 +81,13 @@ class ExecutionQualityRecord:
     requested_qty: float | None
     remaining_qty: float | None
     remaining_notional_krw: float | None
+    internal_target_remaining_qty: float | None
+    internal_target_residue_material: bool
+    internal_target_residue_reason: str
+    exchange_submit_notional_krw: float | None
+    exchange_spent_quote_krw: float | None
+    exchange_remaining_quote_krw: float | None
+    exchange_fill_completion_ratio: float | None
     qty_step: float | None
     effective_min_trade_qty: float | None
     min_notional_krw: float | None
@@ -295,8 +304,8 @@ def assess_execution_remainder(
             is_material_remaining=False,
             materiality_reason="no_remaining_qty",
         )
-    if step is not None and remaining <= step:
-        reason = "remaining_qty_at_or_below_qty_step"
+    if step is not None and remaining < step:
+        reason = "remaining_qty_below_qty_step"
         material = False
     elif min_qty is not None and remaining < min_qty:
         reason = "remaining_qty_below_effective_min_trade_qty"
@@ -304,6 +313,9 @@ def assess_execution_remainder(
     elif min_notional is not None and remaining_notional is not None and remaining_notional < min_notional:
         reason = "remaining_notional_below_min_notional_krw"
         material = False
+    elif min_notional is not None and remaining_notional is None:
+        reason = "material_executable_remaining_qty_notional_unknown"
+        material = True
     else:
         reason = "material_executable_remaining_qty"
         material = True
@@ -453,6 +465,32 @@ def _submit_evidence_prices(event: sqlite3.Row | None) -> tuple[int | None, int 
     return request_ts, response_ts, finite_positive(event["price"]), bid, ask, spread_bps(best_bid=bid, best_ask=ask)
 
 
+def _submit_evidence_contract_fields(event: sqlite3.Row | None) -> dict[str, object]:
+    if event is None:
+        return {}
+    evidence = _decode_submit_evidence(event["submit_evidence"])
+    return {
+        "exchange": str(evidence.get("exchange") or evidence.get("broker") or "bithumb").strip().lower() or None,
+        "submit_contract_kind": str(evidence.get("submit_contract_kind") or "").strip() or None,
+        "exchange_order_type": str(evidence.get("exchange_order_type") or "").strip() or None,
+        "exchange_submit_notional_krw": _nested_number(
+            evidence,
+            ("exchange_submit_notional_krw",),
+            ("submit_contract_context", "exchange_submit_notional_krw"),
+        ),
+        "exchange_submit_qty": _nested_number(
+            evidence,
+            ("exchange_submit_qty",),
+            ("submit_contract_context", "exchange_submit_qty"),
+        ),
+        "internal_executable_qty": _nested_number(
+            evidence,
+            ("internal_executable_qty",),
+            ("submit_contract_context", "internal_executable_qty"),
+        ),
+    }
+
+
 def build_execution_quality_record(
     conn: sqlite3.Connection,
     *,
@@ -506,6 +544,7 @@ def build_execution_quality_record(
     intent = _event_by_type(events, "intent_created")
     signal_ref, signal_bid, signal_ask, signal_spread = _signal_context_prices(decision)
     submit_sent_ts, submit_response_ts, submit_ref, submit_bid, submit_ask, submit_spread = _submit_evidence_prices(confirmation)
+    contract_fields = _submit_evidence_contract_fields(confirmation)
     if submit_ref is None and preflight is not None:
         submit_ref = finite_positive(preflight["price"])
     if submit_sent_ts is None and confirmation is not None:
@@ -517,6 +556,12 @@ def build_execution_quality_record(
 
     avg_fill = weighted_average_price(fills)
     filled_qty = sum(float(fill["qty"]) for fill in fills if finite_non_negative(fill["qty"]) is not None)
+    spent_quote = sum(
+        float(fill["qty"]) * float(fill["price"])
+        for fill in fills
+        if finite_non_negative(fill["qty"]) is not None and finite_positive(fill["price"]) is not None
+    )
+    spent_quote = spent_quote if spent_quote > 0 else None
     requested_qty = finite_non_negative(order["qty_req"])
     remaining_qty = None if requested_qty is None else max(0.0, requested_qty - filled_qty)
     fee = sum(float(fill["fee"]) for fill in fills if finite_non_negative(fill["fee"]) is not None) if fills else None
@@ -534,8 +579,18 @@ def build_execution_quality_record(
         effective_min_trade_qty=order["effective_min_trade_qty"],
         min_notional_krw=order["min_notional_krw"],
     )
-    material_unfilled = bool(unfilled and remainder.is_material_remaining)
-    material_partial = bool(partial and remainder.is_material_remaining)
+    exchange_submit_notional = finite_positive(contract_fields.get("exchange_submit_notional_krw"))
+    exchange_spent_quote = spent_quote
+    exchange_remaining_quote = (
+        max(0.0, exchange_submit_notional - float(exchange_spent_quote))
+        if exchange_submit_notional is not None and exchange_spent_quote is not None
+        else None
+    )
+    exchange_completion_ratio = (
+        min(float(exchange_spent_quote) / exchange_submit_notional, 1.0)
+        if exchange_submit_notional is not None and exchange_spent_quote is not None and exchange_submit_notional > 0
+        else None
+    )
     notional = (avg_fill * filled_qty) if avg_fill is not None and filled_qty > 0 else None
     realized_fee_rate = None if fee is None or notional is None or notional <= 0 else fee / notional
     side = str(order["side"] or "").upper() or None
@@ -546,6 +601,37 @@ def build_execution_quality_record(
     model_breach = None
     if backtest_assumed_slippage_bps is not None and slippage_signal is not None:
         model_breach = slippage_signal > float(backtest_assumed_slippage_bps)
+
+    exchange = str(contract_fields.get("exchange") or "bithumb").strip().lower() or None
+    submit_contract_kind = (
+        str(contract_fields.get("submit_contract_kind") or "").strip()
+        or ("market_sell_base_qty" if side == "SELL" and str(order["order_type"] or "").lower() == "market" else None)
+    )
+    semantics = classify_order_semantics(
+        raw_order_type=order["order_type"],
+        side=side,
+        exchange=exchange,
+        submit_contract_kind=submit_contract_kind,
+    )
+    quote_budget_buy = (
+        semantics.canonical_execution_kind == CANONICAL_MARKET_BUY_QUOTE_NOTIONAL
+        and submit_contract_kind == "market_buy_notional"
+        and exchange_submit_notional is not None
+    )
+    quote_budget_remaining_material = False
+    if quote_budget_buy and exchange_remaining_quote is not None:
+        if remainder.min_notional_krw is None:
+            quote_budget_remaining_material = exchange_remaining_quote > 0
+        else:
+            quote_budget_remaining_material = exchange_remaining_quote >= float(remainder.min_notional_krw)
+    material_unfilled = bool(unfilled and (quote_budget_remaining_material if quote_budget_buy else remainder.is_material_remaining))
+    material_partial = bool(partial and (quote_budget_remaining_material if quote_budget_buy else remainder.is_material_remaining))
+    materiality_reason = remainder.materiality_reason
+    if quote_budget_buy and exchange_remaining_quote is not None:
+        if quote_budget_remaining_material:
+            materiality_reason = "exchange_quote_budget_remaining_material"
+        else:
+            materiality_reason = "exchange_quote_budget_remaining_below_min_notional_krw"
 
     missing: list[str] = []
     if decision_id is None:
@@ -576,8 +662,6 @@ def build_execution_quality_record(
         quality_status = QUALITY_WITHIN_MODEL
         quality_reason = "complete_evidence_within_thresholds"
 
-    semantics = classify_order_semantics(raw_order_type=order["order_type"], side=side)
-
     return ExecutionQualityRecord(
         client_order_id=str(order["client_order_id"]),
         submit_attempt_id=str(order["submit_attempt_id"]) if order["submit_attempt_id"] else None,
@@ -587,6 +671,8 @@ def build_execution_quality_record(
         market=str((confirmation or preflight or intent)["symbol"]) if (confirmation or preflight or intent) is not None and (confirmation or preflight or intent)["symbol"] else None,
         side=side,
         order_type=str(order["order_type"]) if order["order_type"] else None,
+        exchange=exchange,
+        submit_contract_kind=submit_contract_kind,
         canonical_execution_kind=semantics.canonical_execution_kind,
         market_equivalent=semantics.market_equivalent,
         legacy_unknown_order_type=semantics.legacy_unknown,
@@ -611,6 +697,13 @@ def build_execution_quality_record(
         requested_qty=requested_qty,
         remaining_qty=remaining_qty,
         remaining_notional_krw=remainder.remaining_notional_krw,
+        internal_target_remaining_qty=remaining_qty,
+        internal_target_residue_material=remainder.is_material_remaining,
+        internal_target_residue_reason=remainder.materiality_reason,
+        exchange_submit_notional_krw=exchange_submit_notional,
+        exchange_spent_quote_krw=exchange_spent_quote,
+        exchange_remaining_quote_krw=exchange_remaining_quote,
+        exchange_fill_completion_ratio=exchange_completion_ratio,
         qty_step=remainder.qty_step,
         effective_min_trade_qty=remainder.effective_min_trade_qty,
         min_notional_krw=remainder.min_notional_krw,
@@ -628,7 +721,7 @@ def build_execution_quality_record(
         unfilled_flag=unfilled,
         material_partial_fill_flag=material_partial,
         material_unfilled_flag=material_unfilled,
-        remaining_qty_materiality_reason=remainder.materiality_reason,
+        remaining_qty_materiality_reason=materiality_reason,
         quality_status=quality_status,
         quality_reason=quality_reason,
         backtest_assumed_slippage_bps=backtest_assumed_slippage_bps,
@@ -642,16 +735,24 @@ _EXECUTION_QUALITY_COLUMNS = tuple(ExecutionQualityRecord.__dataclass_fields__.k
 def upsert_execution_quality_record(conn: sqlite3.Connection, record: ExecutionQualityRecord) -> None:
     now_ms = int(time.time() * 1000)
     values = [getattr(record, name) for name in _EXECUTION_QUALITY_COLUMNS]
-    assignments = ", ".join(f"{name}=excluded.{name}" for name in _EXECUTION_QUALITY_COLUMNS if name != "client_order_id")
+    update_assignments = ", ".join(f"{name}=?" for name in _EXECUTION_QUALITY_COLUMNS if name != "client_order_id")
     placeholders = ", ".join("?" for _ in _EXECUTION_QUALITY_COLUMNS)
     columns = ", ".join(_EXECUTION_QUALITY_COLUMNS)
+    update_values = [getattr(record, name) for name in _EXECUTION_QUALITY_COLUMNS if name != "client_order_id"]
+    cursor = conn.execute(
+        f"""
+        UPDATE execution_quality_events
+        SET {update_assignments}, updated_ts=?
+        WHERE client_order_id=?
+        """,
+        (*update_values, now_ms, record.client_order_id),
+    )
+    if cursor.rowcount:
+        return
     conn.execute(
         f"""
         INSERT INTO execution_quality_events({columns}, created_ts, updated_ts)
         VALUES ({placeholders}, ?, ?)
-        ON CONFLICT(client_order_id) DO UPDATE SET
-            {assignments},
-            updated_ts=excluded.updated_ts
         """,
         (*values, now_ms, now_ms),
     )

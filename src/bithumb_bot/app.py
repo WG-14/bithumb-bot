@@ -5202,6 +5202,7 @@ def _build_fill_trade_linkage_diagnostic(*, apply_safe: bool = False) -> dict[st
         unmatchable = 0
         repaired_count = 0
         skipped_count = 0
+        decision_rows: list[dict[str, object]] = []
         samples: list[dict[str, object]] = []
         repaired_rows: list[dict[str, object]] = []
         now_ms = int(time.time() * 1000)
@@ -5267,17 +5268,24 @@ def _build_fill_trade_linkage_diagnostic(*, apply_safe: bool = False) -> dict[st
                 unmatchable += 1
                 status = "unmatchable"
                 skipped_count += 1
+            decision_row = {
+                "fill_row_id": int(row["id"]),
+                "client_order_id": client_order_id,
+                "fill_id": str(row["fill_id"] or ""),
+                "status": status,
+                "matched_trade_count": len(candidates),
+                "candidate_trade_ids": [int(item["trade_id"]) for item in candidates],
+                "decision": (
+                    "applied"
+                    if apply_safe and len(candidates) == 1
+                    else "dry_run_would_apply"
+                    if len(candidates) == 1
+                    else "skipped"
+                ),
+            }
+            decision_rows.append(decision_row)
             if len(samples) < 10:
-                samples.append(
-                    {
-                        "fill_row_id": int(row["id"]),
-                        "client_order_id": client_order_id,
-                        "fill_id": str(row["fill_id"] or ""),
-                        "status": status,
-                        "matched_trade_count": len(candidates),
-                        "candidate_trade_ids": [int(item["trade_id"]) for item in candidates],
-                    }
-                )
+                samples.append(decision_row)
         if apply_safe:
             conn.commit()
         after_missing = int(conn.execute("SELECT COUNT(*) FROM fills WHERE trade_id IS NULL").fetchone()[0])
@@ -5295,6 +5303,7 @@ def _build_fill_trade_linkage_diagnostic(*, apply_safe: bool = False) -> dict[st
         "apply_safe": bool(apply_safe),
         "repaired_count": repaired_count,
         "skipped_count": skipped_count,
+        "rows": decision_rows,
         "repaired_rows": repaired_rows,
         "samples": samples,
     }
@@ -5319,7 +5328,7 @@ def cmd_diagnose_fill_trade_linkage(*, as_json: bool = False, apply_safe: bool =
         f"apply_safe={1 if bool(payload.get('apply_safe')) else 0} "
         f"repaired_count={int(payload.get('repaired_count') or 0)}"
     )
-    for sample in payload.get("samples") or []:
+    for sample in payload.get("rows") or []:
         print(
             "  "
             f"fill_row_id={int(sample.get('fill_row_id') or 0)} "

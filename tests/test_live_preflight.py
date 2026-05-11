@@ -340,8 +340,24 @@ def test_live_real_order_execution_preflight_accepts_armed_live(monkeypatch: pyt
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="small_live")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
 
     config.validate_live_real_order_execution_preflight(settings)
+
+
+def test_live_real_order_execution_preflight_rejects_armed_live_without_approved_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_real_order_execution_preflight(settings)
+
+    assert "approved_profile_missing" in str(exc.value)
 
 
 def test_live_armed_preflight_requires_approved_small_live_profile(monkeypatch: pytest.MonkeyPatch) -> None:

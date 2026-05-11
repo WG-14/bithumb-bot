@@ -1171,6 +1171,19 @@ def validate_live_real_order_execution_preflight(cfg: Settings) -> None:
         raise LiveModeValidationError(
             "live real-order execution preflight failed: " + "; ".join(issues)
         )
+    runtime_contract = runtime_contract_from_settings(cfg)
+    profile_result = verify_profile_against_runtime(
+        profile_path=str(runtime_contract.get("profile_selector") or "").strip(),
+        runtime=runtime_contract,
+        require_profile=True,
+        expected_profile_modes={"small_live"},
+        verify_source_promotion=True,
+    )
+    if not profile_result.ok:
+        raise LiveModeValidationError(
+            "live real-order execution preflight failed: approved profile verification failed: "
+            f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
+        )
 
 
 def validate_live_dry_run_loop_startup_contract(cfg: Settings) -> None:

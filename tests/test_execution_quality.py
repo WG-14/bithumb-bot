@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
@@ -199,7 +200,12 @@ def test_latency_calculation_handles_missing_and_ordering() -> None:
 
 
 def test_canonical_order_semantics_side_aware() -> None:
-    buy_price = classify_order_semantics(raw_order_type="price", side="BUY")
+    buy_price = classify_order_semantics(
+        raw_order_type="price",
+        side="BUY",
+        exchange="bithumb",
+        submit_contract_kind="market_buy_notional",
+    )
     assert buy_price.canonical_execution_kind == "market_buy_quote_notional"
     assert buy_price.market_equivalent is True
     assert buy_price.legacy_unknown is False
@@ -215,6 +221,10 @@ def test_canonical_order_semantics_side_aware() -> None:
     legacy = classify_order_semantics(raw_order_type=None, side="BUY")
     assert legacy.canonical_execution_kind == "legacy_unknown"
     assert legacy.legacy_unknown is True
+
+    invalid_buy_market = classify_order_semantics(raw_order_type="market", side="BUY", exchange="bithumb")
+    assert invalid_buy_market.canonical_execution_kind == "unsupported_unknown"
+    assert invalid_buy_market.market_equivalent is False
 
     unsupported = classify_order_semantics(raw_order_type="post_only", side="BUY")
     assert unsupported.canonical_execution_kind == "unsupported_unknown"
@@ -232,7 +242,7 @@ def test_execution_remainder_materiality_rules() -> None:
         min_notional_krw=5000.0,
     )
     assert tiny.is_material_remaining is False
-    assert tiny.materiality_reason == "remaining_qty_at_or_below_qty_step"
+    assert tiny.materiality_reason == "remaining_qty_below_qty_step"
 
     material = assess_execution_remainder(
         requested_qty=0.002,
@@ -244,6 +254,54 @@ def test_execution_remainder_materiality_rules() -> None:
         min_notional_krw=5000.0,
     )
     assert material.is_material_remaining is True
+
+    one_step = assess_execution_remainder(
+        requested_qty=0.0011,
+        filled_qty=0.0010,
+        remaining_qty=0.0001,
+        reference_price=100_000_000.0,
+        qty_step=0.0001,
+        effective_min_trade_qty=0.0001,
+        min_notional_krw=5000.0,
+    )
+    assert one_step.is_material_remaining is True
+    assert one_step.materiality_reason == "material_executable_remaining_qty"
+
+    below_min_qty = assess_execution_remainder(
+        requested_qty=0.001,
+        filled_qty=0.00095,
+        remaining_qty=0.00005,
+        reference_price=100_000_000.0,
+        qty_step=None,
+        effective_min_trade_qty=0.0001,
+        min_notional_krw=5000.0,
+    )
+    assert below_min_qty.is_material_remaining is False
+    assert below_min_qty.materiality_reason == "remaining_qty_below_effective_min_trade_qty"
+
+    below_min_notional = assess_execution_remainder(
+        requested_qty=0.001,
+        filled_qty=0.0008,
+        remaining_qty=0.0002,
+        reference_price=10_000_000.0,
+        qty_step=0.0001,
+        effective_min_trade_qty=0.0001,
+        min_notional_krw=5000.0,
+    )
+    assert below_min_notional.is_material_remaining is False
+    assert below_min_notional.materiality_reason == "remaining_notional_below_min_notional_krw"
+
+    missing_reference = assess_execution_remainder(
+        requested_qty=0.001,
+        filled_qty=0.0008,
+        remaining_qty=0.0002,
+        reference_price=None,
+        qty_step=0.0001,
+        effective_min_trade_qty=0.0001,
+        min_notional_krw=5000.0,
+    )
+    assert missing_reference.is_material_remaining is True
+    assert missing_reference.materiality_reason == "material_executable_remaining_qty_notional_unknown"
 
     unfilled = assess_execution_remainder(
         requested_qty=0.001,
@@ -268,6 +326,8 @@ def _seed_quality_order(
     fill_prices: tuple[float, ...] = (101.0,),
     fill_qtys: tuple[float, ...] = (0.5,),
     qty_req: float = 1.0,
+    submit_contract_kind: str | None = None,
+    exchange_submit_notional_krw: float | None = None,
     request_ts: int = 1_700_000_000_100,
     response_ts: int = 1_700_000_000_180,
 ) -> int:
@@ -318,6 +378,9 @@ def _seed_quality_order(
         timeout_flag=False,
         submit_evidence=json.dumps(
             {
+                "exchange": "bithumb",
+                "submit_contract_kind": submit_contract_kind,
+                "exchange_submit_notional_krw": exchange_submit_notional_krw,
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "top_of_book": {"best_bid": 99.0, "best_ask": 100.0},
@@ -465,9 +528,10 @@ def test_summary_reports_market_limit_cost_latency_and_fill_comparison(tmp_path)
         _seed_quality_order(
             conn,
             client_order_id="quality_market_fast_costly",
+            side="SELL",
             order_type="MaRkEt",
             decision_price=100.0,
-            fill_prices=(101.0,),
+            fill_prices=(99.0,),
             fill_qtys=(1.0,),
             qty_req=1.0,
             request_ts=1_700_000_000_100,
@@ -528,7 +592,14 @@ def test_summary_reports_market_limit_cost_latency_and_fill_comparison(tmp_path)
 def test_summary_order_type_comparison_handles_one_side_only_and_unknown_type(tmp_path) -> None:
     conn = ensure_db(str(tmp_path / "execution-quality-one-side.sqlite"))
     try:
-        _seed_quality_order(conn, client_order_id="quality_market_only", order_type="market", fill_prices=(100.2,), fill_qtys=(1.0,))
+        _seed_quality_order(
+            conn,
+            client_order_id="quality_market_only",
+            side="SELL",
+            order_type="market",
+            fill_prices=(100.2,),
+            fill_qtys=(1.0,),
+        )
         _seed_quality_order(conn, client_order_id="quality_unknown_type", order_type="post_only", fill_prices=(100.1,), fill_qtys=(1.0,))
         market_only = build_execution_quality_record(conn, client_order_id="quality_market_only")
         unknown = build_execution_quality_record(conn, client_order_id="quality_unknown_type")
@@ -613,6 +684,8 @@ def test_material_remainder_controls_quality_gate_and_preserves_raw_flags(tmp_pa
             conn,
             client_order_id="quality_tiny_residue",
             order_type="price",
+            submit_contract_kind="market_buy_notional",
+            exchange_submit_notional_krw=60_000.0,
             decision_price=100_000_000.0,
             submit_reference=100_000_000.0,
             fill_prices=(100_000_000.0,),
@@ -633,7 +706,13 @@ def test_material_remainder_controls_quality_gate_and_preserves_raw_flags(tmp_pa
     assert record is not None
     assert record.partial_fill_flag is True
     assert record.material_partial_fill_flag is False
-    assert record.remaining_qty_materiality_reason == "remaining_qty_at_or_below_qty_step"
+    assert record.exchange_submit_notional_krw == pytest.approx(60_000.0)
+    assert record.exchange_spent_quote_krw == pytest.approx(59_988.0)
+    assert record.exchange_remaining_quote_krw == pytest.approx(12.0)
+    assert record.exchange_fill_completion_ratio == pytest.approx(0.9998)
+    assert record.internal_target_remaining_qty == pytest.approx(0.00000012)
+    assert record.internal_target_residue_material is False
+    assert record.remaining_qty_materiality_reason == "exchange_quote_budget_remaining_below_min_notional_krw"
     assert record.quality_status == "within_model"
 
     summary = summarize_execution_quality([record], thresholds=ExecutionQualityThresholds(min_sample=1))
@@ -662,7 +741,7 @@ def test_execution_quality_report_cli_json_and_persistence(tmp_path, monkeypatch
     object.__setattr__(settings, "LIVE_EXECUTION_QUALITY_MIN_SAMPLE", 1)
     conn = ensure_db(str(db_path))
     try:
-        _seed_quality_order(conn, client_order_id="quality_cli", fill_prices=(101.0,), fill_qtys=(1.0,))
+        _seed_quality_order(conn, client_order_id="quality_cli", side="SELL", fill_prices=(99.0,), fill_qtys=(1.0,))
         conn.commit()
     finally:
         conn.close()
@@ -714,3 +793,64 @@ def test_execution_quality_schema_and_refresh_are_idempotent(tmp_path) -> None:
 
     assert count is not None
     assert int(count["count"]) == 1
+
+
+def test_execution_quality_old_schema_is_upgraded_and_report_runs(tmp_path, monkeypatch, capsys) -> None:
+    db_path = tmp_path / "execution-quality-old-schema.sqlite"
+    raw = sqlite3.connect(str(db_path))
+    try:
+        raw.execute(
+            """
+            CREATE TABLE execution_quality_events (
+                client_order_id TEXT,
+                order_type TEXT,
+                filled_qty REAL NOT NULL DEFAULT 0,
+                requested_qty REAL,
+                quality_status TEXT NOT NULL DEFAULT 'insufficient_evidence',
+                quality_reason TEXT NOT NULL DEFAULT 'legacy_schema'
+            )
+            """
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "LIVE_EXECUTION_QUALITY_MIN_SAMPLE", 1)
+    conn = ensure_db(str(db_path))
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(execution_quality_events)").fetchall()}
+        for column in (
+            "canonical_execution_kind",
+            "market_equivalent",
+            "legacy_unknown_order_type",
+            "unsupported_unknown_order_type",
+            "remaining_notional_krw",
+            "qty_step",
+            "effective_min_trade_qty",
+            "min_notional_krw",
+            "material_partial_fill_flag",
+            "material_unfilled_flag",
+            "remaining_qty_materiality_reason",
+            "exchange_submit_notional_krw",
+            "exchange_fill_completion_ratio",
+        ):
+            assert column in columns
+        _seed_quality_order(
+            conn,
+            client_order_id="quality_old_schema",
+            side="SELL",
+            order_type="market",
+            fill_prices=(100.0,),
+            fill_qtys=(1.0,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc = main(["execution-quality-report", "--limit", "10", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["sample_count"] == 1
+    assert payload["market_equivalent_order_count"] == 1
