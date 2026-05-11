@@ -243,6 +243,107 @@ def test_backfill_cli_dry_run_prints_operator_context_without_quality_pass(
     assert not Path(settings.DB_PATH).exists()
 
 
+def test_backfill_cli_non_dry_run_empty_response_exits_nonzero(
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+    _settings_guard,
+) -> None:
+    monkeypatch.setattr("bithumb_bot.historical_backfill.httpx.Client", lambda *args, **kwargs: _DummyClient())
+    monkeypatch.setattr("bithumb_bot.historical_backfill.fetch_minute_candles", lambda *args, **kwargs: [])
+
+    rc = main(
+        [
+            "backfill-candles",
+            "--market",
+            "KRW-BTC",
+            "--interval",
+            "1m",
+            "--start",
+            "2023-01-01",
+            "--end",
+            "2023-01-01",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "status=COMPLETE reason=no_older_candles" in out
+    assert "coverage_status=INCOMPLETE" in out
+    assert "reason=coverage_incomplete_after_backfill" in out
+    assert "dataset_quality status=NOT_EVALUATED_BY_BACKFILL" in out
+    assert "quality_gate_status=PASS" not in out
+
+
+def test_backfill_cli_non_dry_run_range_covered_but_missing_buckets_exits_nonzero(
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+    _settings_guard,
+) -> None:
+    monkeypatch.setattr("bithumb_bot.historical_backfill.httpx.Client", lambda *args, **kwargs: _DummyClient())
+    monkeypatch.setattr(
+        "bithumb_bot.historical_backfill.fetch_minute_candles",
+        lambda *args, **kwargs: [_candle("2023-01-01T00:00:00")],
+    )
+
+    rc = main(
+        [
+            "backfill-candles",
+            "--market",
+            "KRW-BTC",
+            "--interval",
+            "1m",
+            "--start",
+            "2023-01-01",
+            "--end",
+            "2023-01-01",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "status=COMPLETE reason=range_covered" in out
+    assert "coverage_status=INCOMPLETE" in out
+    assert "reason=coverage_incomplete_after_backfill" in out
+    assert "dataset_quality status=NOT_EVALUATED_BY_BACKFILL" in out
+
+
+def test_backfill_cli_dry_run_incomplete_coverage_can_exit_zero_but_prints_not_ready(
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+    _settings_guard,
+) -> None:
+    monkeypatch.setattr("bithumb_bot.historical_backfill.httpx.Client", lambda *args, **kwargs: _DummyClient())
+    monkeypatch.setattr(
+        "bithumb_bot.historical_backfill.fetch_minute_candles",
+        lambda *args, **kwargs: [_candle("2023-01-01T00:00:00")],
+    )
+
+    rc = main(
+        [
+            "backfill-candles",
+            "--market",
+            "KRW-BTC",
+            "--interval",
+            "1m",
+            "--start",
+            "2023-01-01",
+            "--end",
+            "2023-01-01",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "dry_run=1" in out
+    assert "coverage_status=INCOMPLETE" in out
+    assert "dataset_quality status=NOT_EVALUATED_BY_BACKFILL" in out
+    assert "result=DRY_RUN_NOT_READY" in out
+    assert "reason=coverage_incomplete_after_backfill" in out
+    assert "quality_gate_status=PASS" not in out
+    assert not Path(settings.DB_PATH).exists()
+
+
 def test_backfill_cli_rejects_repo_local_db_path(
     monkeypatch,
     capsys: pytest.CaptureFixture[str],

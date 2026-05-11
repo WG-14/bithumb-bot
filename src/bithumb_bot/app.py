@@ -7931,7 +7931,29 @@ def main(argv: list[str] | None = None) -> int:
             "[BACKFILL-CANDLES] dataset_quality "
             f"status={result.dataset_quality_status} next_action={result.next_action}"
         )
-        return 0 if result.progress.status == "COMPLETE" else 1
+        coverage_complete = coverage.get("coverage_status") == "COMPLETE"
+        if result.progress.status != "COMPLETE":
+            print(
+                "[BACKFILL-CANDLES] result=FAIL "
+                f"reason={result.progress.reason or 'progress_incomplete'} "
+                "next_action=inspect backfill progress, rerun backfill, "
+                "then run research-readiness --manifest <manifest>"
+            )
+            return 1
+        if not coverage_complete:
+            result_status = "DRY_RUN_NOT_READY" if result.dry_run else "FAIL"
+            print(
+                f"[BACKFILL-CANDLES] result={result_status} "
+                "reason=coverage_incomplete_after_backfill "
+                "next_action=inspect missing ranges, rerun backfill, "
+                "then run research-readiness --manifest <manifest>"
+            )
+            return 0 if result.dry_run else 1
+        print(
+            "[BACKFILL-CANDLES] result=COMPLETE reason=coverage_complete "
+            "next_action=run research-readiness --manifest <manifest> before research-backtest"
+        )
+        return 0
     elif args.cmd == "research-walk-forward":
         return cmd_research_walk_forward(
             manifest_path=str(args.manifest),
