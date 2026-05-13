@@ -243,6 +243,66 @@ class WalkForwardConfig:
 
 
 @dataclass(frozen=True)
+class ResearchArtifactPolicy:
+    candidate_journal: bool = True
+    failed_candidate_evidence: bool = True
+    full_decisions_external_jsonl: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "candidate_journal": bool(self.candidate_journal),
+            "failed_candidate_evidence": bool(self.failed_candidate_evidence),
+            "full_decisions_external_jsonl": bool(self.full_decisions_external_jsonl),
+        }
+
+
+@dataclass(frozen=True)
+class ResearchResourceLimits:
+    max_runtime_s_per_candidate_split: float | None = 300.0
+    max_decisions_retained: int | None = 0
+    max_trades: int | None = 5000
+    max_equity_points_retained: int | None = 0
+    max_rss_mb: float | None = 1400.0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "max_runtime_s_per_candidate_split": self.max_runtime_s_per_candidate_split,
+            "max_decisions_retained": self.max_decisions_retained,
+            "max_trades": self.max_trades,
+            "max_equity_points_retained": self.max_equity_points_retained,
+            "max_rss_mb": self.max_rss_mb,
+        }
+
+
+@dataclass(frozen=True)
+class ResearchHeartbeatPolicy:
+    interval_s: float | None = 10.0
+    bar_interval: int | None = 10000
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "interval_s": self.interval_s,
+            "bar_interval": self.bar_interval,
+        }
+
+
+@dataclass(frozen=True)
+class ResearchRunPolicy:
+    report_detail: str = "summary"
+    artifact_policy: ResearchArtifactPolicy = field(default_factory=ResearchArtifactPolicy)
+    resource_limits: ResearchResourceLimits = field(default_factory=ResearchResourceLimits)
+    heartbeat: ResearchHeartbeatPolicy = field(default_factory=ResearchHeartbeatPolicy)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "report_detail": self.report_detail,
+            "artifact_policy": self.artifact_policy.as_dict(),
+            "resource_limits": self.resource_limits.as_dict(),
+            "heartbeat": self.heartbeat.as_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class ExperimentManifest:
     experiment_id: str
     hypothesis: str
@@ -257,6 +317,7 @@ class ExperimentManifest:
     deployment_tier: str
     acceptance_gate: AcceptanceGate
     walk_forward: WalkForwardConfig | None
+    research_run: ResearchRunPolicy
     raw: dict[str, Any]
 
     def canonical_payload(self) -> dict[str, Any]:
@@ -275,6 +336,7 @@ class ExperimentManifest:
             "dataset_quality_policy": _canonical_dataset_quality_policy(self.raw.get("dataset_quality_policy")),
             "acceptance_gate": self.acceptance_gate.as_dict(),
             "walk_forward": self.walk_forward.as_dict() if self.walk_forward is not None else None,
+            "research_run": self.research_run.as_dict(),
         }
 
     def manifest_hash(self) -> str:
@@ -309,6 +371,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
     deployment_tier = _parse_deployment_tier(payload.get("deployment_tier") or payload.get("promotion_target"))
     acceptance_gate = _parse_acceptance_gate(_required_dict(payload, "acceptance_gate"))
     walk_forward = _parse_walk_forward(payload.get("walk_forward"))
+    research_run = _parse_research_run(payload.get("research_run"))
     if acceptance_gate.walk_forward_required and walk_forward is None:
         raise ManifestValidationError("walk_forward is required when acceptance_gate.walk_forward_required=true")
 
@@ -328,6 +391,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
         deployment_tier=deployment_tier,
         acceptance_gate=acceptance_gate,
         walk_forward=walk_forward,
+        research_run=research_run,
         raw=dict(payload),
     )
 
@@ -891,6 +955,90 @@ def _parse_walk_forward(value: Any) -> WalkForwardConfig | None:
     )
 
 
+def _parse_research_run(value: Any) -> ResearchRunPolicy:
+    if value is None:
+        return ResearchRunPolicy()
+    if not isinstance(value, dict):
+        raise ManifestValidationError("research_run must be an object")
+    allowed_fields = {"report_detail", "artifact_policy", "resource_limits", "heartbeat"}
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"research_run unsupported fields: {','.join(unknown)}")
+    report_detail = str(value.get("report_detail") or "summary").strip().lower()
+    if report_detail not in {"summary", "standard", "full"}:
+        raise ManifestValidationError("research_run.report_detail must be summary, standard, or full")
+    return ResearchRunPolicy(
+        report_detail=report_detail,
+        artifact_policy=_parse_research_artifact_policy(value.get("artifact_policy")),
+        resource_limits=_parse_research_resource_limits(value.get("resource_limits")),
+        heartbeat=_parse_research_heartbeat(value.get("heartbeat")),
+    )
+
+
+def _parse_research_artifact_policy(value: Any) -> ResearchArtifactPolicy:
+    if value is None:
+        return ResearchArtifactPolicy()
+    if not isinstance(value, dict):
+        raise ManifestValidationError("research_run.artifact_policy must be an object")
+    allowed_fields = {"candidate_journal", "failed_candidate_evidence", "full_decisions_external_jsonl"}
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"research_run.artifact_policy unsupported fields: {','.join(unknown)}")
+    return ResearchArtifactPolicy(
+        candidate_journal=bool(value.get("candidate_journal", True)),
+        failed_candidate_evidence=bool(value.get("failed_candidate_evidence", True)),
+        full_decisions_external_jsonl=bool(value.get("full_decisions_external_jsonl", False)),
+    )
+
+
+def _parse_research_resource_limits(value: Any) -> ResearchResourceLimits:
+    if value is None:
+        return ResearchResourceLimits()
+    if not isinstance(value, dict):
+        raise ManifestValidationError("research_run.resource_limits must be an object")
+    allowed_fields = {
+        "max_runtime_s_per_candidate_split",
+        "max_decisions_retained",
+        "max_trades",
+        "max_equity_points_retained",
+        "max_rss_mb",
+    }
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"research_run.resource_limits unsupported fields: {','.join(unknown)}")
+    return ResearchResourceLimits(
+        max_runtime_s_per_candidate_split=_optional_positive_float(
+            value.get("max_runtime_s_per_candidate_split", 300.0),
+            "research_run.resource_limits.max_runtime_s_per_candidate_split",
+        ),
+        max_decisions_retained=_optional_positive_or_zero_int(
+            value.get("max_decisions_retained", 0),
+            "research_run.resource_limits.max_decisions_retained",
+        ),
+        max_trades=_optional_positive_or_zero_int(value.get("max_trades", 5000), "research_run.resource_limits.max_trades"),
+        max_equity_points_retained=_optional_positive_or_zero_int(
+            value.get("max_equity_points_retained", 0),
+            "research_run.resource_limits.max_equity_points_retained",
+        ),
+        max_rss_mb=_optional_positive_float(value.get("max_rss_mb", 1400.0), "research_run.resource_limits.max_rss_mb"),
+    )
+
+
+def _parse_research_heartbeat(value: Any) -> ResearchHeartbeatPolicy:
+    if value is None:
+        return ResearchHeartbeatPolicy()
+    if not isinstance(value, dict):
+        raise ManifestValidationError("research_run.heartbeat must be an object")
+    allowed_fields = {"interval_s", "bar_interval"}
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"research_run.heartbeat unsupported fields: {','.join(unknown)}")
+    return ResearchHeartbeatPolicy(
+        interval_s=_optional_positive_float(value.get("interval_s", 10.0), "research_run.heartbeat.interval_s"),
+        bar_interval=_optional_positive_or_zero_int(value.get("bar_interval", 10000), "research_run.heartbeat.bar_interval"),
+    )
+
+
 def _validate_split_order(split: DatasetSplit) -> None:
     if split.train.end_ts_ms() >= split.validation.start_ts_ms():
         raise ManifestValidationError("dataset.train must end before dataset.validation starts")
@@ -945,6 +1093,15 @@ def _optional_finite_non_negative_float(value: Any, field: str) -> float | None:
     return parsed
 
 
+def _optional_positive_float(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
+    parsed = _finite_non_negative_float(value, field)
+    if parsed <= 0.0:
+        return None
+    return float(parsed)
+
+
 def _optional_pct(value: Any, field: str) -> float | None:
     parsed = _optional_finite_non_negative_float(value, field)
     if parsed is not None and parsed > 100.0:
@@ -970,3 +1127,9 @@ def _positive_or_zero_int(value: Any, field: str) -> int:
     if parsed < 0:
         raise ManifestValidationError(f"{field} must be >= 0")
     return parsed
+
+
+def _optional_positive_or_zero_int(value: Any, field: str) -> int | None:
+    if value is None:
+        return None
+    return _positive_or_zero_int(value, field)

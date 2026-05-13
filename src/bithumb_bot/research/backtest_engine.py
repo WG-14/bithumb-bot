@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+import time
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable
 
 from bithumb_bot.market_regime import (
     RegimeCoverageRow,
@@ -36,6 +37,163 @@ from .metrics_contract import (
 
 START_CASH_KRW = 1_000_000.0
 BUY_FRACTION = 0.99
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class BacktestResourceLimits:
+    max_runtime_s_per_candidate_split: float | None = None
+    max_decisions_retained: int | None = None
+    max_trades: int | None = None
+    max_equity_points_retained: int | None = None
+    max_rss_mb: float | None = None
+
+
+@dataclass(frozen=True)
+class BacktestHeartbeatPolicy:
+    interval_s: float | None = None
+    bar_interval: int | None = None
+
+
+@dataclass
+class BacktestRunContext:
+    experiment_id: str = ""
+    candidate_id: str = ""
+    scenario_id: str = ""
+    scenario_index: int | None = None
+    split_name: str = ""
+    report_detail: str = "full"
+    resource_limits: BacktestResourceLimits = field(default_factory=BacktestResourceLimits)
+    heartbeat: BacktestHeartbeatPolicy = field(default_factory=BacktestHeartbeatPolicy)
+    progress_callback: ProgressCallback | None = None
+    started_at: float = field(default_factory=time.perf_counter)
+
+
+class BacktestResourceLimitExceeded(RuntimeError):
+    def __init__(self, reason: str, evidence: dict[str, Any]) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.evidence = evidence
+
+
+@dataclass
+class _BacktestAccumulator:
+    context: BacktestRunContext
+    total_candles: int
+    decision_count: int = 0
+    signal_count: int = 0
+    retained_decision_count: int = 0
+    retained_equity_point_count: int = 0
+    trade_count: int = 0
+    closed_trade_count: int = 0
+    last_heartbeat_s: float = field(default_factory=time.perf_counter)
+    last_heartbeat_bar: int = 0
+    decision_hash_material: list[str] = field(default_factory=list)
+
+    @property
+    def report_detail(self) -> str:
+        detail = str(self.context.report_detail or "full").strip().lower()
+        return detail if detail in {"summary", "standard", "full"} else "full"
+
+    def retain_full_detail(self) -> bool:
+        return self.report_detail == "full"
+
+    def retain_decision(self) -> bool:
+        if self.report_detail == "full":
+            return True
+        limit = self.context.resource_limits.max_decisions_retained
+        if limit is None:
+            return True
+        return self.retained_decision_count < int(limit)
+
+    def retain_equity_point(self) -> bool:
+        if self.report_detail == "full":
+            return True
+        limit = self.context.resource_limits.max_equity_points_retained
+        if limit is None:
+            return True
+        return self.retained_equity_point_count < int(limit)
+
+    def update_decision(self, payload: dict[str, object], retained: bool) -> None:
+        self.decision_count += 1
+        if str(payload.get("raw_signal") or "").upper() in {"BUY", "SELL"}:
+            self.signal_count += 1
+        self.decision_hash_material.append(str(payload.get("replay_fingerprint_hash") or ""))
+        if retained:
+            self.retained_decision_count += 1
+
+    def update_equity(self, retained: bool) -> None:
+        if retained:
+            self.retained_equity_point_count += 1
+
+    def update_trades(self, trades: list[dict[str, object]]) -> None:
+        self.trade_count = len(trades)
+        self.closed_trade_count = sum(1 for trade in trades if str(trade.get("side") or "").upper() == "SELL")
+
+    def maybe_emit_heartbeat(self, candles_processed: int) -> None:
+        callback = self.context.progress_callback
+        if callback is None:
+            return
+        now = time.perf_counter()
+        interval = self.context.heartbeat.interval_s
+        bar_interval = self.context.heartbeat.bar_interval
+        by_time = interval is not None and now - self.last_heartbeat_s >= float(interval)
+        by_bar = bar_interval is not None and int(bar_interval) > 0 and candles_processed - self.last_heartbeat_bar >= int(bar_interval)
+        if not by_time and not by_bar:
+            return
+        self.last_heartbeat_s = now
+        self.last_heartbeat_bar = candles_processed
+        callback(self.heartbeat_payload(candles_processed=candles_processed))
+
+    def heartbeat_payload(self, *, candles_processed: int) -> dict[str, Any]:
+        return {
+            "stage": "heartbeat",
+            "experiment_id": self.context.experiment_id,
+            "candidate_id": self.context.candidate_id,
+            "scenario": self.context.scenario_id,
+            "split": self.context.split_name,
+            "candles_processed": int(candles_processed),
+            "total_candles": int(self.total_candles),
+            "signal_count": int(self.signal_count),
+            "trade_count": int(self.trade_count),
+            "closed_trade_count": int(self.closed_trade_count),
+            "decision_count": int(self.decision_count),
+            "retained_decision_count": int(self.retained_decision_count),
+            "retained_equity_point_count": int(self.retained_equity_point_count),
+            "elapsed_s": round(time.perf_counter() - self.context.started_at, 3),
+            "rss_mb": _rss_mb(),
+            "report_detail": self.report_detail,
+        }
+
+    def check_limits(self, *, candles_processed: int, trades: list[dict[str, object]]) -> None:
+        self.update_trades(trades)
+        limits = self.context.resource_limits
+        reasons: list[str] = []
+        elapsed = time.perf_counter() - self.context.started_at
+        rss = _rss_mb()
+        if limits.max_runtime_s_per_candidate_split is not None and elapsed > float(limits.max_runtime_s_per_candidate_split):
+            reasons.append("max_runtime_exceeded")
+        if limits.max_trades is not None and self.trade_count > int(limits.max_trades):
+            reasons.append("max_trades_exceeded")
+        if limits.max_decisions_retained is not None and self.retained_decision_count > int(limits.max_decisions_retained):
+            reasons.append("max_retained_decisions_exceeded")
+        if limits.max_equity_points_retained is not None and self.retained_equity_point_count > int(limits.max_equity_points_retained):
+            reasons.append("max_retained_equity_points_exceeded")
+        if limits.max_rss_mb is not None and rss is not None and rss > float(limits.max_rss_mb):
+            reasons.append("max_rss_exceeded")
+        if not reasons:
+            return
+        evidence = self.heartbeat_payload(candles_processed=candles_processed)
+        evidence.update({"status": "TRIPPED", "reasons": sorted(set(reasons))})
+        raise BacktestResourceLimitExceeded("candidate_resource_limit_exceeded", evidence)
+
+    def resource_usage(self, *, candles_processed: int) -> dict[str, Any]:
+        payload = self.heartbeat_payload(candles_processed=candles_processed)
+        payload.pop("stage", None)
+        payload.pop("elapsed_s", None)
+        payload.pop("rss_mb", None)
+        payload["decision_hash"] = canonical_payload_hash(self.decision_hash_material)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -52,6 +210,8 @@ class BacktestRun:
     position_intervals: tuple[PositionInterval, ...] = ()
     closed_trades: tuple[ClosedTradeRecord, ...] = ()
     metrics_v2: MetricContractV2 | None = None
+    resource_usage: dict[str, object] | None = None
+    retained_detail_summary: dict[str, object] | None = None
 
 
 @dataclass
@@ -77,6 +237,7 @@ def run_sma_backtest(
     parameter_stability_score: float | None = None,
     execution_model: ExecutionModel | None = None,
     execution_timing_policy: ExecutionTimingPolicy | None = None,
+    context: BacktestRunContext | None = None,
 ) -> BacktestRun:
     short_n = int(parameter_values.get("SMA_SHORT", parameter_values.get("short_n", 0)))
     long_n = int(parameter_values.get("SMA_LONG", parameter_values.get("long_n", 0)))
@@ -91,6 +252,8 @@ def run_sma_backtest(
         raise ValueError("SMA_SHORT must be smaller than SMA_LONG")
 
     candles = dataset.candles
+    run_context = context or BacktestRunContext(report_detail="full")
+    accumulator = _BacktestAccumulator(context=run_context, total_candles=len(candles))
     dataset_content_hash = dataset.content_hash()
     warnings: list[str] = []
     if len(candles) < long_n + 2:
@@ -103,6 +266,8 @@ def run_sma_backtest(
             regime_performance=(),
             regime_coverage=(),
             execution_event_summary=empty_execution_event_summary(),
+            resource_usage=accumulator.resource_usage(candles_processed=len(candles)),
+            retained_detail_summary=_retained_detail_summary(accumulator),
         )
 
     closes = [candle.close for candle in candles]
@@ -127,14 +292,17 @@ def run_sma_backtest(
     trades: list[dict[str, object]] = []
     pending_fills: list[_PendingFill] = []
     decisions: list[dict[str, object]] = []
-    equity_curve: list[EquityPoint] = [
-        EquityPoint(
-            ts=candle_close_ts(candles[0], interval=dataset.interval),
-            equity=START_CASH_KRW,
-            cash=START_CASH_KRW,
-            asset_qty=0.0,
+    equity_curve: list[EquityPoint] = []
+    if accumulator.retain_equity_point():
+        equity_curve.append(
+            EquityPoint(
+                ts=candle_close_ts(candles[0], interval=dataset.interval),
+                equity=START_CASH_KRW,
+                cash=START_CASH_KRW,
+                asset_qty=0.0,
+            )
         )
-    ]
+        accumulator.update_equity(retained=True)
     closed_pnls: list[float] = []
     prev_above: bool | None = None
     model = execution_model or FixedBpsExecutionModel(fee_rate=fee_rate, slippage_bps=slippage_bps)
@@ -224,32 +392,34 @@ def run_sma_backtest(
                 action = "BUY"
             elif raw_signal == "SELL" and sellable_qty > 0.0:
                 action = "SELL"
-        decisions.append(
-            _research_decision_payload(
-                dataset=dataset,
-                dataset_content_hash=dataset_content_hash,
-                parameter_values=parameter_values,
-                fee_rate=fee_rate,
-                slippage_bps=slippage_bps,
-                timing_policy=timing_policy,
-                candle_ts=int(candle.ts),
-                decision_ts=int(decision_boundary_ts),
-                raw_signal=raw_signal,
-                final_signal=action,
-                raw_reason=raw_reason,
-                blocked=bool(raw_signal in {"BUY", "SELL"} and action == "HOLD"),
-                blocked_filters=blocked_filters,
-                prev_s=prev_short,
-                prev_l=prev_long,
-                curr_s=curr_short,
-                curr_l=curr_long,
-                gap_ratio=gap_ratio,
-                range_ratio=range_ratio,
-                regime_snapshot=regime_snapshot,
-                qty=qty,
-                sellable_qty=sellable_qty,
-            )
+        decision_payload = _research_decision_payload(
+            dataset=dataset,
+            dataset_content_hash=dataset_content_hash,
+            parameter_values=parameter_values,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            timing_policy=timing_policy,
+            candle_ts=int(candle.ts),
+            decision_ts=int(decision_boundary_ts),
+            raw_signal=raw_signal,
+            final_signal=action,
+            raw_reason=raw_reason,
+            blocked=bool(raw_signal in {"BUY", "SELL"} and action == "HOLD"),
+            blocked_filters=blocked_filters,
+            prev_s=prev_short,
+            prev_l=prev_long,
+            curr_s=curr_short,
+            curr_l=curr_long,
+            gap_ratio=gap_ratio,
+            range_ratio=range_ratio,
+            regime_snapshot=regime_snapshot,
+            qty=qty,
+            sellable_qty=sellable_qty,
         )
+        retain_decision = accumulator.retain_decision()
+        if retain_decision:
+            decisions.append(decision_payload)
+        accumulator.update_decision(decision_payload, retained=retain_decision)
 
         if action == "BUY":
             signal = build_signal_event(
@@ -293,8 +463,12 @@ def run_sma_backtest(
                     mark_price=candle.close,
                     peak=peak,
                     max_drawdown=max_drawdown,
+                    retain=accumulator.retain_equity_point(),
                 )
+                accumulator.update_equity(retained=bool(equity_curve and equity_curve[-1].ts == mark_boundary_ts))
                 prev_above = above
+                accumulator.maybe_emit_heartbeat(index - long_n + 1)
+                accumulator.check_limits(candles_processed=index - long_n + 1, trades=trades)
                 continue
             spend = cash * BUY_FRACTION
             fill = model.simulate(
@@ -319,8 +493,12 @@ def run_sma_backtest(
                     mark_price=candle.close,
                     peak=peak,
                     max_drawdown=max_drawdown,
+                    retain=accumulator.retain_equity_point(),
                 )
+                accumulator.update_equity(retained=bool(equity_curve and equity_curve[-1].ts == mark_boundary_ts))
                 prev_above = above
+                accumulator.maybe_emit_heartbeat(index - long_n + 1)
+                accumulator.check_limits(candles_processed=index - long_n + 1, trades=trades)
                 continue
             exec_price = float(fill.avg_fill_price)
             fee = fill.fee
@@ -401,8 +579,12 @@ def run_sma_backtest(
                     mark_price=candle.close,
                     peak=peak,
                     max_drawdown=max_drawdown,
+                    retain=accumulator.retain_equity_point(),
                 )
+                accumulator.update_equity(retained=bool(equity_curve and equity_curve[-1].ts == mark_boundary_ts))
                 prev_above = above
+                accumulator.maybe_emit_heartbeat(index - long_n + 1)
+                accumulator.check_limits(candles_processed=index - long_n + 1, trades=trades)
                 continue
             fill = model.simulate(
                 ExecutionRequest(
@@ -426,8 +608,12 @@ def run_sma_backtest(
                     mark_price=candle.close,
                     peak=peak,
                     max_drawdown=max_drawdown,
+                    retain=accumulator.retain_equity_point(),
                 )
+                accumulator.update_equity(retained=bool(equity_curve and equity_curve[-1].ts == mark_boundary_ts))
                 prev_above = above
+                accumulator.maybe_emit_heartbeat(index - long_n + 1)
+                accumulator.check_limits(candles_processed=index - long_n + 1, trades=trades)
                 continue
             exec_price = float(fill.avg_fill_price)
             sell_qty = fill.filled_qty
@@ -476,8 +662,12 @@ def run_sma_backtest(
             mark_price=candle.close,
             peak=peak,
             max_drawdown=max_drawdown,
+            retain=accumulator.retain_equity_point(),
         )
+        accumulator.update_equity(retained=bool(equity_curve and equity_curve[-1].ts == mark_boundary_ts))
         prev_above = above
+        accumulator.maybe_emit_heartbeat(index - long_n + 1)
+        accumulator.check_limits(candles_processed=index - long_n + 1, trades=trades)
 
     last = candles[-1]
     last_mark_ts = candle_close_ts(last, interval=dataset.interval)
@@ -497,14 +687,16 @@ def run_sma_backtest(
     )
     _mark_pending_fills_at_end(pending_fills=pending_fills, trades=trades, final_mark_ts=last_mark_ts)
     final_equity = cash + qty * last.close
-    equity_curve.append(
-        EquityPoint(
-            ts=last_mark_ts,
-            equity=final_equity,
-            cash=cash,
-            asset_qty=qty,
+    if accumulator.retain_equity_point():
+        equity_curve.append(
+            EquityPoint(
+                ts=last_mark_ts,
+                equity=final_equity,
+                cash=cash,
+                asset_qty=qty,
+            )
         )
-    )
+        accumulator.update_equity(retained=True)
     return_pct = ((final_equity / START_CASH_KRW) - 1.0) * 100.0
     metrics = _metrics(
         return_pct=return_pct,
@@ -531,6 +723,14 @@ def run_sma_backtest(
         closed_trades=closed_trade_records,
         execution_records=execution_records,
     )
+    if not accumulator.retain_full_detail():
+        metrics_v2 = replace(
+            metrics_v2,
+            return_risk=replace(metrics_v2.return_risk, max_drawdown_pct=float(max_drawdown * 100.0)),
+            limitation_reasons=tuple(
+                sorted(set(metrics_v2.limitation_reasons) | {"bounded_detail_equity_curve_not_retained"})
+            ),
+        )
     return BacktestRun(
         metrics=metrics,
         metrics_v2=metrics_v2,
@@ -544,11 +744,36 @@ def run_sma_backtest(
         equity_curve=tuple(equity_curve),
         position_intervals=position_intervals,
         closed_trades=closed_trade_records,
+        resource_usage=accumulator.resource_usage(candles_processed=max(0, len(candles) - long_n)),
+        retained_detail_summary=_retained_detail_summary(accumulator),
     )
 
 
 def _sma(values: list[float], n: int, end: int) -> float:
     return sum(values[end - n : end]) / n
+
+
+def _rss_mb() -> float | None:
+    try:
+        import resource
+
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except Exception:
+        return None
+    # Linux reports KiB; macOS reports bytes. AWS Linux is the reference runtime.
+    if rss > 10_000_000:
+        return round(rss / (1024.0 * 1024.0), 3)
+    return round(rss / 1024.0, 3)
+
+
+def _retained_detail_summary(accumulator: _BacktestAccumulator) -> dict[str, object]:
+    return {
+        "report_detail": accumulator.report_detail,
+        "decision_count": accumulator.decision_count,
+        "retained_decision_count": accumulator.retained_decision_count,
+        "retained_equity_point_count": accumulator.retained_equity_point_count,
+        "decision_hash": canonical_payload_hash(accumulator.decision_hash_material),
+    }
 
 
 def _record_equity_mark(
@@ -560,16 +785,18 @@ def _record_equity_mark(
     mark_price: float,
     peak: float,
     max_drawdown: float,
+    retain: bool = True,
 ) -> tuple[float, float]:
     equity = float(cash) + float(qty) * float(mark_price)
-    equity_curve.append(
-        EquityPoint(
-            ts=int(ts),
-            equity=equity,
-            cash=float(cash),
-            asset_qty=float(qty),
+    if retain:
+        equity_curve.append(
+            EquityPoint(
+                ts=int(ts),
+                equity=equity,
+                cash=float(cash),
+                asset_qty=float(qty),
+            )
         )
-    )
     peak = max(float(peak), equity)
     if peak > 0.0:
         max_drawdown = max(float(max_drawdown), (peak - equity) / peak)

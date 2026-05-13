@@ -20,7 +20,14 @@ from .dataset_snapshot import (
     load_dataset_range,
     load_dataset_split,
 )
-from .backtest_engine import BacktestRun, execution_event_summary
+from .backtest_engine import (
+    BacktestHeartbeatPolicy,
+    BacktestResourceLimitExceeded,
+    BacktestResourceLimits,
+    BacktestRun,
+    BacktestRunContext,
+    execution_event_summary,
+)
 from .deployment_policy import validate_production_calibration_policy
 from .execution_calibration import compare_calibration_to_scenario
 from .execution_model import FixedBpsExecutionModel, StressExecutionModel, model_params_hash
@@ -33,6 +40,7 @@ from .metrics_contract import METRICS_SCHEMA_VERSION
 from .parameter_space import candidate_id, iter_parameter_candidates
 from .promotion_gate import build_candidate_profile
 from .report_writer import ResearchReportPaths, write_research_report
+from bithumb_bot.storage_io import append_jsonl, write_json_atomic
 from .strategy_registry import research_strategy_data_requirements, resolve_research_strategy
 
 
@@ -66,6 +74,91 @@ def _estimated_strategy_runs(
     if include_walk_forward:
         base_split_count = max(0, split_count - walk_forward_split_count)
     return int(candidate_count) * int(scenario_count) * int(base_split_count + walk_forward_split_count)
+
+
+def _research_artifact_root(manager: PathManager, experiment_id: str) -> Path:
+    root = manager.data_dir() / "derived" / "research" / experiment_id
+    project_root = manager.project_root.resolve()
+    if PathManager._is_within(root.resolve(), project_root):
+        raise ResearchValidationError(f"research derived artifact path must be outside repository: {root.resolve()}")
+    return root
+
+
+def _candidate_events_path(manager: PathManager, experiment_id: str) -> Path:
+    return _research_artifact_root(manager, experiment_id) / "candidate_events.jsonl"
+
+
+def _candidate_result_path(manager: PathManager, experiment_id: str, candidate_id: str) -> Path:
+    return _research_artifact_root(manager, experiment_id) / "candidate_results" / f"{candidate_id}.json"
+
+
+def _candidate_failure_path(manager: PathManager, experiment_id: str, candidate_id: str) -> Path:
+    return _research_artifact_root(manager, experiment_id) / "candidate_failures" / f"{candidate_id}.json"
+
+
+def _append_candidate_event(
+    *,
+    manager: PathManager,
+    manifest: ExperimentManifest,
+    event: dict[str, Any],
+) -> None:
+    if not manifest.research_run.artifact_policy.candidate_journal:
+        return
+    append_jsonl(
+        _candidate_events_path(manager, manifest.experiment_id),
+        {"experiment_id": manifest.experiment_id, "manifest_hash": manifest.manifest_hash(), **event},
+    )
+
+
+def _backtest_context(
+    *,
+    manifest: ExperimentManifest,
+    manager: PathManager,
+    candidate_id: str,
+    scenario_id: str,
+    scenario_index: int,
+    split_name: str,
+    progress_callback: ProgressCallback | None,
+) -> BacktestRunContext:
+    limits = manifest.research_run.resource_limits
+    heartbeat = manifest.research_run.heartbeat
+    return BacktestRunContext(
+        experiment_id=manifest.experiment_id,
+        candidate_id=candidate_id,
+        scenario_id=scenario_id,
+        scenario_index=scenario_index,
+        split_name=split_name,
+        report_detail=manifest.research_run.report_detail,
+        resource_limits=BacktestResourceLimits(
+            max_runtime_s_per_candidate_split=limits.max_runtime_s_per_candidate_split,
+            max_decisions_retained=limits.max_decisions_retained,
+            max_trades=limits.max_trades,
+            max_equity_points_retained=limits.max_equity_points_retained,
+            max_rss_mb=limits.max_rss_mb,
+        ),
+        heartbeat=BacktestHeartbeatPolicy(
+            interval_s=heartbeat.interval_s,
+            bar_interval=heartbeat.bar_interval,
+        ),
+        progress_callback=lambda event: _progress_and_journal(
+            callback=progress_callback,
+            manager=manager,
+            manifest=manifest,
+            event=event,
+        ),
+    )
+
+
+def _progress_and_journal(
+    *,
+    callback: ProgressCallback | None,
+    manager: PathManager | None,
+    manifest: ExperimentManifest | None,
+    event: dict[str, Any],
+) -> None:
+    _emit_progress(callback, **event)
+    if manager is not None and manifest is not None and event.get("stage") in {"heartbeat", "candidate_start", "candidate_failure", "candidate_complete"}:
+        _append_candidate_event(manager=manager, manifest=manifest, event=event)
 
 
 def run_research_backtest(
@@ -119,6 +212,7 @@ def run_research_backtest(
 
     candidates = _evaluate_candidates(
         manifest=manifest,
+        manager=manager,
         snapshots=snapshots,
         quality_reports=quality_reports,
         include_walk_forward=False,
@@ -203,6 +297,7 @@ def run_research_walk_forward(
     _require_enough_candles(snapshots.values())
     candidates = _evaluate_candidates(
         manifest=manifest,
+        manager=manager,
         snapshots=snapshots,
         quality_reports=quality_reports,
         include_walk_forward=True,
@@ -248,6 +343,7 @@ def run_research_walk_forward(
 def _evaluate_candidates(
     *,
     manifest: ExperimentManifest,
+    manager: PathManager,
     snapshots: dict[str, DatasetSnapshot],
     quality_reports: dict[str, DatasetQualityReport],
     include_walk_forward: bool,
@@ -307,137 +403,91 @@ def _evaluate_candidates(
         base_results: list[dict[str, Any]] = []
         for index, params in enumerate(raw_candidates):
             param_candidate_id = candidate_id(params, index)
-            _emit_progress(
-                progress_callback,
-                stage="evaluate",
-                scenario=f"{scenario_index + 1}/{len(manifest.execution_model.scenarios)}",
-                candidate=f"{index + 1}/{len(raw_candidates)}",
-                split="train",
-                candles=len(snapshots["train"].candles),
-                candidate_id=param_candidate_id,
-            )
-            train = runner(
-                dataset=snapshots["train"],
-                parameter_values=params,
-                fee_rate=scenario.fee_rate,
-                slippage_bps=float(scenario.slippage_bps),
-                parameter_stability_score=None,
-                execution_model=_execution_model_from_scenario(
-                    scenario,
-                    seed_context=_seed_context(
-                        manifest_hash=manifest_hash,
-                        scenario=scenario,
-                        scenario_id=scenario_id,
-                        parameter_candidate_id=param_candidate_id,
-                        split_name="train",
-                    ),
-                ),
-                execution_timing_policy=manifest.execution_timing,
-            )
-            _emit_progress(
-                progress_callback,
-                stage="evaluate",
-                scenario=f"{scenario_index + 1}/{len(manifest.execution_model.scenarios)}",
-                candidate=f"{index + 1}/{len(raw_candidates)}",
-                split="validation",
-                candles=len(snapshots["validation"].candles),
-                candidate_id=param_candidate_id,
-            )
-            validation = runner(
-                dataset=snapshots["validation"],
-                parameter_values=params,
-                fee_rate=scenario.fee_rate,
-                slippage_bps=float(scenario.slippage_bps),
-                parameter_stability_score=None,
-                execution_model=_execution_model_from_scenario(
-                    scenario,
-                    seed_context=_seed_context(
-                        manifest_hash=manifest_hash,
-                        scenario=scenario,
-                        scenario_id=scenario_id,
-                        parameter_candidate_id=param_candidate_id,
-                        split_name="validation",
-                    ),
-                ),
-                execution_timing_policy=manifest.execution_timing,
-            )
-            final_holdout = None
-            if "final_holdout" in snapshots:
-                _emit_progress(
-                    progress_callback,
-                    stage="evaluate",
-                    scenario=f"{scenario_index + 1}/{len(manifest.execution_model.scenarios)}",
-                    candidate=f"{index + 1}/{len(raw_candidates)}",
-                    split="final_holdout",
-                    candles=len(snapshots["final_holdout"].candles),
-                    candidate_id=param_candidate_id,
-                )
-                final_holdout = runner(
-                    dataset=snapshots["final_holdout"],
-                    parameter_values=params,
-                    fee_rate=scenario.fee_rate,
-                    slippage_bps=float(scenario.slippage_bps),
-                    parameter_stability_score=None,
-                    execution_model=_execution_model_from_scenario(
-                        scenario,
-                        seed_context=_seed_context(
-                            manifest_hash=manifest_hash,
-                            scenario=scenario,
-                            scenario_id=scenario_id,
-                            parameter_candidate_id=param_candidate_id,
-                            split_name="final_holdout",
-                        ),
-                    ),
-                    execution_timing_policy=manifest.execution_timing,
-                )
-            walk_forward = (
-                _walk_forward_metrics(
-                    manifest=manifest,
-                    snapshots=snapshots,
-                    parameter_values=params,
-                    fee_rate=scenario.fee_rate,
-                    scenario=scenario,
-                    parameter_candidate_id=param_candidate_id,
-                    parameter_stability_score=None,
-                )
-                if include_walk_forward
-                else None
-            )
-            base_results.append(
-                {
-                    "index": index,
+            _append_candidate_event(
+                manager=manager,
+                manifest=manifest,
+                event={
+                    "stage": "candidate_start",
                     "candidate_id": param_candidate_id,
+                    "scenario_id": scenario_id,
+                    "scenario_index": scenario_index,
                     "parameter_values": params,
-                    "train_metrics": train.metrics.as_dict(),
-                    "validation_metrics": validation.metrics.as_dict(),
-                    "final_holdout_metrics": final_holdout.metrics.as_dict() if final_holdout else None,
-                    "train_metrics_v2": _metrics_v2_payload(train),
-                    "validation_metrics_v2": _metrics_v2_payload(validation),
-                    "final_holdout_metrics_v2": _metrics_v2_payload(final_holdout) if final_holdout else None,
-                    "train_execution_metadata": _execution_metadata(train.trades),
-                    "validation_execution_metadata": _execution_metadata(validation.trades),
-                    "final_holdout_execution_metadata": _execution_metadata(final_holdout.trades) if final_holdout else None,
-                    "train_execution_event_summary": train.execution_event_summary or execution_event_summary(train.trades),
-                    "validation_execution_event_summary": validation.execution_event_summary or execution_event_summary(validation.trades),
-                    "final_holdout_execution_event_summary": (
-                        final_holdout.execution_event_summary or execution_event_summary(final_holdout.trades)
-                        if final_holdout
-                        else None
-                    ),
-                    "train_regime_performance": [row.as_dict() for row in train.regime_performance],
-                    "train_regime_coverage": [row.as_dict() for row in train.regime_coverage],
-                    "validation_regime_performance": [row.as_dict() for row in validation.regime_performance],
-                    "validation_regime_coverage": [row.as_dict() for row in validation.regime_coverage],
-                    "final_holdout_regime_performance": (
-                        [row.as_dict() for row in final_holdout.regime_performance] if final_holdout else None
-                    ),
-                    "final_holdout_regime_coverage": (
-                        [row.as_dict() for row in final_holdout.regime_coverage] if final_holdout else None
-                    ),
-                    "walk_forward_metrics": walk_forward,
-                    "warnings": sorted(set(train.warnings + validation.warnings + ((final_holdout.warnings if final_holdout else ())))),
-                }
+                },
             )
+            try:
+                base = _evaluate_candidate_base_result(
+                    manifest=manifest,
+                    manager=manager,
+                    runner=runner,
+                    snapshots=snapshots,
+                    params=params,
+                    index=index,
+                    raw_candidate_count=len(raw_candidates),
+                    scenario=scenario,
+                    scenario_index=scenario_index,
+                    scenario_id=scenario_id,
+                    manifest_hash=manifest_hash,
+                    include_walk_forward=include_walk_forward,
+                    progress_callback=progress_callback,
+                )
+            except BacktestResourceLimitExceeded as exc:
+                base = _failed_candidate_base_result(
+                    manifest=manifest,
+                    candidate_index=index,
+                    candidate_id=param_candidate_id,
+                    params=params,
+                    scenario=scenario,
+                    scenario_index=scenario_index,
+                    scenario_id=scenario_id,
+                    reason=exc.reason,
+                    resource_guard=exc.evidence,
+                )
+                _write_failed_candidate_evidence(
+                    manager=manager,
+                    manifest=manifest,
+                    candidate=base,
+                )
+                _append_candidate_event(
+                    manager=manager,
+                    manifest=manifest,
+                    event={
+                        "stage": "candidate_failure",
+                        "candidate_id": param_candidate_id,
+                        "scenario_id": scenario_id,
+                        "reason": exc.reason,
+                        "resource_guard": exc.evidence,
+                    },
+                )
+            except Exception as exc:
+                base = _failed_candidate_base_result(
+                    manifest=manifest,
+                    candidate_index=index,
+                    candidate_id=param_candidate_id,
+                    params=params,
+                    scenario=scenario,
+                    scenario_index=scenario_index,
+                    scenario_id=scenario_id,
+                    reason="candidate_exception",
+                    resource_guard={"status": "ERROR", "exception_type": type(exc).__name__, "message": str(exc)},
+                )
+                _write_failed_candidate_evidence(
+                    manager=manager,
+                    manifest=manifest,
+                    candidate=base,
+                )
+                _append_candidate_event(
+                    manager=manager,
+                    manifest=manifest,
+                    event={
+                        "stage": "candidate_failure",
+                        "candidate_id": param_candidate_id,
+                        "scenario_id": scenario_id,
+                        "reason": "candidate_exception",
+                        "exception_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            base_results.append(base)
         stability = _parameter_stability_scores(
             manifest=manifest,
             candidates=raw_candidates,
@@ -497,6 +547,17 @@ def _evaluate_candidates(
                     set(fail_reasons)
                     | set(str(item) for item in execution_reality_summary["execution_reality_gate_reasons"])
                 )
+            if base.get("candidate_failed"):
+                gate_result = "FAIL"
+                fail_reasons = sorted(
+                    set(fail_reasons)
+                    | {
+                        "candidate_resource_limit_exceeded"
+                        if base.get("failure_reason") == "candidate_resource_limit_exceeded"
+                        else str(base.get("failure_reason") or "candidate_failed")
+                    }
+                    | set(str(item) for item in (base.get("resource_guard") or {}).get("reasons", []))
+                )
             cost_model = {
                 "fee_rate": scenario.fee_rate,
                 "slippage_bps": float(scenario.slippage_bps),
@@ -543,6 +604,11 @@ def _evaluate_candidates(
                 "walk_forward_gate_result": "PASS" if walk_forward and walk_forward["return_consistency_pass"] else None,
                 "scenario_acceptance_gate_result": gate_result,
                 "scenario_fail_reasons": fail_reasons,
+                "resource_guard": base.get("resource_guard"),
+                "retained_detail_summary": base.get("retained_detail_summary"),
+                "train_resource_usage": base.get("train_resource_usage"),
+                "validation_resource_usage": base.get("validation_resource_usage"),
+                "final_holdout_resource_usage": base.get("final_holdout_resource_usage"),
                 "train_execution_metadata": base.get("train_execution_metadata") or [],
                 "validation_execution_metadata": base.get("validation_execution_metadata") or [],
                 "final_holdout_execution_metadata": base.get("final_holdout_execution_metadata"),
@@ -632,6 +698,11 @@ def _evaluate_candidates(
                 "train_execution_event_summary": primary.get("train_execution_event_summary"),
                 "validation_execution_event_summary": primary.get("validation_execution_event_summary"),
                 "final_holdout_execution_event_summary": primary.get("final_holdout_execution_event_summary"),
+                "resource_guard": primary.get("resource_guard"),
+                "retained_detail_summary": primary.get("retained_detail_summary"),
+                "train_resource_usage": primary.get("train_resource_usage"),
+                "validation_resource_usage": primary.get("validation_resource_usage"),
+                "final_holdout_resource_usage": primary.get("final_holdout_resource_usage"),
             }
         )
         warning_reasons = _execution_calibration_warning_reasons(candidate_payload)
@@ -658,8 +729,268 @@ def _evaluate_candidates(
                 set(candidate_payload.get("gate_fail_reasons") or ()) | set(policy_result.reasons)
             )
         candidate_payload["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate_payload))
+        write_json_atomic(
+            _candidate_result_path(manager, manifest.experiment_id, str(candidate_payload["parameter_candidate_id"])),
+            candidate_payload,
+        )
+        _append_candidate_event(
+            manager=manager,
+            manifest=manifest,
+            event={
+                "stage": "candidate_complete",
+                "candidate_id": candidate_payload["parameter_candidate_id"],
+                "acceptance_gate_result": candidate_payload.get("acceptance_gate_result"),
+                "gate_fail_reasons": candidate_payload.get("gate_fail_reasons") or [],
+            },
+        )
         rows.append(candidate_payload)
     return sorted(rows, key=_candidate_rank_key)
+
+
+def _evaluate_candidate_base_result(
+    *,
+    manifest: ExperimentManifest,
+    manager: PathManager,
+    runner: Any,
+    snapshots: dict[str, DatasetSnapshot],
+    params: dict[str, Any],
+    index: int,
+    raw_candidate_count: int,
+    scenario: ExecutionScenario,
+    scenario_index: int,
+    scenario_id: str,
+    manifest_hash: str,
+    include_walk_forward: bool,
+    progress_callback: ProgressCallback | None,
+) -> dict[str, Any]:
+    param_candidate_id = candidate_id(params, index)
+
+    def _run(split_name: str) -> BacktestRun:
+        _emit_progress(
+            progress_callback,
+            stage="evaluate",
+            scenario=f"{scenario_index + 1}/{len(manifest.execution_model.scenarios)}",
+            candidate=f"{index + 1}/{raw_candidate_count}",
+            split=split_name,
+            candles=len(snapshots[split_name].candles),
+            candidate_id=param_candidate_id,
+            report_detail=manifest.research_run.report_detail,
+        )
+        return runner(
+            dataset=snapshots[split_name],
+            parameter_values=params,
+            fee_rate=scenario.fee_rate,
+            slippage_bps=float(scenario.slippage_bps),
+            parameter_stability_score=None,
+            execution_model=_execution_model_from_scenario(
+                scenario,
+                seed_context=_seed_context(
+                    manifest_hash=manifest_hash,
+                    scenario=scenario,
+                    scenario_id=scenario_id,
+                    parameter_candidate_id=param_candidate_id,
+                    split_name=split_name,
+                ),
+            ),
+            execution_timing_policy=manifest.execution_timing,
+            context=_backtest_context(
+                manifest=manifest,
+                manager=manager,
+                candidate_id=param_candidate_id,
+                scenario_id=scenario_id,
+                scenario_index=scenario_index,
+                split_name=split_name,
+                progress_callback=progress_callback,
+            ),
+        )
+
+    train = _run("train")
+    validation = _run("validation")
+    final_holdout = _run("final_holdout") if "final_holdout" in snapshots else None
+    walk_forward = (
+        _walk_forward_metrics(
+            manifest=manifest,
+            snapshots=snapshots,
+            parameter_values=params,
+            fee_rate=scenario.fee_rate,
+            scenario=scenario,
+            parameter_candidate_id=param_candidate_id,
+            parameter_stability_score=None,
+        )
+        if include_walk_forward
+        else None
+    )
+    return {
+        "index": index,
+        "candidate_id": param_candidate_id,
+        "parameter_values": params,
+        "train_metrics": train.metrics.as_dict(),
+        "validation_metrics": validation.metrics.as_dict(),
+        "final_holdout_metrics": final_holdout.metrics.as_dict() if final_holdout else None,
+        "train_metrics_v2": _metrics_v2_payload(train),
+        "validation_metrics_v2": _metrics_v2_payload(validation),
+        "final_holdout_metrics_v2": _metrics_v2_payload(final_holdout) if final_holdout else None,
+        "train_execution_metadata": _execution_metadata(train.trades),
+        "validation_execution_metadata": _execution_metadata(validation.trades),
+        "final_holdout_execution_metadata": _execution_metadata(final_holdout.trades) if final_holdout else None,
+        "train_execution_event_summary": train.execution_event_summary or execution_event_summary(train.trades),
+        "validation_execution_event_summary": validation.execution_event_summary or execution_event_summary(validation.trades),
+        "final_holdout_execution_event_summary": (
+            final_holdout.execution_event_summary or execution_event_summary(final_holdout.trades)
+            if final_holdout
+            else None
+        ),
+        "train_regime_performance": [row.as_dict() for row in train.regime_performance],
+        "train_regime_coverage": [row.as_dict() for row in train.regime_coverage],
+        "validation_regime_performance": [row.as_dict() for row in validation.regime_performance],
+        "validation_regime_coverage": [row.as_dict() for row in validation.regime_coverage],
+        "final_holdout_regime_performance": (
+            [row.as_dict() for row in final_holdout.regime_performance] if final_holdout else None
+        ),
+        "final_holdout_regime_coverage": (
+            [row.as_dict() for row in final_holdout.regime_coverage] if final_holdout else None
+        ),
+        "walk_forward_metrics": walk_forward,
+        "warnings": sorted(set(train.warnings + validation.warnings + ((final_holdout.warnings if final_holdout else ())))),
+        "train_resource_usage": train.resource_usage,
+        "validation_resource_usage": validation.resource_usage,
+        "final_holdout_resource_usage": final_holdout.resource_usage if final_holdout else None,
+        "retained_detail_summary": validation.retained_detail_summary,
+    }
+
+
+def _failed_candidate_base_result(
+    *,
+    manifest: ExperimentManifest,
+    candidate_index: int,
+    candidate_id: str,
+    params: dict[str, Any],
+    scenario: ExecutionScenario,
+    scenario_index: int,
+    scenario_id: str,
+    reason: str,
+    resource_guard: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = _failed_metrics_payload()
+    metrics_v2 = _failed_metrics_v2_payload()
+    split = str(resource_guard.get("split") or "unknown") if isinstance(resource_guard, dict) else "unknown"
+    return {
+        "index": candidate_index,
+        "candidate_id": candidate_id,
+        "parameter_values": params,
+        "train_metrics": metrics,
+        "validation_metrics": metrics,
+        "final_holdout_metrics": None,
+        "train_metrics_v2": metrics_v2,
+        "validation_metrics_v2": metrics_v2,
+        "final_holdout_metrics_v2": None,
+        "train_execution_metadata": [],
+        "validation_execution_metadata": [],
+        "final_holdout_execution_metadata": None,
+        "train_execution_event_summary": {},
+        "validation_execution_event_summary": {},
+        "final_holdout_execution_event_summary": None,
+        "train_regime_performance": [],
+        "train_regime_coverage": [],
+        "validation_regime_performance": [],
+        "validation_regime_coverage": [],
+        "final_holdout_regime_performance": None,
+        "final_holdout_regime_coverage": None,
+        "walk_forward_metrics": None,
+        "warnings": [reason],
+        "candidate_failed": True,
+        "failure_reason": reason,
+        "resource_guard": resource_guard,
+        "failed_split": split,
+        "scenario_id": scenario_id,
+        "scenario_index": scenario_index,
+        "scenario_type": scenario.type,
+        "research_run_policy": manifest.research_run.as_dict(),
+    }
+
+
+def _failed_metrics_payload() -> dict[str, Any]:
+    return {
+        "return_pct": 0.0,
+        "max_drawdown_pct": 0.0,
+        "profit_factor": None,
+        "profit_factor_unbounded": False,
+        "trade_count": 0,
+        "win_rate": 0.0,
+        "avg_win": None,
+        "avg_loss": None,
+        "fee_total": 0.0,
+        "slippage_total": 0.0,
+        "max_consecutive_losses": 0,
+        "single_trade_dependency_score": None,
+        "parameter_stability_score": None,
+    }
+
+
+def _failed_metrics_v2_payload() -> dict[str, Any]:
+    return {
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "return_risk": {
+            "total_return_pct": 0.0,
+            "cagr_pct": None,
+            "max_drawdown_pct": 0.0,
+            "realized_return_pct": 0.0,
+            "unrealized_pnl_end": 0.0,
+            "open_position_at_end": False,
+        },
+        "trade_quality": {
+            "closed_trade_count": 0,
+            "execution_count": 0,
+            "win_rate": 0.0,
+            "avg_win": None,
+            "avg_loss": None,
+            "payoff_ratio": None,
+            "profit_factor": None,
+            "profit_factor_unbounded": False,
+            "expectancy_per_trade_krw": None,
+            "expectancy_per_trade_pct": None,
+            "max_consecutive_losses": 0,
+            "single_trade_dependency_score": None,
+        },
+        "time_exposure": {
+            "period_start_ts": None,
+            "period_end_ts": None,
+            "elapsed_ms": None,
+            "calendar_days": None,
+            "active_bar_count": 0,
+            "exposure_time_pct": None,
+            "avg_holding_time_ms": None,
+            "median_holding_time_ms": None,
+            "max_holding_time_ms": None,
+        },
+        "cost_execution": {
+            "fee_total": 0.0,
+            "slippage_total": 0.0,
+            "fee_drag_ratio": None,
+            "slippage_drag_ratio": None,
+            "filled_execution_count": 0,
+            "partial_fill_count": 0,
+            "failed_execution_count": 0,
+            "skipped_execution_count": 0,
+            "quote_coverage_pct": None,
+            "median_quote_age_ms": None,
+            "p95_quote_age_ms": None,
+            "fee_drag_ratio_basis": "traded_notional",
+            "slippage_drag_ratio_basis": "traded_notional",
+        },
+        "limitation_reasons": ["candidate_failed_before_complete_metrics"],
+    }
+
+
+def _write_failed_candidate_evidence(
+    *,
+    manager: PathManager,
+    manifest: ExperimentManifest,
+    candidate: dict[str, Any],
+) -> None:
+    if not manifest.research_run.artifact_policy.failed_candidate_evidence:
+        return
+    write_json_atomic(_candidate_failure_path(manager, manifest.experiment_id, str(candidate["candidate_id"])), candidate)
 
 
 def _apply_scenario_policy(*, manifest: ExperimentManifest, candidate: dict[str, Any]) -> None:
@@ -1260,6 +1591,7 @@ def _report_payload(
         "regime_acceptance_gate": manifest.acceptance_gate.regime_acceptance_gate.as_dict(),
         "execution_model": manifest.execution_model.as_dict(),
         "execution_model_source": manifest.execution_model.source,
+        "research_run": manifest.research_run.as_dict(),
         "metrics_schema_version": METRICS_SCHEMA_VERSION,
         "metrics_gate_policy": metrics_gate_policy_from_acceptance_gate(manifest.acceptance_gate),
         "metrics_gate_policy_hash": metrics_gate_policy_hash(

@@ -12,7 +12,13 @@ from bithumb_bot.paths import PathManager
 from bithumb_bot.canonical_decision import export_research_decisions, export_runtime_replay_decisions
 from bithumb_bot.decision_equivalence import compare_decision_equivalence
 from bithumb_bot.research import backtest_engine
-from bithumb_bot.research.backtest_engine import run_sma_backtest
+from bithumb_bot.research.backtest_engine import (
+    BacktestHeartbeatPolicy,
+    BacktestResourceLimitExceeded,
+    BacktestResourceLimits,
+    BacktestRunContext,
+    run_sma_backtest,
+)
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot, TopOfBookQuote
 from bithumb_bot.research.execution_calibration import build_calibration_artifact
 from bithumb_bot.research.execution_model import ExecutionFill, ExecutionRequest, FixedBpsExecutionModel, StressExecutionModel
@@ -345,6 +351,130 @@ def test_tiny_three_day_sma_backtest_completes_structurally() -> None:
     assert result.candle_count == 4320
     assert len(result.decisions) == 4320 - 30
     assert result.metrics_v2 is not None
+
+
+def test_research_run_policy_participates_in_manifest_hash() -> None:
+    bounded = parse_manifest(_manifest())
+    full_payload = dict(_manifest())
+    full_payload["research_run"] = {
+        "report_detail": "full",
+        "resource_limits": {
+            "max_runtime_s_per_candidate_split": None,
+            "max_decisions_retained": None,
+            "max_trades": None,
+            "max_equity_points_retained": None,
+            "max_rss_mb": None,
+        },
+    }
+    full = parse_manifest(full_payload)
+
+    assert bounded.research_run.report_detail == "summary"
+    assert bounded.research_run.resource_limits.max_decisions_retained == 0
+    assert bounded.manifest_hash() != full.manifest_hash()
+
+
+def test_summary_mode_does_not_retain_full_per_candle_decisions_and_is_deterministic() -> None:
+    snapshot = _snapshot_from_closes([100, 99, 98, 97, 99, 102, 105, 104, 103, 100, 98, 96])
+    context = BacktestRunContext(
+        report_detail="summary",
+        resource_limits=BacktestResourceLimits(max_decisions_retained=0, max_equity_points_retained=0),
+    )
+
+    first = run_sma_backtest(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        context=context,
+    )
+    second = run_sma_backtest(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        context=BacktestRunContext(
+            report_detail="summary",
+            resource_limits=BacktestResourceLimits(max_decisions_retained=0, max_equity_points_retained=0),
+        ),
+    )
+
+    assert first.decisions == ()
+    assert first.equity_curve == ()
+    assert first.retained_detail_summary["decision_count"] == len(snapshot.candles) - 4
+    assert first.retained_detail_summary["decision_hash"] == second.retained_detail_summary["decision_hash"]
+    assert first.metrics.as_dict() == second.metrics.as_dict()
+
+
+def test_heartbeat_and_max_trades_guard_trip() -> None:
+    events: list[dict[str, object]] = []
+    snapshot = _snapshot_from_closes(([100, 90, 110, 90, 110, 90, 110, 90] * 5))
+
+    with pytest.raises(BacktestResourceLimitExceeded) as raised:
+        run_sma_backtest(
+            dataset=snapshot,
+            parameter_values={"SMA_SHORT": 1, "SMA_LONG": 2},
+            fee_rate=0.0,
+            slippage_bps=0.0,
+            context=BacktestRunContext(
+                experiment_id="guard_exp",
+                candidate_id="candidate_guard",
+                scenario_id="scenario_1",
+                split_name="validation",
+                report_detail="summary",
+                resource_limits=BacktestResourceLimits(max_trades=2, max_decisions_retained=0, max_equity_points_retained=0),
+                heartbeat=BacktestHeartbeatPolicy(interval_s=None, bar_interval=1),
+                progress_callback=events.append,
+            ),
+        )
+
+    assert any(event.get("stage") == "heartbeat" for event in events)
+    assert raised.value.reason == "candidate_resource_limit_exceeded"
+    assert "max_trades_exceeded" in raised.value.evidence["reasons"]
+    assert raised.value.evidence["retained_decision_count"] == 0
+
+
+def test_research_sweep_continues_after_guard_failure_and_writes_candidate_artifacts(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["experiment_id"] = "bounded_sweep"
+    payload["parameter_space"] = {
+        "SMA_SHORT": [2],
+        "SMA_LONG": [4],
+        "SMA_FILTER_GAP_MIN_RATIO": [0.0, 1.0],
+        "SMA_FILTER_VOL_MIN_RANGE_RATIO": [0.0],
+    }
+    payload["research_run"] = {
+        "report_detail": "summary",
+        "resource_limits": {
+            "max_runtime_s_per_candidate_split": 60,
+            "max_decisions_retained": 0,
+            "max_trades": 1,
+            "max_equity_points_retained": 0,
+            "max_rss_mb": None,
+        },
+        "heartbeat": {"interval_s": None, "bar_interval": 5},
+    }
+
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert len(report["candidates"]) == 2
+    assert any("candidate_resource_limit_exceeded" in (candidate.get("gate_fail_reasons") or []) for candidate in report["candidates"])
+    assert Path(report["artifact_paths"]["report_path"]).exists()
+    assert Path(report["artifact_paths"]["derived_path"]).exists()
+    root = manager.data_dir() / "derived" / "research" / "bounded_sweep"
+    assert (root / "candidate_events.jsonl").exists()
+    assert list((root / "candidate_results").glob("candidate_*.json"))
+    assert list((root / "candidate_failures").glob("candidate_*.json"))
 
 
 def test_failed_sell_records_failure_candle_equity_and_mdd() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from bisect import bisect_left
 from pathlib import Path
 from typing import Any
 
@@ -108,10 +109,11 @@ class DatasetSnapshot:
     def top_of_book_for_ts(self, ts: int) -> TopOfBookQuote | None:
         if not self.top_of_book_quotes:
             return None
-        for candle, quote in zip(self.candles, self.top_of_book_quotes):
-            if candle.ts == ts:
-                return quote
-        return None
+        lookup = getattr(self, "_top_of_book_by_candle_ts", None)
+        if lookup is None:
+            lookup = {int(candle.ts): quote for candle, quote in zip(self.candles, self.top_of_book_quotes)}
+            object.__setattr__(self, "_top_of_book_by_candle_ts", lookup)
+        return lookup.get(int(ts))
 
     def execution_top_of_book_quotes(self) -> tuple[TopOfBookQuote, ...]:
         if self.top_of_book_event_quotes:
@@ -119,13 +121,32 @@ class DatasetSnapshot:
         return tuple(quote for quote in self.top_of_book_quotes if quote is not None)
 
     def sorted_execution_top_of_book_quotes(self) -> tuple[TopOfBookQuote, ...]:
+        cached = getattr(self, "_sorted_execution_top_of_book_quotes", None)
+        if cached is not None:
+            return cached
         quotes = self.execution_top_of_book_quotes()
         if all(
             (int(prev.ts), str(prev.source)) <= (int(curr.ts), str(curr.source))
             for prev, curr in zip(quotes, quotes[1:])
         ):
-            return quotes
-        return tuple(sorted(quotes, key=lambda quote: (int(quote.ts), str(quote.source))))
+            sorted_quotes = quotes
+        else:
+            sorted_quotes = tuple(sorted(quotes, key=lambda quote: (int(quote.ts), str(quote.source))))
+        object.__setattr__(self, "_sorted_execution_top_of_book_quotes", sorted_quotes)
+        object.__setattr__(self, "_sorted_execution_top_of_book_timestamps", tuple(int(quote.ts) for quote in sorted_quotes))
+        return sorted_quotes
+
+    def first_quote_after_or_equal(self, *, target_ts: int, max_wait_ms: int) -> TopOfBookQuote | None:
+        quotes = self.sorted_execution_top_of_book_quotes()
+        timestamps = getattr(self, "_sorted_execution_top_of_book_timestamps", None)
+        if timestamps is None:
+            timestamps = tuple(int(quote.ts) for quote in quotes)
+            object.__setattr__(self, "_sorted_execution_top_of_book_timestamps", timestamps)
+        max_ts = int(target_ts) + int(max_wait_ms)
+        index = bisect_left(timestamps, int(target_ts))
+        if index < len(quotes) and int(quotes[index].ts) <= max_ts:
+            return quotes[index]
+        return None
 
 
 @dataclass(frozen=True)
