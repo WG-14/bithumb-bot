@@ -5,6 +5,7 @@ import pytest
 from bithumb_bot.approved_profile import diff_profile_to_runtime
 from bithumb_bot.execution_reality_contract import (
     build_execution_reality_contract,
+    execution_condition_contract_hash,
     execution_contract_hash,
     unsupported_capability_reasons,
 )
@@ -46,7 +47,6 @@ def test_execution_contract_hash_is_stable_and_ignores_generated_timestamps() ->
     [
         ("fill_reference_policy", "latency_adjusted_orderbook"),
         ("top_of_book_required", True),
-        ("calibration_artifact_hash", "sha256:other"),
         ("execution_reality_level", "latency_adjusted_top_of_book"),
     ],
 )
@@ -55,6 +55,14 @@ def test_execution_contract_hash_changes_for_semantic_execution_fields(field: st
     changed = _contract(**{field: value})
 
     assert changed["execution_contract_hash"] != base["execution_contract_hash"]
+
+
+def test_execution_condition_hash_excludes_calibration_artifact_lineage() -> None:
+    base = _contract(calibration_artifact_hash="sha256:first")
+    changed = _contract(calibration_artifact_hash="sha256:second")
+
+    assert execution_condition_contract_hash(base) == execution_condition_contract_hash(changed)
+    assert execution_contract_hash(base) == execution_contract_hash(changed)
 
 
 def _manifest_payload() -> dict[str, object]:

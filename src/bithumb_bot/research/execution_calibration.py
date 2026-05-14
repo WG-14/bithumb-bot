@@ -7,6 +7,7 @@ from typing import Any
 
 from bithumb_bot.paths import PathManager, PathPolicyError
 from bithumb_bot.storage_io import write_json_atomic
+from bithumb_bot.execution_reality_contract import execution_condition_contract_hash
 
 from .hashing import sha256_prefixed
 
@@ -114,6 +115,7 @@ def compare_calibration_to_scenario(
     expected_execution_timing_policy: dict[str, Any] | None = None,
     expected_execution_contract_hash: str | None = None,
     expected_execution_reality_contract: dict[str, Any] | None = None,
+    expected_calibration_artifact_hash: str | None = None,
     require_content_hash: bool = False,
     min_sample_count: int | None = None,
     require_quality_gate_pass: bool = False,
@@ -142,7 +144,7 @@ def compare_calibration_to_scenario(
         artifact_level = artifact.get("execution_reality_level")
         if artifact_level is not None and expected_level is not None and str(artifact_level) != expected_level:
             reasons.append("execution_calibration_reality_level_mismatch")
-    expected_contract_hash = str(
+    expected_condition_contract_hash = str(
         expected_execution_contract_hash
         or (
             expected_execution_reality_contract.get("execution_contract_hash")
@@ -151,18 +153,31 @@ def compare_calibration_to_scenario(
         )
         or ""
     ).strip()
-    artifact_contract_hash = str(artifact.get("execution_contract_hash") or "").strip()
-    artifact_contract_hashes = [
+    if isinstance(expected_execution_reality_contract, dict):
+        expected_condition_contract_hash = execution_condition_contract_hash(expected_execution_reality_contract)
+    artifact_contract = artifact.get("execution_reality_contract")
+    artifact_stored_contract_hash = str(artifact.get("execution_contract_hash") or "").strip()
+    artifact_condition_contract_hash = artifact_stored_contract_hash
+    if isinstance(artifact_contract, dict):
+        artifact_condition_contract_hash = execution_condition_contract_hash(artifact_contract)
+    artifact_condition_contract_hashes = [
         str(item).strip()
         for item in (artifact.get("execution_contract_hashes") or [])
         if str(item).strip()
     ]
-    if bool(artifact.get("mixed_execution_contract_hashes")) or len(set(artifact_contract_hashes)) > 1:
+    if isinstance(artifact_contract, dict):
+        artifact_condition_contract_hashes = [artifact_condition_contract_hash]
+    if bool(artifact.get("mixed_execution_contract_hashes")) or len(set(artifact_condition_contract_hashes)) > 1:
         reasons.append("execution_calibration_mixed_contract_hashes")
-    elif expected_contract_hash:
-        if not artifact_contract_hash:
+    elif expected_condition_contract_hash:
+        if not artifact_stored_contract_hash:
             reasons.append("execution_calibration_contract_hash_missing")
-        elif artifact_contract_hash != expected_contract_hash:
+        elif (
+            isinstance(artifact_contract, dict)
+            and artifact_stored_contract_hash != artifact_condition_contract_hash
+        ):
+            reasons.append("execution_calibration_contract_hash_mismatch")
+        elif artifact_condition_contract_hash != expected_condition_contract_hash:
             reasons.append("execution_calibration_contract_hash_mismatch")
     if bool(artifact.get("insufficient_evidence")) or int(artifact.get("sample_count") or 0) <= 0:
         reasons.append("execution_calibration_insufficient_evidence")
@@ -190,10 +205,17 @@ def compare_calibration_to_scenario(
         reasons.append("execution_calibration_unfilled_rate_exceeds_assumption")
     if breach_rate is not None and breach_rate > max_model_breach_rate:
         reasons.append("execution_calibration_model_breach_rate_exceeds_threshold")
+    condition_mismatch = "execution_calibration_contract_hash_mismatch" in reasons
+    lineage_mismatch = (
+        bool(expected_calibration_artifact_hash)
+        and bool(artifact.get("content_hash"))
+        and str(expected_calibration_artifact_hash) != str(artifact.get("content_hash"))
+    )
     return {
         "status": "PASS" if not reasons else "FAIL",
         "reasons": reasons,
         "artifact_hash": artifact.get("content_hash"),
+        "artifact_content_hash": artifact.get("content_hash"),
         "content_hash_present": isinstance(artifact.get("content_hash"), str),
         "market": artifact.get("market"),
         "interval": artifact.get("interval"),
@@ -206,10 +228,18 @@ def compare_calibration_to_scenario(
         ),
         "artifact_fill_reference_policy": artifact.get("backtest_fill_reference_policy"),
         "artifact_execution_reality_level": artifact.get("execution_reality_level"),
-        "expected_execution_contract_hash": expected_contract_hash or None,
-        "artifact_execution_contract_hash": artifact_contract_hash or None,
-        "artifact_execution_contract_hashes": artifact_contract_hashes,
+        "expected_execution_contract_hash": expected_condition_contract_hash or None,
+        "artifact_execution_contract_hash": artifact_condition_contract_hash or None,
+        "expected_execution_condition_contract_hash": expected_condition_contract_hash or None,
+        "artifact_execution_condition_contract_hash": artifact_condition_contract_hash or None,
+        "artifact_recorded_execution_contract_hash": artifact_stored_contract_hash or None,
+        "expected_calibration_artifact_hash": expected_calibration_artifact_hash,
+        "artifact_execution_contract_hashes": artifact_condition_contract_hashes,
+        "artifact_execution_condition_contract_hashes": artifact_condition_contract_hashes,
         "mixed_execution_contract_hashes": bool(artifact.get("mixed_execution_contract_hashes")),
+        "execution_condition_contract_mismatch": condition_mismatch,
+        "calibration_artifact_lineage_mismatch": lineage_mismatch,
+        "execution_contract_hash_missing": "execution_calibration_contract_hash_missing" in reasons,
         "execution_contract_mismatch_count": int(artifact.get("execution_contract_mismatch_count") or 0),
         "execution_contract_missing_count": int(artifact.get("execution_contract_missing_count") or 0),
         "signal_reference_price_source": artifact.get("signal_reference_price_source"),

@@ -7,6 +7,7 @@ from typing import Any
 
 EXECUTION_REALITY_CONTRACT_SCHEMA_VERSION = 1
 CONTRACT_HASH_FIELD = "execution_contract_hash"
+EXECUTION_CONDITION_LINEAGE_FIELDS = frozenset({"calibration_artifact_hash"})
 
 _TIMESTAMP_FIELDS = frozenset(
     {
@@ -30,6 +31,10 @@ REALITY_ORDER = {
 
 
 def execution_contract_hash(contract: dict[str, Any]) -> str:
+    return execution_condition_contract_hash(contract)
+
+
+def execution_condition_contract_hash(contract: dict[str, Any]) -> str:
     payload = _canonical_contract_payload(contract)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -43,7 +48,7 @@ def attach_execution_contract_hash(contract: dict[str, Any]) -> dict[str, Any]:
 
 def contract_hash_matches(contract: dict[str, Any], expected_hash: object | None = None) -> bool:
     observed = str(expected_hash or contract.get(CONTRACT_HASH_FIELD) or "").strip()
-    return bool(observed) and execution_contract_hash(contract) == observed
+    return bool(observed) and execution_condition_contract_hash(contract) == observed
 
 
 def build_execution_reality_contract(
@@ -141,8 +146,8 @@ def execution_contract_mismatch_reasons(
     if not isinstance(observed, dict):
         return [{"field": "execution_reality_contract", "reason": "observed_execution_contract_missing"}]
     mismatches: list[dict[str, object]] = []
-    expected_hash = str(expected.get(CONTRACT_HASH_FIELD) or execution_contract_hash(expected))
-    observed_hash = str(observed.get(CONTRACT_HASH_FIELD) or execution_contract_hash(observed))
+    expected_hash = str(expected.get(CONTRACT_HASH_FIELD) or execution_condition_contract_hash(expected))
+    observed_hash = str(observed.get(CONTRACT_HASH_FIELD) or execution_condition_contract_hash(observed))
     if expected_hash != observed_hash:
         mismatches.append(
             {
@@ -157,6 +162,8 @@ def execution_contract_mismatch_reasons(
             continue
         if field == CONTRACT_HASH_FIELD:
             continue
+        if field in EXECUTION_CONDITION_LINEAGE_FIELDS:
+            continue
         if expected.get(field) != observed.get(field):
             mismatches.append(
                 {
@@ -170,7 +177,13 @@ def execution_contract_mismatch_reasons(
 
 
 def _canonical_contract_payload(contract: dict[str, Any]) -> dict[str, Any]:
-    return _strip_runtime_only({k: v for k, v in contract.items() if k != CONTRACT_HASH_FIELD})
+    return _strip_runtime_only(
+        {
+            k: v
+            for k, v in contract.items()
+            if k != CONTRACT_HASH_FIELD and k not in EXECUTION_CONDITION_LINEAGE_FIELDS
+        }
+    )
 
 
 def _strip_runtime_only(value: Any) -> Any:

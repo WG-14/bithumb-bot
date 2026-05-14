@@ -413,6 +413,7 @@ def _evaluate_candidates(
             expected_interval=manifest.interval,
             expected_execution_timing_policy=manifest.execution_timing.as_dict(),
             expected_execution_reality_contract=expected_execution_contract,
+            expected_calibration_artifact_hash=expected_calibration_hash,
             require_content_hash=manifest.execution_model.calibration_required,
             min_sample_count=ExecutionQualityThresholds().min_sample,
             require_quality_gate_pass=(
