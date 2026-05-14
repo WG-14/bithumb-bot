@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .deployment_policy import is_production_bound_target
 from .hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
 
 
@@ -148,6 +149,7 @@ def build_promotion_lineage(
     statistical_evidence_path: str | None = None,
     statistical_evidence_hash: str | None = None,
     selection_universe_hash: str | None = None,
+    candidate_metric_values_hash: str | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     lineage = validate_lineage_artifact(base_lineage)
@@ -181,6 +183,7 @@ def build_promotion_lineage(
             "statistical_evidence_path": statistical_evidence_path,
             "statistical_evidence_hash": statistical_evidence_hash,
             "selection_universe_hash": selection_universe_hash,
+            "candidate_metric_values_hash": candidate_metric_values_hash,
             "created_at": created_at or datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -213,6 +216,7 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
         "execution_calibration_artifact_hash": None,
         "statistical_evidence_hash": None,
         "selection_universe_hash": None,
+        "candidate_metric_values_hash": None,
         "mismatches": [],
         "missing_artifacts": [],
         "legacy_compatibility_used": False,
@@ -256,6 +260,7 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     summary["execution_calibration_artifact_hash"] = lineage.get("execution_calibration_artifact_hash")
     summary["statistical_evidence_hash"] = lineage.get("statistical_evidence_hash")
     summary["selection_universe_hash"] = lineage.get("selection_universe_hash")
+    summary["candidate_metric_values_hash"] = lineage.get("candidate_metric_values_hash")
 
     _compare(summary, "manifest_hash", promotion.get("manifest_hash"), lineage.get("manifest_hash"), "manifest_hash_mismatch")
     _compare(
@@ -282,7 +287,9 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     )
 
     _verify_artifact_hash(summary, lineage, "backtest_report", required=True)
-    statistical_required = bool(promotion.get("statistical_validation_required"))
+    statistical_required = bool(promotion.get("statistical_validation_required")) or is_production_bound_target(
+        promotion.get("deployment_tier")
+    )
     if statistical_required:
         _compare(
             summary,
@@ -298,6 +305,13 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
             lineage.get("selection_universe_hash"),
             "selection_universe_hash_mismatch",
         )
+        _compare(
+            summary,
+            "candidate_metric_values_hash",
+            promotion.get("candidate_metric_values_hash"),
+            lineage.get("candidate_metric_values_hash"),
+            "candidate_metric_values_hash_mismatch",
+        )
     _verify_artifact_hash(
         summary,
         lineage,
@@ -305,6 +319,8 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
         required=statistical_required,
         missing_reason="statistical_evidence_missing",
     )
+    if statistical_required:
+        _verify_statistical_evidence_bindings(summary, promotion, lineage)
     walk_required = bool(promotion.get("walk_forward_required"))
     _verify_artifact_hash(
         summary,
@@ -401,6 +417,46 @@ def _verify_artifact_hash(
                 actual,
                 embedded or None,
                 f"{stem}_embedded_content_hash_mismatch",
+            )
+        )
+
+
+def _verify_statistical_evidence_bindings(
+    summary: dict[str, Any],
+    promotion: dict[str, Any],
+    lineage: dict[str, Any],
+) -> None:
+    path_value = str(lineage.get("statistical_evidence_path") or "").strip()
+    if not path_value:
+        return
+    path = Path(path_value).expanduser()
+    if not path.exists():
+        return
+    try:
+        payload = _load_object(path)
+    except ValueError:
+        return
+    _compare(
+        summary,
+        "statistical_evidence.selection_universe_hash",
+        promotion.get("selection_universe_hash"),
+        payload.get("selection_universe_hash"),
+        "selection_universe_hash_mismatch",
+    )
+    _compare(
+        summary,
+        "statistical_evidence.candidate_metric_values_hash",
+        promotion.get("candidate_metric_values_hash"),
+        payload.get("candidate_metric_values_hash"),
+        "candidate_metric_values_hash_mismatch",
+    )
+    if payload.get("candidate_metric_values_hash") != lineage.get("candidate_metric_values_hash"):
+        summary["mismatches"].append(
+            _mismatch(
+                "lineage.candidate_metric_values_hash",
+                lineage.get("candidate_metric_values_hash"),
+                payload.get("candidate_metric_values_hash"),
+                "candidate_metric_values_hash_mismatch",
             )
         )
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 from bithumb_bot.research.experiment_manifest import parse_manifest
 from bithumb_bot.research.statistical_selection import (
     build_statistical_selection_evidence,
+    candidate_metric_values_hash,
     selection_universe_hash,
+    validate_statistical_evidence_for_candidate,
 )
 
 
@@ -161,3 +163,174 @@ def test_statistical_evidence_content_hash_is_stable_and_fails_no_edge_large_uni
     assert evidence["statistical_gate_result"] == "FAIL"
     assert "attempt_budget_exceeded" in evidence["gate_fail_reasons"]
     assert "holdout_reuse_budget_exceeded" in evidence["gate_fail_reasons"]
+
+
+def test_candidate_metric_values_hash_is_deterministic_and_binds_metric_values() -> None:
+    candidates = _candidates()
+
+    first = candidate_metric_values_hash(
+        candidates=candidates,
+        required_scenario_ids=["scenario_001"],
+        primary_metric="net_excess_return",
+        primary_metric_source="validation_metrics",
+        benchmark="cash",
+    )
+    reordered = candidate_metric_values_hash(
+        candidates=list(reversed(candidates)),
+        required_scenario_ids=["scenario_001"],
+        primary_metric="net_excess_return",
+        primary_metric_source="validation_metrics",
+        benchmark="cash",
+    )
+    changed = _candidates()
+    changed[0]["validation_metrics"] = {"return_pct": 2.0}
+    changed_hash = candidate_metric_values_hash(
+        candidates=changed,
+        required_scenario_ids=["scenario_001"],
+        primary_metric="net_excess_return",
+        primary_metric_source="validation_metrics",
+        benchmark="cash",
+    )
+
+    assert first == reordered
+    assert changed_hash != first
+
+
+def test_statistical_evidence_fails_closed_when_metric_universe_is_incomplete() -> None:
+    manifest = _manifest()
+    candidates = _candidates()
+    candidates[1].pop("validation_metrics")
+
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=candidates,
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash="sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        required_scenario_ids=["scenario_001"],
+        search_budget=2,
+        parameter_grid_size=2,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+    )
+
+    assert evidence["metric_value_count"] == 1
+    assert evidence["missing_metric_count"] == 1
+    assert evidence["statistical_gate_result"] == "FAIL"
+    assert "statistical_metric_values_missing" in evidence["gate_fail_reasons"]
+
+
+def test_statistical_validation_detects_metadata_mismatch_and_underreported_trials() -> None:
+    manifest = _manifest()
+    candidates = _candidates()
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=candidates,
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash="sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        required_scenario_ids=["scenario_001"],
+        search_budget=5000,
+        parameter_grid_size=5000,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+    )
+    stale = dict(evidence)
+    stale["search_budget"] = 1
+    stale["effective_trial_count"] = 1
+    stale["content_hash"] = evidence["content_hash"]
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": manifest.manifest_hash(),
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 2,
+        "search_budget": 5000,
+        "parameter_grid_size": 5000,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "metric_value_count": 2,
+        "statistical_evidence_hash": evidence["content_hash"],
+    }
+    candidate = {
+        **candidates[0],
+        "deployment_tier": "paper_candidate",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "metric_value_count": 2,
+        "statistical_evidence_hash": evidence["content_hash"],
+    }
+
+    reasons = validate_statistical_evidence_for_candidate(
+        candidate=candidate,
+        report=report,
+        evidence=stale,
+    )
+
+    assert "statistical_evidence_hash_mismatch" in reasons
+    assert "statistical_search_budget_mismatch" in reasons
+    assert "statistical_effective_trial_count_underreported" in reasons
+
+
+def test_statistical_validation_refuses_missing_metric_value_hash() -> None:
+    manifest = _manifest()
+    candidates = _candidates()
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=candidates,
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash="sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        required_scenario_ids=["scenario_001"],
+        search_budget=2,
+        parameter_grid_size=2,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+    )
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": manifest.manifest_hash(),
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 2,
+        "search_budget": 2,
+        "parameter_grid_size": 2,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "metric_value_count": 2,
+        "statistical_evidence_hash": evidence["content_hash"],
+    }
+
+    reasons = validate_statistical_evidence_for_candidate(
+        candidate={**candidates[0], "deployment_tier": "paper_candidate"},
+        report=report,
+        evidence=evidence,
+    )
+
+    assert "candidate_metric_values_hash_missing" in reasons

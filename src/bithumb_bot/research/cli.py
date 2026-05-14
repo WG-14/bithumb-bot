@@ -139,8 +139,13 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  statistical_attempt_index={report.get('attempt_index')}")
     print(f"  statistical_holdout_reuse_count={report.get('holdout_reuse_count')}")
     print(f"  selection_universe_hash={report.get('selection_universe_hash') or 'none'}")
+    print(f"  candidate_metric_values_hash={report.get('candidate_metric_values_hash') or 'none'}")
+    print(f"  statistical_metric_value_count={report.get('metric_value_count')}")
+    print(f"  statistical_missing_metric_count={report.get('missing_metric_count')}")
     print(f"  statistical_evidence_hash={report.get('statistical_evidence_hash') or 'none'}")
+    print(f"  summary_metric_max_bootstrap_p_value={report.get('summary_metric_max_bootstrap_p_value')}")
     print(f"  white_reality_check_p_value={report.get('white_reality_check_p_value')}")
+    print(f"  white_reality_check_method={report.get('white_reality_check_method') or 'none'}")
     print(f"  statistical_gate_result={report.get('statistical_gate_result') or 'none'}")
     print(
         "  statistical_gate_fail_reasons="

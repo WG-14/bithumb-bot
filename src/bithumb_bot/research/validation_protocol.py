@@ -1689,6 +1689,7 @@ def _report_payload(
             hypothesis_id=hypothesis_id,
             hypothesis_status=hypothesis_status,
             selection_hash=universe_hash,
+            required_scenario_ids=required_scenario_ids,
             search_budget=parameter_grid_size,
             parameter_grid_size=parameter_grid_size,
             attempt_index=attempt_index,
@@ -1779,13 +1780,33 @@ def _report_payload(
         "metrics_contract_required": bool(manifest.acceptance_gate.metrics_contract_required),
         "statistical_validation_required": statistical_validation_required(manifest),
         "statistical_validation_contract": statistical_contract,
+        "benchmark": statistical_evidence.get("benchmark") if statistical_evidence else None,
+        "primary_metric": statistical_evidence.get("primary_metric") if statistical_evidence else None,
+        "primary_metric_source": statistical_evidence.get("primary_metric_source") if statistical_evidence else None,
         "selection_universe_hash": universe_hash,
+        "candidate_metric_values_hash": (
+            statistical_evidence.get("candidate_metric_values_hash") if statistical_evidence else None
+        ),
+        "candidate_metric_values_summary": (
+            statistical_evidence.get("candidate_metric_values_summary") if statistical_evidence else None
+        ),
+        "metric_value_count": statistical_evidence.get("metric_value_count") if statistical_evidence else None,
+        "missing_metric_count": statistical_evidence.get("missing_metric_count") if statistical_evidence else None,
         "statistical_evidence_hash": statistical_evidence.get("content_hash") if statistical_evidence else None,
         "statistical_evidence_path": str(statistical_evidence_path.resolve()) if statistical_evidence_path else None,
         "statistical_gate_result": statistical_evidence.get("statistical_gate_result") if statistical_evidence else None,
         "statistical_gate_fail_reasons": statistical_evidence.get("gate_fail_reasons") if statistical_evidence else [],
         "white_reality_check_p_value": (
             statistical_evidence.get("white_reality_check_p_value") if statistical_evidence else None
+        ),
+        "summary_metric_max_bootstrap_p_value": (
+            statistical_evidence.get("summary_metric_max_bootstrap_p_value") if statistical_evidence else None
+        ),
+        "white_reality_check_method": (
+            statistical_evidence.get("white_reality_check_method") if statistical_evidence else None
+        ),
+        "promotion_grade_limitations": (
+            statistical_evidence.get("promotion_grade_limitations") if statistical_evidence else []
         ),
         "effective_trial_count": statistical_evidence.get("effective_trial_count") if statistical_evidence else None,
         "deployment_tier": manifest.deployment_tier,
@@ -1850,16 +1871,34 @@ def _attach_statistical_selection_to_candidates(
     gate_result = evidence.get("statistical_gate_result") if isinstance(evidence, dict) else None
     gate_reasons = evidence.get("gate_fail_reasons") if isinstance(evidence, dict) else []
     p_value = evidence.get("white_reality_check_p_value") if isinstance(evidence, dict) else None
+    summary_p_value = evidence.get("summary_metric_max_bootstrap_p_value") if isinstance(evidence, dict) else None
     effective_trial_count = evidence.get("effective_trial_count") if isinstance(evidence, dict) else None
+    candidate_metric_values_hash = evidence.get("candidate_metric_values_hash") if isinstance(evidence, dict) else None
+    candidate_metric_values_summary = evidence.get("candidate_metric_values_summary") if isinstance(evidence, dict) else None
+    metric_value_count = evidence.get("metric_value_count") if isinstance(evidence, dict) else None
+    missing_metric_count = evidence.get("missing_metric_count") if isinstance(evidence, dict) else None
+    method = evidence.get("white_reality_check_method") if isinstance(evidence, dict) else None
+    limitations = evidence.get("promotion_grade_limitations") if isinstance(evidence, dict) else []
     for candidate in candidates:
         candidate["statistical_validation_required"] = required
         candidate["statistical_validation_contract"] = contract
+        candidate["benchmark"] = evidence.get("benchmark") if isinstance(evidence, dict) else None
+        candidate["primary_metric"] = evidence.get("primary_metric") if isinstance(evidence, dict) else None
+        candidate["primary_metric_source"] = evidence.get("primary_metric_source") if isinstance(evidence, dict) else None
         candidate["selection_universe_hash"] = selection_hash
+        candidate["candidate_metric_values_hash"] = candidate_metric_values_hash
+        candidate["candidate_metric_values_summary"] = candidate_metric_values_summary
+        candidate["candidate_count"] = len(candidates)
+        candidate["metric_value_count"] = metric_value_count
+        candidate["missing_metric_count"] = missing_metric_count
         candidate["statistical_evidence_hash"] = evidence_hash
         candidate["statistical_evidence_path"] = str(evidence_path.resolve()) if evidence_path is not None else None
         candidate["statistical_gate_result"] = gate_result
         candidate["statistical_gate_fail_reasons"] = list(gate_reasons) if isinstance(gate_reasons, list) else []
         candidate["white_reality_check_p_value"] = p_value
+        candidate["summary_metric_max_bootstrap_p_value"] = summary_p_value
+        candidate["white_reality_check_method"] = method
+        candidate["promotion_grade_limitations"] = list(limitations) if isinstance(limitations, list) else []
         candidate["effective_trial_count"] = effective_trial_count
         candidate.pop("candidate_profile_hash", None)
         candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))

@@ -70,6 +70,26 @@ def test_pass_report_summary_sets_promotion_allowed() -> None:
     assert summary.next_action == "review_promotion_candidate"
 
 
+def test_statistical_gate_failure_forces_promotion_disallowed() -> None:
+    report = _report(
+        candidates=[_candidate("candidate_001", gate="PASS")],
+        best_candidate_id="candidate_001",
+        gate_result="PASS",
+    )
+    report.update(
+        {
+            "statistical_validation_required": True,
+            "statistical_gate_result": "FAIL",
+            "statistical_gate_fail_reasons": ["reality_check_p_value_failed"],
+        }
+    )
+
+    summary = build_research_run_summary(report)
+
+    assert summary.promotion_allowed is False
+    assert summary.next_action == "do_not_promote_review_statistical_selection"
+
+
 def test_fail_report_summary_sets_promotion_disallowed() -> None:
     summary = build_research_run_summary(
         _report(candidates=[_candidate("candidate_001", fail_reasons=["profit_factor_failed"])])
@@ -260,6 +280,8 @@ def test_print_report_summary_renders_statistical_selection_diagnostics(capsys) 
     assert "white_reality_check_p_value=0.2" in output
     assert "statistical_gate_result=FAIL" in output
     assert "statistical_gate_fail_reasons=reality_check_p_value_failed" in output
+    assert "promotion_allowed=0" in output
+    assert "next_action=do_not_promote_review_statistical_selection" in output
 
 
 def test_print_report_summary_renders_metrics_v2_for_passing_candidate(capsys) -> None:

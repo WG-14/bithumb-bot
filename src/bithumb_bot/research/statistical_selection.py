@@ -13,6 +13,7 @@ from .hashing import content_hash_payload, sha256_prefixed
 
 
 STATISTICAL_SELECTION_EVIDENCE_SCHEMA_VERSION = 1
+PRIMARY_METRIC_SOURCE = "validation_metrics"
 
 
 def statistical_validation_required(manifest_or_payload: ExperimentManifest | dict[str, Any]) -> bool:
@@ -63,6 +64,62 @@ def selection_universe_hash(
     )
 
 
+def candidate_metric_universe_payload(
+    *,
+    candidates: list[dict[str, Any]],
+    required_scenario_ids: list[str],
+    primary_metric: str,
+    primary_metric_source: str,
+    benchmark: str,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: str(item.get("parameter_candidate_id") or "")):
+        metrics = candidate.get(primary_metric_source)
+        value = _metric_value(metrics, primary_metric, benchmark) if isinstance(metrics, dict) else None
+        candidate_required_scenarios = candidate.get("required_scenario_ids")
+        if not isinstance(candidate_required_scenarios, list):
+            candidate_required_scenarios = required_scenario_ids
+        rows.append(
+            {
+                "candidate_id": str(candidate.get("parameter_candidate_id") or ""),
+                "parameter_values": candidate.get("parameter_values") or {},
+                "scenario_policy": candidate.get("scenario_policy"),
+                "required_scenario_ids": sorted(str(item) for item in candidate_required_scenarios),
+                "primary_metric": primary_metric,
+                "primary_metric_source": primary_metric_source,
+                "validation_metric_value": value,
+                "validation_metric_missing": value is None,
+                "acceptance_gate_result": candidate.get("acceptance_gate_result"),
+            }
+        )
+    return {
+        "primary_metric": primary_metric,
+        "primary_metric_source": primary_metric_source,
+        "benchmark": benchmark,
+        "required_scenario_ids": sorted(str(item) for item in required_scenario_ids),
+        "candidates": rows,
+    }
+
+
+def candidate_metric_values_hash(
+    *,
+    candidates: list[dict[str, Any]],
+    required_scenario_ids: list[str],
+    primary_metric: str,
+    primary_metric_source: str,
+    benchmark: str,
+) -> str:
+    return sha256_prefixed(
+        candidate_metric_universe_payload(
+            candidates=candidates,
+            required_scenario_ids=required_scenario_ids,
+            primary_metric=primary_metric,
+            primary_metric_source=primary_metric_source,
+            benchmark=benchmark,
+        )
+    )
+
+
 def build_statistical_selection_evidence(
     *,
     manifest: ExperimentManifest,
@@ -74,6 +131,7 @@ def build_statistical_selection_evidence(
     hypothesis_id: str | None,
     hypothesis_status: str | None,
     selection_hash: str,
+    required_scenario_ids: list[str] | None = None,
     search_budget: int,
     parameter_grid_size: int,
     attempt_index: int,
@@ -84,8 +142,26 @@ def build_statistical_selection_evidence(
     if contract is None:
         return None
     contract_payload = contract.as_dict()
-    primary_metric_source = "validation_metrics"
-    metric_values = _candidate_metric_values(candidates, contract)
+    primary_metric_source = PRIMARY_METRIC_SOURCE
+    required_scenario_ids = list(required_scenario_ids or [])
+    metric_payload = candidate_metric_universe_payload(
+        candidates=candidates,
+        required_scenario_ids=required_scenario_ids,
+        primary_metric=contract.primary_metric,
+        primary_metric_source=primary_metric_source,
+        benchmark=contract.benchmark,
+    )
+    metric_values = _candidate_metric_values_from_payload(metric_payload)
+    metric_value_count = len(metric_values)
+    missing_metric_count = len(candidates) - metric_value_count
+    effective_trial_count = _effective_trial_count(
+        candidate_count=len(candidates),
+        metric_value_count=metric_value_count,
+        search_budget=search_budget,
+        parameter_grid_size=parameter_grid_size,
+        attempt_index=attempt_index,
+        holdout_reuse_count=holdout_reuse_count,
+    )
     p_value, seed = _metric_centered_max_bootstrap_p_value(
         metric_values=metric_values,
         n_bootstrap=contract.bootstrap.n_bootstrap,
@@ -97,6 +173,7 @@ def build_statistical_selection_evidence(
         attempt_index=attempt_index,
         holdout_reuse_count=holdout_reuse_count,
         metric_values=metric_values,
+        candidate_count=len(candidates),
     )
     payload: dict[str, Any] = {
         "artifact_type": "statistical_selection_evidence",
@@ -108,7 +185,18 @@ def build_statistical_selection_evidence(
         "dataset_content_hash": dataset_content_hash,
         "dataset_quality_hash": dataset_quality_hash,
         "selection_universe_hash": selection_hash,
+        "candidate_metric_values_hash": sha256_prefixed(metric_payload),
+        "candidate_metric_values_summary": {
+            "candidate_count": len(candidates),
+            "metric_value_count": metric_value_count,
+            "missing_metric_count": missing_metric_count,
+            "primary_metric": contract.primary_metric,
+            "primary_metric_source": primary_metric_source,
+            "benchmark": contract.benchmark,
+        },
         "candidate_count": len(candidates),
+        "metric_value_count": metric_value_count,
+        "missing_metric_count": missing_metric_count,
         "search_budget": search_budget,
         "parameter_grid_size": parameter_grid_size,
         "attempt_index": attempt_index,
@@ -122,11 +210,14 @@ def build_statistical_selection_evidence(
         "block_length": None,
         "block_length_policy": contract.bootstrap.block_length_policy,
         "seed": seed,
-        "effective_trial_count": len(metric_values) * max(1, attempt_index) * max(1, holdout_reuse_count + 1),
+        "effective_trial_count": effective_trial_count,
+        "summary_metric_max_bootstrap_p_value": p_value,
         "white_reality_check_p_value": p_value,
+        "white_reality_check_method": "approximation_summary_metric_centered_max_bootstrap",
         "statistical_gate_result": "FAIL" if gate_reasons else "PASS",
         "gate_fail_reasons": gate_reasons,
         "limitations": _limitations(contract),
+        "promotion_grade_limitations": _promotion_grade_limitations(contract),
         "statistical_validation_contract": contract_payload,
     }
     payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
@@ -172,6 +263,16 @@ def validate_statistical_evidence_for_candidate(
         reasons.append("statistical_evidence_hash_mismatch")
     if embedded_hash != actual_hash:
         reasons.append("statistical_evidence_hash_mismatch")
+
+    expected_metric_hash = str(
+        candidate.get("candidate_metric_values_hash") or report.get("candidate_metric_values_hash") or ""
+    )
+    actual_metric_hash = str(evidence.get("candidate_metric_values_hash") or "")
+    if not expected_metric_hash.startswith("sha256:"):
+        reasons.append("candidate_metric_values_hash_missing")
+    elif actual_metric_hash != expected_metric_hash:
+        reasons.append("candidate_metric_values_hash_mismatch")
+
     expected_universe = str(candidate.get("selection_universe_hash") or report.get("selection_universe_hash") or "")
     if not expected_universe.startswith("sha256:"):
         reasons.append("selection_universe_hash_missing")
@@ -184,13 +285,36 @@ def validate_statistical_evidence_for_candidate(
             if str(expected or "") != str(actual or ""):
                 reasons.append("selection_universe_hash_mismatch")
                 break
+    _extend_statistical_metadata_reasons(candidate=candidate, report=report, evidence=evidence, reasons=reasons)
     p_value = evidence.get("white_reality_check_p_value")
     if p_value is None:
         reasons.append("reality_check_p_value_missing")
     elif _as_float(p_value) is None:
         reasons.append("reality_check_p_value_missing")
+    summary_p_value = evidence.get("summary_metric_max_bootstrap_p_value")
+    if summary_p_value is not None and _as_float(summary_p_value) != _as_float(p_value):
+        reasons.append("reality_check_p_value_missing")
+    if evidence.get("white_reality_check_method") != "approximation_summary_metric_centered_max_bootstrap":
+        reasons.append("statistical_metadata_mismatch")
     if evidence.get("effective_trial_count") is None:
         reasons.append("effective_trial_count_missing")
+    elif _as_int(evidence.get("effective_trial_count")) is not None:
+        expected_effective = _expected_effective_trial_count(candidate=candidate, report=report, evidence=evidence)
+        if expected_effective is not None and int(evidence["effective_trial_count"]) < expected_effective:
+            reasons.append("statistical_effective_trial_count_underreported")
+    if _as_int(evidence.get("metric_value_count")) != _as_int(candidate.get("metric_value_count") or report.get("metric_value_count")):
+        reasons.append("statistical_metric_value_count_mismatch")
+    metric_value_count = _as_int(evidence.get("metric_value_count"))
+    candidate_count = _as_int(evidence.get("candidate_count"))
+    missing_metric_count = _as_int(evidence.get("missing_metric_count"))
+    if (
+        metric_value_count is None
+        or candidate_count is None
+        or missing_metric_count is None
+        or metric_value_count != candidate_count
+        or missing_metric_count != 0
+    ):
+        reasons.append("statistical_metric_values_missing")
     if evidence.get("statistical_gate_result") != "PASS":
         gate_reasons = [str(item) for item in evidence.get("gate_fail_reasons") or []]
         reasons.extend(gate_reasons or ["reality_check_p_value_failed"])
@@ -204,6 +328,41 @@ def validate_statistical_evidence_for_candidate(
     return sorted(set(reasons))
 
 
+def _extend_statistical_metadata_reasons(
+    *,
+    candidate: dict[str, Any],
+    report: dict[str, Any],
+    evidence: dict[str, Any],
+    reasons: list[str],
+) -> None:
+    code_by_field = {
+        "candidate_count": "statistical_candidate_count_mismatch",
+        "search_budget": "statistical_search_budget_mismatch",
+        "parameter_grid_size": "statistical_parameter_grid_size_mismatch",
+        "attempt_index": "statistical_attempt_index_mismatch",
+        "holdout_reuse_count": "statistical_holdout_reuse_count_mismatch",
+        "dataset_reuse_policy": "statistical_dataset_reuse_policy_mismatch",
+        "benchmark": "statistical_benchmark_mismatch",
+        "primary_metric": "statistical_primary_metric_mismatch",
+        "primary_metric_source": "statistical_primary_metric_mismatch",
+    }
+    for field, code in code_by_field.items():
+        expected = candidate.get(field)
+        if expected is None:
+            expected = report.get(field)
+        actual = evidence.get(field)
+        if expected is None and actual is None:
+            reasons.append(code)
+            reasons.append("statistical_metadata_mismatch")
+        elif str(expected or "") != str(actual or ""):
+            reasons.append(code)
+            reasons.append("statistical_metadata_mismatch")
+    expected_contract = candidate.get("statistical_validation_contract") or report.get("statistical_validation_contract")
+    if expected_contract != evidence.get("statistical_validation_contract"):
+        reasons.append("statistical_contract_mismatch")
+        reasons.append("statistical_metadata_mismatch")
+
+
 def _candidate_metric_values(
     candidates: list[dict[str, Any]],
     contract: StatisticalSelectionContract,
@@ -214,6 +373,20 @@ def _candidate_metric_values(
         if not isinstance(metrics, dict):
             continue
         value = _metric_value(metrics, contract.primary_metric, contract.benchmark)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _candidate_metric_values_from_payload(payload: dict[str, Any]) -> list[float]:
+    values: list[float] = []
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return values
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        value = _as_float(candidate.get("validation_metric_value"))
         if value is not None:
             values.append(value)
     return values
@@ -267,10 +440,13 @@ def _statistical_gate_fail_reasons(
     attempt_index: int,
     holdout_reuse_count: int,
     metric_values: list[float],
+    candidate_count: int,
 ) -> list[str]:
     reasons: list[str] = []
     if not metric_values:
         reasons.append("effective_trial_count_missing")
+    if len(metric_values) != candidate_count:
+        reasons.append("statistical_metric_values_missing")
     if p_value is None:
         reasons.append("reality_check_p_value_missing")
     elif p_value > contract.gates.max_reality_check_p_value:
@@ -289,13 +465,67 @@ def _statistical_gate_fail_reasons(
 def _limitations(contract: StatisticalSelectionContract) -> list[str]:
     limitations = [
         "metric_summary_bootstrap_not_trade_or_bar_return_bootstrap",
-        "white_reality_check_equivalent_uses_centered_candidate_primary_metric_distribution",
+        "white_reality_check_approximation_uses_centered_candidate_primary_metric_distribution",
     ]
     if contract.gates.max_spa_p_value is None:
         limitations.append("spa_not_implemented")
     if contract.gates.min_deflated_sharpe_probability is None:
         limitations.append("deflated_sharpe_not_implemented")
     return limitations
+
+
+def _promotion_grade_limitations(contract: StatisticalSelectionContract) -> list[str]:
+    limitations = [
+        "not_full_white_reality_check",
+        "not_bar_return_bootstrap",
+        "not_trade_return_bootstrap",
+    ]
+    if contract.gates.max_spa_p_value is None:
+        limitations.append("spa_not_implemented")
+    if contract.gates.min_deflated_sharpe_probability is None:
+        limitations.append("deflated_sharpe_not_implemented")
+    return limitations
+
+
+def _effective_trial_count(
+    *,
+    candidate_count: int,
+    metric_value_count: int,
+    search_budget: int,
+    parameter_grid_size: int,
+    attempt_index: int,
+    holdout_reuse_count: int,
+) -> int:
+    base = max(
+        int(candidate_count),
+        int(metric_value_count),
+        int(search_budget),
+        int(parameter_grid_size),
+    )
+    return base * max(1, int(attempt_index)) * max(1, int(holdout_reuse_count) + 1)
+
+
+def _expected_effective_trial_count(
+    *,
+    candidate: dict[str, Any],
+    report: dict[str, Any],
+    evidence: dict[str, Any],
+) -> int | None:
+    values = {
+        "candidate_count": _as_int(candidate.get("candidate_count") or report.get("candidate_count") or evidence.get("candidate_count")),
+        "metric_value_count": _as_int(evidence.get("metric_value_count")),
+        "search_budget": _as_int(candidate.get("search_budget") or report.get("search_budget") or evidence.get("search_budget")),
+        "parameter_grid_size": _as_int(
+            candidate.get("parameter_grid_size") or report.get("parameter_grid_size") or evidence.get("parameter_grid_size")
+        ),
+        "attempt_index": _as_int(candidate.get("attempt_index") or report.get("attempt_index") or evidence.get("attempt_index")),
+        "holdout_reuse_count": _as_int(
+            candidate.get("holdout_reuse_count") or report.get("holdout_reuse_count") or evidence.get("holdout_reuse_count")
+        ),
+    }
+    if any(value is None for value in values.values()):
+        return None
+    return _effective_trial_count(**{key: int(value) for key, value in values.items() if value is not None})
 
 
 def _seed_from_hash(value: str) -> int:
@@ -311,6 +541,15 @@ def _as_float(value: object) -> float | None:
     if parsed != parsed or parsed in {float("inf"), float("-inf")}:
         return None
     return parsed
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _ensure_research_output_path_allowed(manager: PathManager, path: Path) -> None:
