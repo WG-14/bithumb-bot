@@ -9,6 +9,7 @@ import pytest
 from bithumb_bot.broker import paper
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, set_portfolio
+from bithumb_bot.execution_quality import build_execution_quality_record
 from bithumb_bot.public_api_orderbook import BestQuote
 
 
@@ -41,6 +42,12 @@ def _configure_stress(
         "BUY_FRACTION": _set("BUY_FRACTION", 1.0),
         "MAX_ORDERBOOK_SPREAD_BPS": _set("MAX_ORDERBOOK_SPREAD_BPS", 100.0),
     }
+
+
+def _configure_immediate(tmp_path: Path, *, db_name: str):
+    values = _configure_stress(tmp_path, db_name=db_name)
+    _set("PAPER_EXECUTION_MODEL", "immediate")
+    return values
 
 
 def _restore(values: dict[str, object]) -> None:
@@ -125,6 +132,54 @@ def _latest_stress_evidence(conn):
     ).fetchone()
     assert row is not None
     return json.loads(str(row["submit_evidence"]))
+
+
+def test_paper_immediate_execution_records_execution_contract_evidence(tmp_path: Path, monkeypatch):
+    old = _configure_immediate(tmp_path, db_name="immediate_contract.sqlite")
+    try:
+        _prepare_buy(monkeypatch)
+
+        trade = paper.paper_execute("BUY", ts=1_700_000_000_000, price=100.0)
+
+        assert trade is not None
+        conn = ensure_db()
+        evidence = _latest_stress_evidence(conn)
+        row = conn.execute(
+            "SELECT client_order_id FROM order_events WHERE submit_phase='paper_execution' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        record = build_execution_quality_record(conn, client_order_id=str(row["client_order_id"]))
+        conn.close()
+
+        assert evidence["execution_model_name"] == "immediate_top_of_book"
+        assert evidence["fill_status"] == "filled"
+        assert evidence["execution_contract_hash"].startswith("sha256:")
+        assert evidence["execution_reality_contract"]["execution_contract_hash"] == evidence["execution_contract_hash"]
+        assert record is not None
+        assert record.execution_contract_hash == evidence["execution_contract_hash"]
+        assert record.execution_reality_contract == evidence["execution_reality_contract"]
+        assert record.execution_contract_hash_valid is True
+    finally:
+        _restore(old)
+
+
+def test_paper_stress_execution_records_execution_contract_evidence(tmp_path: Path, monkeypatch):
+    old = _configure_stress(tmp_path, db_name="stress_contract.sqlite")
+    try:
+        _prepare_buy(monkeypatch)
+
+        trade = paper.paper_execute("BUY", ts=1_700_000_000_000, price=100.0)
+
+        assert trade is not None
+        conn = ensure_db()
+        evidence = _latest_stress_evidence(conn)
+        conn.close()
+
+        assert evidence["execution_model_name"] == "stress"
+        assert evidence["fill_status"] == "filled"
+        assert evidence["execution_contract_hash"].startswith("sha256:")
+        assert evidence["execution_reality_contract"]["execution_contract_hash"] == evidence["execution_contract_hash"]
+    finally:
+        _restore(old)
 
 
 def test_stress_failure_records_failed_order_without_fill_or_trade(tmp_path: Path, monkeypatch):

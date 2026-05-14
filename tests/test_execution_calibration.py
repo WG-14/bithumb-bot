@@ -8,9 +8,11 @@ from bithumb_bot.research.execution_calibration import (
     compare_calibration_to_scenario,
     validate_calibration_artifact,
 )
+from bithumb_bot.execution_reality_contract import build_execution_reality_contract
 
 
 def test_calibration_artifact_schema_is_hash_validated() -> None:
+    contract = _execution_contract()
     artifact = build_calibration_artifact(
         summary={
             "sample_count": 40,
@@ -22,6 +24,10 @@ def test_calibration_artifact_schema_is_hash_validated() -> None:
             "unfilled_rate": 0.01,
             "model_breach_rate": 0.03,
             "quality_gate_status": "PASS",
+            "execution_reality_contract": contract,
+            "execution_contract_hash": contract["execution_contract_hash"],
+            "execution_contract_hashes": [contract["execution_contract_hash"]],
+            "execution_contract_hash_present": True,
         },
         market="KRW-BTC",
         interval="1m",
@@ -33,6 +39,7 @@ def test_calibration_artifact_schema_is_hash_validated() -> None:
     assert validated["artifact_type"] == "execution_cost_calibration"
     assert validated["content_hash"].startswith("sha256:")
     assert validated["recommended_research_cost_model"]["slippage_bps"]
+    assert validated["execution_contract_hash"] == contract["execution_contract_hash"]
 
 
 def test_calibration_hash_mismatch_is_rejected() -> None:
@@ -201,3 +208,78 @@ def test_optional_warn_mode_missing_calibration_is_explicit() -> None:
 
     assert result["status"] == "MISSING"
     assert result["reasons"] == ["execution_calibration_missing"]
+
+
+def test_calibration_artifact_binds_execution_contract_hash() -> None:
+    contract = _execution_contract()
+    artifact = _artifact(
+        execution_reality_contract=contract,
+        execution_contract_hash=contract["execution_contract_hash"],
+        execution_contract_hashes=[contract["execution_contract_hash"]],
+        execution_contract_hash_present=True,
+    )
+
+    assert artifact["execution_contract_hash"] == contract["execution_contract_hash"]
+    assert artifact["execution_reality_contract"] == contract
+
+
+def test_compare_calibration_fails_on_execution_contract_hash_mismatch() -> None:
+    contract = _execution_contract()
+    other = _execution_contract(latency_model={"type": "fixed_bps", "latency_ms": 1})
+    artifact = _artifact(
+        execution_contract_hash=contract["execution_contract_hash"],
+        execution_contract_hashes=[contract["execution_contract_hash"]],
+        execution_contract_hash_present=True,
+    )
+
+    result = _compare(artifact, expected_execution_contract_hash=other["execution_contract_hash"])
+
+    assert result["status"] == "FAIL"
+    assert "execution_calibration_contract_hash_mismatch" in result["reasons"]
+
+
+def test_compare_calibration_fails_when_contract_hash_required_but_missing() -> None:
+    contract = _execution_contract()
+    artifact = _artifact()
+
+    result = _compare(artifact, expected_execution_contract_hash=contract["execution_contract_hash"])
+
+    assert result["status"] == "FAIL"
+    assert "execution_calibration_contract_hash_missing" in result["reasons"]
+
+
+def test_compare_calibration_fails_on_mixed_execution_contract_hashes() -> None:
+    first = _execution_contract()
+    second = _execution_contract(latency_model={"type": "fixed_bps", "latency_ms": 1})
+    artifact = _artifact(
+        execution_contract_hash=None,
+        execution_contract_hashes=[
+            first["execution_contract_hash"],
+            second["execution_contract_hash"],
+        ],
+        mixed_execution_contract_hashes=True,
+    )
+
+    result = _compare(artifact, expected_execution_contract_hash=first["execution_contract_hash"])
+
+    assert result["status"] == "FAIL"
+    assert "execution_calibration_mixed_contract_hashes" in result["reasons"]
+
+
+def _execution_contract(**overrides):
+    kwargs = {
+        "fill_reference_policy": "next_candle_open",
+        "missing_quote_policy": "warn",
+        "min_execution_reality_level_for_promotion": "candle_next_open",
+        "allow_same_candle_close_fill": False,
+        "top_of_book_required": False,
+        "latency_model": {"type": "fixed_bps", "latency_ms": 0},
+        "partial_fill_model": {"type": "fixed_bps", "partial_fill_rate": 0.0},
+        "order_failure_model": {"type": "fixed_bps", "order_failure_rate": 0.0},
+        "fee_source": "operator_declared_test_fee",
+        "slippage_source": "test_calibration",
+        "calibration_required": True,
+        "calibration_artifact_hash": "sha256:calibration",
+    }
+    kwargs.update(overrides)
+    return build_execution_reality_contract(**kwargs)

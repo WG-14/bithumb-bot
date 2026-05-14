@@ -392,6 +392,17 @@ def _evaluate_candidates(
 
     for scenario_index, scenario in enumerate(manifest.execution_model.scenarios):
         scenario_id = _scenario_id(scenario, scenario_index)
+        expected_calibration_hash = (
+            execution_calibration.get("content_hash")
+            if isinstance(execution_calibration, dict)
+            else None
+        )
+        expected_execution_contract = _execution_reality_contract(
+            manifest=manifest,
+            scenario=scenario,
+            calibration_hash=expected_calibration_hash,
+            top_of_book_available=int(top_of_book_quality_summary.get("joined_quote_count") or 0) > 0,
+        )
         calibration_gate = compare_calibration_to_scenario(
             calibration=execution_calibration,
             assumed_slippage_bps=scenario.slippage_bps + scenario.market_order_extra_cost_bps,
@@ -401,6 +412,7 @@ def _evaluate_candidates(
             expected_market=manifest.market,
             expected_interval=manifest.interval,
             expected_execution_timing_policy=manifest.execution_timing.as_dict(),
+            expected_execution_reality_contract=expected_execution_contract,
             require_content_hash=manifest.execution_model.calibration_required,
             min_sample_count=ExecutionQualityThresholds().min_sample,
             require_quality_gate_pass=(

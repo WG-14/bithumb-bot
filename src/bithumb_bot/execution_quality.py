@@ -14,6 +14,7 @@ from .order_semantics import (
     CANONICAL_MARKET_SELL_BASE_QTY,
     classify_order_semantics,
 )
+from .execution_reality_contract import contract_hash_matches
 from .research.experiment_manifest import load_manifest
 
 
@@ -63,6 +64,10 @@ class ExecutionQualityRecord:
     legacy_unknown_order_type: bool
     unsupported_unknown_order_type: bool
     exchange_order_id: str | None
+    execution_reality_contract: dict[str, Any] | None
+    execution_contract_hash: str | None
+    execution_contract_hash_valid: bool | None
+    execution_contract_mismatch_reason: str | None
     signal_ts_ms: int | None
     signal_reference_price: float | None
     signal_best_bid: float | None
@@ -492,6 +497,41 @@ def _submit_evidence_contract_fields(event: sqlite3.Row | None) -> dict[str, obj
     }
 
 
+def _submit_execution_contract_fields(event: sqlite3.Row | None) -> dict[str, object]:
+    if event is None:
+        return {
+            "execution_reality_contract": None,
+            "execution_contract_hash": None,
+            "execution_contract_hash_valid": None,
+            "execution_contract_mismatch_reason": "submit_evidence_missing",
+        }
+    evidence = _decode_submit_evidence(event["submit_evidence"])
+    contract = evidence.get("execution_reality_contract")
+    contract_hash = evidence.get("execution_contract_hash")
+    if not isinstance(contract, dict):
+        return {
+            "execution_reality_contract": None,
+            "execution_contract_hash": str(contract_hash).strip() if contract_hash else None,
+            "execution_contract_hash_valid": None,
+            "execution_contract_mismatch_reason": "execution_reality_contract_missing",
+        }
+    observed_hash = str(contract_hash or contract.get("execution_contract_hash") or "").strip() or None
+    if not observed_hash:
+        return {
+            "execution_reality_contract": dict(contract),
+            "execution_contract_hash": None,
+            "execution_contract_hash_valid": False,
+            "execution_contract_mismatch_reason": "execution_contract_hash_missing",
+        }
+    valid = contract_hash_matches(contract, observed_hash)
+    return {
+        "execution_reality_contract": dict(contract),
+        "execution_contract_hash": observed_hash,
+        "execution_contract_hash_valid": valid,
+        "execution_contract_mismatch_reason": None if valid else "execution_contract_hash_mismatch",
+    }
+
+
 def build_execution_quality_record(
     conn: sqlite3.Connection,
     *,
@@ -546,6 +586,7 @@ def build_execution_quality_record(
     signal_ref, signal_bid, signal_ask, signal_spread = _signal_context_prices(decision)
     submit_sent_ts, submit_response_ts, submit_ref, submit_bid, submit_ask, submit_spread = _submit_evidence_prices(confirmation)
     contract_fields = _submit_evidence_contract_fields(confirmation)
+    execution_contract_fields = _submit_execution_contract_fields(confirmation)
     if submit_ref is None and preflight is not None:
         submit_ref = finite_positive(preflight["price"])
     if submit_sent_ts is None and confirmation is not None:
@@ -680,6 +721,26 @@ def build_execution_quality_record(
         legacy_unknown_order_type=semantics.legacy_unknown,
         unsupported_unknown_order_type=semantics.unsupported_unknown,
         exchange_order_id=str(order["exchange_order_id"]) if order["exchange_order_id"] else None,
+        execution_reality_contract=(
+            execution_contract_fields["execution_reality_contract"]
+            if isinstance(execution_contract_fields.get("execution_reality_contract"), dict)
+            else None
+        ),
+        execution_contract_hash=(
+            str(execution_contract_fields["execution_contract_hash"])
+            if execution_contract_fields.get("execution_contract_hash")
+            else None
+        ),
+        execution_contract_hash_valid=(
+            bool(execution_contract_fields["execution_contract_hash_valid"])
+            if execution_contract_fields.get("execution_contract_hash_valid") is not None
+            else None
+        ),
+        execution_contract_mismatch_reason=(
+            str(execution_contract_fields["execution_contract_mismatch_reason"])
+            if execution_contract_fields.get("execution_contract_mismatch_reason")
+            else None
+        ),
         signal_ts_ms=(int(decision["decision_ts"]) if decision is not None and decision["decision_ts"] is not None else None),
         signal_reference_price=signal_ref,
         signal_best_bid=signal_bid,
@@ -736,11 +797,15 @@ _EXECUTION_QUALITY_COLUMNS = tuple(ExecutionQualityRecord.__dataclass_fields__.k
 
 def upsert_execution_quality_record(conn: sqlite3.Connection, record: ExecutionQualityRecord) -> None:
     now_ms = int(time.time() * 1000)
-    values = [getattr(record, name) for name in _EXECUTION_QUALITY_COLUMNS]
+    values = [_execution_quality_db_value(record, name) for name in _EXECUTION_QUALITY_COLUMNS]
     update_assignments = ", ".join(f"{name}=?" for name in _EXECUTION_QUALITY_COLUMNS if name != "client_order_id")
     placeholders = ", ".join("?" for _ in _EXECUTION_QUALITY_COLUMNS)
     columns = ", ".join(_EXECUTION_QUALITY_COLUMNS)
-    update_values = [getattr(record, name) for name in _EXECUTION_QUALITY_COLUMNS if name != "client_order_id"]
+    update_values = [
+        _execution_quality_db_value(record, name)
+        for name in _EXECUTION_QUALITY_COLUMNS
+        if name != "client_order_id"
+    ]
     cursor = conn.execute(
         f"""
         UPDATE execution_quality_events
@@ -758,6 +823,13 @@ def upsert_execution_quality_record(conn: sqlite3.Connection, record: ExecutionQ
         """,
         (*values, now_ms, now_ms),
     )
+
+
+def _execution_quality_db_value(record: ExecutionQualityRecord, name: str) -> object:
+    value = getattr(record, name)
+    if name == "execution_reality_contract" and isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return value
 
 
 def refresh_execution_quality_records(
@@ -850,6 +922,16 @@ def summarize_execution_quality(
     insufficient_count = sum(1 for row in records if row.quality_status == QUALITY_INSUFFICIENT_EVIDENCE)
     model_breach_count = sum(1 for row in records if row.model_breach_flag is True)
     sufficient_model_count = sum(1 for row in records if row.model_breach_flag is not None)
+    contract_hashes = sorted(
+        {
+            str(row.execution_contract_hash)
+            for row in records
+            if row.execution_contract_hash is not None and str(row.execution_contract_hash).strip()
+        }
+    )
+    missing_contract_count = sum(1 for row in records if not row.execution_contract_hash)
+    invalid_contract_count = sum(1 for row in records if row.execution_contract_hash_valid is False)
+    mixed_contract_hashes = len(contract_hashes) > 1
     submit_to_fill = [float(row.full_fill_latency_ms) for row in records if row.full_fill_latency_ms is not None]
     slip_signal = [float(row.slippage_vs_signal_bps) for row in records if row.slippage_vs_signal_bps is not None]
     slip_submit = [float(row.slippage_vs_submit_ref_bps) for row in records if row.slippage_vs_submit_ref_bps is not None]
@@ -872,6 +954,14 @@ def summarize_execution_quality(
         status = GATE_WARN
         primary_issue = "missing_execution_quality_evidence"
         next_action = "repair_or_instrument_missing_signal_submit_fill_links"
+    elif mixed_contract_hashes:
+        status = GATE_FAIL
+        primary_issue = "mixed_execution_contract_hashes"
+        next_action = "split_execution_quality_calibration_by_execution_contract_hash"
+    elif invalid_contract_count > 0:
+        status = GATE_FAIL
+        primary_issue = "invalid_execution_contract_hash"
+        next_action = "repair_or_regenerate_contract_bearing_submit_evidence"
     elif p90_slippage is not None and p90_slippage > thresholds.max_p90_slippage_bps:
         status = GATE_FAIL
         primary_issue = "p90_slippage_exceeds_execution_quality_threshold"
@@ -925,6 +1015,12 @@ def summarize_execution_quality(
         "backtest_slippage_bps_max": backtest_slippage_bps_max,
         "model_breach_count": model_breach_count if backtest_slippage_bps_max is not None else None,
         "model_breach_rate": model_breach_rate if backtest_slippage_bps_max is not None else None,
+        "execution_contract_hash": contract_hashes[0] if len(contract_hashes) == 1 else None,
+        "execution_contract_hashes": contract_hashes,
+        "execution_contract_hash_present": len(contract_hashes) == 1 and missing_contract_count == 0,
+        "mixed_execution_contract_hashes": mixed_contract_hashes,
+        "execution_contract_mismatch_count": invalid_contract_count,
+        "execution_contract_missing_count": missing_contract_count,
         "quality_gate_status": status,
         "primary_issue": primary_issue,
         "next_action": next_action,
@@ -969,6 +1065,12 @@ def format_execution_quality_text(summary: dict[str, object]) -> str:
         "backtest_slippage_bps_max",
         "model_breach_count",
         "model_breach_rate",
+        "execution_contract_hash",
+        "execution_contract_hashes",
+        "execution_contract_hash_present",
+        "mixed_execution_contract_hashes",
+        "execution_contract_mismatch_count",
+        "execution_contract_missing_count",
         "market_median_slippage_bps",
         "market_p90_slippage_bps",
         "market_p95_slippage_bps",

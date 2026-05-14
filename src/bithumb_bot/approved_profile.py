@@ -10,6 +10,7 @@ from typing import Any
 
 from .paths import PathManager, PathPolicyError
 from .execution_reality_contract import (
+    build_execution_reality_contract,
     contract_hash_matches,
     execution_contract_mismatch_reasons,
     unsupported_capability_reasons,
@@ -56,6 +57,33 @@ COST_MODEL_ENV_KEYS = (
     "STRATEGY_ENTRY_SLIPPAGE_BPS",
     "MAX_MARKET_SLIPPAGE_BPS",
     "SLIPPAGE_BPS",
+)
+EXECUTION_CONTRACT_ENV_KEYS = (
+    "EXECUTION_FILL_REFERENCE_POLICY",
+    "EXECUTION_DECISION_GUARD_MS",
+    "EXECUTION_MAX_QUOTE_WAIT_MS",
+    "EXECUTION_MISSING_QUOTE_POLICY",
+    "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION",
+    "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL",
+    "EXECUTION_QUOTE_SOURCE",
+    "EXECUTION_QUOTE_AGE_LIMIT_MS",
+    "EXECUTION_TOP_OF_BOOK_REQUIRED",
+    "EXECUTION_TOP_OF_BOOK_IS_FULL_DEPTH",
+    "EXECUTION_DEPTH_REQUIRED",
+    "EXECUTION_TRADE_TICK_REQUIRED",
+    "EXECUTION_QUEUE_POSITION_REQUIRED",
+    "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE",
+    "EXECUTION_REALITY_LEVEL",
+    "EXECUTION_LATENCY_MODEL_TYPE",
+    "EXECUTION_LATENCY_MS",
+    "EXECUTION_PARTIAL_FILL_MODEL_TYPE",
+    "EXECUTION_PARTIAL_FILL_RATE",
+    "EXECUTION_ORDER_FAILURE_MODEL_TYPE",
+    "EXECUTION_ORDER_FAILURE_RATE",
+    "EXECUTION_FEE_SOURCE",
+    "EXECUTION_SLIPPAGE_SOURCE",
+    "EXECUTION_CALIBRATION_REQUIRED",
+    "EXECUTION_CALIBRATION_ARTIFACT_HASH",
 )
 PROFILE_RUNTIME_COST_MISMATCH_ACTION = (
     "Profile/runtime cost mismatch. Regenerate or select an approved profile whose base cost assumption "
@@ -809,7 +837,7 @@ def runtime_contract_from_env_values(env: dict[str, str]) -> dict[str, Any]:
             default="0",
         ),
     }
-    return {
+    runtime = {
         "mode": _value("MODE", default="paper"),
         "live_dry_run": _value("LIVE_DRY_RUN", default="true"),
         "live_real_order_armed": _value("LIVE_REAL_ORDER_ARMED", default="false"),
@@ -834,6 +862,11 @@ def runtime_contract_from_env_values(env: dict[str, str]) -> dict[str, Any]:
             ),
         },
     }
+    execution_contract = _execution_contract_from_env_values(env)
+    if execution_contract is not None:
+        runtime["execution_reality_contract"] = execution_contract
+        runtime["execution_contract_hash"] = execution_contract["execution_contract_hash"]
+    return runtime
 
 
 def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
@@ -841,7 +874,7 @@ def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
         str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
         or str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
     )
-    return {
+    runtime = {
         "mode": str(getattr(cfg, "MODE", "")),
         "live_dry_run": bool(getattr(cfg, "LIVE_DRY_RUN", True)),
         "live_real_order_armed": bool(getattr(cfg, "LIVE_REAL_ORDER_ARMED", False)),
@@ -873,6 +906,116 @@ def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
             "slippage_bps": float(getattr(cfg, "STRATEGY_ENTRY_SLIPPAGE_BPS")),
         },
     }
+    execution_contract = _execution_contract_from_settings(cfg)
+    if execution_contract is not None:
+        runtime["execution_reality_contract"] = execution_contract
+        runtime["execution_contract_hash"] = execution_contract["execution_contract_hash"]
+    return runtime
+
+
+def _execution_contract_from_env_values(env: dict[str, str]) -> dict[str, Any] | None:
+    if not any(str(env.get(key, "")).strip() for key in EXECUTION_CONTRACT_ENV_KEYS):
+        return None
+
+    def _value(key: str, default: str | None = None) -> str | None:
+        raw = str(env.get(key, "")).strip()
+        return raw if raw else default
+
+    fill_reference_policy = _value("EXECUTION_FILL_REFERENCE_POLICY")
+    if not fill_reference_policy:
+        return None
+    return build_execution_reality_contract(
+        fill_reference_policy=fill_reference_policy,
+        decision_guard_ms=_int_env(_value("EXECUTION_DECISION_GUARD_MS", "0")),
+        max_quote_wait_ms=_int_env(_value("EXECUTION_MAX_QUOTE_WAIT_MS", "0")),
+        missing_quote_policy=_value("EXECUTION_MISSING_QUOTE_POLICY", "warn") or "warn",
+        min_execution_reality_level_for_promotion=_value("EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION"),
+        allow_same_candle_close_fill=_bool_value(_value("EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL", "false")),
+        quote_source=_value("EXECUTION_QUOTE_SOURCE"),
+        quote_age_limit_ms=_optional_int_env(_value("EXECUTION_QUOTE_AGE_LIMIT_MS")),
+        top_of_book_required=_bool_value(_value("EXECUTION_TOP_OF_BOOK_REQUIRED", "false")),
+        top_of_book_is_full_depth=_bool_value(_value("EXECUTION_TOP_OF_BOOK_IS_FULL_DEPTH", "false")),
+        depth_required=_bool_value(_value("EXECUTION_DEPTH_REQUIRED", "false")),
+        trade_tick_required=_bool_value(_value("EXECUTION_TRADE_TICK_REQUIRED", "false")),
+        queue_position_required=_bool_value(_value("EXECUTION_QUEUE_POSITION_REQUIRED", "false")),
+        intra_candle_path_available=_bool_value(_value("EXECUTION_INTRA_CANDLE_PATH_AVAILABLE", "false")),
+        latency_model={
+            "type": _value("EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps"),
+            "latency_ms": _int_env(_value("EXECUTION_LATENCY_MS", "0")),
+        },
+        partial_fill_model={
+            "type": _value("EXECUTION_PARTIAL_FILL_MODEL_TYPE", _value("EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps")),
+            "partial_fill_rate": _float_env(_value("EXECUTION_PARTIAL_FILL_RATE", "0")),
+        },
+        order_failure_model={
+            "type": _value("EXECUTION_ORDER_FAILURE_MODEL_TYPE", _value("EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps")),
+            "order_failure_rate": _float_env(_value("EXECUTION_ORDER_FAILURE_RATE", "0")),
+        },
+        fee_source=_value("EXECUTION_FEE_SOURCE"),
+        slippage_source=_value("EXECUTION_SLIPPAGE_SOURCE"),
+        calibration_required=_bool_value(_value("EXECUTION_CALIBRATION_REQUIRED", "false")),
+        calibration_artifact_hash=_value("EXECUTION_CALIBRATION_ARTIFACT_HASH"),
+        execution_reality_level=_value("EXECUTION_REALITY_LEVEL"),
+    )
+
+
+def _execution_contract_from_settings(cfg: object) -> dict[str, Any] | None:
+    fill_reference_policy = str(getattr(cfg, "EXECUTION_FILL_REFERENCE_POLICY", "") or "").strip()
+    if not fill_reference_policy:
+        return None
+    return build_execution_reality_contract(
+        fill_reference_policy=fill_reference_policy,
+        decision_guard_ms=int(getattr(cfg, "EXECUTION_DECISION_GUARD_MS", 0)),
+        max_quote_wait_ms=int(getattr(cfg, "EXECUTION_MAX_QUOTE_WAIT_MS", 0)),
+        missing_quote_policy=str(getattr(cfg, "EXECUTION_MISSING_QUOTE_POLICY", "warn")),
+        min_execution_reality_level_for_promotion=_optional_settings_str(
+            cfg, "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION"
+        ),
+        allow_same_candle_close_fill=bool(getattr(cfg, "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL", False)),
+        quote_source=_optional_settings_str(cfg, "EXECUTION_QUOTE_SOURCE"),
+        quote_age_limit_ms=getattr(cfg, "EXECUTION_QUOTE_AGE_LIMIT_MS", None),
+        top_of_book_required=bool(getattr(cfg, "EXECUTION_TOP_OF_BOOK_REQUIRED", False)),
+        top_of_book_is_full_depth=bool(getattr(cfg, "EXECUTION_TOP_OF_BOOK_IS_FULL_DEPTH", False)),
+        depth_required=bool(getattr(cfg, "EXECUTION_DEPTH_REQUIRED", False)),
+        trade_tick_required=bool(getattr(cfg, "EXECUTION_TRADE_TICK_REQUIRED", False)),
+        queue_position_required=bool(getattr(cfg, "EXECUTION_QUEUE_POSITION_REQUIRED", False)),
+        intra_candle_path_available=bool(getattr(cfg, "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE", False)),
+        latency_model={
+            "type": str(getattr(cfg, "EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps")),
+            "latency_ms": int(getattr(cfg, "EXECUTION_LATENCY_MS", 0)),
+        },
+        partial_fill_model={
+            "type": str(getattr(cfg, "EXECUTION_PARTIAL_FILL_MODEL_TYPE", getattr(cfg, "EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps"))),
+            "partial_fill_rate": float(getattr(cfg, "EXECUTION_PARTIAL_FILL_RATE", 0.0)),
+        },
+        order_failure_model={
+            "type": str(getattr(cfg, "EXECUTION_ORDER_FAILURE_MODEL_TYPE", getattr(cfg, "EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps"))),
+            "order_failure_rate": float(getattr(cfg, "EXECUTION_ORDER_FAILURE_RATE", 0.0)),
+        },
+        fee_source=_optional_settings_str(cfg, "EXECUTION_FEE_SOURCE"),
+        slippage_source=_optional_settings_str(cfg, "EXECUTION_SLIPPAGE_SOURCE"),
+        calibration_required=bool(getattr(cfg, "EXECUTION_CALIBRATION_REQUIRED", False)),
+        calibration_artifact_hash=_optional_settings_str(cfg, "EXECUTION_CALIBRATION_ARTIFACT_HASH"),
+        execution_reality_level=_optional_settings_str(cfg, "EXECUTION_REALITY_LEVEL"),
+    )
+
+
+def _optional_settings_str(cfg: object, name: str) -> str | None:
+    value = str(getattr(cfg, name, "") or "").strip()
+    return value or None
+
+
+def _int_env(value: object) -> int:
+    return int(str(value or "0").strip())
+
+
+def _optional_int_env(value: object) -> int | None:
+    raw = str(value or "").strip()
+    return int(raw) if raw else None
+
+
+def _float_env(value: object) -> float:
+    return float(str(value or "0").strip())
 
 
 def diff_profile_to_runtime(
@@ -924,6 +1067,15 @@ def diff_profile_to_runtime(
             observed=runtime_contract,
         ):
             mismatches.append(mismatch)
+    elif str(profile.get("profile_mode") or "").strip().lower() in APPROVED_PROFILE_MODES:
+        mismatches.append(
+            {
+                "field": "execution_reality_contract",
+                "expected": profile.get("execution_contract_hash"),
+                "actual": None,
+                "reason": "runtime_execution_contract_missing",
+            }
+        )
     return tuple(mismatches)
 
 

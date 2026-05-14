@@ -691,28 +691,27 @@ def paper_execute(
             fee_rate=fee_rate,
         )
         execution_result = _build_paper_execution_adapter().execute(execution_request)
-        if _paper_execution_model_name() == "stress":
-            _record_paper_execution_evidence(
-                conn,
-                client_order_id=client_order_id,
-                market=market,
-                side=side,
-                qty=float(execution_result.requested_qty),
-                price=(
-                    float(execution_result.avg_fill_price)
-                    if execution_result.avg_fill_price is not None
-                    else float(fill_price)
-                ),
-                ts=int(ts),
-                order_status=(
-                    "FAILED"
-                    if execution_result.fill_status == "failed"
-                    else "PARTIAL"
-                    if execution_result.fill_status == "partial"
-                    else "FILLED"
-                ),
-                evidence=execution_result.evidence,
-            )
+        _record_paper_execution_evidence(
+            conn,
+            client_order_id=client_order_id,
+            market=market,
+            side=side,
+            qty=float(execution_result.requested_qty),
+            price=(
+                float(execution_result.avg_fill_price)
+                if execution_result.avg_fill_price is not None
+                else float(fill_price)
+            ),
+            ts=int(ts),
+            order_status=(
+                "FAILED"
+                if execution_result.fill_status == "failed"
+                else "PARTIAL"
+                if execution_result.fill_status == "partial"
+                else "FILLED"
+            ),
+            evidence=execution_result.evidence,
+        )
 
         if execution_result.fill_status == "failed" or execution_result.filled_qty <= 0.0:
             set_status(

@@ -604,6 +604,45 @@ class Settings:
     PAPER_EXECUTION_PARTIAL_FILL_RATE: float = float(os.getenv("PAPER_EXECUTION_PARTIAL_FILL_RATE", "0"))
     PAPER_EXECUTION_PARTIAL_FILL_FRACTION: float = float(os.getenv("PAPER_EXECUTION_PARTIAL_FILL_FRACTION", "0.5"))
     PAPER_EXECUTION_ORDER_FAILURE_RATE: float = float(os.getenv("PAPER_EXECUTION_ORDER_FAILURE_RATE", "0"))
+    EXECUTION_FILL_REFERENCE_POLICY: str = os.getenv("EXECUTION_FILL_REFERENCE_POLICY", "").strip()
+    EXECUTION_DECISION_GUARD_MS: int = int(os.getenv("EXECUTION_DECISION_GUARD_MS", "0"))
+    EXECUTION_MAX_QUOTE_WAIT_MS: int = int(os.getenv("EXECUTION_MAX_QUOTE_WAIT_MS", "0"))
+    EXECUTION_MISSING_QUOTE_POLICY: str = os.getenv("EXECUTION_MISSING_QUOTE_POLICY", "warn").strip() or "warn"
+    EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION: str = os.getenv(
+        "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION", ""
+    ).strip()
+    EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL: bool = parse_bool_env(
+        "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL", "false"
+    )
+    EXECUTION_QUOTE_SOURCE: str = os.getenv("EXECUTION_QUOTE_SOURCE", "").strip()
+    EXECUTION_QUOTE_AGE_LIMIT_MS: int | None = (
+        None
+        if os.getenv("EXECUTION_QUOTE_AGE_LIMIT_MS") in (None, "")
+        else int(os.getenv("EXECUTION_QUOTE_AGE_LIMIT_MS", "0"))
+    )
+    EXECUTION_TOP_OF_BOOK_REQUIRED: bool = parse_bool_env("EXECUTION_TOP_OF_BOOK_REQUIRED", "false")
+    EXECUTION_TOP_OF_BOOK_IS_FULL_DEPTH: bool = parse_bool_env("EXECUTION_TOP_OF_BOOK_IS_FULL_DEPTH", "false")
+    EXECUTION_DEPTH_REQUIRED: bool = parse_bool_env("EXECUTION_DEPTH_REQUIRED", "false")
+    EXECUTION_TRADE_TICK_REQUIRED: bool = parse_bool_env("EXECUTION_TRADE_TICK_REQUIRED", "false")
+    EXECUTION_QUEUE_POSITION_REQUIRED: bool = parse_bool_env("EXECUTION_QUEUE_POSITION_REQUIRED", "false")
+    EXECUTION_INTRA_CANDLE_PATH_AVAILABLE: bool = parse_bool_env("EXECUTION_INTRA_CANDLE_PATH_AVAILABLE", "false")
+    EXECUTION_REALITY_LEVEL: str = os.getenv("EXECUTION_REALITY_LEVEL", "").strip()
+    EXECUTION_LATENCY_MODEL_TYPE: str = os.getenv("EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps").strip() or "fixed_bps"
+    EXECUTION_LATENCY_MS: int = int(os.getenv("EXECUTION_LATENCY_MS", "0"))
+    EXECUTION_PARTIAL_FILL_MODEL_TYPE: str = (
+        os.getenv("EXECUTION_PARTIAL_FILL_MODEL_TYPE", os.getenv("EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps")).strip()
+        or "fixed_bps"
+    )
+    EXECUTION_PARTIAL_FILL_RATE: float = float(os.getenv("EXECUTION_PARTIAL_FILL_RATE", "0"))
+    EXECUTION_ORDER_FAILURE_MODEL_TYPE: str = (
+        os.getenv("EXECUTION_ORDER_FAILURE_MODEL_TYPE", os.getenv("EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps")).strip()
+        or "fixed_bps"
+    )
+    EXECUTION_ORDER_FAILURE_RATE: float = float(os.getenv("EXECUTION_ORDER_FAILURE_RATE", "0"))
+    EXECUTION_FEE_SOURCE: str = os.getenv("EXECUTION_FEE_SOURCE", "").strip()
+    EXECUTION_SLIPPAGE_SOURCE: str = os.getenv("EXECUTION_SLIPPAGE_SOURCE", "").strip()
+    EXECUTION_CALIBRATION_REQUIRED: bool = parse_bool_env("EXECUTION_CALIBRATION_REQUIRED", "false")
+    EXECUTION_CALIBRATION_ARTIFACT_HASH: str = os.getenv("EXECUTION_CALIBRATION_ARTIFACT_HASH", "").strip()
     # ?꾨왂 吏꾩엯 鍮꾩슜 ?꾪꽣?먯꽌 湲곕? ?щ━?쇱?瑜?異붿젙?????ъ슜?섎뒗 bps.
     # ?곗꽑?쒖쐞:
     #   STRATEGY_ENTRY_SLIPPAGE_BPS > MAX_MARKET_SLIPPAGE_BPS > SLIPPAGE_BPS > 0

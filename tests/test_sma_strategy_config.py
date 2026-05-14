@@ -64,6 +64,25 @@ def settings_guard():
         "APPROVED_STRATEGY_PROFILE_PATH",
         "STRATEGY_APPROVED_PROFILE_PATH",
         "STRATEGY_CANDIDATE_PROFILE_PATH",
+        "EXECUTION_FILL_REFERENCE_POLICY",
+        "EXECUTION_MISSING_QUOTE_POLICY",
+        "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION",
+        "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL",
+        "EXECUTION_TOP_OF_BOOK_REQUIRED",
+        "EXECUTION_DEPTH_REQUIRED",
+        "EXECUTION_TRADE_TICK_REQUIRED",
+        "EXECUTION_QUEUE_POSITION_REQUIRED",
+        "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE",
+        "EXECUTION_LATENCY_MODEL_TYPE",
+        "EXECUTION_LATENCY_MS",
+        "EXECUTION_PARTIAL_FILL_MODEL_TYPE",
+        "EXECUTION_PARTIAL_FILL_RATE",
+        "EXECUTION_ORDER_FAILURE_MODEL_TYPE",
+        "EXECUTION_ORDER_FAILURE_RATE",
+        "EXECUTION_FEE_SOURCE",
+        "EXECUTION_SLIPPAGE_SOURCE",
+        "EXECUTION_CALIBRATION_REQUIRED",
+        "EXECUTION_CALIBRATION_ARTIFACT_HASH",
     )
     original = {name: getattr(settings, name) for name in names}
     try:
@@ -71,6 +90,28 @@ def settings_guard():
     finally:
         for name, value in original.items():
             object.__setattr__(settings, name, value)
+
+
+def _set_matching_runtime_execution_contract_settings() -> None:
+    object.__setattr__(settings, "EXECUTION_FILL_REFERENCE_POLICY", "next_candle_open")
+    object.__setattr__(settings, "EXECUTION_MISSING_QUOTE_POLICY", "fail")
+    object.__setattr__(settings, "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION", "candle_next_open")
+    object.__setattr__(settings, "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL", False)
+    object.__setattr__(settings, "EXECUTION_TOP_OF_BOOK_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_DEPTH_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_TRADE_TICK_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_QUEUE_POSITION_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE", False)
+    object.__setattr__(settings, "EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps")
+    object.__setattr__(settings, "EXECUTION_LATENCY_MS", 0)
+    object.__setattr__(settings, "EXECUTION_PARTIAL_FILL_MODEL_TYPE", "fixed_bps")
+    object.__setattr__(settings, "EXECUTION_PARTIAL_FILL_RATE", 0.0)
+    object.__setattr__(settings, "EXECUTION_ORDER_FAILURE_MODEL_TYPE", "fixed_bps")
+    object.__setattr__(settings, "EXECUTION_ORDER_FAILURE_RATE", 0.0)
+    object.__setattr__(settings, "EXECUTION_FEE_SOURCE", "operator_declared_test_fee")
+    object.__setattr__(settings, "EXECUTION_SLIPPAGE_SOURCE", "test_calibration")
+    object.__setattr__(settings, "EXECUTION_CALIBRATION_REQUIRED", True)
+    object.__setattr__(settings, "EXECUTION_CALIBRATION_ARTIFACT_HASH", "sha256:calibration")
 
 
 def _write_paper_profile(tmp_path: Path, *, sma_short: int) -> Path:
@@ -299,6 +340,7 @@ def test_approved_profile_selector_is_marked_full_contract_not_legacy(
     object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
     object.__setattr__(settings, "STRATEGY_APPROVED_PROFILE_PATH", "")
     object.__setattr__(settings, "STRATEGY_CANDIDATE_PROFILE_PATH", "")
+    _set_matching_runtime_execution_contract_settings()
 
     config = sma_strategy_config_from_settings()
 

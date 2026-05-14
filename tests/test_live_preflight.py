@@ -70,6 +70,25 @@ def _restore_settings():
         "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO,
         "LIVE_FEE_RATE_ESTIMATE": settings.LIVE_FEE_RATE_ESTIMATE,
         "STRATEGY_ENTRY_SLIPPAGE_BPS": settings.STRATEGY_ENTRY_SLIPPAGE_BPS,
+        "EXECUTION_FILL_REFERENCE_POLICY": settings.EXECUTION_FILL_REFERENCE_POLICY,
+        "EXECUTION_MISSING_QUOTE_POLICY": settings.EXECUTION_MISSING_QUOTE_POLICY,
+        "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION": settings.EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION,
+        "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL": settings.EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL,
+        "EXECUTION_TOP_OF_BOOK_REQUIRED": settings.EXECUTION_TOP_OF_BOOK_REQUIRED,
+        "EXECUTION_DEPTH_REQUIRED": settings.EXECUTION_DEPTH_REQUIRED,
+        "EXECUTION_TRADE_TICK_REQUIRED": settings.EXECUTION_TRADE_TICK_REQUIRED,
+        "EXECUTION_QUEUE_POSITION_REQUIRED": settings.EXECUTION_QUEUE_POSITION_REQUIRED,
+        "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE": settings.EXECUTION_INTRA_CANDLE_PATH_AVAILABLE,
+        "EXECUTION_LATENCY_MODEL_TYPE": settings.EXECUTION_LATENCY_MODEL_TYPE,
+        "EXECUTION_LATENCY_MS": settings.EXECUTION_LATENCY_MS,
+        "EXECUTION_PARTIAL_FILL_MODEL_TYPE": settings.EXECUTION_PARTIAL_FILL_MODEL_TYPE,
+        "EXECUTION_PARTIAL_FILL_RATE": settings.EXECUTION_PARTIAL_FILL_RATE,
+        "EXECUTION_ORDER_FAILURE_MODEL_TYPE": settings.EXECUTION_ORDER_FAILURE_MODEL_TYPE,
+        "EXECUTION_ORDER_FAILURE_RATE": settings.EXECUTION_ORDER_FAILURE_RATE,
+        "EXECUTION_FEE_SOURCE": settings.EXECUTION_FEE_SOURCE,
+        "EXECUTION_SLIPPAGE_SOURCE": settings.EXECUTION_SLIPPAGE_SOURCE,
+        "EXECUTION_CALIBRATION_REQUIRED": settings.EXECUTION_CALIBRATION_REQUIRED,
+        "EXECUTION_CALIBRATION_ARTIFACT_HASH": settings.EXECUTION_CALIBRATION_ARTIFACT_HASH,
     }
     old_cache = dict(order_rules._cached_rules)
     yield
@@ -157,6 +176,7 @@ def _set_valid_live_defaults(
     object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", False)
     object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_WARNING", False)
     object.__setattr__(settings, "MARKET_PREFLIGHT_WARNING_STATES", "CAUTION")
+    _set_matching_runtime_execution_contract_settings()
     monkeypatch.delenv("MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", raising=False)
     monkeypatch.delenv("MARKET_PREFLIGHT_BLOCK_ON_WARNING", raising=False)
     monkeypatch.delenv("MARKET_PREFLIGHT_WARNING_STATES", raising=False)
@@ -199,6 +219,28 @@ def _set_valid_live_defaults(
     profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="live_dry_run")
     object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
     object.__setattr__(settings, "STRATEGY_APPROVED_PROFILE_PATH", "")
+
+
+def _set_matching_runtime_execution_contract_settings() -> None:
+    object.__setattr__(settings, "EXECUTION_FILL_REFERENCE_POLICY", "next_candle_open")
+    object.__setattr__(settings, "EXECUTION_MISSING_QUOTE_POLICY", "fail")
+    object.__setattr__(settings, "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION", "candle_next_open")
+    object.__setattr__(settings, "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL", False)
+    object.__setattr__(settings, "EXECUTION_TOP_OF_BOOK_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_DEPTH_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_TRADE_TICK_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_QUEUE_POSITION_REQUIRED", False)
+    object.__setattr__(settings, "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE", False)
+    object.__setattr__(settings, "EXECUTION_LATENCY_MODEL_TYPE", "fixed_bps")
+    object.__setattr__(settings, "EXECUTION_LATENCY_MS", 0)
+    object.__setattr__(settings, "EXECUTION_PARTIAL_FILL_MODEL_TYPE", "fixed_bps")
+    object.__setattr__(settings, "EXECUTION_PARTIAL_FILL_RATE", 0.0)
+    object.__setattr__(settings, "EXECUTION_ORDER_FAILURE_MODEL_TYPE", "fixed_bps")
+    object.__setattr__(settings, "EXECUTION_ORDER_FAILURE_RATE", 0.0)
+    object.__setattr__(settings, "EXECUTION_FEE_SOURCE", "operator_declared_test_fee")
+    object.__setattr__(settings, "EXECUTION_SLIPPAGE_SOURCE", "test_calibration")
+    object.__setattr__(settings, "EXECUTION_CALIBRATION_REQUIRED", True)
+    object.__setattr__(settings, "EXECUTION_CALIBRATION_ARTIFACT_HASH", "sha256:calibration")
 
 
 def _candidate_profile_for_current_settings() -> dict[str, object]:

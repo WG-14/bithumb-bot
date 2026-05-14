@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .execution_reality_contract import contract_hash_matches
 from .research.hashing import content_hash_payload, sha256_prefixed
 
 
@@ -122,6 +123,20 @@ def validate_profile_transition_evidence(
             source_hash,
             f"{prefix}_source_promotion_hash_mismatch",
         )
+    parent_contract_hash = str(parent_profile.get("execution_contract_hash") or "").strip()
+    evidence_contract_hash = str(payload.get("execution_contract_hash") or "").strip()
+    if not parent_contract_hash:
+        raise EvidenceValidationError(f"{prefix}_parent_execution_contract_hash_missing")
+    if not evidence_contract_hash:
+        raise EvidenceValidationError(f"{prefix}_execution_contract_hash_missing")
+    if evidence_contract_hash != parent_contract_hash:
+        raise EvidenceValidationError(f"{prefix}_execution_contract_hash_mismatch")
+    evidence_contract = payload.get("execution_reality_contract")
+    if evidence_contract is not None:
+        if not isinstance(evidence_contract, dict):
+            raise EvidenceValidationError(f"{prefix}_schema_invalid:execution_reality_contract")
+        if not contract_hash_matches(evidence_contract, evidence_contract_hash):
+            raise EvidenceValidationError(f"{prefix}_execution_contract_hash_mismatch")
     if evidence_path is not None:
         recorded_path = str(payload.get("evidence_path") or "").strip()
         if recorded_path and str(Path(evidence_path).expanduser().resolve()) != recorded_path:
@@ -269,6 +284,8 @@ def _recommended_next_action(error: str) -> str:
         return "regenerate_typed_evidence_with_db_fingerprint"
     if "execution_quality_not_applicable" in error:
         return "generate_or_attach_execution_quality_evidence_before_promotion"
+    if "execution_contract_hash" in error:
+        return "regenerate_typed_evidence_with_matching_execution_contract"
     if "profile_hash_mismatch" in error or "source_promotion_hash_mismatch" in error:
         return "fix_profile_selection_or_rerun_evidence_for_selected_profile"
     if "observation_window_insufficient" in error or "decision_count_insufficient" in error:

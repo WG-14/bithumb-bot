@@ -269,6 +269,25 @@ def _write_env(path: Path, *, sma_short: int = 2, profile_path: str = "") -> Non
                 "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO=0",
                 "LIVE_FEE_RATE_ESTIMATE=0.0025",
                 "STRATEGY_ENTRY_SLIPPAGE_BPS=50",
+                "EXECUTION_FILL_REFERENCE_POLICY=next_candle_open",
+                "EXECUTION_MISSING_QUOTE_POLICY=warn",
+                "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION=candle_next_open",
+                "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL=false",
+                "EXECUTION_TOP_OF_BOOK_REQUIRED=false",
+                "EXECUTION_DEPTH_REQUIRED=false",
+                "EXECUTION_TRADE_TICK_REQUIRED=false",
+                "EXECUTION_QUEUE_POSITION_REQUIRED=false",
+                "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE=false",
+                "EXECUTION_LATENCY_MODEL_TYPE=fixed_bps",
+                "EXECUTION_LATENCY_MS=0",
+                "EXECUTION_PARTIAL_FILL_MODEL_TYPE=fixed_bps",
+                "EXECUTION_PARTIAL_FILL_RATE=0",
+                "EXECUTION_ORDER_FAILURE_MODEL_TYPE=fixed_bps",
+                "EXECUTION_ORDER_FAILURE_RATE=0",
+                "EXECUTION_FEE_SOURCE=operator_declared_test_fee",
+                "EXECUTION_SLIPPAGE_SOURCE=test_calibration",
+                "EXECUTION_CALIBRATION_REQUIRED=true",
+                "EXECUTION_CALIBRATION_ARTIFACT_HASH=sha256:calibration",
                 "",
             ]
         ),
@@ -304,6 +323,8 @@ def _evidence_payload(profile: dict[str, object], *, evidence_type: str = "paper
         "approved_profile_content_hash": profile["profile_content_hash"],
         "source_promotion_path": profile["source_promotion_artifact_path"],
         "source_promotion_content_hash": profile["source_promotion_content_hash"],
+        "execution_reality_contract": profile["execution_reality_contract"],
+        "execution_contract_hash": profile["execution_contract_hash"],
         "observation_start": "2026-05-01T00:00:00+00:00",
         "observation_end": "2026-05-03T00:00:00+00:00",
         "observation_duration_seconds": 172800,
@@ -748,6 +769,75 @@ def test_profile_verify_passes_when_env_matches(
     assert payload["legacy_candidate_profile_path_used"] is False
 
 
+def test_profile_verify_fails_when_env_runtime_execution_contract_missing_for_production_profile(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "paper.env"
+    _write_env(env_path, profile_path=str(profile_path))
+    lines = [
+        line
+        for line in env_path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("EXECUTION_")
+    ]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert cmd_profile_verify(profile_path=str(profile_path), env_path=str(env_path)) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["reason"] == "approved_profile_runtime_mismatch"
+    assert payload["approved_profile_runtime_verified"] is False
+    assert any(
+        item.get("reason") == "runtime_execution_contract_missing"
+        for item in payload["approved_profile_mismatches"]
+    )
+
+
+def test_profile_verify_fails_when_env_runtime_execution_contract_hash_differs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "paper.env"
+    _write_env(env_path, profile_path=str(profile_path))
+    text = env_path.read_text(encoding="utf-8").replace(
+        "EXECUTION_SLIPPAGE_SOURCE=test_calibration",
+        "EXECUTION_SLIPPAGE_SOURCE=drifted_runtime_source",
+    )
+    env_path.write_text(text, encoding="utf-8")
+
+    assert cmd_profile_verify(profile_path=str(profile_path), env_path=str(env_path)) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["reason"] == "approved_profile_runtime_mismatch"
+    assert any(
+        item.get("reason") == "execution_contract_hash_mismatch"
+        for item in payload["approved_profile_mismatches"]
+    )
+
+
+def test_profile_diff_reports_execution_contract_field_mismatches(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "paper.env"
+    _write_env(env_path, profile_path=str(profile_path))
+    text = env_path.read_text(encoding="utf-8").replace(
+        "EXECUTION_PARTIAL_FILL_RATE=0",
+        "EXECUTION_PARTIAL_FILL_RATE=0.1",
+    )
+    env_path.write_text(text, encoding="utf-8")
+
+    profile = load_approved_profile(profile_path)
+    runtime = runtime_contract_from_env_values(parse_env_file(env_path))
+    mismatches = diff_profile_to_runtime(profile, runtime)
+
+    assert any(item.get("reason") == "execution_contract_hash_mismatch" for item in mismatches)
+    assert any(
+        item.get("field") == "execution_reality_contract.partial_fill_model"
+        for item in mismatches
+    )
+
+
 def test_profile_verify_json_preserves_ambiguous_live_flags_reason(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -868,6 +958,84 @@ def test_profile_transition_preserves_parent_hash_and_stores_evidence_hash(tmp_p
     assert child["paper_validation_evidence_path"] == str(evidence_path.resolve())
     assert child["paper_validation_evidence_content_hash"] == json.loads(evidence_path.read_text())["content_hash"]
     assert child["paper_validation_approved_profile_hash"] == parent["profile_content_hash"]
+
+
+def test_profile_transition_evidence_fails_on_execution_contract_mismatch(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    parent = _profile(str(promotion_path))
+    payload = _evidence_payload(parent)
+    other_contract = build_execution_reality_contract(
+        fill_reference_policy="next_candle_open",
+        missing_quote_policy="warn",
+        min_execution_reality_level_for_promotion="candle_next_open",
+        allow_same_candle_close_fill=False,
+        top_of_book_required=False,
+        latency_model={"type": "fixed_bps", "latency_ms": 1},
+        partial_fill_model={"type": "fixed_bps", "partial_fill_rate": 0.0},
+        order_failure_model={"type": "fixed_bps", "order_failure_rate": 0.0},
+        fee_source="operator_declared_test_fee",
+        slippage_source="test_calibration",
+        calibration_required=True,
+        calibration_artifact_hash="sha256:calibration",
+    )
+    payload["execution_reality_contract"] = other_contract
+    payload["execution_contract_hash"] = other_contract["execution_contract_hash"]
+    evidence_path = _write_evidence_payload(tmp_path, "paper_contract_mismatch.json", payload)
+
+    with pytest.raises(ApprovedProfileError, match="paper_validation_evidence_execution_contract_hash_mismatch"):
+        promote_profile_mode(
+            parent_profile=parent,
+            target_mode="live_dry_run",
+            paper_validation_evidence=str(evidence_path),
+        )
+
+
+def test_profile_transition_evidence_fails_when_execution_contract_missing(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    parent = _profile(str(promotion_path))
+    payload = _evidence_payload(parent)
+    payload.pop("execution_contract_hash")
+    payload.pop("execution_reality_contract")
+    evidence_path = _write_evidence_payload(tmp_path, "paper_contract_missing.json", payload)
+
+    with pytest.raises(ApprovedProfileError, match="paper_validation_evidence_execution_contract_hash_missing"):
+        promote_profile_mode(
+            parent_profile=parent,
+            target_mode="live_dry_run",
+            paper_validation_evidence=str(evidence_path),
+        )
+
+
+def test_profile_transition_evidence_accepts_matching_execution_contract(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    parent = _profile(str(promotion_path))
+    payload = _evidence_payload(parent)
+
+    assert _validate_evidence_payload(parent, payload) == payload["content_hash"]
+
+
+def test_live_readiness_evidence_fails_on_execution_contract_mismatch(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    paper = _profile(str(promotion_path))
+    live_dry_run = promote_profile_mode(
+        parent_profile=paper,
+        target_mode="live_dry_run",
+        paper_validation_evidence=str(_write_evidence(tmp_path, "paper_validation.json", profile=paper)),
+    )
+    payload = _evidence_payload(live_dry_run, evidence_type="live_readiness")
+    payload["execution_contract_hash"] = "sha256:other"
+    evidence_path = _write_evidence_payload(tmp_path, "live_contract_mismatch.json", payload)
+
+    with pytest.raises(ApprovedProfileError, match="live_readiness_evidence_execution_contract_hash_mismatch"):
+        promote_profile_mode(
+            parent_profile=live_dry_run,
+            target_mode="small_live",
+            live_readiness_evidence=str(evidence_path),
+        )
 
 
 @pytest.mark.parametrize(

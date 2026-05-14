@@ -44,6 +44,13 @@ def build_calibration_artifact(
         "fill_price_source": summary.get("fill_price_source") or "recorded_fill_avg_price",
         "backtest_fill_reference_policy": summary.get("backtest_fill_reference_policy"),
         "execution_reality_level": summary.get("execution_reality_level"),
+        "execution_reality_contract": summary.get("execution_reality_contract"),
+        "execution_contract_hash": summary.get("execution_contract_hash"),
+        "execution_contract_hashes": list(summary.get("execution_contract_hashes") or []),
+        "execution_contract_hash_present": bool(summary.get("execution_contract_hash_present")),
+        "mixed_execution_contract_hashes": bool(summary.get("mixed_execution_contract_hashes")),
+        "execution_contract_mismatch_count": int(summary.get("execution_contract_mismatch_count") or 0),
+        "execution_contract_missing_count": int(summary.get("execution_contract_missing_count") or 0),
         "insufficient_evidence": sample_count <= 0 or summary.get("quality_gate_status") == "INSUFFICIENT_EVIDENCE",
         "recommended_research_cost_model": _recommended_model(summary),
     }
@@ -105,6 +112,8 @@ def compare_calibration_to_scenario(
     expected_market: str | None = None,
     expected_interval: str | None = None,
     expected_execution_timing_policy: dict[str, Any] | None = None,
+    expected_execution_contract_hash: str | None = None,
+    expected_execution_reality_contract: dict[str, Any] | None = None,
     require_content_hash: bool = False,
     min_sample_count: int | None = None,
     require_quality_gate_pass: bool = False,
@@ -133,6 +142,28 @@ def compare_calibration_to_scenario(
         artifact_level = artifact.get("execution_reality_level")
         if artifact_level is not None and expected_level is not None and str(artifact_level) != expected_level:
             reasons.append("execution_calibration_reality_level_mismatch")
+    expected_contract_hash = str(
+        expected_execution_contract_hash
+        or (
+            expected_execution_reality_contract.get("execution_contract_hash")
+            if isinstance(expected_execution_reality_contract, dict)
+            else ""
+        )
+        or ""
+    ).strip()
+    artifact_contract_hash = str(artifact.get("execution_contract_hash") or "").strip()
+    artifact_contract_hashes = [
+        str(item).strip()
+        for item in (artifact.get("execution_contract_hashes") or [])
+        if str(item).strip()
+    ]
+    if bool(artifact.get("mixed_execution_contract_hashes")) or len(set(artifact_contract_hashes)) > 1:
+        reasons.append("execution_calibration_mixed_contract_hashes")
+    elif expected_contract_hash:
+        if not artifact_contract_hash:
+            reasons.append("execution_calibration_contract_hash_missing")
+        elif artifact_contract_hash != expected_contract_hash:
+            reasons.append("execution_calibration_contract_hash_mismatch")
     if bool(artifact.get("insufficient_evidence")) or int(artifact.get("sample_count") or 0) <= 0:
         reasons.append("execution_calibration_insufficient_evidence")
     p90 = _float_or_none(artifact.get("p90_slippage_bps"))
@@ -175,6 +206,12 @@ def compare_calibration_to_scenario(
         ),
         "artifact_fill_reference_policy": artifact.get("backtest_fill_reference_policy"),
         "artifact_execution_reality_level": artifact.get("execution_reality_level"),
+        "expected_execution_contract_hash": expected_contract_hash or None,
+        "artifact_execution_contract_hash": artifact_contract_hash or None,
+        "artifact_execution_contract_hashes": artifact_contract_hashes,
+        "mixed_execution_contract_hashes": bool(artifact.get("mixed_execution_contract_hashes")),
+        "execution_contract_mismatch_count": int(artifact.get("execution_contract_mismatch_count") or 0),
+        "execution_contract_missing_count": int(artifact.get("execution_contract_missing_count") or 0),
         "signal_reference_price_source": artifact.get("signal_reference_price_source"),
         "submit_reference_price_source": artifact.get("submit_reference_price_source"),
         "fill_price_source": artifact.get("fill_price_source"),

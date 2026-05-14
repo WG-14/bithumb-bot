@@ -18,6 +18,7 @@ from bithumb_bot.execution_quality import (
     side_aware_slippage_bps,
     summarize_execution_quality,
 )
+from bithumb_bot.execution_reality_contract import build_execution_reality_contract
 from bithumb_bot.order_semantics import classify_order_semantics
 from bithumb_bot.execution import apply_fill_and_trade
 from bithumb_bot.oms import add_fill, create_order, record_submit_attempt
@@ -349,6 +350,7 @@ def _seed_quality_order(
     exchange_submit_notional_krw: float | None = None,
     request_ts: int = 1_700_000_000_100,
     response_ts: int = 1_700_000_000_180,
+    execution_reality_contract: dict[str, object] | None = None,
 ) -> int:
     decision_id = record_strategy_decision(
         conn,
@@ -381,6 +383,17 @@ def _seed_quality_order(
         ts_ms=1_700_000_000_050,
         conn=conn,
     )
+    submit_evidence: dict[str, object] = {
+        "exchange": "bithumb",
+        "submit_contract_kind": submit_contract_kind,
+        "exchange_submit_notional_krw": exchange_submit_notional_krw,
+        "request_ts": request_ts,
+        "response_ts": response_ts,
+        "top_of_book": {"best_bid": 99.0, "best_ask": 100.0},
+    }
+    if execution_reality_contract is not None:
+        submit_evidence["execution_reality_contract"] = execution_reality_contract
+        submit_evidence["execution_contract_hash"] = execution_reality_contract["execution_contract_hash"]
     record_submit_attempt(
         conn=conn,
         client_order_id=client_order_id,
@@ -395,17 +408,7 @@ def _seed_quality_order(
         submission_reason_code="confirmed_success",
         exception_class=None,
         timeout_flag=False,
-        submit_evidence=json.dumps(
-            {
-                "exchange": "bithumb",
-                "submit_contract_kind": submit_contract_kind,
-                "exchange_submit_notional_krw": exchange_submit_notional_krw,
-                "request_ts": request_ts,
-                "response_ts": response_ts,
-                "top_of_book": {"best_bid": 99.0, "best_ask": 100.0},
-            },
-            sort_keys=True,
-        ),
+        submit_evidence=json.dumps(submit_evidence, sort_keys=True),
         exchange_order_id_obtained=True,
         order_status="NEW",
         order_type=order_type,
@@ -421,6 +424,25 @@ def _seed_quality_order(
             conn=conn,
         )
     return decision_id
+
+
+def _quality_execution_contract(**overrides: object) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "fill_reference_policy": "paper_top_of_book",
+        "missing_quote_policy": "fail",
+        "quote_source": "test_quote",
+        "top_of_book_required": True,
+        "top_of_book_is_full_depth": False,
+        "latency_model": {"type": "immediate_top_of_book", "latency_ms": 0},
+        "partial_fill_model": {"type": "immediate_top_of_book", "partial_fill_rate": 0.0},
+        "order_failure_model": {"type": "immediate_top_of_book", "order_failure_rate": 0.0},
+        "fee_source": "paper_runtime_settings",
+        "slippage_source": "paper_runtime_settings",
+        "calibration_required": False,
+        "execution_reality_level": "paper_immediate_top_of_book",
+    }
+    kwargs.update(overrides)
+    return build_execution_reality_contract(**kwargs)
 
 
 def test_order_level_execution_quality_aggregates_fills_and_latency(tmp_path) -> None:
@@ -450,6 +472,89 @@ def test_order_level_execution_quality_aggregates_fills_and_latency(tmp_path) ->
     assert record.slippage_vs_submit_ref_bps == pytest.approx(150.0)
     assert record.slippage_vs_best_quote_bps == pytest.approx(150.0)
     assert record.quality_status == "within_model"
+
+
+def test_execution_quality_record_extracts_execution_contract_hash_from_submit_evidence(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "execution-quality-contract.sqlite"))
+    contract = _quality_execution_contract()
+    try:
+        _seed_quality_order(
+            conn,
+            client_order_id="quality_contract",
+            fill_prices=(100.0,),
+            fill_qtys=(1.0,),
+            execution_reality_contract=contract,
+        )
+        record = build_execution_quality_record(conn, client_order_id="quality_contract")
+    finally:
+        conn.close()
+
+    assert record is not None
+    assert record.execution_contract_hash == contract["execution_contract_hash"]
+    assert record.execution_reality_contract == contract
+    assert record.execution_contract_hash_valid is True
+    assert record.execution_contract_mismatch_reason is None
+
+
+def test_execution_quality_summary_reports_single_execution_contract_hash(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "execution-quality-contract-summary.sqlite"))
+    contract = _quality_execution_contract()
+    try:
+        records = []
+        for client_order_id in ("quality_contract_a", "quality_contract_b"):
+            _seed_quality_order(
+                conn,
+                client_order_id=client_order_id,
+                fill_prices=(100.0,),
+                fill_qtys=(1.0,),
+                execution_reality_contract=contract,
+            )
+            records.append(build_execution_quality_record(conn, client_order_id=client_order_id))
+    finally:
+        conn.close()
+
+    summary = summarize_execution_quality(
+        [record for record in records if record is not None],
+        thresholds=ExecutionQualityThresholds(min_sample=1),
+    )
+
+    assert summary["execution_contract_hash"] == contract["execution_contract_hash"]
+    assert summary["execution_contract_hash_present"] is True
+    assert summary["mixed_execution_contract_hashes"] is False
+
+
+def test_execution_quality_summary_flags_mixed_execution_contract_hashes(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "execution-quality-contract-mixed.sqlite"))
+    first_contract = _quality_execution_contract()
+    second_contract = _quality_execution_contract(
+        latency_model={"type": "immediate_top_of_book", "latency_ms": 1}
+    )
+    try:
+        records = []
+        for client_order_id, contract in (
+            ("quality_contract_first", first_contract),
+            ("quality_contract_second", second_contract),
+        ):
+            _seed_quality_order(
+                conn,
+                client_order_id=client_order_id,
+                fill_prices=(100.0,),
+                fill_qtys=(1.0,),
+                execution_reality_contract=contract,
+            )
+            records.append(build_execution_quality_record(conn, client_order_id=client_order_id))
+    finally:
+        conn.close()
+
+    summary = summarize_execution_quality(
+        [record for record in records if record is not None],
+        thresholds=ExecutionQualityThresholds(min_sample=1),
+    )
+
+    assert summary["execution_contract_hash"] is None
+    assert summary["mixed_execution_contract_hashes"] is True
+    assert summary["quality_gate_status"] == "FAIL"
+    assert summary["primary_issue"] == "mixed_execution_contract_hashes"
 
 
 def test_execution_quality_historical_submit_timestamp_fallback_remains_explicit(tmp_path) -> None:
