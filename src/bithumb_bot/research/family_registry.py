@@ -94,12 +94,16 @@ def validate_family_registry_binding(
     evidence: dict[str, Any],
 ) -> list[str]:
     contract = evidence.get("statistical_validation_contract") or report.get("statistical_validation_contract")
-    if not isinstance(contract, dict) or contract.get("multiple_testing_scope") != "experiment_family":
-        return []
-    reasons: list[str] = []
     path_value = str(evidence.get("family_trial_registry_path") or report.get("family_trial_registry_path") or "").strip()
     prior_hash = str(evidence.get("family_trial_registry_prior_hash") or report.get("family_trial_registry_prior_hash") or "").strip()
     row_hash = str(evidence.get("family_trial_registry_row_hash") or report.get("family_trial_registry_row_hash") or "").strip()
+    registry_declared = bool(path_value or prior_hash or row_hash)
+    if (
+        not registry_declared
+        and (not isinstance(contract, dict) or contract.get("multiple_testing_scope") != "experiment_family")
+    ):
+        return []
+    reasons: list[str] = []
     if not path_value or not prior_hash.startswith("sha256:"):
         return ["experiment_family_universe_missing"]
     path = Path(path_value).expanduser()

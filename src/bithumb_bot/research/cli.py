@@ -100,6 +100,7 @@ def cmd_research_promote_candidate(
     print(f"  family_trial_registry_row_hash={result.artifact.get('family_trial_registry_row_hash') or 'none'}")
     print(f"  white_reality_check_p_value={result.artifact.get('white_reality_check_p_value')}")
     print(f"  summary_metric_max_bootstrap_p_value={result.artifact.get('summary_metric_max_bootstrap_p_value')}")
+    print(f"  bootstrap_sampling_contract_hash={result.artifact.get('bootstrap_sampling_contract_hash') or 'none'}")
     print(f"  statistical_gate_result={result.artifact.get('statistical_gate_result') or 'none'}")
     print(
         "  statistical_gate_fail_reasons="
@@ -169,6 +170,7 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  summary_metric_max_bootstrap_p_value={report.get('summary_metric_max_bootstrap_p_value')}")
     print(f"  white_reality_check_p_value={report.get('white_reality_check_p_value')}")
     print(f"  white_reality_check_method={report.get('white_reality_check_method') or 'none'}")
+    print(f"  bootstrap_sampling_contract_hash={report.get('bootstrap_sampling_contract_hash') or 'none'}")
     print(f"  statistical_gate_result={report.get('statistical_gate_result') or 'none'}")
     print(
         "  statistical_gate_fail_reasons="

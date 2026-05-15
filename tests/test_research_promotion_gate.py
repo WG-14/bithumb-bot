@@ -499,6 +499,7 @@ def _write_report_with_lineage(
         "hypothesis_id": "hypothesis_001",
         "hypothesis_status": "pre_registered",
         "search_budget": 4,
+        "parameter_space_hash": "sha256:parameter-space",
         "parameter_grid_size": 4,
         "attempt_index": 2,
         "failed_candidate_count": 1,
@@ -537,9 +538,9 @@ def _statistical_contract(**gate_overrides: object) -> dict[str, object]:
         "selection_universe": "all_parameter_candidates_all_required_scenarios",
         "multiple_testing_scope": "experiment",
         "bootstrap": {
-            "method": "metric_centered_max_bootstrap",
+            "method": "white_reality_check_block_bootstrap",
             "n_bootstrap": 100,
-            "block_length_policy": "not_applicable_summary_metric",
+            "block_length_policy": "fixed",
             "seed_policy": "derived_from_selection_universe_hash",
         },
         "gates": gates,
@@ -601,7 +602,7 @@ def _attach_statistical_evidence(
         "benchmark": "cash",
         "primary_metric": "net_excess_return",
         "primary_metric_source": "validation_metrics",
-        "bootstrap_method": "metric_centered_max_bootstrap",
+        "bootstrap_method": "white_reality_check_block_bootstrap",
         "statistical_method": "white_reality_check_block_bootstrap",
         "evidence_grade": "PROMOTION_GRADE_WRC",
         "minimum_promotion_evidence_grade": "PROMOTION_GRADE_WRC",
@@ -615,7 +616,7 @@ def _attach_statistical_evidence(
             "block_length_policy": "fixed",
             "stationary_bootstrap_probability": None,
             "observation_count": 2,
-            "return_unit": "trade_return",
+            "return_unit": "bar_excess_return",
             "benchmark": "cash",
             "missing_observation_policy": "skip_missing_candidate_trade_returns",
         },
@@ -662,7 +663,7 @@ def _attach_statistical_evidence(
         "dataset_content_hash": report["dataset_content_hash"],
         "dataset_quality_hash": report.get("dataset_quality_hash"),
         "split": "validation",
-        "return_unit": "trade_return",
+        "return_unit": "bar_excess_return",
         "benchmark": "cash",
         "ordered_time_index": [1, 2],
         "ordered_time_index_hash": sha256_prefixed([1, 2]),
@@ -673,7 +674,7 @@ def _attach_statistical_evidence(
                 "candidate_id": str(candidate.get("parameter_candidate_id") or ""),
                 "parameter_values": candidate.get("parameter_values") or {},
                 "scenario_ids": ["scenario_001_fixed_bps_unit"],
-                "return_unit": "trade_return",
+                "return_unit": "bar_excess_return",
                 "benchmark": "cash",
                 "observation_count": 2,
                 "time_index": [1, 2],
@@ -715,8 +716,8 @@ def _attach_statistical_evidence(
         "observation_count": 2,
         "missing_observation_policy": "skip_missing_candidate_trade_returns",
         "limitations": ["test_fixture_panel"],
-        "panel_content_hash": "sha256:panel-content",
     }
+    panel["panel_content_hash"] = sha256_prefixed(content_hash_payload(panel))
     panel["content_hash"] = sha256_prefixed(content_hash_payload(panel))
     panel_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "candidate_return_panel.json"
     write_json_atomic(panel_path, panel)
@@ -751,7 +752,7 @@ def _attach_statistical_evidence(
     evidence["return_panel_hash"] = panel["content_hash"]
     evidence["return_panel_artifact_type"] = "candidate_return_panel"
     evidence["return_panel_split"] = "validation"
-    evidence["return_unit"] = "trade_return"
+    evidence["return_unit"] = "bar_excess_return"
     evidence["return_panel_observation_count"] = 2
     evidence["family_trial_registry_path"] = str(registry_path)
     evidence["family_trial_registry_prior_hash"] = registry_row["prior_registry_hash"]
@@ -759,7 +760,7 @@ def _attach_statistical_evidence(
     evidence["content_hash"] = sha256_prefixed(content_hash_payload(evidence))
     evidence["family_trial_registry_bound_evidence_hash"] = evidence["content_hash"]
     registry_row["statistical_evidence_hash"] = evidence["family_trial_registry_bound_evidence_hash"]
-    registry_row["row_hash"] = sha256_prefixed(content_hash_payload(registry_row))
+    registry_row["row_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in registry_row.items() if k != "row_hash"}))
     registry_path.write_text(json.dumps(registry_row, sort_keys=True) + "\n", encoding="utf-8")
     evidence["family_trial_registry_row_hash"] = registry_row["row_hash"]
     evidence.update(overrides)
@@ -792,6 +793,7 @@ def _attach_statistical_evidence(
     report["white_reality_check_p_value"] = evidence.get("white_reality_check_p_value")
     report["summary_metric_max_bootstrap_p_value"] = evidence.get("summary_metric_max_bootstrap_p_value")
     report["white_reality_check_method"] = evidence.get("white_reality_check_method")
+    report["bootstrap_sampling_contract_hash"] = evidence.get("bootstrap_sampling_contract_hash")
     report["promotion_grade_limitations"] = evidence.get("promotion_grade_limitations")
     report["effective_trial_count"] = evidence.get("effective_trial_count")
     candidate["statistical_validation_required"] = True
@@ -821,6 +823,7 @@ def _attach_statistical_evidence(
     candidate["white_reality_check_p_value"] = evidence.get("white_reality_check_p_value")
     candidate["summary_metric_max_bootstrap_p_value"] = evidence.get("summary_metric_max_bootstrap_p_value")
     candidate["white_reality_check_method"] = evidence.get("white_reality_check_method")
+    candidate["bootstrap_sampling_contract_hash"] = evidence.get("bootstrap_sampling_contract_hash")
     candidate["promotion_grade_limitations"] = evidence.get("promotion_grade_limitations")
     candidate["effective_trial_count"] = evidence.get("effective_trial_count")
     candidate.pop("candidate_profile_hash", None)
@@ -2145,6 +2148,57 @@ def test_reproduce_fails_when_statistical_evidence_hash_mismatches(tmp_path, mon
 
     assert summary["ok"] is False
     assert summary["reason"] == "statistical_evidence_hash_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing", "experiment_family_universe_missing"),
+        ("row_hash_mismatch", "experiment_family_registry_row_hash_mismatch"),
+        ("statistical_evidence_hash_mismatch", "experiment_family_registry_statistical_evidence_hash_mismatch"),
+        ("prior_hash_mismatch", "experiment_family_registry_prior_hash_mismatch"),
+        ("return_panel_hash_mismatch", "experiment_family_registry_return_panel_hash_mismatch"),
+        ("stale_experiment_id", "experiment_family_registry_stale"),
+        ("stale_manifest_hash", "experiment_family_registry_stale"),
+        ("stale_dataset_hash", "experiment_family_registry_stale"),
+        ("stale_attempt_index", "experiment_family_registry_stale"),
+        ("stale_holdout_reuse_count", "experiment_family_registry_stale"),
+    ],
+)
+def test_reproduce_validates_family_registry_binding(tmp_path, monkeypatch, mutation, reason) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    registry_path = Path(result.artifact["family_trial_registry_path"])
+    if mutation == "missing":
+        registry_path.unlink()
+    else:
+        row = json.loads(registry_path.read_text(encoding="utf-8").strip())
+        if mutation == "row_hash_mismatch":
+            row["result_status"] = "TAMPERED"
+        elif mutation == "statistical_evidence_hash_mismatch":
+            row["statistical_evidence_hash"] = "sha256:wrong"
+        elif mutation == "prior_hash_mismatch":
+            row["prior_registry_hash"] = "sha256:wrong"
+        elif mutation == "return_panel_hash_mismatch":
+            row["return_panel_hash"] = "sha256:wrong"
+        elif mutation == "stale_experiment_id":
+            row["experiment_id"] = "old_exp"
+        elif mutation == "stale_manifest_hash":
+            row["manifest_hash"] = "sha256:old-manifest"
+        elif mutation == "stale_dataset_hash":
+            row["dataset_content_hash"] = "sha256:old-dataset"
+        elif mutation == "stale_attempt_index":
+            row["attempt_index"] = 999
+        elif mutation == "stale_holdout_reuse_count":
+            row["holdout_reuse_count"] = 999
+        registry_path.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert summary["ok"] is False
+    assert any(item["reason"] == reason for item in summary["mismatches"]) or summary["reason"] == reason
 
 
 def test_reproduce_fails_when_required_final_holdout_stress_removed(tmp_path, monkeypatch) -> None:

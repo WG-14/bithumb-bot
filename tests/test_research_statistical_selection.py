@@ -609,6 +609,79 @@ def test_candidate_return_panel_hash_binds_metadata_and_validation_recomputes_se
     )
 
 
+def test_return_panel_binding_reports_aggregate_mismatches() -> None:
+    candidates = _candidates()
+    candidates[0]["scenario_results"] = [{"scenario_id": "scenario_001"}]
+    candidates[0]["validation_closed_trades"] = [{"exit_ts": 2, "return_pct": 1.0}]
+    panel = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=candidates,
+    )
+    tampered = {
+        **panel,
+        "candidate_count": 99,
+        "observation_count": 99,
+        "ordered_time_index": [2, 1],
+        "panel_content_hash": "sha256:bad-panel-content",
+    }
+    rows = [dict(row) for row in panel["candidate_return_series"]]
+    rows[0] = {**rows[0], "scenario_ids": ["wrong"], "time_index": [999]}
+    tampered["candidate_return_series"] = rows
+
+    reasons = validate_return_panel_binding(
+        report={
+            "manifest_hash": "sha256:manifest",
+            "dataset_content_hash": "sha256:dataset",
+            "dataset_quality_hash": "sha256:quality",
+            "candidates": candidates,
+        },
+        evidence={"return_panel_hash": panel["content_hash"]},
+        panel=tampered,
+    )
+
+    assert "return_panel_candidate_count_mismatch" in reasons
+    assert "return_panel_observation_count_mismatch" in reasons
+    assert "return_panel_scenario_id_mismatch" in reasons
+    assert "return_panel_time_index_mismatch" in reasons
+    assert "return_panel_panel_content_hash_mismatch" in reasons
+
+
+def test_return_panel_binding_reports_series_alignment_mismatch() -> None:
+    candidates = _candidates()
+    candidates[0]["validation_closed_trades"] = [{"exit_ts": 2, "return_pct": 1.0}]
+    panel = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=candidates,
+    )
+    tampered = {**panel, "candidate_return_series": [dict(row) for row in panel["candidate_return_series"]]}
+    tampered["candidate_return_series"][0]["benchmark_return_series_values"] = [
+        {"ts": 999, "sequence": 0, "return_pct": 0.0}
+    ]
+
+    reasons = validate_return_panel_binding(
+        report={
+            "manifest_hash": "sha256:manifest",
+            "dataset_content_hash": "sha256:dataset",
+            "dataset_quality_hash": "sha256:quality",
+            "candidates": candidates,
+        },
+        evidence={"return_panel_hash": panel["content_hash"]},
+        panel=tampered,
+    )
+
+    assert "return_panel_series_alignment_mismatch" in reasons
+
+
 def test_promotion_grade_spoofed_wrc_is_refused_without_supported_provenance() -> None:
     manifest = _manifest()
     evidence = build_statistical_selection_evidence(
@@ -673,8 +746,202 @@ def test_promotion_grade_spoofed_wrc_is_refused_without_supported_provenance() -
     reasons = validate_statistical_evidence_for_candidate(candidate=candidate, report=report, evidence=spoofed)
 
     assert "statistical_method_provenance_missing" in reasons
+    assert "statistical_method_contract_mismatch" in reasons
     assert "bootstrap_sampling_contract_malformed" in reasons
     assert "return_panel_missing" in reasons
+
+
+def test_promotion_grade_evidence_cannot_override_summary_bootstrap_manifest_contract() -> None:
+    manifest = _manifest()
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=_candidates(),
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash="sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        required_scenario_ids=["scenario_001"],
+        search_budget=2,
+        parameter_grid_size=2,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+    )
+    spoofed = {
+        **evidence,
+        "evidence_grade": "PROMOTION_GRADE_WRC",
+        "statistical_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_p_value": 0.01,
+        "statistical_gate_result": "PASS",
+        "gate_fail_reasons": [],
+        "method_provenance": {"implementation": "spoof", "version": 1},
+    }
+    spoofed["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in spoofed.items() if k != "content_hash"}))
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": manifest.manifest_hash(),
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 2,
+        "search_budget": 2,
+        "parameter_grid_size": 2,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "metric_value_count": 2,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": spoofed["content_hash"],
+        "candidates": _candidates(),
+    }
+    candidate = {**_candidates()[0], **{key: report[key] for key in (
+        "deployment_tier",
+        "statistical_validation_required",
+        "statistical_validation_contract",
+        "selection_universe_hash",
+        "candidate_metric_values_hash",
+        "metric_value_count",
+        "missing_metric_count",
+        "statistical_evidence_hash",
+    )}}
+
+    reasons = validate_statistical_evidence_for_candidate(candidate=candidate, report=report, evidence=spoofed)
+
+    assert "statistical_method_contract_mismatch" in reasons
+
+
+def test_promotion_grade_bootstrap_sampling_method_name_only_fails_closed() -> None:
+    contract = _manifest().statistical_validation.as_dict()
+    contract["bootstrap"] = {
+        "method": "white_reality_check_block_bootstrap",
+        "n_bootstrap": 100,
+        "block_length_policy": "fixed",
+        "seed_policy": "derived_from_selection_universe_hash",
+    }
+    evidence = {
+        "content_hash": "sha256:evidence",
+        "candidate_metric_values_hash": "sha256:metric",
+        "selection_universe_hash": "sha256:selection",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 1,
+        "metric_value_count": 1,
+        "missing_metric_count": 0,
+        "search_budget": 1,
+        "parameter_grid_size": 1,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single",
+        "benchmark": "cash",
+        "primary_metric": "net_excess_return",
+        "primary_metric_source": "validation_metrics",
+        "evidence_grade": "PROMOTION_GRADE_WRC",
+        "bootstrap_method": "white_reality_check_block_bootstrap",
+        "statistical_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_p_value": 0.01,
+        "statistical_gate_result": "PASS",
+        "gate_fail_reasons": [],
+        "effective_trial_count": 1,
+        "return_unit": "bar_excess_return",
+        "return_panel_observation_count": 2,
+        "statistical_validation_contract": contract,
+        "method_provenance": {"implementation": "test", "version": 1},
+        "bootstrap_sampling_contract": {
+            "method_name": "white_reality_check_block_bootstrap",
+            "n_bootstrap": 100,
+            "derived_seed": 1,
+            "block_length": 2,
+        },
+    }
+    evidence["bootstrap_sampling_contract"]["content_hash"] = sha256_prefixed(content_hash_payload(evidence["bootstrap_sampling_contract"]))
+    evidence["bootstrap_sampling_contract_hash"] = evidence["bootstrap_sampling_contract"]["content_hash"]
+    evidence["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "content_hash"}))
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 1,
+        "search_budget": 1,
+        "parameter_grid_size": 1,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": contract,
+        "selection_universe_hash": "sha256:selection",
+        "candidate_metric_values_hash": "sha256:metric",
+        "metric_value_count": 1,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": evidence["content_hash"],
+        "candidates": [{"parameter_candidate_id": "candidate_001", "validation_metrics": {"return_pct": 1.0}}],
+    }
+    candidate = {**report["candidates"][0], **{key: report[key] for key in (
+        "deployment_tier",
+        "statistical_validation_required",
+        "statistical_validation_contract",
+        "selection_universe_hash",
+        "candidate_metric_values_hash",
+        "metric_value_count",
+        "missing_metric_count",
+        "statistical_evidence_hash",
+    )}}
+
+    reasons = validate_statistical_evidence_for_candidate(candidate=candidate, report=report, evidence=evidence)
+
+    assert "bootstrap_sampling_contract_malformed" in reasons
+    assert "bootstrap_sampling_contract_method_mismatch" in reasons
+
+
+def test_trade_return_panel_cannot_satisfy_promotion_grade_wrc() -> None:
+    contract = _manifest().statistical_validation.as_dict()
+    contract["bootstrap"] = {
+        "method": "white_reality_check_block_bootstrap",
+        "n_bootstrap": 100,
+        "block_length_policy": "fixed",
+        "seed_policy": "derived_from_selection_universe_hash",
+    }
+    evidence = {
+        "evidence_grade": "PROMOTION_GRADE_WRC",
+        "statistical_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_method": "white_reality_check_block_bootstrap",
+        "bootstrap_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_p_value": 0.01,
+        "return_unit": "trade_return",
+        "return_panel_observation_count": 2,
+        "return_panel_hash": "sha256:return-panel",
+        "statistical_validation_contract": contract,
+        "method_provenance": {"implementation": "test", "version": 1},
+        "bootstrap_sampling_contract": {
+            "method": "white_reality_check_block_bootstrap",
+            "n_bootstrap": 100,
+            "derived_seed": 1,
+            "block_length": 2,
+        },
+    }
+    evidence["bootstrap_sampling_contract"]["content_hash"] = sha256_prefixed(content_hash_payload(evidence["bootstrap_sampling_contract"]))
+    evidence["bootstrap_sampling_contract_hash"] = evidence["bootstrap_sampling_contract"]["content_hash"]
+
+    reasons = validate_statistical_evidence_for_candidate(
+        candidate={
+            "deployment_tier": "paper_candidate",
+            "statistical_validation_required": True,
+            "statistical_validation_contract": contract,
+        },
+        report={"deployment_tier": "paper_candidate", "statistical_validation_contract": contract, "candidates": []},
+        evidence=evidence,
+    )
+
+    assert "promotion_grade_requires_aligned_return_panel" in reasons
 
 
 def test_family_registry_binding_detects_hash_tampering(tmp_path) -> None:

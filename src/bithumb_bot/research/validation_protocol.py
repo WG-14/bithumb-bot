@@ -2049,6 +2049,9 @@ def _report_payload(
         "white_reality_check_method": (
             statistical_evidence.get("white_reality_check_method") if statistical_evidence else None
         ),
+        "bootstrap_sampling_contract_hash": (
+            statistical_evidence.get("bootstrap_sampling_contract_hash") if statistical_evidence else None
+        ),
         "promotion_grade_limitations": (
             statistical_evidence.get("promotion_grade_limitations") if statistical_evidence else []
         ),
@@ -2186,6 +2189,7 @@ def _attach_statistical_selection_to_candidates(
     return_panel_path = evidence.get("return_panel_path") if isinstance(evidence, dict) else None
     return_unit = evidence.get("return_unit") if isinstance(evidence, dict) else None
     return_panel_observation_count = evidence.get("return_panel_observation_count") if isinstance(evidence, dict) else None
+    bootstrap_sampling_contract_hash = evidence.get("bootstrap_sampling_contract_hash") if isinstance(evidence, dict) else None
     family_trial_registry_path = evidence.get("family_trial_registry_path") if isinstance(evidence, dict) else None
     family_trial_registry_prior_hash = evidence.get("family_trial_registry_prior_hash") if isinstance(evidence, dict) else None
     family_trial_registry_row_hash = evidence.get("family_trial_registry_row_hash") if isinstance(evidence, dict) else None
@@ -2218,6 +2222,7 @@ def _attach_statistical_selection_to_candidates(
         candidate["white_reality_check_p_value"] = p_value
         candidate["summary_metric_max_bootstrap_p_value"] = summary_p_value
         candidate["white_reality_check_method"] = method
+        candidate["bootstrap_sampling_contract_hash"] = bootstrap_sampling_contract_hash
         candidate["promotion_grade_limitations"] = list(limitations) if isinstance(limitations, list) else []
         candidate["effective_trial_count"] = effective_trial_count
         candidate.pop("candidate_profile_hash", None)

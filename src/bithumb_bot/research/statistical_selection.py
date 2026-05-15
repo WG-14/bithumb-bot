@@ -24,6 +24,7 @@ SCREENING_METHOD_DETAIL = "summary_metric_centered_max_bootstrap"
 PROMOTION_GRADE_EVIDENCE_GRADES = {PROMOTION_GRADE_WRC, PROMOTION_GRADE_WRC_SPA_DSR}
 PROMOTION_GRADE_METHODS = {"white_reality_check_block_bootstrap", "white_reality_check_stationary_bootstrap"}
 SUPPORTED_PROMOTION_GRADE_METHODS: set[str] = {"white_reality_check_block_bootstrap"}
+PROMOTION_GRADE_RETURN_UNITS = {"bar_excess_return", "portfolio_bar_return"}
 
 
 def statistical_validation_required(manifest_or_payload: ExperimentManifest | dict[str, Any]) -> bool:
@@ -386,6 +387,7 @@ def validate_statistical_evidence_for_candidate(
         if method in PROMOTION_GRADE_METHODS and method not in SUPPORTED_PROMOTION_GRADE_METHODS:
             reasons.append("promotion_grade_statistical_computation_missing")
             reasons.append("statistical_method_unavailable")
+        _extend_statistical_method_contract_reasons(contract=contract, evidence=evidence, reasons=reasons)
         _extend_promotion_grade_method_reasons(evidence=evidence, report=report, reasons=reasons)
     summary_p_value = evidence.get("summary_metric_max_bootstrap_p_value")
     if evidence_grade == SCREENING_SUMMARY_BOOTSTRAP and summary_p_value is None:
@@ -442,6 +444,8 @@ def _extend_promotion_grade_method_reasons(
         reasons.append("statistical_method_provenance_missing")
     sampling = evidence.get("bootstrap_sampling_contract")
     sampling_hash = str(evidence.get("bootstrap_sampling_contract_hash") or "").strip()
+    evidence_method = str(evidence.get("statistical_method") or "").strip()
+    wrc_method = str(evidence.get("white_reality_check_method") or "").strip()
     if not isinstance(sampling, dict):
         reasons.append("bootstrap_sampling_contract_missing")
     else:
@@ -450,12 +454,20 @@ def _extend_promotion_grade_method_reasons(
             reasons.append("bootstrap_sampling_contract_malformed")
         if sampling.get("method") not in PROMOTION_GRADE_METHODS:
             reasons.append("bootstrap_sampling_contract_malformed")
+        sampling_method = str(sampling.get("method") or "").strip()
+        if not sampling_method:
+            reasons.append("bootstrap_sampling_contract_method_mismatch")
+        if sampling.get("method_name") and str(sampling.get("method_name")) != sampling_method:
+            reasons.append("bootstrap_sampling_contract_method_mismatch")
+        if sampling_method != evidence_method or sampling_method != wrc_method:
+            reasons.append("bootstrap_sampling_contract_method_mismatch")
     if not str(evidence.get("return_panel_hash") or report.get("return_panel_hash") or "").startswith("sha256:"):
         reasons.append("return_panel_hash_missing")
     observation_count = _as_int(evidence.get("return_panel_observation_count") or report.get("return_panel_observation_count"))
     if observation_count is None or observation_count <= 0:
         reasons.append("return_panel_observation_count_insufficient")
-    if evidence.get("return_unit") not in {"bar_excess_return", "portfolio_bar_return", "trade_return"}:
+    if evidence.get("return_unit") not in PROMOTION_GRADE_RETURN_UNITS:
+        reasons.append("promotion_grade_requires_aligned_return_panel")
         reasons.append("return_panel_method_support_insufficient")
     panel = _load_return_panel(evidence, report)
     if not isinstance(panel, dict) or not isinstance(sampling, dict):
@@ -466,6 +478,28 @@ def _extend_promotion_grade_method_reasons(
         reasons.append("promotion_grade_statistical_computation_missing")
     elif claimed is None or abs(claimed - recomputed) > 1e-12:
         reasons.append("white_reality_check_p_value_recompute_mismatch")
+
+
+def _extend_statistical_method_contract_reasons(
+    *,
+    contract: object,
+    evidence: dict[str, Any],
+    reasons: list[str],
+) -> None:
+    if not isinstance(contract, dict):
+        reasons.append("statistical_method_contract_mismatch")
+        return
+    bootstrap = contract.get("bootstrap")
+    contract_method = str(bootstrap.get("method") or "").strip() if isinstance(bootstrap, dict) else ""
+    evidence_method = str(evidence.get("statistical_method") or "").strip()
+    wrc_method = str(evidence.get("white_reality_check_method") or "").strip()
+    bootstrap_method = str(evidence.get("bootstrap_method") or "").strip()
+    if contract_method != evidence_method or contract_method != wrc_method:
+        reasons.append("statistical_method_contract_mismatch")
+    if bootstrap_method and bootstrap_method != contract_method:
+        reasons.append("statistical_method_contract_mismatch")
+    if contract_method in PROMOTION_GRADE_METHODS and contract_method not in SUPPORTED_PROMOTION_GRADE_METHODS:
+        reasons.append("statistical_method_unavailable")
 
 
 def _extend_candidate_metric_recompute_reasons(
@@ -691,6 +725,7 @@ def _bootstrap_sampling_contract(
     benchmark: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "method": contract.bootstrap.method,
         "method_name": contract.bootstrap.method,
         "n_bootstrap": contract.bootstrap.n_bootstrap,
         "seed_policy": contract.bootstrap.seed_policy,

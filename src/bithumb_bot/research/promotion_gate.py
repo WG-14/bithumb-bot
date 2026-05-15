@@ -119,6 +119,7 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "white_reality_check_p_value": candidate.get("white_reality_check_p_value"),
         "summary_metric_max_bootstrap_p_value": candidate.get("summary_metric_max_bootstrap_p_value"),
         "white_reality_check_method": candidate.get("white_reality_check_method"),
+        "bootstrap_sampling_contract_hash": candidate.get("bootstrap_sampling_contract_hash"),
         "promotion_grade_limitations": candidate.get("promotion_grade_limitations"),
         "effective_trial_count": candidate.get("effective_trial_count"),
     }
@@ -720,6 +721,7 @@ def promote_candidate(
         "white_reality_check_p_value": candidate.get("white_reality_check_p_value"),
         "summary_metric_max_bootstrap_p_value": candidate.get("summary_metric_max_bootstrap_p_value"),
         "white_reality_check_method": candidate.get("white_reality_check_method"),
+        "bootstrap_sampling_contract_hash": candidate.get("bootstrap_sampling_contract_hash"),
         "promotion_grade_limitations": candidate.get("promotion_grade_limitations") or [],
         "effective_trial_count": candidate.get("effective_trial_count"),
         "metrics_v2_summary": _promotion_metrics_v2_summary(candidate),

@@ -124,6 +124,9 @@ def validate_return_panel_binding(
         reasons.append("return_panel_hash_mismatch")
     if embedded_hash != actual_hash:
         reasons.append("return_panel_hash_mismatch")
+    panel_content_payload = {k: v for k, v in panel.items() if k not in {"content_hash", "panel_content_hash"}}
+    if str(panel.get("panel_content_hash") or "").strip() != sha256_prefixed(content_hash_payload(panel_content_payload)):
+        reasons.append("return_panel_panel_content_hash_mismatch")
     if panel.get("schema_version") != CANDIDATE_RETURN_PANEL_SCHEMA_VERSION:
         reasons.append("return_panel_schema_version_mismatch")
     for field in ("manifest_hash", "dataset_content_hash", "dataset_quality_hash"):
@@ -142,46 +145,126 @@ def validate_return_panel_binding(
     panel_candidate_ids = sorted(str(item) for item in panel.get("candidate_ids") or [])
     if expected_candidate_ids != panel_candidate_ids:
         reasons.append("return_panel_candidate_mismatch")
-    if not _valid_return_panel_series(panel):
-        reasons.append("return_panel_series_malformed")
+    rows = panel.get("candidate_return_series")
+    if isinstance(rows, list):
+        if _as_int(panel.get("candidate_count")) != len(panel_candidate_ids) or _as_int(panel.get("candidate_count")) != len(rows):
+            reasons.append("return_panel_candidate_count_mismatch")
+        row_candidate_ids = sorted(str(row.get("candidate_id") or "") for row in rows if isinstance(row, dict))
+        if row_candidate_ids != panel_candidate_ids:
+            reasons.append("return_panel_candidate_mismatch")
+        row_observations = [_as_int(row.get("observation_count")) for row in rows if isinstance(row, dict)]
+        if any(value is None for value in row_observations) or _as_int(panel.get("observation_count")) != sum(
+            int(value or 0) for value in row_observations
+        ):
+            reasons.append("return_panel_observation_count_mismatch")
+        scenario_reasons = _return_panel_scenario_reasons(report=report, rows=rows)
+        reasons.extend(scenario_reasons)
+    series_reasons = _return_panel_series_reasons(panel)
+    reasons.extend(series_reasons)
     return sorted(set(reasons))
 
 
-def _valid_return_panel_series(panel: dict[str, Any]) -> bool:
+def _return_panel_series_reasons(panel: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
     ordered_index = panel.get("ordered_time_index")
     if not isinstance(ordered_index, list):
-        return False
+        return ["return_panel_time_index_mismatch"]
     parsed_ordered_index = [_as_int(item) for item in ordered_index]
     if any(item is None for item in parsed_ordered_index):
-        return False
+        return ["return_panel_time_index_mismatch"]
+    if parsed_ordered_index != sorted(parsed_ordered_index):
+        reasons.append("return_panel_time_index_mismatch")
     if sha256_prefixed(parsed_ordered_index) != panel.get("ordered_time_index_hash"):
-        return False
+        reasons.append("return_panel_time_index_mismatch")
     rows = panel.get("candidate_return_series")
     if not isinstance(rows, list):
-        return False
+        return sorted(set(reasons + ["return_panel_series_malformed"]))
+    union_index: set[int] = set()
     for row in rows:
         if not isinstance(row, dict):
-            return False
+            reasons.append("return_panel_series_malformed")
+            continue
         candidate_series = row.get("candidate_return_series_values")
         benchmark_series = row.get("benchmark_return_series_values")
         excess_series = row.get("excess_return_series_values")
         time_index = row.get("time_index")
         if not isinstance(candidate_series, list) or not isinstance(benchmark_series, list) or not isinstance(excess_series, list):
-            return False
+            reasons.append("return_panel_series_malformed")
+            continue
         if not isinstance(time_index, list):
-            return False
+            reasons.append("return_panel_time_index_mismatch")
+            continue
         observation_count = _as_int(row.get("observation_count"))
         if observation_count is None or observation_count != len(candidate_series):
-            return False
+            reasons.append("return_panel_observation_count_mismatch")
+        if len(candidate_series) != len(benchmark_series) or len(candidate_series) != len(excess_series):
+            reasons.append("return_panel_series_alignment_mismatch")
+        candidate_keys = _series_keys(candidate_series)
+        benchmark_keys = _series_keys(benchmark_series)
+        excess_keys = _series_keys(excess_series)
+        if (
+            candidate_keys is None
+            or benchmark_keys is None
+            or excess_keys is None
+            or candidate_keys != benchmark_keys
+            or candidate_keys != excess_keys
+        ):
+            reasons.append("return_panel_series_alignment_mismatch")
+        if candidate_keys is not None and [ts for ts, _seq in candidate_keys] != [_as_int(item) for item in time_index]:
+            reasons.append("return_panel_time_index_mismatch")
+        parsed_time_index = [_as_int(item) for item in time_index]
+        if any(item is None for item in parsed_time_index):
+            reasons.append("return_panel_time_index_mismatch")
+        else:
+            union_index.update(int(item) for item in parsed_time_index if item is not None)
         if sha256_prefixed(time_index) != row.get("time_index_hash"):
-            return False
+            reasons.append("return_panel_time_index_mismatch")
         if sha256_prefixed(candidate_series) != row.get("candidate_return_series_hash"):
-            return False
+            reasons.append("return_panel_series_malformed")
         if sha256_prefixed(benchmark_series) != row.get("benchmark_series_hash"):
-            return False
+            reasons.append("return_panel_series_malformed")
         if sha256_prefixed(excess_series) != row.get("benchmark_excess_return_series_hash"):
-            return False
-    return True
+            reasons.append("return_panel_series_malformed")
+    if parsed_ordered_index != sorted(union_index):
+        reasons.append("return_panel_time_index_mismatch")
+    return sorted(set(reasons))
+
+
+def _return_panel_scenario_reasons(*, report: dict[str, Any], rows: list[Any]) -> list[str]:
+    candidates = report.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    expected_by_candidate: dict[str, list[str]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        scenario_ids = _candidate_scenario_ids(candidate)
+        if scenario_ids:
+            expected_by_candidate[str(candidate.get("parameter_candidate_id") or "")] = scenario_ids
+    reasons: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        expected = expected_by_candidate.get(str(row.get("candidate_id") or ""))
+        if expected is None:
+            continue
+        actual = sorted(str(item) for item in row.get("scenario_ids") or [])
+        if actual != expected:
+            reasons.append("return_panel_scenario_id_mismatch")
+    return reasons
+
+
+def _series_keys(series: list[Any]) -> list[tuple[int, int]] | None:
+    keys: list[tuple[int, int]] = []
+    for item in series:
+        if not isinstance(item, dict):
+            return None
+        ts = _as_int(item.get("ts"))
+        sequence = _as_int(item.get("sequence"))
+        if ts is None or sequence is None:
+            return None
+        keys.append((ts, sequence))
+    return keys
 
 
 def _candidate_trade_return_series(candidate: dict[str, Any], *, split: str) -> list[dict[str, Any]]:

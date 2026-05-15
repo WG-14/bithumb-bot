@@ -10,6 +10,7 @@ from .deployment_policy import is_production_bound_target
 from .hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
 from .statistical_selection import recompute_candidate_metric_values_hash_from_report
 from .return_panel import validate_return_panel_binding
+from .family_registry import validate_family_registry_binding
 
 
 LINEAGE_SCHEMA_VERSION = 1
@@ -221,7 +222,22 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
         "candidate_profile_hash": None,
         "execution_calibration_artifact_hash": None,
         "statistical_evidence_hash": None,
+        "evidence_grade": None,
+        "statistical_method": None,
+        "manifest_bootstrap_method": None,
+        "bootstrap_sampling_contract_hash": None,
         "return_panel_hash": None,
+        "return_unit": None,
+        "return_panel_observation_count": None,
+        "family_trial_registry_path": None,
+        "family_trial_registry_prior_hash": None,
+        "family_trial_registry_row_hash": None,
+        "white_reality_check_p_value": None,
+        "summary_metric_max_bootstrap_p_value": None,
+        "statistical_gate_result": None,
+        "statistical_gate_fail_reasons": [],
+        "promotion_eligibility_gate_result": None,
+        "promotion_blocking_reasons": [],
         "stress_suite_contract_hash": None,
         "validation_stress_suite_hash": None,
         "final_holdout_stress_suite_hash": None,
@@ -244,6 +260,8 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     expected_promotion_hash = str(promotion.get("content_hash") or "")
     actual_promotion_hash = sha256_prefixed(content_hash_payload({k: v for k, v in promotion.items() if k != "content_hash"}))
     summary["promotion_content_hash"] = expected_promotion_hash or None
+    summary["promotion_eligibility_gate_result"] = promotion.get("promotion_eligibility_gate_result")
+    summary["promotion_blocking_reasons"] = promotion.get("promotion_blocking_reasons") or []
     if actual_promotion_hash != expected_promotion_hash:
         summary["reason"] = "promotion_hash_mismatch"
         summary["mismatches"].append(_mismatch("promotion_content_hash", expected_promotion_hash, actual_promotion_hash))
@@ -270,6 +288,21 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     summary["execution_calibration_artifact_hash"] = lineage.get("execution_calibration_artifact_hash")
     summary["statistical_evidence_hash"] = lineage.get("statistical_evidence_hash")
     summary["return_panel_hash"] = lineage.get("return_panel_hash")
+    summary["evidence_grade"] = promotion.get("evidence_grade")
+    summary["statistical_method"] = promotion.get("statistical_method") or promotion.get("white_reality_check_method")
+    contract = promotion.get("statistical_validation_contract")
+    bootstrap = contract.get("bootstrap") if isinstance(contract, dict) else None
+    summary["manifest_bootstrap_method"] = bootstrap.get("method") if isinstance(bootstrap, dict) else None
+    summary["bootstrap_sampling_contract_hash"] = promotion.get("bootstrap_sampling_contract_hash")
+    summary["return_unit"] = promotion.get("return_unit")
+    summary["return_panel_observation_count"] = promotion.get("return_panel_observation_count")
+    summary["family_trial_registry_path"] = promotion.get("family_trial_registry_path")
+    summary["family_trial_registry_prior_hash"] = promotion.get("family_trial_registry_prior_hash")
+    summary["family_trial_registry_row_hash"] = promotion.get("family_trial_registry_row_hash")
+    summary["white_reality_check_p_value"] = promotion.get("white_reality_check_p_value")
+    summary["summary_metric_max_bootstrap_p_value"] = promotion.get("summary_metric_max_bootstrap_p_value")
+    summary["statistical_gate_result"] = promotion.get("statistical_gate_result")
+    summary["statistical_gate_fail_reasons"] = promotion.get("statistical_gate_fail_reasons") or []
     summary["stress_suite_contract_hash"] = promotion.get("stress_suite_contract_hash")
     validation_stress = promotion.get("validation_stress_suite") if isinstance(promotion.get("validation_stress_suite"), dict) else {}
     final_stress = promotion.get("final_holdout_stress_suite") if isinstance(promotion.get("final_holdout_stress_suite"), dict) else {}
@@ -508,6 +541,10 @@ def _verify_statistical_evidence_bindings(
         for reason in validate_return_panel_binding(report=report, evidence=payload, panel=panel):
             summary["mismatches"].append(
                 _mismatch("return_panel", "valid_binding", reason, reason)
+            )
+        for reason in validate_family_registry_binding(report=report, evidence=payload):
+            summary["mismatches"].append(
+                _mismatch("family_trial_registry", "valid_binding", reason, reason)
             )
 
 
