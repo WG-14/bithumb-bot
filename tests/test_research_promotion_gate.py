@@ -670,6 +670,66 @@ def _attach_statistical_evidence(
     candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
 
 
+def _attach_stress_suite(candidate: dict[str, object], *, tamper_hash: bool = False) -> None:
+    contract = {
+        "required_for_promotion": True,
+        "trade_removal": {"top_n_by_net_pnl": [1], "min_return_retention_pct": 50.0},
+        "trade_order_monte_carlo": {
+            "iterations": 100,
+            "seed_policy": "derived_from_manifest_candidate_scenario_split_hash",
+            "min_survival_probability": 0.95,
+            "ruin_max_drawdown_pct": 35.0,
+            "min_closed_trades": 4,
+        },
+    }
+    contract_hash = sha256_prefixed(contract)
+    evidence = {
+        "stress_suite_schema_version": 1,
+        "contract_hash": contract_hash,
+        "seed_material_hash": "sha256:seed",
+        "context": {
+            "experiment_id": "promo_exp",
+            "candidate_id": "candidate_001",
+            "scenario_id": "scenario_001_fixed_bps_unit",
+            "split_name": "validation",
+        },
+        "gate_result": "PASS",
+        "fail_reasons": [],
+        "trade_removal": {"status": "PASS", "cases": [], "fail_reasons": []},
+        "trade_order_monte_carlo": {
+            "status": "PASS",
+            "iterations": 100,
+            "seed": 123,
+            "terminal_equity_p05": 990000.0,
+            "terminal_equity_median": 1010000.0,
+            "terminal_equity_p95": 1020000.0,
+            "max_drawdown_pct_p50": 5.0,
+            "max_drawdown_pct_p95": 10.0,
+            "longest_losing_streak_p50": 1.0,
+            "longest_losing_streak_p95": 2.0,
+            "survival_probability": 1.0,
+            "ruin_max_drawdown_pct": 35.0,
+            "fail_reasons": [],
+        },
+        "limitations": [],
+    }
+    evidence["stress_suite_hash"] = sha256_prefixed(content_hash_payload(evidence))
+    final_evidence = dict(evidence, context={**evidence["context"], "split_name": "final_holdout"})
+    final_evidence.pop("stress_suite_hash", None)
+    final_evidence["stress_suite_hash"] = sha256_prefixed(content_hash_payload(final_evidence))
+    if tamper_hash:
+        evidence["stress_suite_hash"] = "sha256:tampered"
+    candidate["stress_suite_required"] = True
+    candidate["stress_suite_contract"] = contract
+    candidate["stress_suite_contract_hash"] = contract_hash
+    candidate["validation_stress_suite"] = evidence
+    candidate["final_holdout_stress_suite"] = final_evidence
+    candidate["stress_suite_gate_result"] = "PASS"
+    candidate["stress_suite_fail_reasons"] = []
+    candidate.pop("candidate_profile_hash", None)
+    candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
+
+
 def _walk_forward_candidate(backtest_candidate: dict[str, object], **overrides) -> dict[str, object]:
     payload = dict(backtest_candidate)
     payload.update(
@@ -943,6 +1003,32 @@ def test_promotion_artifact_exposes_metrics_contract_evidence_top_level_and_stri
     assert result.artifact["metrics_v2_summary"]["validation_fee_drag_ratio_basis"] == "traded_notional"
     assert result.artifact["metrics_v2_summary"]["final_holdout_slippage_drag_ratio_basis"] == "traded_notional"
     json.dumps(result.artifact, allow_nan=False)
+
+
+def test_promotion_artifact_exposes_required_stress_suite_and_reproduces(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert result.artifact["stress_suite_required"] is True
+    assert result.artifact["stress_suite_contract_hash"].startswith("sha256:")
+    assert result.artifact["validation_stress_suite"]["stress_suite_hash"].startswith("sha256:")
+    assert result.artifact["stress_suite_gate_result"] == "PASS"
+    assert summary["ok"] is True
+
+
+def test_promotion_refuses_required_stress_suite_hash_mismatch(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate, tamper_hash=True)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="stress_suite_hash_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
 
 
 def test_promotion_artifact_execution_event_summary_matches_candidate_profile(tmp_path, monkeypatch) -> None:

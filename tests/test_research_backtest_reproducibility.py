@@ -98,6 +98,25 @@ def _manifest() -> dict[str, object]:
     }
 
 
+def _stress_suite_contract(*, min_retention: float | None = None, min_survival: float = 0.0) -> dict[str, object]:
+    payload = {
+        "required_for_promotion": True,
+        "trade_removal": {
+            "top_n_by_net_pnl": [1],
+        },
+        "trade_order_monte_carlo": {
+            "iterations": 20,
+            "seed_policy": "derived_from_manifest_candidate_scenario_split_hash",
+            "min_survival_probability": min_survival,
+            "ruin_max_drawdown_pct": 90.0,
+            "min_closed_trades": 1,
+        },
+    }
+    if min_retention is not None:
+        payload["trade_removal"]["min_return_retention_pct"] = min_retention
+    return payload
+
+
 class _FailSellExecutionModel:
     name = "fail_sell_test"
     version = "test_v1"
@@ -223,6 +242,58 @@ def test_same_manifest_and_dataset_produce_same_content_hash(tmp_path, monkeypat
         "candidate_failures_dir": "derived/research/deterministic_sma/candidate_failures",
     }
     assert _verify_report_content_hash(persisted, label="backtest_report") == persisted["content_hash"]
+
+
+def test_required_stress_suite_is_attached_to_report_and_candidate(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["stress_suite"] = _stress_suite_contract()
+    manifest = parse_manifest(payload)
+
+    report = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    candidate = report["candidates"][0]
+
+    assert report["stress_suite_required"] is True
+    assert report["stress_suite_contract_hash"].startswith("sha256:")
+    assert candidate["stress_suite_gate_result"] == "PASS"
+    assert candidate["validation_stress_suite"]["stress_suite_hash"].startswith("sha256:")
+    assert report["best_validation_stress_suite"]["stress_suite_hash"] == candidate["validation_stress_suite"]["stress_suite_hash"]
+    json.dumps(report, allow_nan=False)
+
+
+def test_required_stress_suite_failure_blocks_candidate_acceptance(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["stress_suite"] = _stress_suite_contract(min_retention=100.0, min_survival=1.0)
+    payload["stress_suite"]["trade_order_monte_carlo"]["ruin_max_drawdown_pct"] = 0.01
+    manifest = parse_manifest(payload)
+
+    report = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    candidate = report["candidates"][0]
+
+    assert candidate["acceptance_gate_result"] == "FAIL"
+    assert candidate["stress_suite_gate_result"] == "FAIL"
+    assert "stress_suite_gate_not_passed" in candidate["gate_fail_reasons"]
 
 
 def test_report_content_hash_is_independent_of_data_root(tmp_path, monkeypatch) -> None:

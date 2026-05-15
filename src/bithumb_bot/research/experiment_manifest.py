@@ -412,6 +412,77 @@ class StatisticalSelectionContract:
 
 
 @dataclass(frozen=True)
+class StressTradeRemovalContract:
+    top_n_by_net_pnl: tuple[int, ...]
+    min_return_retention_pct: float | None = None
+    max_mdd_multiplier: float | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {"top_n_by_net_pnl": list(self.top_n_by_net_pnl)}
+        if self.min_return_retention_pct is not None:
+            payload["min_return_retention_pct"] = self.min_return_retention_pct
+        if self.max_mdd_multiplier is not None:
+            payload["max_mdd_multiplier"] = self.max_mdd_multiplier
+        return payload
+
+
+@dataclass(frozen=True)
+class StressTradeOrderMonteCarloContract:
+    iterations: int
+    seed_policy: str
+    min_survival_probability: float
+    ruin_max_drawdown_pct: float
+    min_closed_trades: int = 10
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "iterations": self.iterations,
+            "seed_policy": self.seed_policy,
+            "min_survival_probability": self.min_survival_probability,
+            "ruin_max_drawdown_pct": self.ruin_max_drawdown_pct,
+            "min_closed_trades": self.min_closed_trades,
+        }
+
+
+@dataclass(frozen=True)
+class StressRiskAdjustedScoreContract:
+    required_metrics: tuple[str, ...]
+    ranking: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "required_metrics": list(self.required_metrics),
+            "ranking": list(self.ranking),
+        }
+
+
+@dataclass(frozen=True)
+class StressSuiteContract:
+    required_for_promotion: bool
+    trade_removal: StressTradeRemovalContract | None = None
+    trade_order_monte_carlo: StressTradeOrderMonteCarloContract | None = None
+    period_ablation_declared: bool = False
+    parameter_perturbation_declared: bool = False
+    risk_adjusted_score: StressRiskAdjustedScoreContract | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "required_for_promotion": self.required_for_promotion,
+        }
+        if self.trade_removal is not None:
+            payload["trade_removal"] = self.trade_removal.as_dict()
+        if self.trade_order_monte_carlo is not None:
+            payload["trade_order_monte_carlo"] = self.trade_order_monte_carlo.as_dict()
+        if self.period_ablation_declared:
+            payload["period_ablation"] = {"status": "not_implemented"}
+        if self.parameter_perturbation_declared:
+            payload["parameter_perturbation"] = {"status": "not_implemented"}
+        if self.risk_adjusted_score is not None:
+            payload["risk_adjusted_score"] = self.risk_adjusted_score.as_dict()
+        return payload
+
+
+@dataclass(frozen=True)
 class ExperimentManifest:
     experiment_id: str
     hypothesis: str
@@ -426,6 +497,7 @@ class ExperimentManifest:
     deployment_tier: str
     acceptance_gate: AcceptanceGate
     statistical_validation: StatisticalSelectionContract | None
+    stress_suite: StressSuiteContract | None
     walk_forward: WalkForwardConfig | None
     research_run: ResearchRunPolicy
     raw: dict[str, Any]
@@ -450,6 +522,7 @@ class ExperimentManifest:
                 if self.statistical_validation is not None
                 else None
             ),
+            "stress_suite": self.stress_suite.as_dict() if self.stress_suite is not None else None,
             "walk_forward": self.walk_forward.as_dict() if self.walk_forward is not None else None,
             "research_run": self.research_run.as_dict(),
         }
@@ -492,6 +565,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
         payload.get("statistical_validation"),
         deployment_tier=deployment_tier,
     )
+    stress_suite = _parse_stress_suite(payload.get("stress_suite"), deployment_tier=deployment_tier)
     walk_forward = _parse_walk_forward(payload.get("walk_forward"))
     research_run = _parse_research_run(payload.get("research_run"))
     if acceptance_gate.walk_forward_required and walk_forward is None:
@@ -530,6 +604,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
         deployment_tier=deployment_tier,
         acceptance_gate=acceptance_gate,
         statistical_validation=statistical_validation,
+        stress_suite=stress_suite,
         walk_forward=walk_forward,
         research_run=research_run,
         raw=dict(payload),
@@ -1383,6 +1458,180 @@ def _parse_statistical_gates(value: Any) -> StatisticalValidationGates:
             "statistical_validation.gates.max_attempt_index_without_new_hypothesis",
         ),
     )
+
+
+def _parse_stress_suite(value: Any, *, deployment_tier: str) -> StressSuiteContract | None:
+    production_bound = is_production_bound_target(deployment_tier)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ManifestValidationError("stress_suite must be an object")
+    allowed_fields = {
+        "required_for_promotion",
+        "trade_removal",
+        "trade_order_monte_carlo",
+        "period_ablation",
+        "parameter_perturbation",
+        "risk_adjusted_score",
+    }
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"stress_suite unsupported fields: {','.join(unknown)}")
+    required = bool(value.get("required_for_promotion", production_bound))
+    if production_bound and not required:
+        raise ManifestValidationError("stress_suite.required_for_promotion must be true for production-bound manifests")
+    return StressSuiteContract(
+        required_for_promotion=required,
+        trade_removal=_parse_stress_trade_removal(value.get("trade_removal")),
+        trade_order_monte_carlo=_parse_stress_trade_order_monte_carlo(value.get("trade_order_monte_carlo")),
+        period_ablation_declared=_parse_stress_period_ablation_declared(value.get("period_ablation")),
+        parameter_perturbation_declared=_parse_stress_parameter_perturbation_declared(value.get("parameter_perturbation")),
+        risk_adjusted_score=_parse_stress_risk_adjusted_score(value.get("risk_adjusted_score")),
+    )
+
+
+def _parse_stress_trade_removal(value: Any) -> StressTradeRemovalContract | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ManifestValidationError("stress_suite.trade_removal must be an object")
+    allowed_fields = {"top_n_by_net_pnl", "min_return_retention_pct", "max_mdd_multiplier"}
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"stress_suite.trade_removal unsupported fields: {','.join(unknown)}")
+    raw_top_n = value.get("top_n_by_net_pnl")
+    if not isinstance(raw_top_n, list) or not raw_top_n:
+        raise ManifestValidationError("stress_suite.trade_removal.top_n_by_net_pnl must be a non-empty array")
+    top_n = tuple(_positive_int(item, "stress_suite.trade_removal.top_n_by_net_pnl") for item in raw_top_n)
+    if len(set(top_n)) != len(top_n):
+        raise ManifestValidationError("stress_suite.trade_removal.top_n_by_net_pnl must not contain duplicates")
+    min_retention = _optional_pct(
+        value.get("min_return_retention_pct"),
+        "stress_suite.trade_removal.min_return_retention_pct",
+    )
+    max_mdd_multiplier = _optional_positive_float(
+        value.get("max_mdd_multiplier"),
+        "stress_suite.trade_removal.max_mdd_multiplier",
+    )
+    return StressTradeRemovalContract(
+        top_n_by_net_pnl=tuple(sorted(top_n)),
+        min_return_retention_pct=min_retention,
+        max_mdd_multiplier=max_mdd_multiplier,
+    )
+
+
+def _parse_stress_trade_order_monte_carlo(value: Any) -> StressTradeOrderMonteCarloContract | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ManifestValidationError("stress_suite.trade_order_monte_carlo must be an object")
+    allowed_fields = {
+        "iterations",
+        "seed_policy",
+        "min_survival_probability",
+        "ruin_max_drawdown_pct",
+        "min_closed_trades",
+    }
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"stress_suite.trade_order_monte_carlo unsupported fields: {','.join(unknown)}")
+    seed_policy = str(value.get("seed_policy") or "").strip()
+    if seed_policy != "derived_from_manifest_candidate_scenario_split_hash":
+        raise ManifestValidationError(
+            "stress_suite.trade_order_monte_carlo.seed_policy must be derived_from_manifest_candidate_scenario_split_hash"
+        )
+    return StressTradeOrderMonteCarloContract(
+        iterations=_positive_int(value.get("iterations"), "stress_suite.trade_order_monte_carlo.iterations"),
+        seed_policy=seed_policy,
+        min_survival_probability=_probability(
+            value.get("min_survival_probability"),
+            "stress_suite.trade_order_monte_carlo.min_survival_probability",
+        ),
+        ruin_max_drawdown_pct=_finite_non_negative_float(
+            value.get("ruin_max_drawdown_pct"),
+            "stress_suite.trade_order_monte_carlo.ruin_max_drawdown_pct",
+        ),
+        min_closed_trades=_positive_int(
+            value.get("min_closed_trades", 10),
+            "stress_suite.trade_order_monte_carlo.min_closed_trades",
+        ),
+    )
+
+
+def _parse_stress_risk_adjusted_score(value: Any) -> StressRiskAdjustedScoreContract | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ManifestValidationError("stress_suite.risk_adjusted_score must be an object")
+    allowed_fields = {"required_metrics", "ranking"}
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"stress_suite.risk_adjusted_score unsupported fields: {','.join(unknown)}")
+    required = _named_string_list(
+        value.get("required_metrics"),
+        "stress_suite.risk_adjusted_score.required_metrics",
+    )
+    ranking = _named_string_list(value.get("ranking"), "stress_suite.risk_adjusted_score.ranking")
+    supported_metrics = {"calmar", "sharpe", "sortino"}
+    unsupported = sorted(set(required) - supported_metrics)
+    if unsupported:
+        raise ManifestValidationError(
+            f"stress_suite.risk_adjusted_score.required_metrics unsupported values: {','.join(unsupported)}"
+        )
+    supported_ranking = {"pass_gate", "max_calmar", "max_expectancy", "min_mdd"}
+    ranking_unsupported = sorted(set(ranking) - supported_ranking)
+    if ranking_unsupported:
+        raise ManifestValidationError(
+            f"stress_suite.risk_adjusted_score.ranking unsupported values: {','.join(ranking_unsupported)}"
+        )
+    return StressRiskAdjustedScoreContract(required_metrics=tuple(required), ranking=tuple(ranking))
+
+
+def _parse_stress_period_ablation_declared(value: Any) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        raise ManifestValidationError("stress_suite.period_ablation must be an object")
+    allowed_fields = {"calendar_years", "min_pass_ratio"}
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"stress_suite.period_ablation unsupported fields: {','.join(unknown)}")
+    years = value.get("calendar_years")
+    if years != "auto" and not isinstance(years, list):
+        raise ManifestValidationError("stress_suite.period_ablation.calendar_years must be auto or an array")
+    if "min_pass_ratio" in value:
+        _probability(value.get("min_pass_ratio"), "stress_suite.period_ablation.min_pass_ratio")
+    return True
+
+
+def _parse_stress_parameter_perturbation_declared(value: Any) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        raise ManifestValidationError("stress_suite.parameter_perturbation must be an object")
+    allowed_fields = {"relative_pct", "numeric_params_only"}
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"stress_suite.parameter_perturbation unsupported fields: {','.join(unknown)}")
+    relative = value.get("relative_pct")
+    if not isinstance(relative, list) or not relative:
+        raise ManifestValidationError("stress_suite.parameter_perturbation.relative_pct must be a non-empty array")
+    for item in relative:
+        parsed = _optional_finite_float(item, "stress_suite.parameter_perturbation.relative_pct")
+        if parsed == 0.0:
+            raise ManifestValidationError("stress_suite.parameter_perturbation.relative_pct values must be non-zero")
+    if "numeric_params_only" in value and not isinstance(value.get("numeric_params_only"), bool):
+        raise ManifestValidationError("stress_suite.parameter_perturbation.numeric_params_only must be boolean")
+    return True
+
+
+def _named_string_list(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ManifestValidationError(f"{field} must be a non-empty array")
+    out = [str(item).strip() for item in value]
+    if any(not item for item in out):
+        raise ManifestValidationError(f"{field} values must be non-empty strings")
+    return out
 
 
 def _parse_regime_acceptance_gate(value: Any) -> RegimeAcceptanceGate:

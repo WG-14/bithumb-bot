@@ -16,6 +16,7 @@ from .deployment_policy import is_production_bound_target, validate_production_c
 from .metrics_contract import METRICS_SCHEMA_VERSION
 from .metrics_gate_policy import metrics_gate_policy_hash
 from .statistical_selection import validate_statistical_evidence_for_candidate
+from .stress_suite import validate_stress_suite_evidence_for_candidate
 
 
 class PromotionGateError(ValueError):
@@ -83,6 +84,13 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "metrics_gate_policy": candidate.get("metrics_gate_policy"),
         "metrics_gate_policy_hash": candidate.get("metrics_gate_policy_hash"),
         "metrics_contract_required": bool(candidate.get("metrics_contract_required")),
+        "stress_suite_required": bool(candidate.get("stress_suite_required")),
+        "stress_suite_contract": candidate.get("stress_suite_contract"),
+        "stress_suite_contract_hash": candidate.get("stress_suite_contract_hash"),
+        "validation_stress_suite": candidate.get("validation_stress_suite"),
+        "final_holdout_stress_suite": candidate.get("final_holdout_stress_suite"),
+        "stress_suite_gate_result": candidate.get("stress_suite_gate_result"),
+        "stress_suite_fail_reasons": candidate.get("stress_suite_fail_reasons"),
         "validation_metrics_v2": candidate.get("validation_metrics_v2"),
         "final_holdout_metrics_v2": candidate.get("final_holdout_metrics_v2"),
         "walk_forward_metrics": candidate.get("walk_forward_metrics"),
@@ -147,6 +155,7 @@ def evaluate_candidate_for_promotion(candidate: dict[str, Any]) -> tuple[bool, l
     _extend_execution_calibration_reasons(candidate, reasons)
     _extend_production_calibration_policy_reasons(candidate, reasons)
     _extend_metrics_contract_reasons(candidate, reasons)
+    _extend_stress_suite_reasons(candidate, reasons)
     _extend_probe_grade_reasons(candidate, reasons)
     profile_hash = candidate.get("candidate_profile_hash")
     if not profile_hash:
@@ -187,6 +196,7 @@ def validate_backtest_candidate_for_promotion(candidate: dict[str, Any] | None) 
     _extend_execution_calibration_reasons(candidate, reasons, prefix="backtest_")
     _extend_production_calibration_policy_reasons(candidate, reasons, prefix="backtest_")
     _extend_metrics_contract_reasons(candidate, reasons, prefix="backtest_")
+    _extend_stress_suite_reasons(candidate, reasons, prefix="backtest_")
     _extend_probe_grade_reasons(candidate, reasons, prefix="backtest_")
     return not reasons, reasons
 
@@ -239,6 +249,22 @@ def _extend_metrics_contract_reasons(
             missing_code="final_holdout_metrics_v2_missing",
             prefix=prefix,
         )
+
+
+def _extend_stress_suite_reasons(
+    candidate: dict[str, Any],
+    reasons: list[str],
+    *,
+    prefix: str = "",
+) -> None:
+    if not bool(candidate.get("stress_suite_required")):
+        return
+    if candidate.get("stress_suite_gate_result") != "PASS":
+        reasons.extend([f"{prefix}stress_suite_gate_not_passed", "stress_suite_gate_not_passed"])
+    if not isinstance(candidate.get("validation_stress_suite"), dict):
+        reasons.extend([f"{prefix}stress_suite_required_but_missing", "stress_suite_required_but_missing"])
+    if not str(candidate.get("stress_suite_contract_hash") or "").startswith("sha256:"):
+        reasons.extend([f"{prefix}stress_suite_hash_missing", "stress_suite_hash_missing"])
 
 
 def _extend_metrics_v2_presence_reasons(
@@ -547,6 +573,9 @@ def promote_candidate(
     )
     if statistical_reasons:
         raise PromotionGateError(f"promotion refused: {','.join(statistical_reasons)}")
+    stress_reasons = validate_stress_suite_evidence_for_candidate(candidate=backtest.candidate, report=report)
+    if stress_reasons:
+        raise PromotionGateError(f"promotion refused: {','.join(stress_reasons)}")
     walk_forward: ValidatedCandidate | None = None
     if backtest.candidate.get("walk_forward_required"):
         walk_forward = validate_walk_forward_candidate_for_promotion(
@@ -652,6 +681,13 @@ def promote_candidate(
         "metrics_gate_policy": candidate.get("metrics_gate_policy"),
         "metrics_gate_policy_hash": candidate.get("metrics_gate_policy_hash"),
         "metrics_contract_required": bool(candidate.get("metrics_contract_required")),
+        "stress_suite_required": bool(candidate.get("stress_suite_required")),
+        "stress_suite_contract": candidate.get("stress_suite_contract"),
+        "stress_suite_contract_hash": candidate.get("stress_suite_contract_hash"),
+        "validation_stress_suite": candidate.get("validation_stress_suite"),
+        "final_holdout_stress_suite": candidate.get("final_holdout_stress_suite"),
+        "stress_suite_gate_result": candidate.get("stress_suite_gate_result"),
+        "stress_suite_fail_reasons": candidate.get("stress_suite_fail_reasons") or [],
         "statistical_validation_required": bool(candidate.get("statistical_validation_required")),
         "statistical_validation_contract": candidate.get("statistical_validation_contract"),
         "benchmark": candidate.get("benchmark"),

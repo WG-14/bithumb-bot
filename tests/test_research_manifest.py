@@ -58,6 +58,27 @@ def _statistical_validation() -> dict[str, object]:
     }
 
 
+def _stress_suite() -> dict[str, object]:
+    return {
+        "required_for_promotion": True,
+        "trade_removal": {
+            "top_n_by_net_pnl": [1, 3],
+            "min_return_retention_pct": 50.0,
+        },
+        "trade_order_monte_carlo": {
+            "iterations": 100,
+            "seed_policy": "derived_from_manifest_candidate_scenario_split_hash",
+            "min_survival_probability": 0.95,
+            "ruin_max_drawdown_pct": 35.0,
+            "min_closed_trades": 3,
+        },
+        "risk_adjusted_score": {
+            "required_metrics": ["calmar"],
+            "ranking": ["pass_gate", "max_calmar", "max_expectancy", "min_mdd"],
+        },
+    }
+
+
 def _production_manifest() -> dict[str, object]:
     payload = _manifest()
     payload["deployment_tier"] = "paper_candidate"
@@ -109,6 +130,59 @@ def test_manifest_parses_statistical_validation_and_binds_hash() -> None:
     changed["statistical_validation"] = _statistical_validation()
     changed["statistical_validation"]["gates"]["max_holdout_reuse_count"] = 2
     assert parse_manifest(changed).manifest_hash() != baseline_hash
+
+
+def test_manifest_parses_stress_suite_and_binds_hash() -> None:
+    payload = _manifest()
+    payload["stress_suite"] = _stress_suite()
+
+    manifest = parse_manifest(payload)
+    baseline_hash = manifest.manifest_hash()
+
+    assert manifest.stress_suite is not None
+    assert manifest.stress_suite.required_for_promotion is True
+    assert manifest.canonical_payload()["stress_suite"]["trade_removal"]["top_n_by_net_pnl"] == [1, 3]
+
+    changed = _manifest()
+    changed["stress_suite"] = _stress_suite()
+    changed["stress_suite"]["trade_order_monte_carlo"]["min_survival_probability"] = 0.9
+    assert parse_manifest(changed).manifest_hash() != baseline_hash
+
+
+def test_manifest_rejects_unknown_stress_suite_fields() -> None:
+    payload = _manifest()
+    payload["stress_suite"] = _stress_suite()
+    payload["stress_suite"]["unexpected"] = True
+
+    with pytest.raises(ManifestValidationError, match="stress_suite unsupported fields"):
+        parse_manifest(payload)
+
+
+def test_manifest_rejects_invalid_stress_top_n_list() -> None:
+    payload = _manifest()
+    payload["stress_suite"] = _stress_suite()
+    payload["stress_suite"]["trade_removal"]["top_n_by_net_pnl"] = [1, 1]
+
+    with pytest.raises(ManifestValidationError, match="must not contain duplicates"):
+        parse_manifest(payload)
+
+
+def test_manifest_rejects_invalid_stress_probability_threshold() -> None:
+    payload = _manifest()
+    payload["stress_suite"] = _stress_suite()
+    payload["stress_suite"]["trade_order_monte_carlo"]["min_survival_probability"] = 1.5
+
+    with pytest.raises(ManifestValidationError, match="min_survival_probability"):
+        parse_manifest(payload)
+
+
+def test_production_bound_manifest_rejects_disabled_stress_suite_gate() -> None:
+    payload = _production_manifest()
+    payload["stress_suite"] = _stress_suite()
+    payload["stress_suite"]["required_for_promotion"] = False
+
+    with pytest.raises(ManifestValidationError, match="stress_suite.required_for_promotion must be true"):
+        parse_manifest(payload)
 
 
 def test_production_bound_manifest_requires_statistical_validation() -> None:

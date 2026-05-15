@@ -216,6 +216,9 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
         "candidate_profile_hash": None,
         "execution_calibration_artifact_hash": None,
         "statistical_evidence_hash": None,
+        "stress_suite_contract_hash": None,
+        "validation_stress_suite_hash": None,
+        "final_holdout_stress_suite_hash": None,
         "selection_universe_hash": None,
         "candidate_metric_values_hash": None,
         "mismatches": [],
@@ -260,6 +263,11 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     summary["candidate_profile_hash"] = lineage.get("candidate_profile_hash")
     summary["execution_calibration_artifact_hash"] = lineage.get("execution_calibration_artifact_hash")
     summary["statistical_evidence_hash"] = lineage.get("statistical_evidence_hash")
+    summary["stress_suite_contract_hash"] = promotion.get("stress_suite_contract_hash")
+    validation_stress = promotion.get("validation_stress_suite") if isinstance(promotion.get("validation_stress_suite"), dict) else {}
+    final_stress = promotion.get("final_holdout_stress_suite") if isinstance(promotion.get("final_holdout_stress_suite"), dict) else {}
+    summary["validation_stress_suite_hash"] = validation_stress.get("stress_suite_hash")
+    summary["final_holdout_stress_suite_hash"] = final_stress.get("stress_suite_hash")
     summary["selection_universe_hash"] = lineage.get("selection_universe_hash")
     summary["candidate_metric_values_hash"] = lineage.get("candidate_metric_values_hash")
 
@@ -322,6 +330,8 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     )
     if statistical_required:
         _verify_statistical_evidence_bindings(summary, promotion, lineage)
+    if bool(promotion.get("stress_suite_required")):
+        _verify_stress_suite_bindings(summary, promotion, lineage)
     walk_required = bool(promotion.get("walk_forward_required"))
     _verify_artifact_hash(
         summary,
@@ -463,6 +473,72 @@ def _verify_statistical_evidence_bindings(
         )
     if isinstance(report, dict):
         _verify_statistical_report_bindings(summary, promotion, lineage, payload, report)
+
+
+def _verify_stress_suite_bindings(
+    summary: dict[str, Any],
+    promotion: dict[str, Any],
+    lineage: dict[str, Any],
+) -> None:
+    contract = promotion.get("stress_suite_contract")
+    contract_hash = str(promotion.get("stress_suite_contract_hash") or "").strip()
+    if not isinstance(contract, dict):
+        summary["mismatches"].append(
+            _mismatch("promotion.stress_suite_contract", "object", type(contract).__name__, "stress_suite_contract_mismatch")
+        )
+        return
+    actual_contract_hash = sha256_prefixed(contract)
+    if actual_contract_hash != contract_hash:
+        summary["mismatches"].append(
+            _mismatch("promotion.stress_suite_contract_hash", actual_contract_hash, contract_hash, "stress_suite_contract_mismatch")
+        )
+    for field in ("validation_stress_suite", "final_holdout_stress_suite"):
+        evidence = promotion.get(field)
+        if field == "final_holdout_stress_suite" and evidence is None:
+            continue
+        if not isinstance(evidence, dict):
+            summary["mismatches"].append(
+                _mismatch(f"promotion.{field}", "object", type(evidence).__name__, "stress_suite_required_but_missing")
+            )
+            continue
+        embedded = str(evidence.get("stress_suite_hash") or "")
+        actual = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "stress_suite_hash"}))
+        if embedded != actual:
+            summary["mismatches"].append(_mismatch(f"promotion.{field}.stress_suite_hash", actual, embedded, "stress_suite_hash_mismatch"))
+        if evidence.get("contract_hash") != contract_hash:
+            summary["mismatches"].append(
+                _mismatch(f"promotion.{field}.contract_hash", contract_hash, evidence.get("contract_hash"), "stress_suite_contract_mismatch")
+            )
+    report = _load_optional_artifact(lineage.get("backtest_report_path"))
+    if not isinstance(report, dict):
+        return
+    candidates = report.get("candidates")
+    if not isinstance(candidates, list):
+        return
+    candidate = next((item for item in candidates if item.get("parameter_candidate_id") == promotion.get("candidate_id")), None)
+    if not isinstance(candidate, dict):
+        summary["mismatches"].append(
+            _mismatch("backtest_report.candidate", promotion.get("candidate_id"), None, "stress_suite_evidence_malformed")
+        )
+        return
+    _compare(
+        summary,
+        "backtest_report.stress_suite_contract_hash",
+        promotion.get("stress_suite_contract_hash"),
+        candidate.get("stress_suite_contract_hash"),
+        "stress_suite_contract_mismatch",
+    )
+    for field in ("validation_stress_suite", "final_holdout_stress_suite"):
+        promoted = promotion.get(field)
+        reported = candidate.get(field)
+        if isinstance(promoted, dict) and isinstance(reported, dict):
+            _compare(
+                summary,
+                f"backtest_report.{field}.stress_suite_hash",
+                promoted.get("stress_suite_hash"),
+                reported.get("stress_suite_hash"),
+                "stress_suite_hash_mismatch",
+            )
 
 
 def _verify_statistical_report_bindings(

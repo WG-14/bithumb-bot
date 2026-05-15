@@ -27,6 +27,7 @@ from .backtest_engine import (
     BacktestResourceLimits,
     BacktestRun,
     BacktestRunContext,
+    START_CASH_KRW,
     execution_event_summary,
 )
 from .deployment_policy import validate_production_calibration_policy
@@ -48,6 +49,7 @@ from .statistical_selection import (
     statistical_validation_required,
     write_statistical_selection_evidence,
 )
+from .stress_suite import StressSuiteContext, analyze_stress_suite, stress_suite_required
 from .strategy_registry import research_strategy_data_requirements, resolve_research_strategy
 
 
@@ -560,6 +562,52 @@ def _evaluate_candidates(
                 dataset_quality_status=dataset_quality_status,
                 dataset_quality_reasons=dataset_quality_reasons,
             )
+            validation_stress_suite = None
+            final_holdout_stress_suite = None
+            stress_gate_result = None
+            stress_fail_reasons: list[str] = []
+            stress_contract = manifest.stress_suite.as_dict() if manifest.stress_suite is not None else None
+            stress_contract_hash = sha256_prefixed(stress_contract) if stress_contract is not None else None
+            if manifest.stress_suite is not None:
+                validation_stress_suite = analyze_stress_suite(
+                    contract=manifest.stress_suite,
+                    context=StressSuiteContext(
+                        manifest_hash=manifest_hash,
+                        experiment_id=manifest.experiment_id,
+                        candidate_id=base["candidate_id"],
+                        scenario_id=scenario_id,
+                        split_name="validation",
+                        parameter_values=params,
+                    ),
+                    original_metrics=validation_metrics,
+                    metrics_v2=validation_metrics_v2,
+                    closed_trades=tuple(base.get("validation_closed_trades") or ()),
+                    starting_cash=START_CASH_KRW,
+                )
+                stress_fail_reasons.extend(str(reason) for reason in validation_stress_suite.get("fail_reasons") or [])
+                if final_holdout_metrics is not None:
+                    final_holdout_stress_suite = analyze_stress_suite(
+                        contract=manifest.stress_suite,
+                        context=StressSuiteContext(
+                            manifest_hash=manifest_hash,
+                            experiment_id=manifest.experiment_id,
+                            candidate_id=base["candidate_id"],
+                            scenario_id=scenario_id,
+                            split_name="final_holdout",
+                            parameter_values=params,
+                        ),
+                        original_metrics=final_holdout_metrics,
+                        metrics_v2=final_holdout_metrics_v2,
+                        closed_trades=tuple(base.get("final_holdout_closed_trades") or ()),
+                        starting_cash=START_CASH_KRW,
+                    )
+                    stress_fail_reasons.extend(
+                        f"final_holdout_{reason}" for reason in final_holdout_stress_suite.get("fail_reasons") or []
+                    )
+                stress_gate_result = "PASS" if not stress_fail_reasons else "FAIL"
+                if manifest.stress_suite.required_for_promotion and stress_gate_result != "PASS":
+                    gate_result = "FAIL"
+                    fail_reasons = sorted(set(fail_reasons) | set(stress_fail_reasons) | {"stress_suite_gate_not_passed"})
             execution_metadata = list(base.get("validation_execution_metadata") or [])
             execution_reality_summary = _execution_reality_summary(
                 policy=manifest.execution_timing,
@@ -639,6 +687,12 @@ def _evaluate_candidates(
                 "metrics_schema_version": METRICS_SCHEMA_VERSION,
                 "metrics_gate_policy": metrics_gate_policy,
                 "metrics_gate_policy_hash": metrics_gate_policy_digest,
+                "stress_suite_contract": stress_contract,
+                "stress_suite_contract_hash": stress_contract_hash,
+                "validation_stress_suite": validation_stress_suite,
+                "final_holdout_stress_suite": final_holdout_stress_suite,
+                "stress_suite_gate_result": stress_gate_result,
+                "stress_suite_fail_reasons": sorted(set(stress_fail_reasons)),
                 "train_metrics_v2": train_metrics_v2,
                 "validation_metrics_v2": validation_metrics_v2,
                 "final_holdout_metrics_v2": final_holdout_metrics_v2,
@@ -706,6 +760,9 @@ def _evaluate_candidates(
                     "metrics_gate_policy": metrics_gate_policy,
                     "metrics_gate_policy_hash": metrics_gate_policy_digest,
                     "metrics_contract_required": bool(manifest.acceptance_gate.metrics_contract_required),
+                    "stress_suite_required": stress_suite_required(manifest),
+                    "stress_suite_contract": stress_contract,
+                    "stress_suite_contract_hash": stress_contract_hash,
                     "regime_classifier_version": MARKET_REGIME_VERSION,
                     "warnings": [],
                     "repository_version": _repository_version(),
@@ -741,6 +798,13 @@ def _evaluate_candidates(
                 "metrics_gate_policy": primary.get("metrics_gate_policy") or candidate_payload.get("metrics_gate_policy"),
                 "metrics_gate_policy_hash": primary.get("metrics_gate_policy_hash") or candidate_payload.get("metrics_gate_policy_hash"),
                 "metrics_contract_required": bool(manifest.acceptance_gate.metrics_contract_required),
+                "stress_suite_required": stress_suite_required(manifest),
+                "stress_suite_contract": primary.get("stress_suite_contract"),
+                "stress_suite_contract_hash": primary.get("stress_suite_contract_hash"),
+                "validation_stress_suite": primary.get("validation_stress_suite"),
+                "final_holdout_stress_suite": primary.get("final_holdout_stress_suite"),
+                "stress_suite_gate_result": primary.get("stress_suite_gate_result"),
+                "stress_suite_fail_reasons": primary.get("stress_suite_fail_reasons") or [],
                 "train_metrics_v2": primary.get("train_metrics_v2"),
                 "validation_metrics_v2": primary.get("validation_metrics_v2"),
                 "final_holdout_metrics_v2": primary.get("final_holdout_metrics_v2"),
@@ -899,6 +963,9 @@ def _evaluate_candidate_base_result(
         "train_metrics_v2": _metrics_v2_payload(train),
         "validation_metrics_v2": _metrics_v2_payload(validation),
         "final_holdout_metrics_v2": _metrics_v2_payload(final_holdout) if final_holdout else None,
+        "train_closed_trades": train.closed_trades,
+        "validation_closed_trades": validation.closed_trades,
+        "final_holdout_closed_trades": final_holdout.closed_trades if final_holdout else (),
         "train_execution_metadata": _execution_metadata(train.trades),
         "validation_execution_metadata": _execution_metadata(validation.trades),
         "final_holdout_execution_metadata": _execution_metadata(final_holdout.trades) if final_holdout else None,
@@ -1655,6 +1722,8 @@ def _report_payload(
         if manifest.statistical_validation is not None
         else None
     )
+    stress_contract = manifest.stress_suite.as_dict() if manifest.stress_suite is not None else None
+    stress_contract_hash = sha256_prefixed(stress_contract) if stress_contract is not None else None
     required_scenario_ids = sorted(
         {
             str(scenario_id)
@@ -1778,6 +1847,9 @@ def _report_payload(
             metrics_gate_policy_from_acceptance_gate(manifest.acceptance_gate)
         ),
         "metrics_contract_required": bool(manifest.acceptance_gate.metrics_contract_required),
+        "stress_suite_required": stress_suite_required(manifest),
+        "stress_suite_contract": stress_contract,
+        "stress_suite_contract_hash": stress_contract_hash,
         "statistical_validation_required": statistical_validation_required(manifest),
         "statistical_validation_contract": statistical_contract,
         "benchmark": statistical_evidence.get("benchmark") if statistical_evidence else None,
@@ -1836,6 +1908,10 @@ def _report_payload(
         "best_candidate_id": best.get("parameter_candidate_id") if best else None,
         "best_validation_metrics_v2": best.get("validation_metrics_v2") if best else None,
         "best_final_holdout_metrics_v2": best.get("final_holdout_metrics_v2") if best else None,
+        "stress_suite_gate_result": best.get("stress_suite_gate_result") if best else None,
+        "stress_suite_fail_reasons": best.get("stress_suite_fail_reasons") if best else [],
+        "best_validation_stress_suite": best.get("validation_stress_suite") if best else None,
+        "best_final_holdout_stress_suite": best.get("final_holdout_stress_suite") if best else None,
         "gate_result": "PASS" if best else "FAIL",
         "warnings": warnings,
         "candidates": candidates,
@@ -2255,7 +2331,7 @@ def _execution_calibration_warning_reasons(candidate: dict[str, Any]) -> list[st
     return [str(reason) for reason in gate.get("reasons") or ["execution_calibration_failed"]]
 
 
-def _candidate_rank_key(candidate: dict[str, Any]) -> tuple[int, int, float, float, int, float, float, float, float]:
+def _candidate_rank_key(candidate: dict[str, Any]) -> tuple[int, int, float, float, int, float, float, float, float, float]:
     passed = 0 if candidate.get("acceptance_gate_result") == "PASS" else 1
     validation = candidate.get("validation_metrics") or {}
     metrics_v2 = candidate.get("validation_metrics_v2") if isinstance(candidate.get("validation_metrics_v2"), dict) else {}
@@ -2268,6 +2344,13 @@ def _candidate_rank_key(candidate: dict[str, Any]) -> tuple[int, int, float, flo
     slippage_drag = cost_execution.get("slippage_drag_ratio")
     cagr = return_risk.get("cagr_pct")
     dependency = trade_quality.get("single_trade_dependency_score")
+    stress_score = candidate.get("validation_stress_suite")
+    risk_adjusted = (
+        stress_score.get("risk_adjusted_score")
+        if isinstance(stress_score, dict) and isinstance(stress_score.get("risk_adjusted_score"), dict)
+        else {}
+    )
+    calmar = risk_adjusted.get("calmar_ratio")
     return (
         passed,
         open_position_rank,
@@ -2276,6 +2359,7 @@ def _candidate_rank_key(candidate: dict[str, Any]) -> tuple[int, int, float, flo
         -int(validation.get("trade_count") or 0),
         float(fee_drag) if fee_drag is not None else 0.0,
         float(slippage_drag) if slippage_drag is not None else 0.0,
+        -float(calmar) if calmar is not None else 0.0,
         -float(cagr) if cagr is not None else -float(validation.get("return_pct") or 0.0),
         float(dependency) if dependency is not None else 0.0,
     )
