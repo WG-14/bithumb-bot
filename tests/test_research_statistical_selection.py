@@ -8,6 +8,7 @@ from bithumb_bot.research.statistical_selection import (
     selection_universe_hash,
     validate_statistical_evidence_for_candidate,
 )
+from bithumb_bot.research.return_panel import build_candidate_return_panel
 
 
 def _manifest():
@@ -418,3 +419,122 @@ def test_statistical_validation_refuses_missing_metric_value_hash() -> None:
     )
 
     assert "candidate_metric_values_hash_missing" in reasons
+
+
+def test_summary_bootstrap_is_screening_grade_and_does_not_populate_wrc_field() -> None:
+    manifest = _manifest()
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=_candidates(),
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash="sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        required_scenario_ids=["scenario_001"],
+        search_budget=2,
+        parameter_grid_size=2,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+    )
+
+    assert evidence["evidence_grade"] == "SCREENING_SUMMARY_BOOTSTRAP"
+    assert evidence["statistical_method"] == "summary_metric_centered_max_bootstrap"
+    assert evidence["summary_metric_max_bootstrap_p_value"] is not None
+    assert evidence["white_reality_check_p_value"] is None
+    assert evidence["white_reality_check_method"] is None
+
+
+def test_screening_grade_evidence_cannot_satisfy_production_bound_promotion() -> None:
+    manifest = _manifest()
+    candidates = _candidates()
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=candidates,
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash="sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        required_scenario_ids=["scenario_001"],
+        search_budget=2,
+        parameter_grid_size=2,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+    )
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": manifest.manifest_hash(),
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 2,
+        "search_budget": 2,
+        "parameter_grid_size": 2,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "metric_value_count": 2,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": evidence["content_hash"],
+        "candidates": candidates,
+    }
+    candidate = {
+        **candidates[0],
+        "deployment_tier": "paper_candidate",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "metric_value_count": 2,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": evidence["content_hash"],
+    }
+
+    reasons = validate_statistical_evidence_for_candidate(candidate=candidate, report=report, evidence=evidence)
+
+    assert "statistical_evidence_grade_insufficient" in reasons
+    assert "return_panel_missing" in reasons
+
+
+def test_candidate_return_panel_hash_binds_trade_return_series() -> None:
+    candidates = _candidates()
+    candidates[0]["scenario_results"] = [
+        {
+            "validation_closed_trades": [
+                {"entry_ts": 1, "exit_ts": 2, "return_pct": 1.0},
+                {"entry_ts": 3, "exit_ts": 4, "return_pct": -0.5},
+            ]
+        }
+    ]
+    first = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=candidates,
+    )
+    candidates[0]["scenario_results"][0]["validation_closed_trades"][1]["return_pct"] = -0.4
+    changed = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=candidates,
+    )
+
+    assert first["content_hash"] != changed["content_hash"]
+    assert first["candidate_return_series"][0]["observation_count"] == 2

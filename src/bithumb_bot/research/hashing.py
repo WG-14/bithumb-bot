@@ -12,12 +12,16 @@ REPORT_TOP_LEVEL_HASH_EXCLUDED_FIELDS = frozenset(
         "created_at",
         "artifact_paths",
         "statistical_evidence_path",
+        "return_panel_path",
+        "family_trial_registry_path",
     }
 )
 REPORT_RUNTIME_ONLY_FIELDS = frozenset(
     {
         "failure_artifact_path",
         "statistical_evidence_path",
+        "return_panel_path",
+        "family_trial_registry_path",
     }
 )
 

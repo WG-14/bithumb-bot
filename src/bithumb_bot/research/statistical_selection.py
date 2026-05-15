@@ -9,11 +9,20 @@ from bithumb_bot.storage_io import write_json_atomic
 
 from .deployment_policy import is_production_bound_target
 from .experiment_manifest import ExperimentManifest, StatisticalSelectionContract
+from .family_registry import validate_family_registry_binding
 from .hashing import content_hash_payload, sha256_prefixed
+from .return_panel import validate_return_panel_binding
 
 
 STATISTICAL_SELECTION_EVIDENCE_SCHEMA_VERSION = 1
 PRIMARY_METRIC_SOURCE = "validation_metrics"
+SCREENING_SUMMARY_BOOTSTRAP = "SCREENING_SUMMARY_BOOTSTRAP"
+PROMOTION_GRADE_WRC = "PROMOTION_GRADE_WRC"
+PROMOTION_GRADE_WRC_SPA_DSR = "PROMOTION_GRADE_WRC_SPA_DSR"
+SCREENING_METHOD = "metric_centered_max_bootstrap"
+SCREENING_METHOD_DETAIL = "summary_metric_centered_max_bootstrap"
+PROMOTION_GRADE_EVIDENCE_GRADES = {PROMOTION_GRADE_WRC, PROMOTION_GRADE_WRC_SPA_DSR}
+PROMOTION_GRADE_METHODS = {"white_reality_check_block_bootstrap", "white_reality_check_stationary_bootstrap"}
 
 
 def statistical_validation_required(manifest_or_payload: ExperimentManifest | dict[str, Any]) -> bool:
@@ -166,6 +175,11 @@ def build_statistical_selection_evidence(
     attempt_index: int,
     holdout_reuse_count: int,
     dataset_reuse_policy: str,
+    return_panel: dict[str, Any] | None = None,
+    return_panel_path: Path | None = None,
+    family_trial_registry_prior_hash: str | None = None,
+    family_trial_registry_path: Path | None = None,
+    family_trial_registry_row_hash: str | None = None,
 ) -> dict[str, Any] | None:
     contract = manifest.statistical_validation
     if contract is None:
@@ -204,6 +218,13 @@ def build_statistical_selection_evidence(
         metric_values=metric_values,
         candidate_count=len(candidates),
     )
+    sampling_contract = _bootstrap_sampling_contract(
+        contract=contract,
+        selection_hash=selection_hash,
+        observation_count=int(return_panel.get("observation_count") or 0) if isinstance(return_panel, dict) else 0,
+        return_unit=str(return_panel.get("return_unit") or "unavailable") if isinstance(return_panel, dict) else "unavailable",
+        benchmark=contract.benchmark,
+    )
     payload: dict[str, Any] = {
         "artifact_type": "statistical_selection_evidence",
         "schema_version": STATISTICAL_SELECTION_EVIDENCE_SCHEMA_VERSION,
@@ -236,14 +257,31 @@ def build_statistical_selection_evidence(
         "primary_metric": contract.primary_metric,
         "primary_metric_source": primary_metric_source,
         "bootstrap_method": contract.bootstrap.method,
+        "statistical_method": SCREENING_METHOD_DETAIL,
+        "evidence_grade": SCREENING_SUMMARY_BOOTSTRAP,
+        "minimum_promotion_evidence_grade": PROMOTION_GRADE_WRC,
+        "promotion_grade_available": False,
+        "bootstrap_sampling_contract": sampling_contract,
+        "bootstrap_sampling_contract_hash": sampling_contract["content_hash"],
+        "return_panel_path": str(return_panel_path.resolve()) if return_panel_path else None,
+        "return_panel_hash": return_panel.get("content_hash") if isinstance(return_panel, dict) else None,
+        "return_panel_artifact_type": return_panel.get("artifact_type") if isinstance(return_panel, dict) else None,
+        "return_panel_split": return_panel.get("split") if isinstance(return_panel, dict) else None,
+        "return_unit": return_panel.get("return_unit") if isinstance(return_panel, dict) else "unavailable",
+        "return_panel_observation_count": return_panel.get("observation_count") if isinstance(return_panel, dict) else 0,
+        "family_trial_registry_path": str(family_trial_registry_path.resolve()) if family_trial_registry_path else None,
+        "family_trial_registry_prior_hash": family_trial_registry_prior_hash,
+        "family_trial_registry_row_hash": family_trial_registry_row_hash,
         "n_bootstrap": contract.bootstrap.n_bootstrap,
         "block_length": None,
         "block_length_policy": contract.bootstrap.block_length_policy,
         "seed": seed,
         "effective_trial_count": effective_trial_count,
         "summary_metric_max_bootstrap_p_value": p_value,
-        "white_reality_check_p_value": p_value,
-        "white_reality_check_method": "approximation_summary_metric_centered_max_bootstrap",
+        "selection_adjusted_summary_p_value": p_value,
+        "white_reality_check_p_value": None,
+        "white_reality_check_method": None,
+        "white_reality_check_available": False,
         "statistical_gate_result": "FAIL" if gate_reasons else "PASS",
         "gate_fail_reasons": gate_reasons,
         "limitations": _limitations(contract),
@@ -322,16 +360,33 @@ def validate_statistical_evidence_for_candidate(
                 reasons.append("selection_universe_hash_mismatch")
                 break
     _extend_statistical_metadata_reasons(candidate=candidate, report=report, evidence=evidence, reasons=reasons)
-    p_value = evidence.get("white_reality_check_p_value")
-    if p_value is None:
-        reasons.append("reality_check_p_value_missing")
-    elif _as_float(p_value) is None:
-        reasons.append("reality_check_p_value_missing")
+    evidence_grade = str(evidence.get("evidence_grade") or "").strip()
+    production_bound = is_production_bound_target(candidate.get("deployment_tier") or report.get("deployment_tier"))
+    if production_bound and evidence_grade not in PROMOTION_GRADE_EVIDENCE_GRADES:
+        reasons.append("statistical_evidence_grade_insufficient")
+    if not evidence_grade:
+        reasons.append("statistical_evidence_grade_missing")
+    method = evidence.get("statistical_method") or evidence.get("white_reality_check_method")
+    if evidence_grade == SCREENING_SUMMARY_BOOTSTRAP:
+        p_value = evidence.get("summary_metric_max_bootstrap_p_value")
+        if p_value is None or _as_float(p_value) is None:
+            reasons.append("summary_metric_max_bootstrap_p_value_missing")
+        if evidence.get("white_reality_check_p_value") is not None:
+            reasons.append("white_reality_check_field_overloaded")
+        if evidence.get("white_reality_check_method") is not None:
+            reasons.append("white_reality_check_field_overloaded")
+    else:
+        p_value = evidence.get("white_reality_check_p_value")
+        if p_value is None or _as_float(p_value) is None:
+            reasons.append("reality_check_p_value_missing")
+        if method not in PROMOTION_GRADE_METHODS and evidence_grade in PROMOTION_GRADE_EVIDENCE_GRADES:
+            reasons.append("statistical_method_unavailable")
     summary_p_value = evidence.get("summary_metric_max_bootstrap_p_value")
-    if summary_p_value is not None and _as_float(summary_p_value) != _as_float(p_value):
-        reasons.append("reality_check_p_value_missing")
-    if evidence.get("white_reality_check_method") != "approximation_summary_metric_centered_max_bootstrap":
-        reasons.append("statistical_metadata_mismatch")
+    if evidence_grade == SCREENING_SUMMARY_BOOTSTRAP and summary_p_value is None:
+        reasons.append("summary_metric_max_bootstrap_p_value_missing")
+    if production_bound:
+        reasons.extend(validate_return_panel_binding(report=report, evidence=evidence, panel=_load_return_panel(evidence, report)))
+        reasons.extend(validate_family_registry_binding(report=report, evidence=evidence))
     if evidence.get("effective_trial_count") is None:
         reasons.append("effective_trial_count_missing")
     elif _as_int(evidence.get("effective_trial_count")) is not None:
@@ -358,7 +413,7 @@ def validate_statistical_evidence_for_candidate(
         gates = contract.get("gates")
         if isinstance(gates, dict):
             if gates.get("max_spa_p_value") is not None and evidence.get("spa_p_value") is None:
-                reasons.append("spa_p_value_missing")
+                reasons.append("spa_method_unavailable")
             if gates.get("min_deflated_sharpe_probability") is not None and evidence.get("deflated_sharpe_probability") is None:
                 reasons.append("deflated_sharpe_missing")
     return sorted(set(reasons))
@@ -555,7 +610,8 @@ def _statistical_gate_fail_reasons(
 def _limitations(contract: StatisticalSelectionContract) -> list[str]:
     limitations = [
         "metric_summary_bootstrap_not_trade_or_bar_return_bootstrap",
-        "white_reality_check_approximation_uses_centered_candidate_primary_metric_distribution",
+        "summary_metric_centered_max_bootstrap_screening_only",
+        "not_white_reality_check",
     ]
     if contract.gates.max_spa_p_value is None:
         limitations.append("spa_not_implemented")
@@ -575,6 +631,45 @@ def _promotion_grade_limitations(contract: StatisticalSelectionContract) -> list
     if contract.gates.min_deflated_sharpe_probability is None:
         limitations.append("deflated_sharpe_not_implemented")
     return limitations
+
+
+def _bootstrap_sampling_contract(
+    *,
+    contract: StatisticalSelectionContract,
+    selection_hash: str,
+    observation_count: int,
+    return_unit: str,
+    benchmark: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "method_name": contract.bootstrap.method,
+        "n_bootstrap": contract.bootstrap.n_bootstrap,
+        "seed_policy": contract.bootstrap.seed_policy,
+        "derived_seed": _seed_from_hash(selection_hash),
+        "block_length": None,
+        "block_length_policy": contract.bootstrap.block_length_policy,
+        "stationary_bootstrap_probability": None,
+        "observation_count": int(observation_count),
+        "return_unit": return_unit,
+        "benchmark": benchmark,
+        "missing_observation_policy": "skip_missing_candidate_trade_returns",
+    }
+    payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
+    return payload
+
+
+def _load_return_panel(evidence: dict[str, Any], report: dict[str, Any]) -> dict[str, Any] | None:
+    path_value = str(evidence.get("return_panel_path") or report.get("return_panel_path") or "").strip()
+    if not path_value:
+        return None
+    try:
+        import json
+
+        with Path(path_value).expanduser().open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _effective_trial_count(

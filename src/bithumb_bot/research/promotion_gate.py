@@ -96,6 +96,15 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "walk_forward_metrics": candidate.get("walk_forward_metrics"),
         "statistical_validation_required": bool(candidate.get("statistical_validation_required")),
         "statistical_validation_contract": candidate.get("statistical_validation_contract"),
+        "evidence_grade": candidate.get("evidence_grade"),
+        "statistical_method": candidate.get("statistical_method"),
+        "return_panel_hash": candidate.get("return_panel_hash"),
+        "return_panel_path": candidate.get("return_panel_path"),
+        "return_unit": candidate.get("return_unit"),
+        "return_panel_observation_count": candidate.get("return_panel_observation_count"),
+        "family_trial_registry_path": candidate.get("family_trial_registry_path"),
+        "family_trial_registry_prior_hash": candidate.get("family_trial_registry_prior_hash"),
+        "family_trial_registry_row_hash": candidate.get("family_trial_registry_row_hash"),
         "benchmark": candidate.get("benchmark"),
         "primary_metric": candidate.get("primary_metric"),
         "primary_metric_source": candidate.get("primary_metric_source"),
@@ -562,14 +571,6 @@ def promote_candidate(
         None,
     )
     backtest = _validated_backtest_candidate(candidate)
-    statistical_evidence = _load_statistical_evidence(report=report, report_dir=research_report_dir)
-    statistical_reasons = validate_statistical_evidence_for_candidate(
-        candidate=backtest.candidate,
-        report=report,
-        evidence=statistical_evidence,
-    )
-    if statistical_reasons:
-        raise PromotionGateError(f"promotion refused: {','.join(statistical_reasons)}")
     stress_reasons = validate_stress_suite_evidence_for_candidate(candidate=backtest.candidate, report=report)
     if stress_reasons:
         raise PromotionGateError(f"promotion refused: {','.join(stress_reasons)}")
@@ -581,6 +582,14 @@ def promote_candidate(
             candidate_id=candidate_id,
             backtest_candidate=backtest.candidate,
         )
+    statistical_evidence = _load_statistical_evidence(report=report, report_dir=research_report_dir)
+    statistical_reasons = validate_statistical_evidence_for_candidate(
+        candidate=backtest.candidate,
+        report=report,
+        evidence=statistical_evidence,
+    )
+    if statistical_reasons:
+        raise PromotionGateError(f"promotion refused: {','.join(statistical_reasons)}")
     base_lineage = report.get("lineage") if isinstance(report.get("lineage"), dict) else None
     lineage: dict[str, Any] | None = None
     if base_lineage is not None:
@@ -687,6 +696,15 @@ def promote_candidate(
         "stress_suite_fail_reasons": candidate.get("stress_suite_fail_reasons") or [],
         "statistical_validation_required": bool(candidate.get("statistical_validation_required")),
         "statistical_validation_contract": candidate.get("statistical_validation_contract"),
+        "evidence_grade": candidate.get("evidence_grade"),
+        "statistical_method": candidate.get("statistical_method"),
+        "return_panel_hash": candidate.get("return_panel_hash") or report.get("return_panel_hash"),
+        "return_panel_path": candidate.get("return_panel_path") or report.get("return_panel_path"),
+        "return_unit": candidate.get("return_unit") or report.get("return_unit"),
+        "return_panel_observation_count": candidate.get("return_panel_observation_count") or report.get("return_panel_observation_count"),
+        "family_trial_registry_path": report.get("family_trial_registry_path"),
+        "family_trial_registry_prior_hash": report.get("family_trial_registry_prior_hash"),
+        "family_trial_registry_row_hash": report.get("family_trial_registry_row_hash"),
         "benchmark": candidate.get("benchmark"),
         "primary_metric": candidate.get("primary_metric"),
         "primary_metric_source": candidate.get("primary_metric_source"),
@@ -753,6 +771,8 @@ def promote_candidate(
                 execution_calibration_artifact_hash=candidate_calibration_hash,
                 statistical_evidence_path=artifact.get("statistical_evidence_path"),
                 statistical_evidence_hash=artifact.get("statistical_evidence_hash"),
+                return_panel_path=artifact.get("return_panel_path"),
+                return_panel_hash=artifact.get("return_panel_hash"),
                 selection_universe_hash=artifact.get("selection_universe_hash"),
                 candidate_metric_values_hash=artifact.get("candidate_metric_values_hash"),
                 created_at=artifact["generated_at"],

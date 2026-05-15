@@ -35,7 +35,12 @@ from .execution_calibration import compare_calibration_to_scenario
 from .execution_model import FixedBpsExecutionModel, StressExecutionModel, model_params_hash
 from .execution_timing import execution_reality_gate, signal_quote_coverage_summary
 from .experiment_manifest import DateRange, ExecutionScenario, ExperimentManifest
-from .hashing import sha256_prefixed
+from .hashing import content_hash_payload, sha256_prefixed
+from .family_registry import (
+    append_family_trial_registry_row,
+    family_trial_registry_path,
+    registry_content_hash,
+)
 from .lineage import build_research_lineage
 from .metrics_gate_policy import metrics_gate_policy_from_acceptance_gate, metrics_gate_policy_hash
 from .metrics_contract import METRICS_SCHEMA_VERSION
@@ -49,6 +54,7 @@ from .statistical_selection import (
     statistical_validation_required,
     write_statistical_selection_evidence,
 )
+from .return_panel import build_candidate_return_panel, write_candidate_return_panel
 from .stress_suite import StressSuiteContext, analyze_stress_suite, stress_suite_required
 from .strategy_registry import research_strategy_data_requirements, resolve_research_strategy
 
@@ -736,6 +742,10 @@ def _evaluate_candidates(
                 "train_execution_metadata": base.get("train_execution_metadata") or [],
                 "validation_execution_metadata": base.get("validation_execution_metadata") or [],
                 "final_holdout_execution_metadata": base.get("final_holdout_execution_metadata"),
+                "validation_closed_trades": [
+                    trade.as_dict() if hasattr(trade, "as_dict") else trade
+                    for trade in (base.get("validation_closed_trades") or [])
+                ],
             }
             candidate_payload = aggregates.setdefault(
                 base["candidate_id"],
@@ -1823,8 +1833,34 @@ def _report_payload(
     )
     statistical_evidence: dict[str, Any] | None = None
     statistical_evidence_path: Path | None = None
+    return_panel: dict[str, Any] | None = None
+    return_panel_path: Path | None = None
+    family_registry_path: Path | None = None
+    family_registry_prior_hash: str | None = None
+    family_registry_row_hash: str | None = None
     universe_hash: str | None = None
     if statistical_contract is not None:
+        return_panel = build_candidate_return_panel(
+            experiment_id=manifest.experiment_id,
+            manifest_hash=manifest.manifest_hash(),
+            dataset_content_hash=dataset_hash,
+            dataset_quality_hash=dataset_quality_hash,
+            split="validation",
+            benchmark=str(statistical_contract["benchmark"]),
+            candidates=candidates,
+        )
+        if manager is not None:
+            return_panel_path = write_candidate_return_panel(
+                manager=manager,
+                experiment_id=manifest.experiment_id,
+                panel=return_panel,
+            )
+            if statistical_contract.get("multiple_testing_scope") == "experiment_family":
+                family_registry_path = family_trial_registry_path(
+                    manager=manager,
+                    experiment_family_id=experiment_family_id,
+                )
+                family_registry_prior_hash = registry_content_hash(family_registry_path)
         universe_hash = selection_universe_hash(
             manifest_hash=manifest.manifest_hash(),
             dataset_content_hash=dataset_hash,
@@ -1854,6 +1890,11 @@ def _report_payload(
             attempt_index=attempt_index,
             holdout_reuse_count=holdout_reuse_count,
             dataset_reuse_policy=dataset_reuse_policy,
+            return_panel=return_panel,
+            return_panel_path=return_panel_path,
+            family_trial_registry_prior_hash=family_registry_prior_hash,
+            family_trial_registry_path=family_registry_path,
+            family_trial_registry_row_hash=family_registry_row_hash,
         )
         if statistical_evidence is not None and manager is not None:
             statistical_evidence_path = write_statistical_selection_evidence(
@@ -1861,6 +1902,32 @@ def _report_payload(
                 experiment_id=manifest.experiment_id,
                 evidence=statistical_evidence,
             )
+            if statistical_contract.get("multiple_testing_scope") == "experiment_family":
+                registry_result = append_family_trial_registry_row(
+                    manager=manager,
+                    experiment_family_id=experiment_family_id,
+                    experiment_id=manifest.experiment_id,
+                    manifest_hash=manifest.manifest_hash(),
+                    hypothesis_id=str(hypothesis_id) if hypothesis_id is not None else None,
+                    hypothesis_status=str(hypothesis_status) if hypothesis_status is not None else None,
+                    attempt_index=attempt_index,
+                    holdout_reuse_count=holdout_reuse_count,
+                    dataset_content_hash=dataset_hash,
+                    parameter_space_hash=sha256_prefixed(manifest.parameter_space),
+                    candidate_count=len(candidates),
+                    return_panel_hash=str(return_panel.get("content_hash")) if isinstance(return_panel, dict) else None,
+                    statistical_evidence_hash=str(statistical_evidence.get("content_hash")),
+                    result_status=str(statistical_evidence.get("statistical_gate_result") or "UNKNOWN"),
+                    created_at=generated_at,
+                )
+                family_registry_row_hash = str(registry_result.get("row_hash") or "")
+                statistical_evidence["family_trial_registry_row_hash"] = family_registry_row_hash
+                statistical_evidence["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in statistical_evidence.items() if k != "content_hash"}))
+                statistical_evidence_path = write_statistical_selection_evidence(
+                    manager=manager,
+                    experiment_id=manifest.experiment_id,
+                    evidence=statistical_evidence,
+                )
         _attach_statistical_selection_to_candidates(
             candidates=candidates,
             required=statistical_validation_required(manifest),
@@ -1959,6 +2026,16 @@ def _report_payload(
         "missing_metric_count": statistical_evidence.get("missing_metric_count") if statistical_evidence else None,
         "statistical_evidence_hash": statistical_evidence.get("content_hash") if statistical_evidence else None,
         "statistical_evidence_path": str(statistical_evidence_path.resolve()) if statistical_evidence_path else None,
+        "return_panel_hash": return_panel.get("content_hash") if return_panel else None,
+        "return_panel_path": str(return_panel_path.resolve()) if return_panel_path else None,
+        "return_panel_split": return_panel.get("split") if return_panel else None,
+        "return_unit": return_panel.get("return_unit") if return_panel else None,
+        "return_panel_observation_count": return_panel.get("observation_count") if return_panel else None,
+        "evidence_grade": statistical_evidence.get("evidence_grade") if statistical_evidence else None,
+        "statistical_method": statistical_evidence.get("statistical_method") if statistical_evidence else None,
+        "family_trial_registry_path": str(family_registry_path.resolve()) if family_registry_path else None,
+        "family_trial_registry_prior_hash": family_registry_prior_hash,
+        "family_trial_registry_row_hash": family_registry_row_hash,
         "statistical_gate_result": statistical_evidence.get("statistical_gate_result") if statistical_evidence else None,
         "statistical_gate_fail_reasons": statistical_evidence.get("gate_fail_reasons") if statistical_evidence else [],
         "white_reality_check_p_value": (
@@ -2013,7 +2090,30 @@ def _report_payload(
         "best_final_holdout_stress_suite": (
             stress_summary_candidate.get("final_holdout_stress_suite") if stress_summary_candidate else None
         ),
-        "gate_result": "PASS" if best else "FAIL",
+        "candidate_acceptance_gate_result": "PASS" if best else "FAIL",
+        "statistical_selection_gate_result": statistical_evidence.get("statistical_gate_result") if statistical_evidence else None,
+        "walk_forward_gate_result": best.get("walk_forward_gate_result") if best else None,
+        "promotion_eligibility_gate_result": (
+            "PASS"
+            if best and (
+                not statistical_validation_required(manifest)
+                or (statistical_evidence is not None and statistical_evidence.get("statistical_gate_result") == "PASS")
+            )
+            else "FAIL"
+        ),
+        "promotion_blocking_reasons": _promotion_blocking_reasons(
+            best=best,
+            statistical_required=statistical_validation_required(manifest),
+            statistical_evidence=statistical_evidence,
+        ),
+        "gate_result": (
+            "PASS"
+            if best and (
+                not statistical_validation_required(manifest)
+                or (statistical_evidence is not None and statistical_evidence.get("statistical_gate_result") == "PASS")
+            )
+            else "FAIL"
+        ),
         "warnings": warnings,
         "candidates": candidates,
         "repository_version": repository_version,
@@ -2033,6 +2133,25 @@ def _primary_base_cost_assumption(candidate: dict[str, Any]) -> dict[str, Any] |
         assumption = result.get("cost_assumption")
         return dict(assumption) if isinstance(assumption, dict) else None
     return None
+
+
+def _promotion_blocking_reasons(
+    *,
+    best: dict[str, Any] | None,
+    statistical_required: bool,
+    statistical_evidence: dict[str, Any] | None,
+) -> list[str]:
+    reasons: list[str] = []
+    if best is None:
+        reasons.append("candidate_acceptance_gate_failed")
+    if statistical_required:
+        if not isinstance(statistical_evidence, dict):
+            reasons.append("statistical_evidence_missing")
+        elif statistical_evidence.get("statistical_gate_result") != "PASS":
+            reasons.extend(str(item) for item in statistical_evidence.get("gate_fail_reasons") or [])
+            if not reasons:
+                reasons.append("statistical_selection_failed")
+    return sorted(set(reasons))
 
 
 def _attach_statistical_selection_to_candidates(
@@ -2055,6 +2174,12 @@ def _attach_statistical_selection_to_candidates(
     metric_value_count = evidence.get("metric_value_count") if isinstance(evidence, dict) else None
     missing_metric_count = evidence.get("missing_metric_count") if isinstance(evidence, dict) else None
     method = evidence.get("white_reality_check_method") if isinstance(evidence, dict) else None
+    evidence_grade = evidence.get("evidence_grade") if isinstance(evidence, dict) else None
+    statistical_method = evidence.get("statistical_method") if isinstance(evidence, dict) else None
+    return_panel_hash = evidence.get("return_panel_hash") if isinstance(evidence, dict) else None
+    return_panel_path = evidence.get("return_panel_path") if isinstance(evidence, dict) else None
+    return_unit = evidence.get("return_unit") if isinstance(evidence, dict) else None
+    return_panel_observation_count = evidence.get("return_panel_observation_count") if isinstance(evidence, dict) else None
     limitations = evidence.get("promotion_grade_limitations") if isinstance(evidence, dict) else []
     for candidate in candidates:
         candidate["statistical_validation_required"] = required
@@ -2070,6 +2195,12 @@ def _attach_statistical_selection_to_candidates(
         candidate["missing_metric_count"] = missing_metric_count
         candidate["statistical_evidence_hash"] = evidence_hash
         candidate["statistical_evidence_path"] = str(evidence_path.resolve()) if evidence_path is not None else None
+        candidate["evidence_grade"] = evidence_grade
+        candidate["statistical_method"] = statistical_method
+        candidate["return_panel_hash"] = return_panel_hash
+        candidate["return_panel_path"] = return_panel_path
+        candidate["return_unit"] = return_unit
+        candidate["return_panel_observation_count"] = return_panel_observation_count
         candidate["statistical_gate_result"] = gate_result
         candidate["statistical_gate_fail_reasons"] = list(gate_reasons) if isinstance(gate_reasons, list) else []
         candidate["white_reality_check_p_value"] = p_value

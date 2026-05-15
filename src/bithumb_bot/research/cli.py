@@ -90,6 +90,10 @@ def cmd_research_promote_candidate(
     print(f"  statistical_validation_required={1 if result.artifact.get('statistical_validation_required') else 0}")
     print(f"  selection_universe_hash={result.artifact.get('selection_universe_hash') or 'none'}")
     print(f"  statistical_evidence_hash={result.artifact.get('statistical_evidence_hash') or 'none'}")
+    print(f"  evidence_grade={result.artifact.get('evidence_grade') or 'none'}")
+    print(f"  statistical_method={result.artifact.get('statistical_method') or 'none'}")
+    print(f"  return_panel_hash={result.artifact.get('return_panel_hash') or 'none'}")
+    print(f"  return_unit={result.artifact.get('return_unit') or 'none'}")
     print(f"  white_reality_check_p_value={result.artifact.get('white_reality_check_p_value')}")
     print(f"  statistical_gate_result={result.artifact.get('statistical_gate_result') or 'none'}")
     print(
@@ -130,6 +134,11 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  candidates_evaluated={report.get('candidate_count')}")
     print(f"  best_candidate_id={report.get('best_candidate_id') or 'none'}")
     print(f"  gate_result={report.get('gate_result')}")
+    print(f"  promotion_eligibility_gate_result={report.get('promotion_eligibility_gate_result') or report.get('gate_result')}")
+    print(
+        "  promotion_blocking_reasons="
+        f"{_format_items(tuple(str(item) for item in report.get('promotion_blocking_reasons') or []))}"
+    )
     print(f"  candidate_gate_counts={_format_counts(summary.candidate_gate_counts)}")
     print(f"  top_fail_reasons={_format_counts(summary.top_fail_reasons)}")
     print(f"  promotion_allowed={1 if summary.promotion_allowed else 0}")
@@ -144,6 +153,12 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  statistical_metric_value_count={report.get('metric_value_count')}")
     print(f"  statistical_missing_metric_count={report.get('missing_metric_count')}")
     print(f"  statistical_evidence_hash={report.get('statistical_evidence_hash') or 'none'}")
+    print(f"  evidence_grade={report.get('evidence_grade') or 'none'}")
+    print(f"  statistical_method={report.get('statistical_method') or 'none'}")
+    print(f"  return_panel_hash={report.get('return_panel_hash') or 'none'}")
+    print(f"  return_unit={report.get('return_unit') or 'none'}")
+    print(f"  return_panel_observation_count={report.get('return_panel_observation_count')}")
+    print(f"  family_trial_registry_prior_hash={report.get('family_trial_registry_prior_hash') or 'none'}")
     print(f"  summary_metric_max_bootstrap_p_value={report.get('summary_metric_max_bootstrap_p_value')}")
     print(f"  white_reality_check_p_value={report.get('white_reality_check_p_value')}")
     print(f"  white_reality_check_method={report.get('white_reality_check_method') or 'none'}")

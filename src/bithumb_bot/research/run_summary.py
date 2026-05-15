@@ -47,9 +47,10 @@ def build_research_run_summary(report: dict[str, object]) -> ResearchRunSummary:
         report.get("statistical_validation_required") is True
         and report.get("statistical_gate_result") != "PASS"
     )
+    promotion_eligibility_failed = report.get("promotion_eligibility_gate_result") == "FAIL"
     promotion_allowed = (
         bool(report.get("best_candidate_id"))
-        and report.get("gate_result") == "PASS"
+        and report.get("promotion_eligibility_gate_result", report.get("gate_result")) == "PASS"
         and not statistical_gate_failed
     )
     has_pass_candidate = any(candidate.get("acceptance_gate_result") == "PASS" for candidate in candidates)
@@ -79,6 +80,7 @@ def build_research_run_summary(report: dict[str, object]) -> ResearchRunSummary:
             top_fail_reasons=fail_reasons,
             gate_result=report.get("gate_result"),
             statistical_gate_failed=statistical_gate_failed,
+            promotion_eligibility_failed=promotion_eligibility_failed,
         ),
     )
 
@@ -140,11 +142,14 @@ def _next_action(
     top_fail_reasons: Counter[str],
     gate_result: object,
     statistical_gate_failed: bool = False,
+    promotion_eligibility_failed: bool = False,
 ) -> str:
     if promotion_allowed:
         return "review_promotion_candidate"
     if statistical_gate_failed:
         return "do_not_promote_review_statistical_selection"
+    if promotion_eligibility_failed:
+        return "do_not_promote_review_blocking_reasons"
     if not has_candidates:
         return "inspect_dataset_or_manifest"
     if "walk_forward_missing" in top_fail_reasons:

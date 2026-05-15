@@ -599,6 +599,23 @@ def _attach_statistical_evidence(
         "primary_metric": "net_excess_return",
         "primary_metric_source": "validation_metrics",
         "bootstrap_method": "metric_centered_max_bootstrap",
+        "statistical_method": "white_reality_check_block_bootstrap",
+        "evidence_grade": "PROMOTION_GRADE_WRC",
+        "minimum_promotion_evidence_grade": "PROMOTION_GRADE_WRC",
+        "promotion_grade_available": True,
+        "bootstrap_sampling_contract": {
+            "method_name": "white_reality_check_block_bootstrap",
+            "n_bootstrap": 100,
+            "seed_policy": "derived_from_selection_universe_hash",
+            "derived_seed": 1,
+            "block_length": 2,
+            "block_length_policy": "fixed",
+            "stationary_bootstrap_probability": None,
+            "observation_count": 2,
+            "return_unit": "trade_return",
+            "benchmark": "cash",
+            "missing_observation_policy": "skip_missing_candidate_trade_returns",
+        },
         "n_bootstrap": 100,
         "block_length": None,
         "block_length_policy": "not_applicable_summary_metric",
@@ -608,7 +625,8 @@ def _attach_statistical_evidence(
         * max(1, holdout_reuse_count + 1),
         "summary_metric_max_bootstrap_p_value": 0.01,
         "white_reality_check_p_value": 0.01,
-        "white_reality_check_method": "approximation_summary_metric_centered_max_bootstrap",
+        "white_reality_check_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_available": True,
         "statistical_gate_result": "PASS",
         "gate_fail_reasons": [],
         "limitations": [
@@ -625,6 +643,62 @@ def _attach_statistical_evidence(
         ],
         "statistical_validation_contract": contract,
     }
+    evidence["bootstrap_sampling_contract"]["content_hash"] = sha256_prefixed(
+        content_hash_payload(evidence["bootstrap_sampling_contract"])
+    )
+    panel = {
+        "artifact_type": "candidate_return_panel",
+        "schema_version": 1,
+        "experiment_id": report["experiment_id"],
+        "manifest_hash": report["manifest_hash"],
+        "dataset_content_hash": report["dataset_content_hash"],
+        "dataset_quality_hash": report.get("dataset_quality_hash"),
+        "split": "validation",
+        "return_unit": "trade_return",
+        "benchmark": "cash",
+        "ordered_time_index_hash": "sha256:time-index",
+        "candidate_count": candidate_count,
+        "candidate_ids": [str(item.get("parameter_candidate_id") or "") for item in report.get("candidates") or [candidate]],
+        "candidate_return_series": [],
+        "observation_count": 2,
+        "missing_observation_policy": "skip_missing_candidate_trade_returns",
+        "limitations": ["test_fixture_panel"],
+        "panel_content_hash": "sha256:panel-content",
+    }
+    panel["content_hash"] = sha256_prefixed(content_hash_payload(panel))
+    panel_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "candidate_return_panel.json"
+    write_json_atomic(panel_path, panel)
+    registry_path = manager.data_dir() / "reports" / "research" / "families" / "family_001" / "trial_registry.jsonl"
+    registry_row = {
+        "schema_version": 1,
+        "experiment_family_id": "family_001",
+        "experiment_id": report["experiment_id"],
+        "manifest_hash": report["manifest_hash"],
+        "hypothesis_id": report.get("hypothesis_id"),
+        "hypothesis_status": report.get("hypothesis_status"),
+        "attempt_index": attempt_index,
+        "holdout_reuse_count": holdout_reuse_count,
+        "dataset_content_hash": report["dataset_content_hash"],
+        "parameter_space_hash": report.get("parameter_space_hash") or "sha256:parameter-space",
+        "candidate_count": candidate_count,
+        "return_panel_hash": panel["content_hash"],
+        "statistical_evidence_hash": None,
+        "result_status": "PASS",
+        "prior_registry_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e191b6417b1db8ce3cdd82e",
+        "created_at": "2026-05-04T00:00:00+00:00",
+    }
+    registry_row["row_hash"] = sha256_prefixed(content_hash_payload(registry_row))
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps(registry_row, sort_keys=True) + "\n", encoding="utf-8")
+    evidence["return_panel_path"] = str(panel_path)
+    evidence["return_panel_hash"] = panel["content_hash"]
+    evidence["return_panel_artifact_type"] = "candidate_return_panel"
+    evidence["return_panel_split"] = "validation"
+    evidence["return_unit"] = "trade_return"
+    evidence["return_panel_observation_count"] = 2
+    evidence["family_trial_registry_path"] = str(registry_path)
+    evidence["family_trial_registry_prior_hash"] = registry_row["prior_registry_hash"]
+    evidence["family_trial_registry_row_hash"] = registry_row["row_hash"]
     evidence.update(overrides)
     evidence["content_hash"] = sha256_prefixed(content_hash_payload(evidence))
     evidence_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "statistical_selection_evidence.json"
@@ -641,6 +715,15 @@ def _attach_statistical_evidence(
     report["missing_metric_count"] = evidence["missing_metric_count"]
     report["statistical_evidence_hash"] = evidence["content_hash"]
     report["statistical_evidence_path"] = str(evidence_path)
+    report["evidence_grade"] = evidence.get("evidence_grade")
+    report["statistical_method"] = evidence.get("statistical_method")
+    report["return_panel_hash"] = evidence.get("return_panel_hash")
+    report["return_panel_path"] = evidence.get("return_panel_path")
+    report["return_unit"] = evidence.get("return_unit")
+    report["return_panel_observation_count"] = evidence.get("return_panel_observation_count")
+    report["family_trial_registry_path"] = evidence.get("family_trial_registry_path")
+    report["family_trial_registry_prior_hash"] = evidence.get("family_trial_registry_prior_hash")
+    report["family_trial_registry_row_hash"] = evidence.get("family_trial_registry_row_hash")
     report["statistical_gate_result"] = evidence.get("statistical_gate_result")
     report["statistical_gate_fail_reasons"] = evidence.get("gate_fail_reasons")
     report["white_reality_check_p_value"] = evidence.get("white_reality_check_p_value")
@@ -661,6 +744,15 @@ def _attach_statistical_evidence(
     candidate["missing_metric_count"] = evidence["missing_metric_count"]
     candidate["statistical_evidence_hash"] = evidence["content_hash"]
     candidate["statistical_evidence_path"] = str(evidence_path)
+    candidate["evidence_grade"] = evidence.get("evidence_grade")
+    candidate["statistical_method"] = evidence.get("statistical_method")
+    candidate["return_panel_hash"] = evidence.get("return_panel_hash")
+    candidate["return_panel_path"] = evidence.get("return_panel_path")
+    candidate["return_unit"] = evidence.get("return_unit")
+    candidate["return_panel_observation_count"] = evidence.get("return_panel_observation_count")
+    candidate["family_trial_registry_path"] = evidence.get("family_trial_registry_path")
+    candidate["family_trial_registry_prior_hash"] = evidence.get("family_trial_registry_prior_hash")
+    candidate["family_trial_registry_row_hash"] = evidence.get("family_trial_registry_row_hash")
     candidate["statistical_gate_result"] = evidence.get("statistical_gate_result")
     candidate["statistical_gate_fail_reasons"] = evidence.get("gate_fail_reasons")
     candidate["white_reality_check_p_value"] = evidence.get("white_reality_check_p_value")

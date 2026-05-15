@@ -149,6 +149,8 @@ def build_promotion_lineage(
     execution_calibration_artifact_hash: str | None = None,
     statistical_evidence_path: str | None = None,
     statistical_evidence_hash: str | None = None,
+    return_panel_path: str | None = None,
+    return_panel_hash: str | None = None,
     selection_universe_hash: str | None = None,
     candidate_metric_values_hash: str | None = None,
     created_at: str | None = None,
@@ -183,6 +185,8 @@ def build_promotion_lineage(
             "execution_calibration_artifact_hash": candidate_calibration_hash or base_calibration_hash,
             "statistical_evidence_path": statistical_evidence_path,
             "statistical_evidence_hash": statistical_evidence_hash,
+            "return_panel_path": return_panel_path,
+            "return_panel_hash": return_panel_hash,
             "selection_universe_hash": selection_universe_hash,
             "candidate_metric_values_hash": candidate_metric_values_hash,
             "created_at": created_at or datetime.now(timezone.utc).isoformat(),
@@ -216,6 +220,7 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
         "candidate_profile_hash": None,
         "execution_calibration_artifact_hash": None,
         "statistical_evidence_hash": None,
+        "return_panel_hash": None,
         "stress_suite_contract_hash": None,
         "validation_stress_suite_hash": None,
         "final_holdout_stress_suite_hash": None,
@@ -263,6 +268,7 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     summary["candidate_profile_hash"] = lineage.get("candidate_profile_hash")
     summary["execution_calibration_artifact_hash"] = lineage.get("execution_calibration_artifact_hash")
     summary["statistical_evidence_hash"] = lineage.get("statistical_evidence_hash")
+    summary["return_panel_hash"] = lineage.get("return_panel_hash")
     summary["stress_suite_contract_hash"] = promotion.get("stress_suite_contract_hash")
     validation_stress = promotion.get("validation_stress_suite") if isinstance(promotion.get("validation_stress_suite"), dict) else {}
     final_stress = promotion.get("final_holdout_stress_suite") if isinstance(promotion.get("final_holdout_stress_suite"), dict) else {}
@@ -321,6 +327,13 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
             lineage.get("candidate_metric_values_hash"),
             "candidate_metric_values_hash_mismatch",
         )
+        _compare(
+            summary,
+            "return_panel_hash",
+            promotion.get("return_panel_hash"),
+            lineage.get("return_panel_hash"),
+            "return_panel_hash_mismatch",
+        )
     _verify_artifact_hash(
         summary,
         lineage,
@@ -330,6 +343,13 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     )
     if statistical_required:
         _verify_statistical_evidence_bindings(summary, promotion, lineage)
+        _verify_artifact_hash(
+            summary,
+            lineage,
+            "return_panel",
+            required=True,
+            missing_reason="return_panel_missing",
+        )
     stress_required = bool(promotion.get("stress_suite_required")) or is_production_bound_target(
         promotion.get("deployment_tier")
     )
@@ -464,6 +484,13 @@ def _verify_statistical_evidence_bindings(
         promotion.get("candidate_metric_values_hash"),
         payload.get("candidate_metric_values_hash"),
         "candidate_metric_values_hash_mismatch",
+    )
+    _compare(
+        summary,
+        "statistical_evidence.return_panel_hash",
+        promotion.get("return_panel_hash"),
+        payload.get("return_panel_hash"),
+        "return_panel_hash_mismatch",
     )
     if payload.get("candidate_metric_values_hash") != lineage.get("candidate_metric_values_hash"):
         summary["mismatches"].append(

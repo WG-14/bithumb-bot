@@ -36,6 +36,40 @@ hypothesis
 -> paper validation consideration
 ```
 
+## Statistical Evidence Grades
+
+Research reports now separate screening evidence from promotion-grade statistical evidence.
+The existing centered max bootstrap over candidate summary metrics is
+`SCREENING_SUMMARY_BOOTSTRAP` only. It may expose
+`summary_metric_max_bootstrap_p_value` / `selection_adjusted_summary_p_value`,
+but it must not populate `white_reality_check_p_value` or claim a full White's
+Reality Check method.
+
+Production-bound promotion requires `PROMOTION_GRADE_WRC` or
+`PROMOTION_GRADE_WRC_SPA_DSR` evidence. If only screening evidence is present,
+promotion fails closed with `statistical_evidence_grade_insufficient`.
+SPA and Deflated Sharpe gates remain fail-closed when configured and unavailable;
+no placeholder p-values are acceptable.
+
+Every statistical evidence artifact is bound to a canonical
+`candidate_return_panel` artifact. The current panel is the smallest honest panel
+available from the engine: validation split `trade_return` series derived from
+closed trade records, with a cash benchmark, ordered time-index hash, per-candidate
+series hashes, benchmark excess-return hashes, observation counts, and explicit
+limitations noting that bar-level portfolio return panels are not yet available.
+Promotion-grade methods that require unavailable return units must fail closed
+rather than infer precision.
+
+For `multiple_testing_scope=experiment_family`, the run must bind a durable
+family trial registry at
+`DATA_ROOT/<mode>/reports/research/families/<experiment_family_id>/trial_registry.jsonl`.
+The registry records experiment id, manifest hash, hypothesis metadata, attempt
+index, holdout reuse count, dataset hash, parameter-space hash, candidate count,
+return panel hash, statistical evidence hash, result status, and row hash. Missing
+or stale registry evidence fails closed as `experiment_family_universe_missing`
+or `experiment_family_registry_stale`; the system must not silently fall back to
+current-experiment-only selection.
+
 The research engine is a pure replay/simulation path. It does not call the live broker, order lifecycle, run loop, recovery commands, or lot-native SELL authority code.
 
 ## Commands
