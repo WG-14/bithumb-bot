@@ -7,6 +7,7 @@ from bithumb_bot.research.metrics_contract import ClosedTradeRecord
 from bithumb_bot.research.stress_suite import (
     StressSuiteContext,
     analyze_stress_suite,
+    stress_suite_required_for_candidate,
     _trade_summary,
     validate_stress_suite_evidence_for_candidate,
 )
@@ -214,6 +215,31 @@ def test_required_stress_evidence_validation_refuses_missing_and_hash_mismatch()
 
     candidate.pop("validation_stress_suite")
     assert "stress_suite_required_but_missing" in validate_stress_suite_evidence_for_candidate(candidate, {})
+
+
+def test_production_bound_candidate_requires_stress_suite_even_when_flag_missing_or_false() -> None:
+    missing = {
+        "deployment_tier": "paper_candidate",
+        "final_holdout_present": False,
+        "final_holdout_required_for_promotion": False,
+    }
+    disabled = dict(missing, stress_suite_required=False)
+
+    assert stress_suite_required_for_candidate(missing, {}) is True
+    assert stress_suite_required_for_candidate(disabled, {}) is True
+    assert "stress_suite_required_but_missing" in validate_stress_suite_evidence_for_candidate(missing, {})
+    assert "stress_suite_required_but_missing" in validate_stress_suite_evidence_for_candidate(disabled, {})
+
+
+def test_research_only_candidate_does_not_require_stress_suite_without_flag() -> None:
+    candidate = {
+        "deployment_tier": "research_only",
+        "final_holdout_present": False,
+        "final_holdout_required_for_promotion": False,
+    }
+
+    assert stress_suite_required_for_candidate(candidate, {}) is False
+    assert validate_stress_suite_evidence_for_candidate(candidate, {}) == []
 
 
 def test_trade_summary_win_rate_uses_ratio_units() -> None:

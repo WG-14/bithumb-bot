@@ -1780,6 +1780,9 @@ def _report_payload(
             evidence_path=statistical_evidence_path,
         )
     best = next((candidate for candidate in candidates if candidate["acceptance_gate_result"] == "PASS"), None)
+    stress_summary_candidate = best
+    if stress_summary_candidate is None and stress_suite_required(manifest) and candidates:
+        stress_summary_candidate = candidates[0]
     warnings = sorted({warning for candidate in candidates for warning in candidate.get("warnings", [])})
     return {
         "report_kind": report_kind,
@@ -1908,10 +1911,18 @@ def _report_payload(
         "best_candidate_id": best.get("parameter_candidate_id") if best else None,
         "best_validation_metrics_v2": best.get("validation_metrics_v2") if best else None,
         "best_final_holdout_metrics_v2": best.get("final_holdout_metrics_v2") if best else None,
-        "stress_suite_gate_result": best.get("stress_suite_gate_result") if best else None,
-        "stress_suite_fail_reasons": best.get("stress_suite_fail_reasons") if best else [],
-        "best_validation_stress_suite": best.get("validation_stress_suite") if best else None,
-        "best_final_holdout_stress_suite": best.get("final_holdout_stress_suite") if best else None,
+        "stress_suite_gate_result": (
+            stress_summary_candidate.get("stress_suite_gate_result") if stress_summary_candidate else None
+        ),
+        "stress_suite_fail_reasons": (
+            stress_summary_candidate.get("stress_suite_fail_reasons") if stress_summary_candidate else []
+        ),
+        "best_validation_stress_suite": (
+            stress_summary_candidate.get("validation_stress_suite") if stress_summary_candidate else None
+        ),
+        "best_final_holdout_stress_suite": (
+            stress_summary_candidate.get("final_holdout_stress_suite") if stress_summary_candidate else None
+        ),
         "gate_result": "PASS" if best else "FAIL",
         "warnings": warnings,
         "candidates": candidates,

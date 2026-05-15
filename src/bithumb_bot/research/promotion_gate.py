@@ -16,7 +16,7 @@ from .deployment_policy import is_production_bound_target, validate_production_c
 from .metrics_contract import METRICS_SCHEMA_VERSION
 from .metrics_gate_policy import metrics_gate_policy_hash
 from .statistical_selection import validate_statistical_evidence_for_candidate
-from .stress_suite import validate_stress_suite_evidence_for_candidate
+from .stress_suite import stress_suite_required_for_candidate, validate_stress_suite_evidence_for_candidate
 
 
 class PromotionGateError(ValueError):
@@ -84,7 +84,7 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "metrics_gate_policy": candidate.get("metrics_gate_policy"),
         "metrics_gate_policy_hash": candidate.get("metrics_gate_policy_hash"),
         "metrics_contract_required": bool(candidate.get("metrics_contract_required")),
-        "stress_suite_required": bool(candidate.get("stress_suite_required")),
+        "stress_suite_required": stress_suite_required_for_candidate(candidate),
         "stress_suite_contract": candidate.get("stress_suite_contract"),
         "stress_suite_contract_hash": candidate.get("stress_suite_contract_hash"),
         "validation_stress_suite": candidate.get("validation_stress_suite"),
@@ -257,7 +257,7 @@ def _extend_stress_suite_reasons(
     *,
     prefix: str = "",
 ) -> None:
-    if not bool(candidate.get("stress_suite_required")):
+    if not stress_suite_required_for_candidate(candidate):
         return
     stress_reasons = validate_stress_suite_evidence_for_candidate(candidate=candidate, report={})
     reasons.extend(f"{prefix}{reason}" for reason in stress_reasons)
@@ -678,7 +678,7 @@ def promote_candidate(
         "metrics_gate_policy": candidate.get("metrics_gate_policy"),
         "metrics_gate_policy_hash": candidate.get("metrics_gate_policy_hash"),
         "metrics_contract_required": bool(candidate.get("metrics_contract_required")),
-        "stress_suite_required": bool(candidate.get("stress_suite_required")),
+        "stress_suite_required": stress_suite_required_for_candidate(candidate, report),
         "stress_suite_contract": candidate.get("stress_suite_contract"),
         "stress_suite_contract_hash": candidate.get("stress_suite_contract_hash"),
         "validation_stress_suite": candidate.get("validation_stress_suite"),

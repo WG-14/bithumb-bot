@@ -274,7 +274,7 @@ def _candidate_with_required_metrics_contract(**overrides) -> dict[str, object]:
     return payload
 
 
-def _production_candidate(**overrides):
+def _production_candidate(*, attach_stress_suite: bool = True, **overrides):
     base_cost_assumption = {
         "label": "test_realistic_fee_0004_slippage_5bps",
         "role": "base",
@@ -379,6 +379,8 @@ def _production_candidate(**overrides):
         payload["execution_reality_contract"] = execution_contract
         payload["execution_contract_hash"] = execution_contract["execution_contract_hash"]
     payload.update(overrides)
+    if attach_stress_suite:
+        _attach_stress_suite(payload)
     explicit_hash = overrides.get("candidate_profile_hash")
     payload.pop("candidate_profile_hash", None)
     payload["candidate_profile_hash"] = explicit_hash or sha256_prefixed(build_candidate_profile(payload))
@@ -1025,6 +1027,38 @@ def test_promotion_artifact_exposes_required_stress_suite_and_reproduces(tmp_pat
     assert result.artifact["validation_stress_suite"]["stress_suite_hash"].startswith("sha256:")
     assert result.artifact["stress_suite_gate_result"] == "PASS"
     assert summary["ok"] is True
+
+
+@pytest.mark.parametrize("field_action", ["missing", "false"])
+def test_production_bound_promotion_refuses_missing_stress_suite_when_flag_not_true(
+    tmp_path,
+    monkeypatch,
+    field_action,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate(attach_stress_suite=False)
+    if field_action == "missing":
+        candidate.pop("stress_suite_required", None)
+    else:
+        candidate["stress_suite_required"] = False
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="stress_suite_required_but_missing"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_research_only_promotion_can_omit_stress_suite(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _candidate()
+    candidate.pop("stress_suite_required", None)
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert result.artifact["deployment_tier"] == "research_only"
+    assert result.artifact["stress_suite_required"] is False
 
 
 def test_promotion_refuses_missing_final_holdout_stress_when_final_holdout_present(tmp_path, monkeypatch) -> None:
@@ -1988,6 +2022,53 @@ def test_reproduce_fails_when_required_final_holdout_stress_hash_mismatches(tmp_
 
     assert summary["ok"] is False
     assert summary["reason"] == "final_holdout_stress_suite_hash_mismatch"
+
+
+@pytest.mark.parametrize("field_action", ["missing", "false"])
+def test_reproduce_requires_stress_suite_for_production_bound_artifact_even_without_flag(
+    tmp_path,
+    monkeypatch,
+    field_action,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    promotion = json.loads(result.artifact_path.read_text(encoding="utf-8"))
+    if field_action == "missing":
+        promotion.pop("stress_suite_required", None)
+    else:
+        promotion["stress_suite_required"] = False
+    promotion["validation_stress_suite"] = None
+    promotion["final_holdout_stress_suite"] = None
+    _rewrite_promotion_artifact(result.artifact_path, promotion)
+
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert summary["ok"] is False
+    assert summary["reason"] == "stress_suite_required_but_missing"
+
+
+@pytest.mark.parametrize("field_action", ["missing", "false"])
+def test_reproduce_accepts_complete_production_bound_stress_suite_even_without_flag(
+    tmp_path,
+    monkeypatch,
+    field_action,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    promotion = json.loads(result.artifact_path.read_text(encoding="utf-8"))
+    if field_action == "missing":
+        promotion.pop("stress_suite_required", None)
+    else:
+        promotion["stress_suite_required"] = False
+    _rewrite_promotion_artifact(result.artifact_path, promotion)
+
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert summary["ok"] is True
 
 
 def test_reproduce_fails_when_promotion_report_stress_contract_drifts(tmp_path, monkeypatch) -> None:

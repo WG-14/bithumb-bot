@@ -330,7 +330,10 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     )
     if statistical_required:
         _verify_statistical_evidence_bindings(summary, promotion, lineage)
-    if bool(promotion.get("stress_suite_required")):
+    stress_required = bool(promotion.get("stress_suite_required")) or is_production_bound_target(
+        promotion.get("deployment_tier")
+    )
+    if stress_required:
         _verify_stress_suite_bindings(summary, promotion, lineage)
     walk_required = bool(promotion.get("walk_forward_required"))
     _verify_artifact_hash(

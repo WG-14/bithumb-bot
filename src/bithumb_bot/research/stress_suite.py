@@ -5,6 +5,7 @@ import random
 from dataclasses import dataclass
 from typing import Any
 
+from .deployment_policy import is_production_bound_target
 from .experiment_manifest import StressSuiteContract
 from .hashing import content_hash_payload, sha256_prefixed
 from .metrics_contract import ClosedTradeRecord
@@ -33,6 +34,18 @@ def stress_suite_required(manifest_or_payload: Any) -> bool:
         return bool(contract.required_for_promotion) if contract is not None else False
     contract = manifest_or_payload.get("stress_suite_contract") if isinstance(manifest_or_payload, dict) else None
     return bool(contract.get("required_for_promotion")) if isinstance(contract, dict) else False
+
+
+def stress_suite_required_for_candidate(
+    candidate: dict[str, Any],
+    report: dict[str, Any] | None = None,
+) -> bool:
+    report_payload = report or {}
+    return (
+        bool(candidate.get("stress_suite_required"))
+        or bool(report_payload.get("stress_suite_required"))
+        or is_production_bound_target(candidate.get("deployment_tier"))
+    )
 
 
 def analyze_stress_suite(
@@ -275,7 +288,7 @@ def analyze_risk_adjusted_score(*, contract: dict[str, Any], metrics_v2: dict[st
 
 def validate_stress_suite_evidence_for_candidate(candidate: dict[str, Any], report: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
-    required = bool(candidate.get("stress_suite_required")) or bool(report.get("stress_suite_required"))
+    required = stress_suite_required_for_candidate(candidate, report)
     if not required:
         return reasons
     contract = candidate.get("stress_suite_contract")

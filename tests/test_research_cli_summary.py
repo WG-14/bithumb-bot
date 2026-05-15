@@ -316,6 +316,43 @@ def test_print_report_summary_renders_stress_suite_diagnostics(capsys) -> None:
     assert "stress_monte_carlo_max_drawdown_pct_p95=31.2" in output
 
 
+def test_all_stress_failed_report_summary_stays_fail_closed(capsys) -> None:
+    report = _report(
+        candidates=[
+            _candidate(
+                "candidate_001",
+                gate="FAIL",
+                fail_reasons=["stress_suite_gate_not_passed"],
+            )
+        ],
+        best_candidate_id=None,
+        gate_result="FAIL",
+    )
+    report.update(
+        {
+            "stress_suite_required": True,
+            "stress_suite_gate_result": "FAIL",
+            "stress_suite_fail_reasons": ["stress_monte_carlo_survival_probability_failed"],
+            "best_validation_stress_suite": {
+                "trade_removal": {"status": "PASS"},
+                "trade_order_monte_carlo": {
+                    "survival_probability": 0.2,
+                    "max_drawdown_pct_p95": 91.0,
+                },
+            },
+        }
+    )
+
+    summary = build_research_run_summary(report)
+    _print_report_summary("RESEARCH-BACKTEST", report)
+
+    output = capsys.readouterr().out
+    assert summary.promotion_allowed is False
+    assert "promotion_allowed=0" in output
+    assert "stress_suite_gate_result=FAIL" in output
+    assert "stress_suite_fail_reasons=stress_monte_carlo_survival_probability_failed" in output
+
+
 def test_print_report_summary_handles_missing_optional_stress_suite(capsys) -> None:
     _print_report_summary("RESEARCH-BACKTEST", _report(candidates=[]))
 

@@ -294,6 +294,11 @@ def test_required_stress_suite_failure_blocks_candidate_acceptance(tmp_path, mon
     assert candidate["acceptance_gate_result"] == "FAIL"
     assert candidate["stress_suite_gate_result"] == "FAIL"
     assert "stress_suite_gate_not_passed" in candidate["gate_fail_reasons"]
+    assert report["best_candidate_id"] is None
+    assert report["gate_result"] == "FAIL"
+    assert report["stress_suite_gate_result"] == "FAIL"
+    assert "stress_monte_carlo_survival_probability_failed" in report["stress_suite_fail_reasons"]
+    assert report["best_validation_stress_suite"]["stress_suite_hash"] == candidate["validation_stress_suite"]["stress_suite_hash"]
 
 
 def test_report_content_hash_is_independent_of_data_root(tmp_path, monkeypatch) -> None:
