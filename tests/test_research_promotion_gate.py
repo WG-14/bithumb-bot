@@ -24,6 +24,23 @@ def _manager(tmp_path: Path, monkeypatch) -> PathManager:
     return PathManager.from_env(Path.cwd())
 
 
+def _production_safe_execution_timing(**overrides):
+    payload = {
+        "signal_basis": "closed_candle",
+        "decision_time": "candle_close",
+        "decision_guard_ms": 0,
+        "fill_reference_policy": "next_candle_open",
+        "quote_selection": "first_after_or_equal",
+        "max_quote_wait_ms": 3000,
+        "missing_quote_policy": "warn",
+        "allow_same_candle_close_fill": False,
+        "min_execution_reality_level_for_promotion": "candle_next_open",
+        "source": "manifest",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _candidate(**overrides):
     execution_contract = build_execution_reality_contract(
         fill_reference_policy="next_candle_open",
@@ -296,6 +313,7 @@ def _production_candidate(**overrides):
     }
     payload = _candidate(
         deployment_tier="paper_candidate",
+        execution_timing_policy=_production_safe_execution_timing(),
         cost_model={"fee_rate": 0.0004, "slippage_bps": 5.0},
         base_cost_assumption=base_cost_assumption,
         cost_assumption_contract=execution_model,
@@ -1399,6 +1417,176 @@ def test_research_only_promotion_keeps_explicit_statistical_compatibility(tmp_pa
 
     assert result.artifact["gate_result"] == "PASS"
     assert result.artifact["statistical_validation_required"] is False
+
+
+def test_production_promotion_accepts_complete_next_candle_open_timing_policy(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert result.artifact["gate_result"] == "PASS"
+    assert (
+        result.artifact["execution_timing_policy"]["min_execution_reality_level_for_promotion"]
+        == "candle_next_open"
+    )
+
+
+def test_production_promotion_refuses_missing_execution_timing_min_level(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    timing = _production_safe_execution_timing()
+    timing.pop("min_execution_reality_level_for_promotion")
+    candidate = _production_candidate(execution_timing_policy=timing)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="production_min_execution_reality_level_required"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_production_promotion_refuses_legacy_default_execution_timing_source(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate(execution_timing_policy=_production_safe_execution_timing(source="legacy_default"))
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="production_legacy_execution_timing_not_promotable"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_production_promotion_refuses_same_candle_close_fill(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate(
+        execution_timing_policy=_production_safe_execution_timing(allow_same_candle_close_fill=True)
+    )
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="production_same_candle_close_fill_not_allowed"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_production_promotion_refuses_candle_close_legacy_policy(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate(
+        execution_timing_policy=_production_safe_execution_timing(
+            fill_reference_policy="candle_close_legacy",
+            allow_same_candle_close_fill=True,
+            min_execution_reality_level_for_promotion="candle_close_optimistic",
+        )
+    )
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="production_execution_reference_price_candle_close_not_promotable"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def _production_orderbook_candidate(**overrides):
+    timing = _production_safe_execution_timing(
+        fill_reference_policy="first_orderbook_after_decision",
+        missing_quote_policy="fail",
+        min_execution_reality_level_for_promotion="top_of_book_after_decision",
+    )
+    execution_contract = build_execution_reality_contract(
+        fill_reference_policy="first_orderbook_after_decision",
+        missing_quote_policy="fail",
+        min_execution_reality_level_for_promotion="top_of_book_after_decision",
+        allow_same_candle_close_fill=False,
+        top_of_book_required=True,
+        top_of_book_is_full_depth=False,
+        latency_model={"type": "fixed_bps", "latency_ms": 0},
+        partial_fill_model={"type": "fixed_bps", "partial_fill_rate": 0.0},
+        order_failure_model={"type": "fixed_bps", "order_failure_rate": 0.0},
+        fee_source="operator_declared_bithumb_app_fee",
+        slippage_source="test_execution_calibration",
+        calibration_required=True,
+        calibration_artifact_hash="sha256:calibration",
+        extra={"quote_evidence_available": True},
+    )
+    top_summary = {
+        "requested": True,
+        "required": True,
+        "fail_closed": False,
+        "gate_status": "PASS",
+        "joined_quote_count": 8,
+        "missing_quote_count": 0,
+        "expected_signal_count": 8,
+        "coverage_pct": 100.0,
+    }
+    payload = _production_candidate(
+        execution_timing_policy=timing,
+        execution_reality_contract=execution_contract,
+        execution_contract_hash=execution_contract["execution_contract_hash"],
+        top_of_book_quality_summary=top_summary,
+    )
+    payload.update(overrides)
+    payload.pop("candidate_profile_hash", None)
+    payload["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(payload))
+    return payload
+
+
+def test_production_promotion_refuses_orderbook_policy_with_min_level_below_policy_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_orderbook_candidate(
+        execution_timing_policy=_production_safe_execution_timing(
+            fill_reference_policy="first_orderbook_after_decision",
+            missing_quote_policy="fail",
+            min_execution_reality_level_for_promotion="candle_next_open",
+        )
+    )
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="production_execution_reality_level_below_policy_reference"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_production_promotion_refuses_latency_orderbook_policy_with_min_level_below_policy_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    execution_contract = build_execution_reality_contract(
+        fill_reference_policy="latency_adjusted_orderbook",
+        missing_quote_policy="fail",
+        min_execution_reality_level_for_promotion="top_of_book_after_decision",
+        allow_same_candle_close_fill=False,
+        top_of_book_required=True,
+        top_of_book_is_full_depth=False,
+        latency_model={"type": "fixed_bps", "latency_ms": 100},
+        partial_fill_model={"type": "fixed_bps", "partial_fill_rate": 0.0},
+        order_failure_model={"type": "fixed_bps", "order_failure_rate": 0.0},
+        fee_source="operator_declared_bithumb_app_fee",
+        slippage_source="test_execution_calibration",
+        calibration_required=True,
+        calibration_artifact_hash="sha256:calibration",
+        extra={"quote_evidence_available": True},
+    )
+    candidate = _production_orderbook_candidate(
+        execution_timing_policy=_production_safe_execution_timing(
+            fill_reference_policy="latency_adjusted_orderbook",
+            missing_quote_policy="fail",
+            min_execution_reality_level_for_promotion="top_of_book_after_decision",
+        ),
+        execution_reality_contract=execution_contract,
+        execution_contract_hash=execution_contract["execution_contract_hash"],
+    )
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="production_execution_reality_level_below_policy_reference"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_production_promotion_refuses_orderbook_policy_without_top_of_book_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_orderbook_candidate(top_of_book_quality_summary=None)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="production_top_of_book_required"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
 
 
 def test_promotion_refuses_missing_lineage_by_default(tmp_path, monkeypatch) -> None:

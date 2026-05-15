@@ -8,10 +8,11 @@ from typing import Any
 
 from bithumb_bot.paths import PathManager, PathPolicyError
 from bithumb_bot.storage_io import write_json_atomic
+from bithumb_bot.execution_reality_contract import evaluate_execution_reality_policy
 
 from .hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
 from .lineage import build_promotion_lineage, validate_lineage_artifact, LineageValidationError
-from .deployment_policy import validate_production_calibration_policy
+from .deployment_policy import is_production_bound_target, validate_production_calibration_policy
 from .metrics_contract import METRICS_SCHEMA_VERSION
 from .metrics_gate_policy import metrics_gate_policy_hash
 from .statistical_selection import validate_statistical_evidence_for_candidate
@@ -299,27 +300,68 @@ def _extend_execution_reality_reasons(
 ) -> None:
     policy = candidate.get("execution_timing_policy")
     summary = candidate.get("execution_reality_summary")
-    if not isinstance(policy, dict):
+    policy_is_dict = isinstance(policy, dict)
+    if not policy_is_dict:
         reasons.extend([f"{prefix}execution_timing_policy_missing", "execution_timing_policy_missing"])
-        return
     if not isinstance(summary, dict):
         reasons.extend([f"{prefix}execution_reality_summary_missing", "execution_reality_summary_missing"])
-        return
-    gate_reasons = [str(item) for item in summary.get("execution_reality_gate_reasons") or []]
-    if summary.get("execution_reality_gate_status") == "FAIL" and gate_reasons:
-        reasons.extend([f"{prefix}{reason}" for reason in gate_reasons])
-        reasons.extend(gate_reasons)
-    fill_policy = str(policy.get("fill_reference_policy") or "")
+    else:
+        gate_reasons = [str(item) for item in summary.get("execution_reality_gate_reasons") or []]
+        if summary.get("execution_reality_gate_status") == "FAIL" and gate_reasons:
+            reasons.extend([f"{prefix}{reason}" for reason in gate_reasons])
+            reasons.extend(gate_reasons)
+        if summary.get("execution_reality_level") == "candle_close_optimistic":
+            reasons.extend([
+                f"{prefix}execution_reality_level_below_required",
+                "execution_reality_level_below_required",
+            ])
+
+    fill_policy = str(policy.get("fill_reference_policy") or "") if policy_is_dict else ""
     if fill_policy == "candle_close_legacy":
         reasons.extend([
             f"{prefix}execution_reference_price_candle_close_not_promotable",
             "execution_reference_price_candle_close_not_promotable",
         ])
-    if summary.get("execution_reality_level") == "candle_close_optimistic":
-        reasons.extend([
-            f"{prefix}execution_reality_level_below_required",
-            "execution_reality_level_below_required",
-        ])
+
+    evaluation = evaluate_execution_reality_policy(
+        production_bound=is_production_bound_target(candidate.get("deployment_tier")),
+        execution_timing=policy if policy_is_dict else None,
+        execution_timing_declared=policy_is_dict,
+        execution_timing_declared_fields=set(policy) if policy_is_dict else set(),
+        dataset_top_of_book=_promotion_top_of_book_evidence(candidate),
+        context="promotion",
+    )
+    evaluation_reasons = [str(reason) for reason in evaluation.get("reasons") or []]
+    reasons.extend([f"{prefix}{reason}" for reason in evaluation_reasons])
+    reasons.extend(evaluation_reasons)
+
+
+def _promotion_top_of_book_evidence(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    summary = candidate.get("top_of_book_quality_summary")
+    contract = candidate.get("execution_reality_contract")
+    if not isinstance(summary, dict) or not isinstance(contract, dict):
+        return None
+
+    coverage = float(summary.get("coverage_pct") or 0.0)
+    joined = int(summary.get("joined_quote_count") or 0)
+    summary_safe = (
+        bool(summary.get("requested"))
+        and bool(summary.get("required"))
+        and str(summary.get("gate_status") or "") == "PASS"
+        and coverage >= 100.0
+        and joined > 0
+    )
+    contract_safe = (
+        bool(contract.get("top_of_book_required"))
+        and bool(contract.get("quote_evidence_available"))
+        and contract.get("top_of_book_is_full_depth") is False
+    )
+    production_safe = summary_safe and contract_safe
+    return {
+        "required": production_safe,
+        "missing_policy": "fail" if production_safe else "warn",
+        "min_coverage_pct": 100.0 if production_safe else coverage,
+    }
 
 
 def _extend_execution_contract_reasons(

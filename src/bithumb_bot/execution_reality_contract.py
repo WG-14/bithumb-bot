@@ -36,6 +36,12 @@ PRODUCTION_EXECUTION_TIMING_REQUIRED_FIELDS = (
     "min_execution_reality_level_for_promotion",
 )
 
+_MIN_REALITY_LEVEL_BY_FILL_POLICY = {
+    "next_candle_open": "candle_next_open",
+    "first_orderbook_after_decision": "top_of_book_after_decision",
+    "latency_adjusted_orderbook": "latency_adjusted_top_of_book",
+}
+
 
 def evaluate_execution_reality_policy(
     *,
@@ -89,6 +95,10 @@ def evaluate_execution_reality_policy(
         reasons.append("production_min_execution_reality_level_required")
     elif min_level == "candle_close_optimistic":
         reasons.append("production_execution_reality_level_below_required")
+    else:
+        required_min_level = _MIN_REALITY_LEVEL_BY_FILL_POLICY.get(fill_policy)
+        if required_min_level is not None and REALITY_ORDER.get(str(min_level), -1) < REALITY_ORDER[required_min_level]:
+            reasons.append("production_execution_reality_level_below_policy_reference")
     if bool(_field_value(execution_timing, "allow_same_candle_close_fill")):
         reasons.append("production_same_candle_close_fill_not_allowed")
 

@@ -250,6 +250,48 @@ def test_production_bound_next_candle_open_execution_timing_passes_manifest_poli
     assert manifest.execution_timing.min_execution_reality_level_for_promotion == "candle_next_open"
 
 
+def test_production_bound_orderbook_policy_min_level_below_reference_fails() -> None:
+    payload = _production_bound_manifest_payload(
+        execution_timing={
+            "fill_reference_policy": "first_orderbook_after_decision",
+            "missing_quote_policy": "fail",
+            "allow_same_candle_close_fill": False,
+            "min_execution_reality_level_for_promotion": "candle_next_open",
+        }
+    )
+    dataset = dict(payload["dataset"])  # type: ignore[arg-type]
+    dataset["top_of_book"] = {
+        "source": "sqlite_orderbook_top_snapshots",
+        "required": True,
+        "missing_policy": "fail",
+        "min_coverage_pct": 100.0,
+    }
+    payload["dataset"] = dataset
+
+    _assert_manifest_reasons(payload, "production_execution_reality_level_below_policy_reference")
+
+
+def test_production_bound_latency_orderbook_policy_min_level_below_reference_fails() -> None:
+    payload = _production_bound_manifest_payload(
+        execution_timing={
+            "fill_reference_policy": "latency_adjusted_orderbook",
+            "missing_quote_policy": "fail",
+            "allow_same_candle_close_fill": False,
+            "min_execution_reality_level_for_promotion": "top_of_book_after_decision",
+        }
+    )
+    dataset = dict(payload["dataset"])  # type: ignore[arg-type]
+    dataset["top_of_book"] = {
+        "source": "sqlite_orderbook_top_snapshots",
+        "required": True,
+        "missing_policy": "fail",
+        "min_coverage_pct": 100.0,
+    }
+    payload["dataset"] = dataset
+
+    _assert_manifest_reasons(payload, "production_execution_reality_level_below_policy_reference")
+
+
 def test_production_bound_candle_close_manifest_fails_closed() -> None:
     payload = _production_bound_manifest_payload()
     payload["execution_timing"] = {
@@ -356,6 +398,31 @@ def test_production_bound_orderbook_timing_with_safe_top_of_book_dataset_passes(
     assert manifest.dataset.top_of_book.required is True
     assert manifest.dataset.top_of_book.missing_policy == "fail"
     assert manifest.execution_timing.fill_reference_policy == "first_orderbook_after_decision"
+
+
+def test_production_bound_latency_orderbook_timing_with_safe_top_of_book_dataset_passes() -> None:
+    payload = _production_bound_manifest_payload(
+        execution_timing={
+            "fill_reference_policy": "latency_adjusted_orderbook",
+            "missing_quote_policy": "fail",
+            "allow_same_candle_close_fill": False,
+            "min_execution_reality_level_for_promotion": "latency_adjusted_top_of_book",
+        }
+    )
+    dataset = dict(payload["dataset"])  # type: ignore[arg-type]
+    dataset["top_of_book"] = {
+        "source": "sqlite_orderbook_top_snapshots",
+        "required": True,
+        "missing_policy": "fail",
+        "min_coverage_pct": 100.0,
+    }
+    payload["dataset"] = dataset
+
+    manifest = parse_manifest(payload)
+
+    assert manifest.dataset.top_of_book is not None
+    assert manifest.dataset.top_of_book.required is True
+    assert manifest.execution_timing.fill_reference_policy == "latency_adjusted_orderbook"
 
 
 def test_invalid_production_bound_legacy_default_fails_before_report_generation() -> None:
