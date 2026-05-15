@@ -617,6 +617,20 @@ def _write_manifest(path: Path, *, calibration_required: bool = False, calibrati
                         "max_attempt_index_without_new_hypothesis": 1,
                     },
                 },
+                "stress_suite": {
+                    "required_for_promotion": True,
+                    "trade_removal": {
+                        "top_n_by_net_pnl": [1],
+                        "min_return_retention_pct": 50.0,
+                    },
+                    "trade_order_monte_carlo": {
+                        "iterations": 100,
+                        "seed_policy": "derived_from_manifest_candidate_scenario_split_hash",
+                        "min_survival_probability": 0.95,
+                        "ruin_max_drawdown_pct": 35.0,
+                        "min_closed_trades": 3,
+                    },
+                },
             }
         ),
         encoding="utf-8",

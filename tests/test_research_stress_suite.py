@@ -7,6 +7,7 @@ from bithumb_bot.research.metrics_contract import ClosedTradeRecord
 from bithumb_bot.research.stress_suite import (
     StressSuiteContext,
     analyze_stress_suite,
+    _trade_summary,
     validate_stress_suite_evidence_for_candidate,
 )
 
@@ -119,6 +120,17 @@ def test_distributed_profits_stress_suite_is_deterministic_and_passes() -> None:
     assert first["stress_suite_hash"].startswith("sha256:")
     assert first["trade_order_monte_carlo"]["terminal_equity_p05"] is not None
     assert first["trade_order_monte_carlo"]["max_drawdown_pct_p95"] is not None
+    assert first["trade_order_monte_carlo"]["limitations"] == [
+        "monte_carlo_does_not_reconstruct_intratrade_equity_path",
+        "monte_carlo_uses_closed_trade_pnl_not_bar_return_series",
+    ]
+    assert first["limitations"] == [
+        "monte_carlo_does_not_reconstruct_intratrade_equity_path",
+        "monte_carlo_uses_closed_trade_pnl_not_bar_return_series",
+        "sharpe_unavailable_without_period_return_series",
+        "sortino_unavailable_without_period_return_series",
+    ]
+    json.dumps(first, allow_nan=False)
 
 
 def test_no_closed_trades_fails_with_stable_reason() -> None:
@@ -202,3 +214,63 @@ def test_required_stress_evidence_validation_refuses_missing_and_hash_mismatch()
 
     candidate.pop("validation_stress_suite")
     assert "stress_suite_required_but_missing" in validate_stress_suite_evidence_for_candidate(candidate, {})
+
+
+def test_trade_summary_win_rate_uses_ratio_units() -> None:
+    summary = _trade_summary(_trades([10_000.0, -5_000.0]), starting_cash=1_000_000.0)
+
+    assert summary["win_rate"] == 0.5
+
+
+def test_required_final_holdout_stress_evidence_is_fail_closed() -> None:
+    manifest = parse_manifest(_contract_payload())
+    result = analyze_stress_suite(
+        contract=manifest.stress_suite,
+        context=_context(),
+        original_metrics={"return_pct": 10.0},
+        metrics_v2=_metrics_v2(),
+        closed_trades=_trades([10_000.0, 9_000.0, 8_000.0, -2_000.0, 7_000.0, -1_000.0]),
+        starting_cash=1_000_000.0,
+    )
+    candidate = {
+        "stress_suite_required": True,
+        "stress_suite_contract": manifest.stress_suite.as_dict(),
+        "stress_suite_contract_hash": result["contract_hash"],
+        "stress_suite_gate_result": "PASS",
+        "validation_stress_suite": dict(result),
+        "final_holdout_present": True,
+        "final_holdout_required_for_promotion": False,
+    }
+
+    reasons = validate_stress_suite_evidence_for_candidate(candidate, {})
+
+    assert "final_holdout_stress_suite_required_but_missing" in reasons
+
+
+def test_candidate_level_stress_contract_is_required_even_when_report_has_contract() -> None:
+    manifest = parse_manifest(_contract_payload())
+    contract = manifest.stress_suite.as_dict()
+    result = analyze_stress_suite(
+        contract=manifest.stress_suite,
+        context=_context(),
+        original_metrics={"return_pct": 10.0},
+        metrics_v2=_metrics_v2(),
+        closed_trades=_trades([10_000.0, 9_000.0, 8_000.0, -2_000.0, 7_000.0, -1_000.0]),
+        starting_cash=1_000_000.0,
+    )
+    contract_hash = result["contract_hash"]
+    candidate = {
+        "stress_suite_required": True,
+        "stress_suite_contract_hash": contract_hash,
+        "stress_suite_gate_result": "PASS",
+        "validation_stress_suite": dict(result),
+        "final_holdout_present": False,
+        "final_holdout_required_for_promotion": False,
+    }
+
+    reasons = validate_stress_suite_evidence_for_candidate(
+        candidate,
+        {"stress_suite_contract": contract, "stress_suite_contract_hash": contract_hash},
+    )
+
+    assert "stress_suite_contract_mismatch" in reasons

@@ -284,6 +284,47 @@ def test_print_report_summary_renders_statistical_selection_diagnostics(capsys) 
     assert "next_action=do_not_promote_review_statistical_selection" in output
 
 
+def test_print_report_summary_renders_stress_suite_diagnostics(capsys) -> None:
+    report = _report(
+        candidates=[_candidate("candidate_001", gate="FAIL")],
+        best_candidate_id=None,
+        gate_result="FAIL",
+    )
+    report.update(
+        {
+            "stress_suite_required": True,
+            "stress_suite_gate_result": "FAIL",
+            "stress_suite_fail_reasons": ["stress_trade_removal_return_retention_failed"],
+            "best_validation_stress_suite": {
+                "trade_removal": {"status": "FAIL"},
+                "trade_order_monte_carlo": {
+                    "survival_probability": 0.972,
+                    "max_drawdown_pct_p95": 31.2,
+                },
+            },
+        }
+    )
+
+    _print_report_summary("RESEARCH-BACKTEST", report)
+
+    output = capsys.readouterr().out
+    assert "stress_suite_required=1" in output
+    assert "stress_suite_gate_result=FAIL" in output
+    assert "stress_suite_fail_reasons=stress_trade_removal_return_retention_failed" in output
+    assert "stress_trade_removal_status=FAIL" in output
+    assert "stress_monte_carlo_survival_probability=0.972" in output
+    assert "stress_monte_carlo_max_drawdown_pct_p95=31.2" in output
+
+
+def test_print_report_summary_handles_missing_optional_stress_suite(capsys) -> None:
+    _print_report_summary("RESEARCH-BACKTEST", _report(candidates=[]))
+
+    output = capsys.readouterr().out
+    assert "stress_suite_required=0" in output
+    assert "stress_suite_gate_result=none" in output
+    assert "stress_trade_removal_status=none" in output
+
+
 def test_print_report_summary_renders_metrics_v2_for_passing_candidate(capsys) -> None:
     report = _report(
         candidates=[

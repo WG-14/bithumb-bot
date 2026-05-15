@@ -73,7 +73,25 @@ def _manifest(*, deployment_tier: str = "paper_candidate") -> dict[str, object]:
             "allow_same_candle_close_fill": False,
             "min_execution_reality_level_for_promotion": "candle_next_open",
         }
+        payload["stress_suite"] = _stress_suite()
     return payload
+
+
+def _stress_suite() -> dict[str, object]:
+    return {
+        "required_for_promotion": True,
+        "trade_removal": {
+            "top_n_by_net_pnl": [1],
+            "min_return_retention_pct": 50.0,
+        },
+        "trade_order_monte_carlo": {
+            "iterations": 100,
+            "seed_policy": "derived_from_manifest_candidate_scenario_split_hash",
+            "min_survival_probability": 0.95,
+            "ruin_max_drawdown_pct": 35.0,
+            "min_closed_trades": 3,
+        },
+    }
 
 
 def _base_scenario() -> dict[str, object]:

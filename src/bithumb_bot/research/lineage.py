@@ -492,22 +492,71 @@ def _verify_stress_suite_bindings(
         summary["mismatches"].append(
             _mismatch("promotion.stress_suite_contract_hash", actual_contract_hash, contract_hash, "stress_suite_contract_mismatch")
         )
-    for field in ("validation_stress_suite", "final_holdout_stress_suite"):
+    final_required = promotion.get("final_holdout_present") is True or promotion.get("final_holdout_required_for_promotion") is True
+    fields = (("validation_stress_suite", True), ("final_holdout_stress_suite", final_required))
+    for field, required in fields:
         evidence = promotion.get(field)
-        if field == "final_holdout_stress_suite" and evidence is None:
+        if evidence is None and not required:
             continue
         if not isinstance(evidence, dict):
             summary["mismatches"].append(
-                _mismatch(f"promotion.{field}", "object", type(evidence).__name__, "stress_suite_required_but_missing")
+                _mismatch(
+                    f"promotion.{field}",
+                    "object",
+                    type(evidence).__name__,
+                    (
+                        "final_holdout_stress_suite_required_but_missing"
+                        if field == "final_holdout_stress_suite"
+                        else "stress_suite_required_but_missing"
+                    ),
+                )
             )
             continue
         embedded = str(evidence.get("stress_suite_hash") or "")
-        actual = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "stress_suite_hash"}))
-        if embedded != actual:
-            summary["mismatches"].append(_mismatch(f"promotion.{field}.stress_suite_hash", actual, embedded, "stress_suite_hash_mismatch"))
+        if not embedded.startswith("sha256:"):
+            summary["mismatches"].append(
+                _mismatch(
+                    f"promotion.{field}.stress_suite_hash",
+                    "sha256:<required>",
+                    embedded or None,
+                    (
+                        "final_holdout_stress_suite_hash_missing"
+                        if field == "final_holdout_stress_suite"
+                        else "stress_suite_hash_missing"
+                    ),
+                )
+            )
+        else:
+            actual = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "stress_suite_hash"}))
+            if embedded != actual:
+                summary["mismatches"].append(
+                    _mismatch(
+                        f"promotion.{field}.stress_suite_hash",
+                        actual,
+                        embedded,
+                        (
+                            "final_holdout_stress_suite_hash_mismatch"
+                            if field == "final_holdout_stress_suite"
+                            else "stress_suite_hash_mismatch"
+                        ),
+                    )
+                )
         if evidence.get("contract_hash") != contract_hash:
             summary["mismatches"].append(
                 _mismatch(f"promotion.{field}.contract_hash", contract_hash, evidence.get("contract_hash"), "stress_suite_contract_mismatch")
+            )
+        if evidence.get("gate_result") != "PASS":
+            summary["mismatches"].append(
+                _mismatch(
+                    f"promotion.{field}.gate_result",
+                    "PASS",
+                    evidence.get("gate_result"),
+                    (
+                        "final_holdout_stress_suite_gate_not_passed"
+                        if field == "final_holdout_stress_suite"
+                        else "stress_suite_gate_not_passed"
+                    ),
+                )
             )
     report = _load_optional_artifact(lineage.get("backtest_report_path"))
     if not isinstance(report, dict):
@@ -528,16 +577,42 @@ def _verify_stress_suite_bindings(
         candidate.get("stress_suite_contract_hash"),
         "stress_suite_contract_mismatch",
     )
-    for field in ("validation_stress_suite", "final_holdout_stress_suite"):
+    if isinstance(candidate.get("stress_suite_contract"), dict) and candidate.get("stress_suite_contract") != contract:
+        summary["mismatches"].append(
+            _mismatch(
+                "backtest_report.stress_suite_contract",
+                contract_hash,
+                candidate.get("stress_suite_contract_hash"),
+                "stress_suite_contract_mismatch",
+            )
+        )
+    for field, required in fields:
         promoted = promotion.get(field)
         reported = candidate.get(field)
+        if required and not isinstance(reported, dict):
+            summary["mismatches"].append(
+                _mismatch(
+                    f"backtest_report.{field}",
+                    "object",
+                    type(reported).__name__,
+                    (
+                        "final_holdout_stress_suite_required_but_missing"
+                        if field == "final_holdout_stress_suite"
+                        else "stress_suite_required_but_missing"
+                    ),
+                )
+            )
         if isinstance(promoted, dict) and isinstance(reported, dict):
             _compare(
                 summary,
                 f"backtest_report.{field}.stress_suite_hash",
                 promoted.get("stress_suite_hash"),
                 reported.get("stress_suite_hash"),
-                "stress_suite_hash_mismatch",
+                (
+                    "final_holdout_stress_suite_hash_mismatch"
+                    if field == "final_holdout_stress_suite"
+                    else "stress_suite_hash_mismatch"
+                ),
             )
 
 

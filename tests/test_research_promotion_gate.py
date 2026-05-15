@@ -779,6 +779,12 @@ def _refresh_candidate_profile_hash(candidate: dict[str, object]) -> None:
     candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
 
 
+def _rewrite_promotion_artifact(path: Path, payload: dict[str, object]) -> None:
+    payload.pop("content_hash", None)
+    payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
+    write_json_atomic(path, payload)
+
+
 def _statistical_metric_hash_for_report(report: dict[str, object]) -> str:
     return candidate_metric_values_hash(
         candidates=report["candidates"],
@@ -1021,6 +1027,43 @@ def test_promotion_artifact_exposes_required_stress_suite_and_reproduces(tmp_pat
     assert summary["ok"] is True
 
 
+def test_promotion_refuses_missing_final_holdout_stress_when_final_holdout_present(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    candidate["final_holdout_stress_suite"] = None
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="final_holdout_stress_suite_required_but_missing"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_missing_final_holdout_stress_when_required_for_promotion(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate(final_holdout_present=False, final_holdout_metrics=None)
+    _attach_stress_suite(candidate)
+    candidate["final_holdout_stress_suite"] = None
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="final_holdout_stress_suite_required_but_missing"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_allows_missing_final_holdout_stress_when_no_holdout_not_required(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _candidate(final_holdout_present=False, final_holdout_required_for_promotion=False, final_holdout_metrics=None)
+    _attach_stress_suite(candidate)
+    candidate["final_holdout_stress_suite"] = None
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+    assert result.artifact["final_holdout_stress_suite"] is None
+
+
 def test_promotion_refuses_required_stress_suite_hash_mismatch(tmp_path, monkeypatch) -> None:
     manager = _manager(tmp_path, monkeypatch)
     candidate = _production_candidate()
@@ -1028,6 +1071,90 @@ def test_promotion_refuses_required_stress_suite_hash_mismatch(tmp_path, monkeyp
     _write_report_with_lineage(manager, candidate)
 
     with pytest.raises(PromotionGateError, match="stress_suite_hash_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_required_final_holdout_stress_hash_mismatch(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    candidate["final_holdout_stress_suite"]["stress_suite_hash"] = "sha256:tampered"
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="final_holdout_stress_suite_hash_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_missing_candidate_stress_contract_with_report_fallback(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    report_contract = candidate["stress_suite_contract"]
+    report_contract_hash = candidate["stress_suite_contract_hash"]
+    candidate["stress_suite_contract"] = None
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(
+        manager,
+        candidate,
+        report_overrides={
+            "stress_suite_required": True,
+            "stress_suite_contract": report_contract,
+            "stress_suite_contract_hash": report_contract_hash,
+        },
+    )
+
+    with pytest.raises(PromotionGateError, match="stress_suite_contract_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_candidate_stress_contract_hash_without_body(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    candidate["stress_suite_contract"] = None
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="stress_suite_contract_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_report_candidate_stress_contract_drift(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    report_contract = {
+        **candidate["stress_suite_contract"],
+        "trade_removal": {"top_n_by_net_pnl": [2], "min_return_retention_pct": 50.0},
+    }
+    _write_report_with_lineage(
+        manager,
+        candidate,
+        report_overrides={
+            "stress_suite_required": True,
+            "stress_suite_contract": report_contract,
+            "stress_suite_contract_hash": sha256_prefixed(report_contract),
+        },
+    )
+
+    with pytest.raises(PromotionGateError, match="stress_suite_contract_mismatch"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_promotion_refuses_validation_stress_contract_hash_drift(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    candidate["validation_stress_suite"]["contract_hash"] = "sha256:other-contract"
+    candidate["validation_stress_suite"].pop("stress_suite_hash", None)
+    candidate["validation_stress_suite"]["stress_suite_hash"] = sha256_prefixed(
+        content_hash_payload(candidate["validation_stress_suite"])
+    )
+    _refresh_candidate_profile_hash(candidate)
+    _write_report_with_lineage(manager, candidate)
+
+    with pytest.raises(PromotionGateError, match="stress_suite_contract_mismatch"):
         promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
 
 
@@ -1831,6 +1958,63 @@ def test_reproduce_fails_when_statistical_evidence_hash_mismatches(tmp_path, mon
     assert summary["reason"] == "statistical_evidence_hash_mismatch"
 
 
+def test_reproduce_fails_when_required_final_holdout_stress_removed(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    promotion = json.loads(result.artifact_path.read_text(encoding="utf-8"))
+    promotion["final_holdout_stress_suite"] = None
+    _rewrite_promotion_artifact(result.artifact_path, promotion)
+
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert summary["ok"] is False
+    assert summary["reason"] == "final_holdout_stress_suite_required_but_missing"
+
+
+def test_reproduce_fails_when_required_final_holdout_stress_hash_mismatches(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    promotion = json.loads(result.artifact_path.read_text(encoding="utf-8"))
+    promotion["final_holdout_stress_suite"]["stress_suite_hash"] = "sha256:tampered"
+    _rewrite_promotion_artifact(result.artifact_path, promotion)
+
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert summary["ok"] is False
+    assert summary["reason"] == "final_holdout_stress_suite_hash_mismatch"
+
+
+def test_reproduce_fails_when_promotion_report_stress_contract_drifts(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _attach_stress_suite(candidate)
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    report_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "backtest_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["candidates"][0]["stress_suite_contract_hash"] = "sha256:drifted"
+    _refresh_candidate_profile_hash(report["candidates"][0])
+    _rewrite_report(report_path, report)
+    promotion = json.loads(result.artifact_path.read_text(encoding="utf-8"))
+    promotion["backtest_report_hash"] = _canonical_report_hash(report)
+    promotion["lineage"]["backtest_report_hash"] = _canonical_report_hash(report)
+    promotion["lineage"].pop("lineage_hash", None)
+    promotion["lineage"]["lineage_hash"] = compute_lineage_hash(promotion["lineage"])
+    promotion["lineage_hash"] = promotion["lineage"]["lineage_hash"]
+    _rewrite_promotion_artifact(result.artifact_path, promotion)
+
+    summary = reproduce_promotion(result.artifact_path).summary
+
+    assert summary["ok"] is False
+    assert summary["reason"] == "stress_suite_contract_mismatch"
+
+
 @pytest.mark.parametrize("field_action", ["false", "missing"])
 def test_reproduce_requires_statistical_evidence_for_production_bound_artifact_even_without_flag(
     tmp_path,
@@ -2250,6 +2434,28 @@ def test_promotion_cli_prints_execution_event_summary(tmp_path, monkeypatch, cap
         "closed_trade_count=4 "
         "execution_event_timeline_incomplete=False"
     ) in output
+
+
+def test_promotion_cli_prints_stress_suite_summary(tmp_path, monkeypatch, capsys) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(research_cli, "PATH_MANAGER", manager)
+    candidate = _candidate()
+    _attach_stress_suite(candidate)
+    _write_report(manager, candidate)
+
+    status = research_cli.cmd_research_promote_candidate(
+        experiment_id="promo_exp",
+        candidate_id="candidate_001",
+    )
+
+    output = capsys.readouterr().out
+    assert status == 0
+    assert "  stress_suite_required=1" in output
+    assert "  stress_suite_gate_result=PASS" in output
+    assert "  stress_suite_fail_reasons=none" in output
+    assert "  stress_trade_removal_status=PASS" in output
+    assert "  stress_monte_carlo_survival_probability=1.0" in output
+    assert "  stress_monte_carlo_max_drawdown_pct_p95=10.0" in output
 
 
 def test_promotion_cli_refuses_required_calibration_failure_without_success_block(

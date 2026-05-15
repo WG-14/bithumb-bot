@@ -11,6 +11,10 @@ from .metrics_contract import ClosedTradeRecord
 
 
 STRESS_SUITE_SCHEMA_VERSION = 1
+MONTE_CARLO_LIMITATIONS = (
+    "monte_carlo_does_not_reconstruct_intratrade_equity_path",
+    "monte_carlo_uses_closed_trade_pnl_not_bar_return_series",
+)
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ def analyze_stress_suite(
         )
         payload["trade_order_monte_carlo"] = section
         fail_reasons.extend(str(reason) for reason in section.get("fail_reasons") or [])
+        limitations.extend(str(item) for item in section.get("limitations") or [])
     if contract.risk_adjusted_score is not None:
         section = analyze_risk_adjusted_score(
             contract=contract.risk_adjusted_score.as_dict(),
@@ -194,6 +199,7 @@ def analyze_trade_order_monte_carlo(
             "status": "FAIL",
             "iterations": int(contract.get("iterations") or 0),
             "fail_reasons": ["stress_monte_carlo_no_closed_trades"],
+            "limitations": list(MONTE_CARLO_LIMITATIONS),
         }
     min_closed_trades = int(contract.get("min_closed_trades") or 10)
     if len(closed_trades) < min_closed_trades:
@@ -236,6 +242,7 @@ def analyze_trade_order_monte_carlo(
             "survival_probability": survival_probability,
             "ruin_max_drawdown_pct": ruin_mdd,
             "fail_reasons": sorted(set(fail_reasons)),
+            "limitations": list(MONTE_CARLO_LIMITATIONS),
         }
     )
 
@@ -271,35 +278,73 @@ def validate_stress_suite_evidence_for_candidate(candidate: dict[str, Any], repo
     required = bool(candidate.get("stress_suite_required")) or bool(report.get("stress_suite_required"))
     if not required:
         return reasons
-    contract = candidate.get("stress_suite_contract") or report.get("stress_suite_contract")
+    contract = candidate.get("stress_suite_contract")
     if not isinstance(contract, dict):
         reasons.append("stress_suite_contract_mismatch")
     if candidate.get("stress_suite_gate_result") != "PASS":
         reasons.append("stress_suite_gate_not_passed")
-    expected_contract_hash = str(candidate.get("stress_suite_contract_hash") or report.get("stress_suite_contract_hash") or "")
+    expected_contract_hash = str(candidate.get("stress_suite_contract_hash") or "")
     actual_contract_hash = sha256_prefixed(contract) if isinstance(contract, dict) else ""
-    if not expected_contract_hash.startswith("sha256:") or actual_contract_hash != expected_contract_hash:
+    if not expected_contract_hash.startswith("sha256:"):
+        reasons.append("stress_suite_hash_missing")
+    elif actual_contract_hash != expected_contract_hash:
+        reasons.append("stress_suite_hash_mismatch")
+    report_contract = report.get("stress_suite_contract")
+    report_contract_hash = str(report.get("stress_suite_contract_hash") or "")
+    if isinstance(report_contract, dict) and isinstance(contract, dict) and report_contract != contract:
         reasons.append("stress_suite_contract_mismatch")
-    for field in ("validation_stress_suite", "final_holdout_stress_suite"):
-        evidence = candidate.get(field)
-        if field == "final_holdout_stress_suite" and evidence is None and not candidate.get("final_holdout_present"):
-            continue
-        if not isinstance(evidence, dict):
-            if field == "validation_stress_suite":
-                reasons.append("stress_suite_required_but_missing")
-            continue
-        embedded_hash = str(evidence.get("stress_suite_hash") or "")
-        if not embedded_hash.startswith("sha256:"):
-            reasons.append("stress_suite_hash_missing")
-            continue
+    if report_contract_hash.startswith("sha256:") and report_contract_hash != expected_contract_hash:
+        reasons.append("stress_suite_contract_mismatch")
+    _validate_stress_evidence(
+        candidate.get("validation_stress_suite"),
+        reasons,
+        expected_contract_hash=expected_contract_hash,
+        missing_code="stress_suite_required_but_missing",
+        hash_missing_code="stress_suite_hash_missing",
+        hash_mismatch_code="stress_suite_hash_mismatch",
+        gate_failed_code="stress_suite_gate_not_passed",
+    )
+    if _final_holdout_stress_required(candidate):
+        _validate_stress_evidence(
+            candidate.get("final_holdout_stress_suite"),
+            reasons,
+            expected_contract_hash=expected_contract_hash,
+            missing_code="final_holdout_stress_suite_required_but_missing",
+            hash_missing_code="final_holdout_stress_suite_hash_missing",
+            hash_mismatch_code="final_holdout_stress_suite_hash_mismatch",
+            gate_failed_code="final_holdout_stress_suite_gate_not_passed",
+        )
+    return sorted(set(reasons))
+
+
+def _final_holdout_stress_required(candidate: dict[str, Any]) -> bool:
+    return candidate.get("final_holdout_present") is True or candidate.get("final_holdout_required_for_promotion") is True
+
+
+def _validate_stress_evidence(
+    evidence: Any,
+    reasons: list[str],
+    *,
+    expected_contract_hash: str,
+    missing_code: str,
+    hash_missing_code: str,
+    hash_mismatch_code: str,
+    gate_failed_code: str,
+) -> None:
+    if not isinstance(evidence, dict):
+        reasons.append(missing_code)
+        return
+    embedded_hash = str(evidence.get("stress_suite_hash") or "")
+    if not embedded_hash.startswith("sha256:"):
+        reasons.append(hash_missing_code)
+    else:
         actual_hash = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "stress_suite_hash"}))
         if actual_hash != embedded_hash:
-            reasons.append("stress_suite_hash_mismatch")
-        if evidence.get("contract_hash") != expected_contract_hash:
-            reasons.append("stress_suite_contract_mismatch")
-        if evidence.get("gate_result") != "PASS":
-            reasons.append("stress_suite_gate_not_passed")
-    return sorted(set(reasons))
+            reasons.append(hash_mismatch_code)
+    if evidence.get("contract_hash") != expected_contract_hash:
+        reasons.append("stress_suite_contract_mismatch")
+    if evidence.get("gate_result") != "PASS":
+        reasons.append(gate_failed_code)
 
 
 def _trade_summary(trades: tuple[ClosedTradeRecord, ...], *, starting_cash: float) -> dict[str, Any]:
@@ -313,7 +358,7 @@ def _trade_summary(trades: tuple[ClosedTradeRecord, ...], *, starting_cash: floa
         "realized_return_pct": (sum(values) / starting_cash * 100.0) if starting_cash > 0.0 else 0.0,
         "profit_factor": (gross_profit / gross_loss) if gross_loss > 0.0 else None,
         "expectancy_per_trade_krw": (sum(values) / len(values)) if values else None,
-        "win_rate": (len(wins) / len(values) * 100.0) if values else 0.0,
+        "win_rate": (len(wins) / len(values)) if values else 0.0,
     }
 
 

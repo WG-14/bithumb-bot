@@ -113,12 +113,30 @@ def _statistical_validation() -> dict[str, object]:
     }
 
 
+def _stress_suite() -> dict[str, object]:
+    return {
+        "required_for_promotion": True,
+        "trade_removal": {
+            "top_n_by_net_pnl": [1],
+            "min_return_retention_pct": 50.0,
+        },
+        "trade_order_monte_carlo": {
+            "iterations": 100,
+            "seed_policy": "derived_from_manifest_candidate_scenario_split_hash",
+            "min_survival_probability": 0.95,
+            "ruin_max_drawdown_pct": 35.0,
+            "min_closed_trades": 3,
+        },
+    }
+
+
 def _production_bound_manifest_payload(**overrides: object) -> dict[str, object]:
     payload = _manifest_payload()
     payload.update(
         {
             "deployment_tier": "paper_candidate",
             "statistical_validation": _statistical_validation(),
+            "stress_suite": _stress_suite(),
             "execution_model": {
                 "type": "fixed_bps",
                 "scenario_role": "base",

@@ -1463,6 +1463,8 @@ def _parse_statistical_gates(value: Any) -> StatisticalValidationGates:
 def _parse_stress_suite(value: Any, *, deployment_tier: str) -> StressSuiteContract | None:
     production_bound = is_production_bound_target(deployment_tier)
     if value is None:
+        if production_bound:
+            raise ManifestValidationError("stress_suite required for production-bound manifests")
         return None
     if not isinstance(value, dict):
         raise ManifestValidationError("stress_suite must be an object")

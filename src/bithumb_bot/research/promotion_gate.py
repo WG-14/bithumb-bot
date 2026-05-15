@@ -259,12 +259,9 @@ def _extend_stress_suite_reasons(
 ) -> None:
     if not bool(candidate.get("stress_suite_required")):
         return
-    if candidate.get("stress_suite_gate_result") != "PASS":
-        reasons.extend([f"{prefix}stress_suite_gate_not_passed", "stress_suite_gate_not_passed"])
-    if not isinstance(candidate.get("validation_stress_suite"), dict):
-        reasons.extend([f"{prefix}stress_suite_required_but_missing", "stress_suite_required_but_missing"])
-    if not str(candidate.get("stress_suite_contract_hash") or "").startswith("sha256:"):
-        reasons.extend([f"{prefix}stress_suite_hash_missing", "stress_suite_hash_missing"])
+    stress_reasons = validate_stress_suite_evidence_for_candidate(candidate=candidate, report={})
+    reasons.extend(f"{prefix}{reason}" for reason in stress_reasons)
+    reasons.extend(stress_reasons)
 
 
 def _extend_metrics_v2_presence_reasons(

@@ -96,6 +96,7 @@ def cmd_research_promote_candidate(
         "  statistical_gate_fail_reasons="
         f"{_format_items(tuple(str(item) for item in result.artifact.get('statistical_gate_fail_reasons') or []))}"
     )
+    _print_stress_suite_summary(result.artifact)
     _print_execution_event_summary(result.artifact.get("execution_event_summary"))
     print(
         "  has_execution_calibration_warning="
@@ -151,6 +152,7 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
         "  statistical_gate_fail_reasons="
         f"{_format_items(tuple(str(item) for item in report.get('statistical_gate_fail_reasons') or []))}"
     )
+    _print_stress_suite_summary(report)
     print(f"  nearest_failed_candidate_id={summary.nearest_failed_candidate_id or 'none'}")
     print(
         "  nearest_failed_candidate_fail_reasons="
@@ -277,6 +279,28 @@ def _print_execution_event_summary(summary: object) -> None:
         f"closed_trade_count={summary.get('closed_trade_count')} "
         f"execution_event_timeline_incomplete={summary.get('execution_event_timeline_incomplete')}"
     )
+
+
+def _print_stress_suite_summary(payload: dict[str, object]) -> None:
+    required = bool(payload.get("stress_suite_required"))
+    evidence = payload.get("validation_stress_suite")
+    if not isinstance(evidence, dict):
+        evidence = payload.get("best_validation_stress_suite")
+    trade_removal = evidence.get("trade_removal") if isinstance(evidence, dict) and isinstance(evidence.get("trade_removal"), dict) else {}
+    monte_carlo = (
+        evidence.get("trade_order_monte_carlo")
+        if isinstance(evidence, dict) and isinstance(evidence.get("trade_order_monte_carlo"), dict)
+        else {}
+    )
+    print(f"  stress_suite_required={1 if required else 0}")
+    print(f"  stress_suite_gate_result={payload.get('stress_suite_gate_result') or 'none'}")
+    print(
+        "  stress_suite_fail_reasons="
+        f"{_format_items(tuple(str(item) for item in payload.get('stress_suite_fail_reasons') or []))}"
+    )
+    print(f"  stress_trade_removal_status={trade_removal.get('status') or 'none'}")
+    print(f"  stress_monte_carlo_survival_probability={monte_carlo.get('survival_probability')}")
+    print(f"  stress_monte_carlo_max_drawdown_pct_p95={monte_carlo.get('max_drawdown_pct_p95')}")
 
 
 def _format_counts(counts: dict[str, int]) -> str:

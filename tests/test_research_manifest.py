@@ -185,6 +185,26 @@ def test_production_bound_manifest_rejects_disabled_stress_suite_gate() -> None:
         parse_manifest(payload)
 
 
+@pytest.mark.parametrize("deployment_tier", ["paper_candidate", "live_dry_run_candidate", "small_live_candidate"])
+def test_production_bound_manifest_requires_stress_suite(deployment_tier: str) -> None:
+    payload = _production_manifest()
+    payload["deployment_tier"] = deployment_tier
+    payload.pop("stress_suite", None)
+
+    with pytest.raises(ManifestValidationError, match="stress_suite required for production-bound manifests"):
+        parse_manifest(payload)
+
+
+def test_research_only_manifest_can_omit_stress_suite() -> None:
+    payload = _manifest()
+    payload["deployment_tier"] = "research_only"
+    payload.pop("stress_suite", None)
+
+    manifest = parse_manifest(payload)
+
+    assert manifest.stress_suite is None
+
+
 def test_production_bound_manifest_requires_statistical_validation() -> None:
     payload = _production_manifest()
     payload.pop("statistical_validation")
