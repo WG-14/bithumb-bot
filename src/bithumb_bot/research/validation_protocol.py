@@ -52,6 +52,7 @@ from .statistical_selection import (
     build_statistical_selection_evidence,
     selection_universe_hash,
     statistical_validation_required,
+    validate_statistical_evidence_for_candidate,
     write_statistical_selection_evidence,
 )
 from .return_panel import build_candidate_return_panel, write_candidate_return_panel
@@ -1903,6 +1904,7 @@ def _report_payload(
                 evidence=statistical_evidence,
             )
             if statistical_contract.get("multiple_testing_scope") == "experiment_family":
+                statistical_evidence["family_trial_registry_bound_evidence_hash"] = statistical_evidence.get("content_hash")
                 registry_result = append_family_trial_registry_row(
                     manager=manager,
                     experiment_family_id=experiment_family_id,
@@ -1916,7 +1918,7 @@ def _report_payload(
                     parameter_space_hash=sha256_prefixed(manifest.parameter_space),
                     candidate_count=len(candidates),
                     return_panel_hash=str(return_panel.get("content_hash")) if isinstance(return_panel, dict) else None,
-                    statistical_evidence_hash=str(statistical_evidence.get("content_hash")),
+                    statistical_evidence_hash=str(statistical_evidence.get("family_trial_registry_bound_evidence_hash")),
                     result_status=str(statistical_evidence.get("statistical_gate_result") or "UNKNOWN"),
                     created_at=generated_at,
                 )
@@ -1941,7 +1943,7 @@ def _report_payload(
     if stress_summary_candidate is None and stress_suite_required(manifest) and candidates:
         stress_summary_candidate = candidates[0]
     warnings = sorted({warning for candidate in candidates for warning in candidate.get("warnings", [])})
-    return {
+    payload = {
         "report_kind": report_kind,
         "experiment_id": manifest.experiment_id,
         "hypothesis": manifest.hypothesis,
@@ -2093,27 +2095,9 @@ def _report_payload(
         "candidate_acceptance_gate_result": "PASS" if best else "FAIL",
         "statistical_selection_gate_result": statistical_evidence.get("statistical_gate_result") if statistical_evidence else None,
         "walk_forward_gate_result": best.get("walk_forward_gate_result") if best else None,
-        "promotion_eligibility_gate_result": (
-            "PASS"
-            if best and (
-                not statistical_validation_required(manifest)
-                or (statistical_evidence is not None and statistical_evidence.get("statistical_gate_result") == "PASS")
-            )
-            else "FAIL"
-        ),
-        "promotion_blocking_reasons": _promotion_blocking_reasons(
-            best=best,
-            statistical_required=statistical_validation_required(manifest),
-            statistical_evidence=statistical_evidence,
-        ),
-        "gate_result": (
-            "PASS"
-            if best and (
-                not statistical_validation_required(manifest)
-                or (statistical_evidence is not None and statistical_evidence.get("statistical_gate_result") == "PASS")
-            )
-            else "FAIL"
-        ),
+        "promotion_eligibility_gate_result": "FAIL",
+        "promotion_blocking_reasons": [],
+        "gate_result": "FAIL",
         "warnings": warnings,
         "candidates": candidates,
         "repository_version": repository_version,
@@ -2121,6 +2105,17 @@ def _report_payload(
         "lineage_hash": lineage["lineage_hash"],
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
     }
+    promotion_blocking_reasons = _promotion_blocking_reasons(
+        best=best,
+        statistical_required=statistical_validation_required(manifest),
+        statistical_evidence=statistical_evidence,
+        report=payload,
+    )
+    payload["promotion_blocking_reasons"] = promotion_blocking_reasons
+    promotion_pass = best is not None and not promotion_blocking_reasons
+    payload["promotion_eligibility_gate_result"] = "PASS" if promotion_pass else "FAIL"
+    payload["gate_result"] = "PASS" if promotion_pass else "FAIL"
+    return payload
 
 
 def _primary_base_cost_assumption(candidate: dict[str, Any]) -> dict[str, Any] | None:
@@ -2140,6 +2135,7 @@ def _promotion_blocking_reasons(
     best: dict[str, Any] | None,
     statistical_required: bool,
     statistical_evidence: dict[str, Any] | None,
+    report: dict[str, Any] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     if best is None:
@@ -2147,10 +2143,20 @@ def _promotion_blocking_reasons(
     if statistical_required:
         if not isinstance(statistical_evidence, dict):
             reasons.append("statistical_evidence_missing")
+        elif best is not None and isinstance(report, dict):
+            reasons.extend(
+                validate_statistical_evidence_for_candidate(
+                    candidate=best,
+                    report=report,
+                    evidence=statistical_evidence,
+                )
+            )
         elif statistical_evidence.get("statistical_gate_result") != "PASS":
             reasons.extend(str(item) for item in statistical_evidence.get("gate_fail_reasons") or [])
-            if not reasons:
-                reasons.append("statistical_selection_failed")
+        if statistical_required and isinstance(statistical_evidence, dict) and not any(
+            str(reason).startswith("statistical_") or str(reason).startswith("return_panel") for reason in reasons
+        ) and statistical_evidence.get("statistical_gate_result") != "PASS":
+            reasons.append("statistical_selection_failed")
     return sorted(set(reasons))
 
 
@@ -2180,6 +2186,9 @@ def _attach_statistical_selection_to_candidates(
     return_panel_path = evidence.get("return_panel_path") if isinstance(evidence, dict) else None
     return_unit = evidence.get("return_unit") if isinstance(evidence, dict) else None
     return_panel_observation_count = evidence.get("return_panel_observation_count") if isinstance(evidence, dict) else None
+    family_trial_registry_path = evidence.get("family_trial_registry_path") if isinstance(evidence, dict) else None
+    family_trial_registry_prior_hash = evidence.get("family_trial_registry_prior_hash") if isinstance(evidence, dict) else None
+    family_trial_registry_row_hash = evidence.get("family_trial_registry_row_hash") if isinstance(evidence, dict) else None
     limitations = evidence.get("promotion_grade_limitations") if isinstance(evidence, dict) else []
     for candidate in candidates:
         candidate["statistical_validation_required"] = required
@@ -2201,6 +2210,9 @@ def _attach_statistical_selection_to_candidates(
         candidate["return_panel_path"] = return_panel_path
         candidate["return_unit"] = return_unit
         candidate["return_panel_observation_count"] = return_panel_observation_count
+        candidate["family_trial_registry_path"] = family_trial_registry_path
+        candidate["family_trial_registry_prior_hash"] = family_trial_registry_prior_hash
+        candidate["family_trial_registry_row_hash"] = family_trial_registry_row_hash
         candidate["statistical_gate_result"] = gate_result
         candidate["statistical_gate_fail_reasons"] = list(gate_reasons) if isinstance(gate_reasons, list) else []
         candidate["white_reality_check_p_value"] = p_value

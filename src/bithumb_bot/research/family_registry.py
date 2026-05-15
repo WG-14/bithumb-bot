@@ -73,6 +73,7 @@ def append_family_trial_registry_row(
         "candidate_count": int(candidate_count),
         "return_panel_hash": return_panel_hash,
         "statistical_evidence_hash": statistical_evidence_hash,
+        "statistical_evidence_hash_phase": "pre_registry_evidence_hash",
         "result_status": result_status,
         "prior_registry_hash": prior_hash,
         "created_at": created_at or datetime.now(timezone.utc).isoformat(),
@@ -111,13 +112,37 @@ def validate_family_registry_binding(
     for row in rows:
         if row_hash.startswith("sha256:") and row.get("row_hash") != row_hash:
             continue
-        if row.get("experiment_id") != evidence.get("experiment_id"):
-            if not row_hash.startswith("sha256:"):
-                continue
-            reasons.append("experiment_family_registry_stale")
+        computed_row_hash = sha256_prefixed(content_hash_payload({k: v for k, v in row.items() if k != "row_hash"}))
+        if not row_hash.startswith("sha256:") or str(row.get("row_hash") or "") != row_hash:
+            reasons.append("experiment_family_registry_row_hash_missing")
+        elif computed_row_hash != row_hash:
+            reasons.append("experiment_family_registry_row_hash_mismatch")
+        expected_fields = {
+            "experiment_family_id": evidence.get("experiment_family_id") or report.get("experiment_family_id"),
+            "experiment_id": evidence.get("experiment_id") or report.get("experiment_id"),
+            "manifest_hash": evidence.get("manifest_hash") or report.get("manifest_hash"),
+            "dataset_content_hash": evidence.get("dataset_content_hash") or report.get("dataset_content_hash"),
+            "attempt_index": evidence.get("attempt_index") or report.get("attempt_index"),
+            "holdout_reuse_count": evidence.get("holdout_reuse_count") or report.get("holdout_reuse_count"),
+        }
+        for field, expected in expected_fields.items():
+            if str(row.get(field) or "") != str(expected or ""):
+                reasons.append("experiment_family_registry_stale")
+                break
         if str(row.get("return_panel_hash") or "") != str(evidence.get("return_panel_hash") or ""):
-            reasons.append("experiment_family_registry_stale")
+            reasons.append("experiment_family_registry_return_panel_hash_mismatch")
+        expected_evidence_hash = str(evidence.get("content_hash") or report.get("statistical_evidence_hash") or "")
+        if row.get("statistical_evidence_hash_phase") == "pre_registry_evidence_hash":
+            expected_evidence_hash = str(evidence.get("family_trial_registry_bound_evidence_hash") or "")
+            if not expected_evidence_hash.startswith("sha256:"):
+                reasons.append("experiment_family_registry_statistical_evidence_hash_missing")
+        if str(row.get("statistical_evidence_hash") or "") != expected_evidence_hash:
+            reasons.append("experiment_family_registry_statistical_evidence_hash_mismatch")
         if str(row.get("prior_registry_hash") or "") != prior_hash:
+            reasons.append("experiment_family_registry_prior_hash_mismatch")
+        if str(row.get("parameter_space_hash") or "") != str(report.get("parameter_space_hash") or ""):
+            reasons.append("experiment_family_registry_stale")
+        if int(row.get("candidate_count") or -1) != int(report.get("candidate_count") or -2):
             reasons.append("experiment_family_registry_stale")
         return sorted(set(reasons))
     return ["experiment_family_registry_stale"]

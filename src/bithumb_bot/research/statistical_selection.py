@@ -23,6 +23,7 @@ SCREENING_METHOD = "metric_centered_max_bootstrap"
 SCREENING_METHOD_DETAIL = "summary_metric_centered_max_bootstrap"
 PROMOTION_GRADE_EVIDENCE_GRADES = {PROMOTION_GRADE_WRC, PROMOTION_GRADE_WRC_SPA_DSR}
 PROMOTION_GRADE_METHODS = {"white_reality_check_block_bootstrap", "white_reality_check_stationary_bootstrap"}
+SUPPORTED_PROMOTION_GRADE_METHODS: set[str] = {"white_reality_check_block_bootstrap"}
 
 
 def statistical_validation_required(manifest_or_payload: ExperimentManifest | dict[str, Any]) -> bool:
@@ -272,6 +273,7 @@ def build_statistical_selection_evidence(
         "family_trial_registry_path": str(family_trial_registry_path.resolve()) if family_trial_registry_path else None,
         "family_trial_registry_prior_hash": family_trial_registry_prior_hash,
         "family_trial_registry_row_hash": family_trial_registry_row_hash,
+        "family_trial_registry_bound_evidence_hash": None,
         "n_bootstrap": contract.bootstrap.n_bootstrap,
         "block_length": None,
         "block_length_policy": contract.bootstrap.block_length_policy,
@@ -381,6 +383,10 @@ def validate_statistical_evidence_for_candidate(
             reasons.append("reality_check_p_value_missing")
         if method not in PROMOTION_GRADE_METHODS and evidence_grade in PROMOTION_GRADE_EVIDENCE_GRADES:
             reasons.append("statistical_method_unavailable")
+        if method in PROMOTION_GRADE_METHODS and method not in SUPPORTED_PROMOTION_GRADE_METHODS:
+            reasons.append("promotion_grade_statistical_computation_missing")
+            reasons.append("statistical_method_unavailable")
+        _extend_promotion_grade_method_reasons(evidence=evidence, report=report, reasons=reasons)
     summary_p_value = evidence.get("summary_metric_max_bootstrap_p_value")
     if evidence_grade == SCREENING_SUMMARY_BOOTSTRAP and summary_p_value is None:
         reasons.append("summary_metric_max_bootstrap_p_value_missing")
@@ -410,6 +416,12 @@ def validate_statistical_evidence_for_candidate(
         gate_reasons = [str(item) for item in evidence.get("gate_fail_reasons") or []]
         reasons.extend(gate_reasons or ["reality_check_p_value_failed"])
     if isinstance(contract, dict):
+        if (
+            production_bound
+            and contract.get("multiple_testing_scope") == "experiment_family"
+            and evidence_grade in PROMOTION_GRADE_EVIDENCE_GRADES
+        ):
+            reasons.append("experiment_family_statistical_universe_not_implemented")
         gates = contract.get("gates")
         if isinstance(gates, dict):
             if gates.get("max_spa_p_value") is not None and evidence.get("spa_p_value") is None:
@@ -417,6 +429,43 @@ def validate_statistical_evidence_for_candidate(
             if gates.get("min_deflated_sharpe_probability") is not None and evidence.get("deflated_sharpe_probability") is None:
                 reasons.append("deflated_sharpe_missing")
     return sorted(set(reasons))
+
+
+def _extend_promotion_grade_method_reasons(
+    *,
+    evidence: dict[str, Any],
+    report: dict[str, Any],
+    reasons: list[str],
+) -> None:
+    provenance = evidence.get("method_provenance")
+    if not isinstance(provenance, dict):
+        reasons.append("statistical_method_provenance_missing")
+    sampling = evidence.get("bootstrap_sampling_contract")
+    sampling_hash = str(evidence.get("bootstrap_sampling_contract_hash") or "").strip()
+    if not isinstance(sampling, dict):
+        reasons.append("bootstrap_sampling_contract_missing")
+    else:
+        actual_sampling_hash = sha256_prefixed(content_hash_payload({k: v for k, v in sampling.items() if k != "content_hash"}))
+        if sampling.get("content_hash") != actual_sampling_hash or sampling_hash != actual_sampling_hash:
+            reasons.append("bootstrap_sampling_contract_malformed")
+        if sampling.get("method") not in PROMOTION_GRADE_METHODS:
+            reasons.append("bootstrap_sampling_contract_malformed")
+    if not str(evidence.get("return_panel_hash") or report.get("return_panel_hash") or "").startswith("sha256:"):
+        reasons.append("return_panel_hash_missing")
+    observation_count = _as_int(evidence.get("return_panel_observation_count") or report.get("return_panel_observation_count"))
+    if observation_count is None or observation_count <= 0:
+        reasons.append("return_panel_observation_count_insufficient")
+    if evidence.get("return_unit") not in {"bar_excess_return", "portfolio_bar_return", "trade_return"}:
+        reasons.append("return_panel_method_support_insufficient")
+    panel = _load_return_panel(evidence, report)
+    if not isinstance(panel, dict) or not isinstance(sampling, dict):
+        return
+    recomputed = recompute_white_reality_check_block_bootstrap(panel=panel, sampling_contract=sampling)
+    claimed = _as_float(evidence.get("white_reality_check_p_value"))
+    if recomputed is None:
+        reasons.append("promotion_grade_statistical_computation_missing")
+    elif claimed is None or abs(claimed - recomputed) > 1e-12:
+        reasons.append("white_reality_check_p_value_recompute_mismatch")
 
 
 def _extend_candidate_metric_recompute_reasons(
@@ -656,6 +705,62 @@ def _bootstrap_sampling_contract(
     }
     payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
     return payload
+
+
+def recompute_white_reality_check_block_bootstrap(
+    *,
+    panel: dict[str, Any],
+    sampling_contract: dict[str, Any],
+) -> float | None:
+    if sampling_contract.get("method") != "white_reality_check_block_bootstrap":
+        return None
+    n_bootstrap = _as_int(sampling_contract.get("n_bootstrap"))
+    block_length = _as_int(sampling_contract.get("block_length"))
+    seed = _as_int(sampling_contract.get("derived_seed"))
+    if n_bootstrap is None or n_bootstrap <= 0 or block_length is None or block_length <= 0 or seed is None:
+        return None
+    candidate_paths: list[list[float]] = []
+    rows = panel.get("candidate_return_series")
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        excess = row.get("excess_return_series_values")
+        if not isinstance(excess, list) or not excess:
+            return None
+        values: list[float] = []
+        for item in excess:
+            if not isinstance(item, dict):
+                return None
+            value = _as_float(item.get("excess_return_pct"))
+            if value is None:
+                return None
+            values.append(value)
+        candidate_paths.append(values)
+    if not candidate_paths:
+        return None
+    observed = max(sum(path) / len(path) for path in candidate_paths)
+    centered_paths = [[value - (sum(path) / len(path)) for value in path] for path in candidate_paths]
+    rng = random.Random(seed)
+    exceed_count = 0
+    for _ in range(n_bootstrap):
+        boot_max = max(_block_bootstrap_mean(path, block_length=block_length, rng=rng) for path in centered_paths)
+        if boot_max >= observed:
+            exceed_count += 1
+    return round((exceed_count + 1) / (n_bootstrap + 1), 12)
+
+
+def _block_bootstrap_mean(path: list[float], *, block_length: int, rng: random.Random) -> float:
+    out: list[float] = []
+    n = len(path)
+    while len(out) < n:
+        start = rng.randrange(n)
+        for offset in range(block_length):
+            out.append(path[(start + offset) % n])
+            if len(out) >= n:
+                break
+    return sum(out) / len(out)
 
 
 def _load_return_panel(evidence: dict[str, Any], report: dict[str, Any]) -> dict[str, Any] | None:

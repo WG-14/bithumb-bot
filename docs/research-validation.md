@@ -54,9 +54,11 @@ no placeholder p-values are acceptable.
 Every statistical evidence artifact is bound to a canonical
 `candidate_return_panel` artifact. The current panel is the smallest honest panel
 available from the engine: validation split `trade_return` series derived from
-closed trade records, with a cash benchmark, ordered time-index hash, per-candidate
-series hashes, benchmark excess-return hashes, observation counts, and explicit
-limitations noting that bar-level portfolio return panels are not yet available.
+closed trade records, with a cash benchmark, ordered time index, candidate ids,
+scenario ids where present, per-candidate return series values, benchmark series
+values, excess-return series values, observation counts, missing-observation
+policy, return unit, split, hashes, and explicit limitations noting that
+bar-level portfolio return panels are not yet available.
 Promotion-grade methods that require unavailable return units must fail closed
 rather than infer precision.
 
@@ -65,10 +67,15 @@ family trial registry at
 `DATA_ROOT/<mode>/reports/research/families/<experiment_family_id>/trial_registry.jsonl`.
 The registry records experiment id, manifest hash, hypothesis metadata, attempt
 index, holdout reuse count, dataset hash, parameter-space hash, candidate count,
-return panel hash, statistical evidence hash, result status, and row hash. Missing
-or stale registry evidence fails closed as `experiment_family_universe_missing`
-or `experiment_family_registry_stale`; the system must not silently fall back to
-current-experiment-only selection.
+return panel hash, statistical evidence hash, result status, and row hash. The
+current registry binding uses an explicit two-phase design: the row records the
+pre-registry evidence hash and the finalized evidence records the row hash, which
+avoids a recursive hash cycle while keeping both artifacts reproducible. Missing,
+stale, tampered, or partially mismatched registry evidence fails closed; the
+system must not silently fall back to current-experiment-only selection. Family-wide
+statistical aggregation is still not implemented, so production-bound promotion
+claims under `experiment_family` fail closed until the registry contributes to the
+actual statistical universe.
 
 The research engine is a pure replay/simulation path. It does not call the live broker, order lifecycle, run loop, recovery commands, or lot-native SELL authority code.
 
@@ -321,7 +328,7 @@ When `acceptance_gate.walk_forward_required=true`, the `walk_forward` section is
 
 Researcher-freedom metadata such as `search_budget`, `parameter_grid_size`, `attempt_index`, `holdout_reuse_count`, `dataset_reuse_policy`, hypothesis ids, and lineage hashes is observability, not a statistical defense. Production-bound promotion now requires a `StatisticalSelectionContract` plus a `statistical_selection_evidence` artifact so the selected candidate is judged as a winner selected from a candidate universe, not as an isolated backtest.
 
-The current implemented correction is `bootstrap.method=metric_centered_max_bootstrap`. It computes a deterministic, seeded max-statistic bootstrap over candidate primary metric summaries and emits `summary_metric_max_bootstrap_p_value`. The compatibility field `white_reality_check_p_value` carries the same value, but `white_reality_check_method=approximation_summary_metric_centered_max_bootstrap` and `promotion_grade_limitations` make the limitation explicit. This is not a full White's Reality Check, not SPA, not Deflated Sharpe, and not a trade/bar-return block bootstrap. If `max_spa_p_value` or `min_deflated_sharpe_probability` is configured before those methods are implemented, promotion fails closed with `spa_p_value_missing` or `deflated_sharpe_missing`.
+The report-generation path currently emits `bootstrap.method=metric_centered_max_bootstrap`. It computes a deterministic, seeded max-statistic bootstrap over candidate primary metric summaries and emits `summary_metric_max_bootstrap_p_value`. It is `SCREENING_SUMMARY_BOOTSTRAP`; it does not populate `white_reality_check_p_value`, and it is not promotion-grade. Promotion-grade WRC evidence must be recomputable from the bound return panel and a supported bootstrap sampling contract with method provenance. SPA and Deflated Sharpe are not implemented; if `max_spa_p_value` or `min_deflated_sharpe_probability` is configured before those methods are implemented, promotion fails closed with `spa_method_unavailable` or `deflated_sharpe_missing`.
 
 Lineage metadata records researcher freedom: manifest, dataset, experiment-family, attempt, holdout-reuse, and search-budget context. Statistical evidence is the enforcement artifact. The `selection_universe_hash` binds the manifest hash, dataset content hash, dataset quality hash when present, experiment-family and hypothesis metadata, candidate ids and parameter values, required scenario ids, primary metric source, benchmark policy, and the statistical validation contract. The separate `candidate_metric_values_hash` binds the exact candidate metric universe used for the statistical test, including candidate ids, parameter values, scenario policy, required scenario ids, primary metric/source, validation metric values, missing-metric markers, and candidate acceptance-gate results.
 
@@ -335,7 +342,7 @@ DATA_ROOT/<mode>/reports/research/<experiment_id>/statistical_selection_evidence
 
 This is a `reports` artifact. It is diagnostic/promotion evidence, not recovery-critical trade lifecycle state. Operators should regenerate it from the same manifest and dataset snapshot rather than editing recorded hashes.
 
-Stable statistical refusal reasons include `statistical_contract_missing`, `statistical_contract_mismatch`, `statistical_evidence_missing`, `statistical_evidence_hash_missing`, `statistical_evidence_hash_mismatch`, `selection_universe_hash_missing`, `selection_universe_hash_mismatch`, `candidate_metric_values_hash_missing`, `candidate_metric_values_hash_mismatch`, `candidate_metric_values_hash_recompute_mismatch`, `statistical_metadata_mismatch`, `statistical_candidate_count_mismatch`, `statistical_attempt_index_mismatch`, `statistical_holdout_reuse_count_mismatch`, `statistical_search_budget_mismatch`, `statistical_parameter_grid_size_mismatch`, `statistical_dataset_reuse_policy_mismatch`, `statistical_benchmark_mismatch`, `statistical_primary_metric_mismatch`, `statistical_metric_values_missing`, `statistical_metric_value_count_mismatch`, `statistical_effective_trial_count_underreported`, `reality_check_p_value_missing`, `reality_check_p_value_failed`, `spa_p_value_missing`, `deflated_sharpe_missing`, `effective_trial_count_missing`, `holdout_reuse_budget_exceeded`, and `attempt_budget_exceeded`.
+Stable statistical refusal reasons include `statistical_contract_missing`, `statistical_contract_mismatch`, `statistical_evidence_missing`, `statistical_evidence_hash_missing`, `statistical_evidence_hash_mismatch`, `statistical_evidence_grade_insufficient`, `selection_universe_hash_missing`, `selection_universe_hash_mismatch`, `candidate_metric_values_hash_missing`, `candidate_metric_values_hash_mismatch`, `candidate_metric_values_hash_recompute_mismatch`, `statistical_method_provenance_missing`, `statistical_method_unavailable`, `promotion_grade_statistical_computation_missing`, `bootstrap_sampling_contract_missing`, `bootstrap_sampling_contract_malformed`, `white_reality_check_p_value_recompute_mismatch`, `experiment_family_statistical_universe_not_implemented`, `return_panel_missing`, `return_panel_hash_missing`, `return_panel_hash_mismatch`, `return_panel_series_malformed`, `statistical_metadata_mismatch`, `statistical_candidate_count_mismatch`, `statistical_attempt_index_mismatch`, `statistical_holdout_reuse_count_mismatch`, `statistical_search_budget_mismatch`, `statistical_parameter_grid_size_mismatch`, `statistical_dataset_reuse_policy_mismatch`, `statistical_benchmark_mismatch`, `statistical_primary_metric_mismatch`, `statistical_metric_values_missing`, `statistical_metric_value_count_mismatch`, `statistical_effective_trial_count_underreported`, `reality_check_p_value_missing`, `reality_check_p_value_failed`, `spa_method_unavailable`, `deflated_sharpe_missing`, `effective_trial_count_missing`, `holdout_reuse_budget_exceeded`, and `attempt_budget_exceeded`.
 
 ## Strategy Robustness Stress Suite
 

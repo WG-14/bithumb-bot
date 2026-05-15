@@ -11,7 +11,10 @@ from bithumb_bot.execution_reality_contract import build_execution_reality_contr
 from bithumb_bot.research import cli as research_cli
 from bithumb_bot.research.hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
 from bithumb_bot.research.lineage import build_research_lineage, compute_lineage_hash, reproduce_promotion
-from bithumb_bot.research.statistical_selection import candidate_metric_values_hash
+from bithumb_bot.research.statistical_selection import (
+    candidate_metric_values_hash,
+    recompute_white_reality_check_block_bootstrap,
+)
 from bithumb_bot.research.metrics_gate_policy import metrics_gate_policy_hash
 from bithumb_bot.research.promotion_gate import PromotionGateError, build_candidate_profile, promote_candidate
 from bithumb_bot.storage_io import write_json_atomic
@@ -532,7 +535,7 @@ def _statistical_contract(**gate_overrides: object) -> dict[str, object]:
         "benchmark": "cash",
         "primary_metric": "net_excess_return",
         "selection_universe": "all_parameter_candidates_all_required_scenarios",
-        "multiple_testing_scope": "experiment_family",
+        "multiple_testing_scope": "experiment",
         "bootstrap": {
             "method": "metric_centered_max_bootstrap",
             "n_bootstrap": 100,
@@ -604,7 +607,7 @@ def _attach_statistical_evidence(
         "minimum_promotion_evidence_grade": "PROMOTION_GRADE_WRC",
         "promotion_grade_available": True,
         "bootstrap_sampling_contract": {
-            "method_name": "white_reality_check_block_bootstrap",
+            "method": "white_reality_check_block_bootstrap",
             "n_bootstrap": 100,
             "seed_policy": "derived_from_selection_universe_hash",
             "derived_seed": 1,
@@ -617,8 +620,8 @@ def _attach_statistical_evidence(
             "missing_observation_policy": "skip_missing_candidate_trade_returns",
         },
         "n_bootstrap": 100,
-        "block_length": None,
-        "block_length_policy": "not_applicable_summary_metric",
+        "block_length": 2,
+        "block_length_policy": "fixed",
         "seed": 1,
         "effective_trial_count": max(candidate_count, search_budget, parameter_grid_size)
         * max(1, attempt_index)
@@ -642,10 +645,15 @@ def _attach_statistical_evidence(
             "deflated_sharpe_not_implemented",
         ],
         "statistical_validation_contract": contract,
+        "method_provenance": {
+            "implementation": "bithumb_bot.research.statistical_selection.recompute_white_reality_check_block_bootstrap",
+            "version": 1,
+        },
     }
     evidence["bootstrap_sampling_contract"]["content_hash"] = sha256_prefixed(
         content_hash_payload(evidence["bootstrap_sampling_contract"])
     )
+    evidence["bootstrap_sampling_contract_hash"] = evidence["bootstrap_sampling_contract"]["content_hash"]
     panel = {
         "artifact_type": "candidate_return_panel",
         "schema_version": 1,
@@ -656,10 +664,54 @@ def _attach_statistical_evidence(
         "split": "validation",
         "return_unit": "trade_return",
         "benchmark": "cash",
-        "ordered_time_index_hash": "sha256:time-index",
+        "ordered_time_index": [1, 2],
+        "ordered_time_index_hash": sha256_prefixed([1, 2]),
         "candidate_count": candidate_count,
         "candidate_ids": [str(item.get("parameter_candidate_id") or "") for item in report.get("candidates") or [candidate]],
-        "candidate_return_series": [],
+        "candidate_return_series": [
+            {
+                "candidate_id": str(candidate.get("parameter_candidate_id") or ""),
+                "parameter_values": candidate.get("parameter_values") or {},
+                "scenario_ids": ["scenario_001_fixed_bps_unit"],
+                "return_unit": "trade_return",
+                "benchmark": "cash",
+                "observation_count": 2,
+                "time_index": [1, 2],
+                "time_index_hash": sha256_prefixed([1, 2]),
+                "candidate_return_series_values": [
+                    {"ts": 1, "sequence": 0, "return_pct": 0.5},
+                    {"ts": 2, "sequence": 1, "return_pct": 0.5},
+                ],
+                "candidate_return_series_hash": sha256_prefixed(
+                    [
+                        {"ts": 1, "sequence": 0, "return_pct": 0.5},
+                        {"ts": 2, "sequence": 1, "return_pct": 0.5},
+                    ]
+                ),
+                "benchmark_return_series_values": [
+                    {"ts": 1, "sequence": 0, "return_pct": 0.0},
+                    {"ts": 2, "sequence": 1, "return_pct": 0.0},
+                ],
+                "benchmark_series_hash": sha256_prefixed(
+                    [
+                        {"ts": 1, "sequence": 0, "return_pct": 0.0},
+                        {"ts": 2, "sequence": 1, "return_pct": 0.0},
+                    ]
+                ),
+                "excess_return_series_values": [
+                    {"ts": 1, "sequence": 0, "excess_return_pct": 0.5},
+                    {"ts": 2, "sequence": 1, "excess_return_pct": 0.5},
+                ],
+                "benchmark_excess_return_series_hash": sha256_prefixed(
+                    [
+                        {"ts": 1, "sequence": 0, "excess_return_pct": 0.5},
+                        {"ts": 2, "sequence": 1, "excess_return_pct": 0.5},
+                    ]
+                ),
+                "missing_observation_policy": "skip_missing_candidate_trade_returns",
+                "return_series_available": True,
+            }
+        ],
         "observation_count": 2,
         "missing_observation_policy": "skip_missing_candidate_trade_returns",
         "limitations": ["test_fixture_panel"],
@@ -668,6 +720,10 @@ def _attach_statistical_evidence(
     panel["content_hash"] = sha256_prefixed(content_hash_payload(panel))
     panel_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "candidate_return_panel.json"
     write_json_atomic(panel_path, panel)
+    evidence["white_reality_check_p_value"] = recompute_white_reality_check_block_bootstrap(
+        panel=panel,
+        sampling_contract=evidence["bootstrap_sampling_contract"],
+    )
     registry_path = manager.data_dir() / "reports" / "research" / "families" / "family_001" / "trial_registry.jsonl"
     registry_row = {
         "schema_version": 1,
@@ -683,11 +739,12 @@ def _attach_statistical_evidence(
         "candidate_count": candidate_count,
         "return_panel_hash": panel["content_hash"],
         "statistical_evidence_hash": None,
+        "statistical_evidence_hash_phase": "pre_registry_evidence_hash",
         "result_status": "PASS",
         "prior_registry_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e191b6417b1db8ce3cdd82e",
         "created_at": "2026-05-04T00:00:00+00:00",
     }
-    registry_row["row_hash"] = sha256_prefixed(content_hash_payload(registry_row))
+    registry_row["row_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in registry_row.items() if k != "row_hash"}))
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(json.dumps(registry_row, sort_keys=True) + "\n", encoding="utf-8")
     evidence["return_panel_path"] = str(panel_path)
@@ -698,9 +755,15 @@ def _attach_statistical_evidence(
     evidence["return_panel_observation_count"] = 2
     evidence["family_trial_registry_path"] = str(registry_path)
     evidence["family_trial_registry_prior_hash"] = registry_row["prior_registry_hash"]
+    evidence["family_trial_registry_bound_evidence_hash"] = None
+    evidence["content_hash"] = sha256_prefixed(content_hash_payload(evidence))
+    evidence["family_trial_registry_bound_evidence_hash"] = evidence["content_hash"]
+    registry_row["statistical_evidence_hash"] = evidence["family_trial_registry_bound_evidence_hash"]
+    registry_row["row_hash"] = sha256_prefixed(content_hash_payload(registry_row))
+    registry_path.write_text(json.dumps(registry_row, sort_keys=True) + "\n", encoding="utf-8")
     evidence["family_trial_registry_row_hash"] = registry_row["row_hash"]
     evidence.update(overrides)
-    evidence["content_hash"] = sha256_prefixed(content_hash_payload(evidence))
+    evidence["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "content_hash"}))
     evidence_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "statistical_selection_evidence.json"
     write_json_atomic(evidence_path, evidence)
     report["statistical_validation_required"] = True

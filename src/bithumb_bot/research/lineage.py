@@ -9,6 +9,7 @@ from typing import Any
 from .deployment_policy import is_production_bound_target
 from .hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
 from .statistical_selection import recompute_candidate_metric_values_hash_from_report
+from .return_panel import validate_return_panel_binding
 
 
 LINEAGE_SCHEMA_VERSION = 1
@@ -503,6 +504,11 @@ def _verify_statistical_evidence_bindings(
         )
     if isinstance(report, dict):
         _verify_statistical_report_bindings(summary, promotion, lineage, payload, report)
+        panel = _load_optional_artifact(lineage.get("return_panel_path"))
+        for reason in validate_return_panel_binding(report=report, evidence=payload, panel=panel):
+            summary["mismatches"].append(
+                _mismatch("return_panel", "valid_binding", reason, reason)
+            )
 
 
 def _verify_stress_suite_bindings(
@@ -719,6 +725,15 @@ def _verify_statistical_report_bindings(
             summary["mismatches"].append(
                 _mismatch(field, recomputed, value, "candidate_metric_values_hash_recompute_mismatch")
             )
+    for field, value in (
+        ("statistical_evidence.return_panel_hash", evidence.get("return_panel_hash")),
+        ("promotion.return_panel_hash", promotion.get("return_panel_hash")),
+        ("lineage.return_panel_hash", lineage.get("return_panel_hash")),
+        ("backtest_report.return_panel_hash", report.get("return_panel_hash")),
+    ):
+        expected = str(evidence.get("return_panel_hash") or "").strip()
+        if str(value or "").strip() != expected:
+            summary["mismatches"].append(_mismatch(field, expected, value, "return_panel_hash_mismatch"))
 
 
 def _load_optional_artifact(path_value: object) -> dict[str, Any] | None:

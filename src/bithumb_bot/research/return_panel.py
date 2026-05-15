@@ -31,24 +31,31 @@ def build_candidate_return_panel(
         series = _candidate_trade_return_series(candidate, split=split)
         timestamps = [int(row["ts"]) for row in series]
         all_timestamps.extend(timestamps)
-        series_hash = sha256_prefixed(series)
-        benchmark_series = [{"ts": row["ts"], "return_pct": 0.0} for row in series]
+        benchmark_series = [{"ts": row["ts"], "sequence": row["sequence"], "return_pct": 0.0} for row in series]
+        excess_series = [
+            {
+                "ts": row["ts"],
+                "sequence": row["sequence"],
+                "excess_return_pct": row["return_pct"],
+            }
+            for row in series
+        ]
         rows.append(
             {
                 "candidate_id": str(candidate.get("parameter_candidate_id") or ""),
                 "parameter_values": candidate.get("parameter_values") or {},
+                "scenario_ids": _candidate_scenario_ids(candidate),
                 "return_unit": DEFAULT_RETURN_UNIT,
                 "benchmark": benchmark,
                 "observation_count": len(series),
+                "time_index": timestamps,
                 "time_index_hash": sha256_prefixed(timestamps),
-                "candidate_return_series_hash": series_hash,
-                "benchmark_excess_return_series_hash": sha256_prefixed(
-                    [
-                        {"ts": row["ts"], "excess_return_pct": row["return_pct"]}
-                        for row in series
-                    ]
-                ),
+                "candidate_return_series_values": series,
+                "candidate_return_series_hash": sha256_prefixed(series),
+                "benchmark_return_series_values": benchmark_series,
                 "benchmark_series_hash": sha256_prefixed(benchmark_series),
+                "excess_return_series_values": excess_series,
+                "benchmark_excess_return_series_hash": sha256_prefixed(excess_series),
                 "missing_observation_policy": DEFAULT_MISSING_OBSERVATION_POLICY,
                 "return_series_available": bool(series),
             }
@@ -64,6 +71,7 @@ def build_candidate_return_panel(
         "split": split,
         "return_unit": DEFAULT_RETURN_UNIT,
         "benchmark": benchmark,
+        "ordered_time_index": ordered_index,
         "ordered_time_index_hash": sha256_prefixed(ordered_index),
         "candidate_count": len(rows),
         "candidate_ids": [row["candidate_id"] for row in rows],
@@ -116,6 +124,8 @@ def validate_return_panel_binding(
         reasons.append("return_panel_hash_mismatch")
     if embedded_hash != actual_hash:
         reasons.append("return_panel_hash_mismatch")
+    if panel.get("schema_version") != CANDIDATE_RETURN_PANEL_SCHEMA_VERSION:
+        reasons.append("return_panel_schema_version_mismatch")
     for field in ("manifest_hash", "dataset_content_hash", "dataset_quality_hash"):
         expected = report.get(field)
         actual = panel.get(field)
@@ -132,7 +142,46 @@ def validate_return_panel_binding(
     panel_candidate_ids = sorted(str(item) for item in panel.get("candidate_ids") or [])
     if expected_candidate_ids != panel_candidate_ids:
         reasons.append("return_panel_candidate_mismatch")
+    if not _valid_return_panel_series(panel):
+        reasons.append("return_panel_series_malformed")
     return sorted(set(reasons))
+
+
+def _valid_return_panel_series(panel: dict[str, Any]) -> bool:
+    ordered_index = panel.get("ordered_time_index")
+    if not isinstance(ordered_index, list):
+        return False
+    parsed_ordered_index = [_as_int(item) for item in ordered_index]
+    if any(item is None for item in parsed_ordered_index):
+        return False
+    if sha256_prefixed(parsed_ordered_index) != panel.get("ordered_time_index_hash"):
+        return False
+    rows = panel.get("candidate_return_series")
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        candidate_series = row.get("candidate_return_series_values")
+        benchmark_series = row.get("benchmark_return_series_values")
+        excess_series = row.get("excess_return_series_values")
+        time_index = row.get("time_index")
+        if not isinstance(candidate_series, list) or not isinstance(benchmark_series, list) or not isinstance(excess_series, list):
+            return False
+        if not isinstance(time_index, list):
+            return False
+        observation_count = _as_int(row.get("observation_count"))
+        if observation_count is None or observation_count != len(candidate_series):
+            return False
+        if sha256_prefixed(time_index) != row.get("time_index_hash"):
+            return False
+        if sha256_prefixed(candidate_series) != row.get("candidate_return_series_hash"):
+            return False
+        if sha256_prefixed(benchmark_series) != row.get("benchmark_series_hash"):
+            return False
+        if sha256_prefixed(excess_series) != row.get("benchmark_excess_return_series_hash"):
+            return False
+    return True
 
 
 def _candidate_trade_return_series(candidate: dict[str, Any], *, split: str) -> list[dict[str, Any]]:
@@ -161,6 +210,18 @@ def _candidate_trade_return_series(candidate: dict[str, Any], *, split: str) -> 
             continue
         rows.append({"ts": ts, "sequence": index, "return_pct": value})
     return sorted(rows, key=lambda row: (int(row["ts"]), int(row["sequence"])))
+
+
+def _candidate_scenario_ids(candidate: dict[str, Any]) -> list[str]:
+    scenario_results = candidate.get("scenario_results")
+    if not isinstance(scenario_results, list):
+        return []
+    ids = [
+        str(scenario.get("scenario_id"))
+        for scenario in scenario_results
+        if isinstance(scenario, dict) and scenario.get("scenario_id") is not None
+    ]
+    return sorted(ids)
 
 
 def _as_int(value: object) -> int | None:

@@ -9,6 +9,10 @@ from bithumb_bot.research.statistical_selection import (
     validate_statistical_evidence_for_candidate,
 )
 from bithumb_bot.research.return_panel import build_candidate_return_panel
+from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
+from bithumb_bot.research.family_registry import EMPTY_REGISTRY_HASH
+from bithumb_bot.research.family_registry import validate_family_registry_binding
+from bithumb_bot.research.return_panel import validate_return_panel_binding
 
 
 def _manifest():
@@ -538,3 +542,197 @@ def test_candidate_return_panel_hash_binds_trade_return_series() -> None:
 
     assert first["content_hash"] != changed["content_hash"]
     assert first["candidate_return_series"][0]["observation_count"] == 2
+
+
+def test_candidate_return_panel_hash_binds_metadata_and_validation_recomputes_series() -> None:
+    candidates = _candidates()
+    candidates[0]["scenario_results"] = [
+        {
+            "scenario_id": "scenario_001",
+            "validation_closed_trades": [{"entry_ts": 1, "exit_ts": 2, "return_pct": 1.0}],
+        }
+    ]
+    panel = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=candidates,
+    )
+    changed_candidate = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=[{**candidates[0], "parameter_candidate_id": "candidate_changed"}, candidates[1]],
+    )
+    changed_benchmark = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="configured",
+        candidates=candidates,
+    )
+    tampered = dict(panel)
+    tampered["candidate_return_series"] = [dict(item) for item in panel["candidate_return_series"]]
+    tampered["candidate_return_series"][0] = dict(tampered["candidate_return_series"][0])
+    tampered["candidate_return_series"][0]["missing_observation_policy"] = "tampered"
+
+    assert changed_candidate["content_hash"] != panel["content_hash"]
+    assert changed_benchmark["content_hash"] != panel["content_hash"]
+    assert "return_panel_series_malformed" not in validate_return_panel_binding(
+        report={
+            "manifest_hash": "sha256:manifest",
+            "dataset_content_hash": "sha256:dataset",
+            "dataset_quality_hash": "sha256:quality",
+            "candidates": candidates,
+        },
+        evidence={"return_panel_hash": panel["content_hash"]},
+        panel=panel,
+    )
+    tampered["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in tampered.items() if k != "content_hash"}))
+    assert "return_panel_hash_mismatch" in validate_return_panel_binding(
+        report={
+            "manifest_hash": "sha256:manifest",
+            "dataset_content_hash": "sha256:dataset",
+            "dataset_quality_hash": "sha256:quality",
+            "candidates": candidates,
+        },
+        evidence={"return_panel_hash": panel["content_hash"]},
+        panel=tampered,
+    )
+
+
+def test_promotion_grade_spoofed_wrc_is_refused_without_supported_provenance() -> None:
+    manifest = _manifest()
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=_candidates(),
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash="sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        required_scenario_ids=["scenario_001"],
+        search_budget=2,
+        parameter_grid_size=2,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+    )
+    spoofed = {
+        **evidence,
+        "evidence_grade": "PROMOTION_GRADE_WRC",
+        "statistical_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_method": "white_reality_check_block_bootstrap",
+        "white_reality_check_p_value": 0.01,
+        "statistical_gate_result": "PASS",
+        "gate_fail_reasons": [],
+    }
+    spoofed["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in spoofed.items() if k != "content_hash"}))
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": manifest.manifest_hash(),
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 2,
+        "search_budget": 2,
+        "parameter_grid_size": 2,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "metric_value_count": 2,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": spoofed["content_hash"],
+        "candidates": _candidates(),
+    }
+    candidate = {
+        **_candidates()[0],
+        "deployment_tier": "paper_candidate",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": evidence["selection_universe_hash"],
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "metric_value_count": 2,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": spoofed["content_hash"],
+    }
+
+    reasons = validate_statistical_evidence_for_candidate(candidate=candidate, report=report, evidence=spoofed)
+
+    assert "statistical_method_provenance_missing" in reasons
+    assert "bootstrap_sampling_contract_malformed" in reasons
+    assert "return_panel_missing" in reasons
+
+
+def test_family_registry_binding_detects_hash_tampering(tmp_path) -> None:
+    manifest = _manifest()
+    contract = {**manifest.statistical_validation.as_dict(), "multiple_testing_scope": "experiment_family"}
+    path = tmp_path / "trial_registry.jsonl"
+    evidence = {
+        "experiment_id": "stat_exp",
+        "experiment_family_id": "family",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "return_panel_hash": "sha256:return-panel",
+        "family_trial_registry_path": str(path),
+        "family_trial_registry_prior_hash": EMPTY_REGISTRY_HASH,
+        "family_trial_registry_bound_evidence_hash": "sha256:pre-registry",
+        "statistical_validation_contract": contract,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+    }
+    row = {
+        "schema_version": 1,
+        "experiment_family_id": "family",
+        "experiment_id": "stat_exp",
+        "manifest_hash": "sha256:manifest",
+        "hypothesis_id": "hypothesis",
+        "hypothesis_status": "pre_registered",
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_content_hash": "sha256:dataset",
+        "parameter_space_hash": "sha256:parameter-space",
+        "candidate_count": 2,
+        "return_panel_hash": "sha256:return-panel",
+        "statistical_evidence_hash": "sha256:pre-registry",
+        "statistical_evidence_hash_phase": "pre_registry_evidence_hash",
+        "result_status": "PASS",
+        "prior_registry_hash": EMPTY_REGISTRY_HASH,
+    }
+    row["row_hash"] = sha256_prefixed(content_hash_payload(row))
+    evidence["family_trial_registry_row_hash"] = row["row_hash"]
+    path.write_text(__import__("json").dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    report = {
+        "experiment_id": "stat_exp",
+        "experiment_family_id": "family",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "parameter_space_hash": "sha256:parameter-space",
+        "candidate_count": 2,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "statistical_validation_contract": contract,
+    }
+
+    assert validate_family_registry_binding(report=report, evidence=evidence) == []
+    tampered = dict(row)
+    tampered["return_panel_hash"] = "sha256:tampered"
+    path.write_text(__import__("json").dumps(tampered, sort_keys=True) + "\n", encoding="utf-8")
+
+    reasons = validate_family_registry_binding(report=report, evidence=evidence)
+
+    assert "experiment_family_registry_row_hash_mismatch" in reasons
+    assert "experiment_family_registry_return_panel_hash_mismatch" in reasons

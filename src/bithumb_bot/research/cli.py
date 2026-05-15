@@ -94,7 +94,12 @@ def cmd_research_promote_candidate(
     print(f"  statistical_method={result.artifact.get('statistical_method') or 'none'}")
     print(f"  return_panel_hash={result.artifact.get('return_panel_hash') or 'none'}")
     print(f"  return_unit={result.artifact.get('return_unit') or 'none'}")
+    print(f"  return_panel_observation_count={result.artifact.get('return_panel_observation_count')}")
+    print(f"  family_trial_registry_path={result.artifact.get('family_trial_registry_path') or 'none'}")
+    print(f"  family_trial_registry_prior_hash={result.artifact.get('family_trial_registry_prior_hash') or 'none'}")
+    print(f"  family_trial_registry_row_hash={result.artifact.get('family_trial_registry_row_hash') or 'none'}")
     print(f"  white_reality_check_p_value={result.artifact.get('white_reality_check_p_value')}")
+    print(f"  summary_metric_max_bootstrap_p_value={result.artifact.get('summary_metric_max_bootstrap_p_value')}")
     print(f"  statistical_gate_result={result.artifact.get('statistical_gate_result') or 'none'}")
     print(
         "  statistical_gate_fail_reasons="
@@ -158,7 +163,9 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  return_panel_hash={report.get('return_panel_hash') or 'none'}")
     print(f"  return_unit={report.get('return_unit') or 'none'}")
     print(f"  return_panel_observation_count={report.get('return_panel_observation_count')}")
+    print(f"  family_trial_registry_path={report.get('family_trial_registry_path') or 'none'}")
     print(f"  family_trial_registry_prior_hash={report.get('family_trial_registry_prior_hash') or 'none'}")
+    print(f"  family_trial_registry_row_hash={report.get('family_trial_registry_row_hash') or 'none'}")
     print(f"  summary_metric_max_bootstrap_p_value={report.get('summary_metric_max_bootstrap_p_value')}")
     print(f"  white_reality_check_p_value={report.get('white_reality_check_p_value')}")
     print(f"  white_reality_check_method={report.get('white_reality_check_method') or 'none'}")
