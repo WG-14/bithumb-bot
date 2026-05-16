@@ -434,6 +434,7 @@ def execution_capability_contract_mismatch_reasons(
     *,
     expected: dict[str, Any] | None,
     observed: dict[str, Any] | None,
+    include_hash: bool = True,
 ) -> list[dict[str, object]]:
     if not isinstance(expected, dict):
         return [{"field": "execution_capability_contract", "reason": "expected_execution_capability_contract_missing"}]
@@ -442,7 +443,7 @@ def execution_capability_contract_mismatch_reasons(
     mismatches: list[dict[str, object]] = []
     expected_hash = str(expected.get(CAPABILITY_CONTRACT_HASH_FIELD) or execution_capability_contract_hash(expected))
     observed_hash = str(observed.get(CAPABILITY_CONTRACT_HASH_FIELD) or execution_capability_contract_hash(observed))
-    if expected_hash != observed_hash:
+    if include_hash and expected_hash != observed_hash:
         mismatches.append(
             {
                 "field": CAPABILITY_CONTRACT_HASH_FIELD,
@@ -460,6 +461,19 @@ def execution_capability_contract_mismatch_reasons(
                 observed.get(field),
             )
             mismatches.extend(availability_mismatches)
+            continue
+        if field == "unavailable_required_capabilities":
+            expected_items = _semantic_unavailable_required_capabilities(expected.get(field))
+            observed_items = _semantic_unavailable_required_capabilities(observed.get(field))
+            if expected_items != observed_items:
+                mismatches.append(
+                    {
+                        "field": "execution_capability_contract.unavailable_required_capabilities",
+                        "expected": sorted(expected_items),
+                        "actual": sorted(observed_items),
+                        "reason": "execution_capability_contract_field_mismatch",
+                    }
+                )
             continue
         if expected.get(field) != observed.get(field):
             mismatches.append(
@@ -501,6 +515,17 @@ def execution_contract_mismatch_reasons(
             continue
         if field in EXECUTION_CONDITION_LINEAGE_FIELDS:
             continue
+        if field in EXECUTION_OBSERVED_EVIDENCE_FIELDS:
+            continue
+        if field == "execution_capability_contract":
+            mismatches.extend(
+                execution_capability_contract_mismatch_reasons(
+                    expected=expected.get(field) if isinstance(expected.get(field), dict) else None,
+                    observed=observed.get(field) if isinstance(observed.get(field), dict) else None,
+                    include_hash=False,
+                )
+            )
+            continue
         if expected.get(field) != observed.get(field):
             mismatches.append(
                 {
@@ -511,6 +536,15 @@ def execution_contract_mismatch_reasons(
                 }
             )
     return mismatches
+
+
+def _semantic_unavailable_required_capabilities(value: object) -> set[str]:
+    items = value if isinstance(value, (list, tuple, set)) else []
+    return {
+        str(item)
+        for item in items
+        if str(item) not in CAPABILITY_OBSERVED_AVAILABILITY_FIELDS
+    }
 
 
 def _canonical_contract_payload(contract: dict[str, Any]) -> dict[str, Any]:

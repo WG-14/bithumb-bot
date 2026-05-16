@@ -796,7 +796,7 @@ def test_top_of_book_runtime_diff_ignores_historical_quote_evidence_availability
         min_execution_reality_level_for_promotion="top_of_book_after_decision",
         allow_same_candle_close_fill=False,
         top_of_book_required=True,
-        top_of_book_available=True,
+        top_of_book_available=False,
         latency_model={"type": "fixed_bps", "latency_ms": 0},
         partial_fill_model={"type": "fixed_bps", "partial_fill_rate": 0.0},
         order_failure_model={"type": "fixed_bps", "order_failure_rate": 0.0},
@@ -827,9 +827,17 @@ def test_top_of_book_runtime_diff_ignores_historical_quote_evidence_availability
         item
         for item in mismatches
         if item.get("field") in {
+            "execution_reality_contract.quote_evidence_available",
+            "execution_reality_contract.depth_available",
+            "execution_reality_contract.trade_ticks_available",
+            "execution_reality_contract.queue_position_available",
+            "execution_reality_contract.market_impact_model_available",
+            "execution_reality_contract.intra_candle_path_available",
+            "execution_reality_contract.execution_capability_contract",
             "execution_contract_hash",
             "execution_capability_contract_hash",
             "execution_capability_contract.available_capabilities.top_of_book",
+            "execution_capability_contract.unavailable_required_capabilities",
         }
     ]
 
@@ -869,6 +877,78 @@ def test_runtime_diff_still_fails_unsupported_full_depth_claim(tmp_path: Path) -
         item.get("field") == "execution_capability_contract.available_capabilities.top_of_book_is_full_depth"
         for item in mismatches
     )
+
+
+def test_runtime_diff_still_detects_execution_policy_drift(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    profile = _profile(str(promotion_path))
+    runtime_contract = build_execution_reality_contract(
+        fill_reference_policy="first_orderbook_after_decision",
+        missing_quote_policy="fail",
+        min_execution_reality_level_for_promotion="top_of_book_after_decision",
+        allow_same_candle_close_fill=False,
+        top_of_book_required=True,
+        top_of_book_available=True,
+        latency_model={"type": "fixed_bps", "latency_ms": 0},
+        partial_fill_model={"type": "fixed_bps", "partial_fill_rate": 0.0},
+        order_failure_model={"type": "fixed_bps", "order_failure_rate": 0.0},
+        fee_source="operator_declared_test_fee",
+        slippage_source="test_calibration",
+        calibration_required=True,
+        calibration_artifact_hash="sha256:calibration",
+    )
+    runtime = {
+        "mode": "paper",
+        "strategy_name": profile["strategy_name"],
+        "market": profile["market"],
+        "interval": profile["interval"],
+        "strategy_parameters": dict(profile["strategy_parameters"]),
+        "cost_model": {"fee_rate": 0.0025, "slippage_bps": 50.0},
+        "execution_reality_contract": runtime_contract,
+        "execution_capability_contract": runtime_contract["execution_capability_contract"],
+    }
+
+    mismatches = diff_profile_to_runtime(profile, runtime)
+
+    assert any(
+        item.get("field") == "execution_reality_contract.fill_reference_policy"
+        for item in mismatches
+    )
+
+
+def test_runtime_diff_still_detects_market_impact_required_drift(tmp_path: Path) -> None:
+    promotion_path = tmp_path / "promotion.json"
+    write_json_atomic(promotion_path, _promotion())
+    profile = _profile(str(promotion_path))
+    runtime_contract = build_execution_reality_contract(
+        fill_reference_policy="next_candle_open",
+        missing_quote_policy="warn",
+        min_execution_reality_level_for_promotion="candle_next_open",
+        allow_same_candle_close_fill=False,
+        market_impact_required=True,
+        latency_model={"type": "fixed_bps", "latency_ms": 0},
+        partial_fill_model={"type": "fixed_bps", "partial_fill_rate": 0.0},
+        order_failure_model={"type": "fixed_bps", "order_failure_rate": 0.0},
+        fee_source="operator_declared_test_fee",
+        slippage_source="test_calibration",
+        calibration_required=True,
+        calibration_artifact_hash="sha256:calibration",
+    )
+    runtime = {
+        "mode": "paper",
+        "strategy_name": profile["strategy_name"],
+        "market": profile["market"],
+        "interval": profile["interval"],
+        "strategy_parameters": dict(profile["strategy_parameters"]),
+        "cost_model": {"fee_rate": 0.0025, "slippage_bps": 50.0},
+        "execution_reality_contract": runtime_contract,
+        "execution_capability_contract": runtime_contract["execution_capability_contract"],
+    }
+
+    mismatches = diff_profile_to_runtime(profile, runtime)
+
+    assert any("market_impact" in str(item) for item in mismatches)
 
 
 def test_profile_diff_detects_env_drift(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ from bithumb_bot.approved_profile import diff_profile_to_runtime
 from bithumb_bot.execution_reality_contract import (
     build_execution_capability_contract,
     build_execution_reality_contract,
+    execution_capability_contract_mismatch_reasons,
     execution_capability_contract_hash,
     execution_condition_contract_hash,
     execution_contract_hash,
@@ -213,6 +214,40 @@ def test_capability_validation_recomputes_required_availability_consistency() ->
 
     assert "execution_capability_required_unavailable" in reasons
     assert "execution_capability_unavailable_required_capabilities_mismatch" in reasons
+
+
+def test_capability_mismatch_ignores_only_top_of_book_unavailable_difference() -> None:
+    expected = build_execution_capability_contract(
+        fill_reference_policy="first_orderbook_after_decision",
+        top_of_book_required=True,
+        top_of_book_available=True,
+        evidence_tier="top_of_book_after_decision",
+    )
+    observed = build_execution_capability_contract(
+        fill_reference_policy="first_orderbook_after_decision",
+        top_of_book_required=True,
+        top_of_book_available=False,
+        evidence_tier="top_of_book_after_decision",
+    )
+
+    assert not [
+        item
+        for item in execution_capability_contract_mismatch_reasons(expected=expected, observed=observed)
+        if item.get("field") == "execution_capability_contract.unavailable_required_capabilities"
+    ]
+
+    bad = build_execution_capability_contract(
+        fill_reference_policy="first_orderbook_after_decision",
+        top_of_book_required=True,
+        top_of_book_available=True,
+        market_impact_model_required=True,
+        evidence_tier="top_of_book_after_decision",
+    )
+
+    assert any(
+        item.get("field") == "execution_capability_contract.unavailable_required_capabilities"
+        for item in execution_capability_contract_mismatch_reasons(expected=expected, observed=bad)
+    )
 
 
 def test_execution_condition_hash_excludes_calibration_artifact_lineage() -> None:

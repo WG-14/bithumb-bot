@@ -1156,7 +1156,19 @@ def diff_profile_to_runtime(
                 "reason": "runtime_execution_capability_contract_missing",
             }
         )
-    return tuple(mismatches)
+    return tuple(_dedupe_mismatches(mismatches))
+
+
+def _dedupe_mismatches(mismatches: list[dict[str, object]]) -> list[dict[str, object]]:
+    seen: set[str] = set()
+    result: list[dict[str, object]] = []
+    for item in mismatches:
+        key = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def profile_runtime_cost_match_status(profile: dict[str, Any] | None, runtime: dict[str, Any]) -> dict[str, object]:
