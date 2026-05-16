@@ -113,13 +113,13 @@ def validate_family_registry_binding(
         rows = _load_registry_rows(path)
     except (OSError, json.JSONDecodeError):
         return ["experiment_family_universe_missing"]
+    if not row_hash.startswith("sha256:"):
+        return ["experiment_family_registry_row_hash_mismatch"]
     for row in rows:
-        if row_hash.startswith("sha256:") and row.get("row_hash") != row_hash:
+        if row.get("row_hash") != row_hash:
             continue
         computed_row_hash = sha256_prefixed(content_hash_payload({k: v for k, v in row.items() if k != "row_hash"}))
-        if not row_hash.startswith("sha256:") or str(row.get("row_hash") or "") != row_hash:
-            reasons.append("experiment_family_registry_row_hash_missing")
-        elif computed_row_hash != row_hash:
+        if computed_row_hash != row_hash:
             reasons.append("experiment_family_registry_row_hash_mismatch")
         expected_fields = {
             "experiment_family_id": evidence.get("experiment_family_id") or report.get("experiment_family_id"),
@@ -149,7 +149,7 @@ def validate_family_registry_binding(
         if int(row.get("candidate_count") or -1) != int(report.get("candidate_count") or -2):
             reasons.append("experiment_family_registry_stale")
         return sorted(set(reasons))
-    return ["experiment_family_registry_stale"]
+    return ["experiment_family_registry_row_hash_mismatch"]
 
 
 def _load_registry_rows(path: Path) -> list[dict[str, Any]]:

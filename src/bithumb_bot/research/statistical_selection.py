@@ -21,6 +21,7 @@ PROMOTION_GRADE_WRC = "PROMOTION_GRADE_WRC"
 PROMOTION_GRADE_WRC_SPA_DSR = "PROMOTION_GRADE_WRC_SPA_DSR"
 SCREENING_METHOD = "metric_centered_max_bootstrap"
 SCREENING_METHOD_DETAIL = "summary_metric_centered_max_bootstrap"
+PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING = "promotion_grade_statistical_generation_unavailable"
 PROMOTION_GRADE_EVIDENCE_GRADES = {PROMOTION_GRADE_WRC, PROMOTION_GRADE_WRC_SPA_DSR}
 PROMOTION_GRADE_METHODS = {"white_reality_check_block_bootstrap", "white_reality_check_stationary_bootstrap"}
 SUPPORTED_PROMOTION_GRADE_METHODS: set[str] = {"white_reality_check_block_bootstrap"}
@@ -263,6 +264,8 @@ def build_statistical_selection_evidence(
         "evidence_grade": SCREENING_SUMMARY_BOOTSTRAP,
         "minimum_promotion_evidence_grade": PROMOTION_GRADE_WRC,
         "promotion_grade_available": False,
+        "official_promotion_grade_wrc_generation_available": False,
+        "warnings": [PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING],
         "bootstrap_sampling_contract": sampling_contract,
         "bootstrap_sampling_contract_hash": sampling_contract["content_hash"],
         "return_panel_path": str(return_panel_path.resolve()) if return_panel_path else None,
@@ -695,6 +698,7 @@ def _limitations(contract: StatisticalSelectionContract) -> list[str]:
         "metric_summary_bootstrap_not_trade_or_bar_return_bootstrap",
         "summary_metric_centered_max_bootstrap_screening_only",
         "not_white_reality_check",
+        PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING,
     ]
     if contract.gates.max_spa_p_value is None:
         limitations.append("spa_not_implemented")
@@ -708,6 +712,7 @@ def _promotion_grade_limitations(contract: StatisticalSelectionContract) -> list
         "not_full_white_reality_check",
         "not_bar_return_bootstrap",
         "not_trade_return_bootstrap",
+        PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING,
     ]
     if contract.gates.max_spa_p_value is None:
         limitations.append("spa_not_implemented")

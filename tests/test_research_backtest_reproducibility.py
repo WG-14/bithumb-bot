@@ -23,9 +23,10 @@ from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot, TopOf
 from bithumb_bot.research.execution_calibration import build_calibration_artifact
 from bithumb_bot.research.execution_model import ExecutionFill, ExecutionRequest, FixedBpsExecutionModel, StressExecutionModel
 from bithumb_bot.research.experiment_manifest import ExecutionTimingPolicy, ManifestValidationError, parse_manifest
+from bithumb_bot.research.cli import _print_report_summary
 from bithumb_bot.research.parameter_space import candidate_id
 from bithumb_bot.research.promotion_gate import PromotionGateError, _verify_report_content_hash, promote_candidate
-from bithumb_bot.research.validation_protocol import run_research_backtest
+from bithumb_bot.research.validation_protocol import _promotion_blocking_reasons, run_research_backtest
 from bithumb_bot.strategy.sma import create_sma_with_filter_strategy
 
 
@@ -96,6 +97,62 @@ def _manifest() -> dict[str, object]:
             "parameter_stability_required": False,
         },
     }
+
+
+def _production_bound_statistical_manifest() -> dict[str, object]:
+    payload = _manifest()
+    payload["deployment_tier"] = "paper_candidate"
+    payload["execution_model"] = {
+        "type": "fixed_bps",
+        "fee_rate": 0.0,
+        "slippage_bps": 0.0,
+        "latency_ms": 0,
+        "partial_fill_rate": 0.0,
+        "order_failure_rate": 0.0,
+        "market_order_extra_cost_bps": 0.0,
+        "scenario_policy": "single_scenario",
+        "scenario_role": "base",
+        "label": "test_operator_declared_zero_fee_zero_slippage",
+        "fee_source": "operator_declared_bithumb_app_fee",
+        "fee_authority_policy": "runtime_fee_authority_must_match_or_fail",
+        "slippage_source": "test_execution_calibration",
+        "promotable_as_base": True,
+        "calibration_required": False,
+    }
+    payload["execution_timing"] = {
+        "signal_basis": "closed_candle",
+        "decision_time": "candle_close",
+        "decision_guard_ms": 0,
+        "fill_reference_policy": "next_candle_open",
+        "quote_selection": "first_after_or_equal",
+        "max_quote_wait_ms": 3000,
+        "missing_quote_policy": "warn",
+        "allow_same_candle_close_fill": False,
+        "min_execution_reality_level_for_promotion": "candle_next_open",
+    }
+    payload["acceptance_gate"]["max_single_trade_dependency_score"] = 1.0
+    payload["statistical_validation"] = {
+        "required_for_promotion": True,
+        "benchmark": "cash",
+        "primary_metric": "net_excess_return",
+        "selection_universe": "all_parameter_candidates_all_required_scenarios",
+        "multiple_testing_scope": "experiment",
+        "bootstrap": {
+            "method": "metric_centered_max_bootstrap",
+            "n_bootstrap": 20,
+            "block_length_policy": "not_applicable_summary_metric",
+            "seed_policy": "derived_from_selection_universe_hash",
+        },
+        "gates": {
+            "max_reality_check_p_value": 1.0,
+            "max_spa_p_value": None,
+            "min_deflated_sharpe_probability": None,
+            "max_holdout_reuse_count": 0,
+            "max_attempt_index_without_new_hypothesis": 1,
+        },
+    }
+    payload["stress_suite"] = _stress_suite_contract()
+    return payload
 
 
 def _stress_suite_contract(*, min_retention: float | None = None, min_survival: float = 0.0) -> dict[str, object]:
@@ -1240,6 +1297,156 @@ def test_research_backtest_fails_candidate_when_required_calibration_missing(tmp
 
     assert report["gate_result"] == "FAIL"
     assert "execution_calibration_missing" in report["candidates"][0]["gate_fail_reasons"]
+
+
+def test_production_bound_screening_report_exposes_promotion_grade_unavailable(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _production_bound_statistical_manifest()
+    manifest = parse_manifest(payload)
+    calibration = build_calibration_artifact(
+        summary={
+            "sample_count": 50,
+            "median_slippage_vs_signal_bps": 0.0,
+            "p90_slippage_vs_signal_bps": 0.0,
+            "p95_slippage_vs_signal_bps": 0.0,
+            "p95_submit_to_fill_ms": 0,
+            "partial_fill_rate": 0.0,
+            "unfilled_rate": 0.0,
+            "model_breach_rate": 0.0,
+            "quality_gate_status": "PASS",
+        },
+        market="KRW-BTC",
+        interval="1m",
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    report = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+        execution_calibration=calibration,
+    )
+
+    assert report["evidence_grade"] == "SCREENING_SUMMARY_BOOTSTRAP"
+    assert report["official_promotion_grade_wrc_generation_available"] is False
+    assert "promotion_grade_statistical_generation_unavailable" in report["warnings"]
+    assert "promotion_grade_statistical_generation_unavailable" in report["promotion_grade_limitations"]
+    assert report["promotion_eligibility_gate_result"] == "FAIL"
+
+
+def test_production_bound_screening_only_promotion_blocking_reasons_include_grade_insufficient() -> None:
+    evidence = {
+        "content_hash": "sha256:evidence",
+        "candidate_metric_values_hash": "sha256:metric",
+        "selection_universe_hash": "sha256:selection",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 1,
+        "candidate_metric_values_summary": {
+            "candidate_count": 1,
+            "metric_value_count": 1,
+            "missing_metric_count": 0,
+        },
+        "metric_value_count": 1,
+        "missing_metric_count": 0,
+        "search_budget": 1,
+        "parameter_grid_size": 1,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "benchmark": "cash",
+        "primary_metric": "net_excess_return",
+        "primary_metric_source": "validation_metrics",
+        "evidence_grade": "SCREENING_SUMMARY_BOOTSTRAP",
+        "summary_metric_max_bootstrap_p_value": 0.01,
+        "white_reality_check_p_value": None,
+        "white_reality_check_method": None,
+        "statistical_gate_result": "PASS",
+        "gate_fail_reasons": [],
+        "effective_trial_count": 1,
+        "official_promotion_grade_wrc_generation_available": False,
+    }
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "candidate_count": 1,
+        "search_budget": 1,
+        "parameter_grid_size": 1,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": _production_bound_statistical_manifest()["statistical_validation"],
+        "selection_universe_hash": "sha256:selection",
+        "candidate_metric_values_hash": "sha256:metric",
+        "metric_value_count": 1,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": "sha256:evidence",
+        "candidates": [{"parameter_candidate_id": "candidate_001", "validation_metrics": {"net_excess_return": 1.0}}],
+    }
+    best = {
+        **report["candidates"][0],
+        "deployment_tier": "paper_candidate",
+        "statistical_validation_required": True,
+        "statistical_validation_contract": report["statistical_validation_contract"],
+        "selection_universe_hash": "sha256:selection",
+        "candidate_metric_values_hash": "sha256:metric",
+        "metric_value_count": 1,
+        "missing_metric_count": 0,
+        "statistical_evidence_hash": "sha256:evidence",
+    }
+
+    reasons = _promotion_blocking_reasons(
+        best=best,
+        statistical_required=True,
+        statistical_evidence=evidence,
+        report=report,
+    )
+
+    assert "statistical_evidence_grade_insufficient" in reasons
+
+
+def test_research_report_cli_summary_prints_promotion_grade_unavailable(capsys) -> None:
+    report = {
+        "experiment_id": "exp",
+        "manifest_hash": "sha256:manifest",
+        "dataset_snapshot_id": "snap",
+        "dataset_content_hash": "sha256:dataset",
+        "candidate_count": 1,
+        "best_candidate_id": "candidate_001",
+        "gate_result": "FAIL",
+        "promotion_eligibility_gate_result": "FAIL",
+        "promotion_blocking_reasons": ["statistical_evidence_grade_insufficient"],
+        "statistical_validation_required": True,
+        "evidence_grade": "SCREENING_SUMMARY_BOOTSTRAP",
+        "statistical_method": "summary_metric_centered_max_bootstrap",
+        "official_promotion_grade_wrc_generation_available": False,
+        "promotion_grade_limitations": ["promotion_grade_statistical_generation_unavailable"],
+        "warnings": ["promotion_grade_statistical_generation_unavailable"],
+        "candidates": [
+            {
+                "parameter_candidate_id": "candidate_001",
+                "acceptance_gate_result": "PASS",
+                "gate_fail_reasons": [],
+            }
+        ],
+    }
+
+    _print_report_summary("RESEARCH-BACKTEST", report)
+    output = capsys.readouterr().out
+
+    assert "  official_promotion_grade_wrc_generation_available=0" in output
+    assert "  promotion_grade_limitations=promotion_grade_statistical_generation_unavailable" in output
+    assert "  warnings=promotion_grade_statistical_generation_unavailable" in output
 
 
 def test_research_backtest_fails_candidate_when_calibration_market_mismatches(tmp_path, monkeypatch) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from bithumb_bot.research.experiment_manifest import parse_manifest
 from bithumb_bot.research.statistical_selection import (
     build_statistical_selection_evidence,
@@ -1003,3 +1005,116 @@ def test_family_registry_binding_detects_hash_tampering(tmp_path) -> None:
 
     assert "experiment_family_registry_row_hash_mismatch" in reasons
     assert "experiment_family_registry_return_panel_hash_mismatch" in reasons
+
+
+def test_family_registry_binding_missing_file_returns_universe_missing(tmp_path) -> None:
+    report, evidence, _row = _family_registry_binding_fixture(tmp_path)
+    Path(evidence["family_trial_registry_path"]).unlink()
+
+    reasons = validate_family_registry_binding(report=report, evidence=evidence)
+
+    assert reasons == ["experiment_family_universe_missing"]
+
+
+def test_family_registry_binding_missing_expected_row_hash_returns_mismatch(tmp_path) -> None:
+    report, evidence, _row = _family_registry_binding_fixture(tmp_path)
+    evidence.pop("family_trial_registry_row_hash")
+
+    reasons = validate_family_registry_binding(report=report, evidence=evidence)
+
+    assert reasons == ["experiment_family_registry_row_hash_mismatch"]
+
+
+def test_family_registry_binding_unmatched_row_hash_returns_mismatch(tmp_path) -> None:
+    report, evidence, _row = _family_registry_binding_fixture(tmp_path)
+    evidence["family_trial_registry_row_hash"] = "sha256:" + "0" * 64
+
+    reasons = validate_family_registry_binding(report=report, evidence=evidence)
+
+    assert reasons == ["experiment_family_registry_row_hash_mismatch"]
+
+
+def test_family_registry_binding_stale_metadata_stays_stale(tmp_path) -> None:
+    report, evidence, _row = _family_registry_binding_fixture(tmp_path)
+    report["experiment_id"] = "other_exp"
+    evidence["experiment_id"] = "other_exp"
+
+    reasons = validate_family_registry_binding(report=report, evidence=evidence)
+
+    assert "experiment_family_registry_stale" in reasons
+    assert "experiment_family_registry_row_hash_mismatch" not in reasons
+
+
+def test_family_registry_binding_specific_hash_mismatches_remain_precise(tmp_path) -> None:
+    report, evidence, _row = _family_registry_binding_fixture(tmp_path)
+    cases = {
+        "return_panel_hash": "experiment_family_registry_return_panel_hash_mismatch",
+        "statistical_evidence_hash": "experiment_family_registry_statistical_evidence_hash_mismatch",
+        "prior_registry_hash": "experiment_family_registry_prior_hash_mismatch",
+    }
+    for field, reason in cases.items():
+        case_report, case_evidence, row = _family_registry_binding_fixture(tmp_path / field)
+        row[field] = "sha256:wrong"
+        row["row_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in row.items() if k != "row_hash"}))
+        case_evidence["family_trial_registry_row_hash"] = row["row_hash"]
+        Path(case_evidence["family_trial_registry_path"]).write_text(
+            __import__("json").dumps(row, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        reasons = validate_family_registry_binding(report=case_report, evidence=case_evidence)
+
+        assert reason in reasons
+
+
+def _family_registry_binding_fixture(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    manifest = _manifest()
+    contract = {**manifest.statistical_validation.as_dict(), "multiple_testing_scope": "experiment_family"}
+    path = tmp_path / "trial_registry.jsonl"
+    evidence = {
+        "experiment_id": "stat_exp",
+        "experiment_family_id": "family",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "return_panel_hash": "sha256:return-panel",
+        "family_trial_registry_path": str(path),
+        "family_trial_registry_prior_hash": EMPTY_REGISTRY_HASH,
+        "family_trial_registry_bound_evidence_hash": "sha256:pre-registry",
+        "statistical_validation_contract": contract,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+    }
+    row = {
+        "schema_version": 1,
+        "experiment_family_id": "family",
+        "experiment_id": "stat_exp",
+        "manifest_hash": "sha256:manifest",
+        "hypothesis_id": "hypothesis",
+        "hypothesis_status": "pre_registered",
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_content_hash": "sha256:dataset",
+        "parameter_space_hash": "sha256:parameter-space",
+        "candidate_count": 2,
+        "return_panel_hash": "sha256:return-panel",
+        "statistical_evidence_hash": "sha256:pre-registry",
+        "statistical_evidence_hash_phase": "pre_registry_evidence_hash",
+        "result_status": "PASS",
+        "prior_registry_hash": EMPTY_REGISTRY_HASH,
+    }
+    row["row_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in row.items() if k != "row_hash"}))
+    evidence["family_trial_registry_row_hash"] = row["row_hash"]
+    path.write_text(__import__("json").dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    report = {
+        "experiment_id": "stat_exp",
+        "experiment_family_id": "family",
+        "manifest_hash": "sha256:manifest",
+        "dataset_content_hash": "sha256:dataset",
+        "parameter_space_hash": "sha256:parameter-space",
+        "candidate_count": 2,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "statistical_validation_contract": contract,
+    }
+    return report, evidence, row

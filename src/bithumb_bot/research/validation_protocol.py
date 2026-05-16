@@ -49,6 +49,7 @@ from .promotion_gate import build_candidate_profile
 from .report_writer import research_artifact_paths, research_artifact_refs, write_research_report
 from bithumb_bot.storage_io import append_jsonl, write_json_atomic
 from .statistical_selection import (
+    PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING,
     build_statistical_selection_evidence,
     selection_universe_hash,
     statistical_validation_required,
@@ -1942,7 +1943,13 @@ def _report_payload(
     stress_summary_candidate = best
     if stress_summary_candidate is None and stress_suite_required(manifest) and candidates:
         stress_summary_candidate = candidates[0]
-    warnings = sorted({warning for candidate in candidates for warning in candidate.get("warnings", [])})
+    warnings = {warning for candidate in candidates for warning in candidate.get("warnings", [])}
+    if isinstance(statistical_evidence, dict) and not statistical_evidence.get(
+        "official_promotion_grade_wrc_generation_available",
+        False,
+    ):
+        warnings.add(PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING)
+    warnings = sorted(warnings)
     payload = {
         "report_kind": report_kind,
         "experiment_id": manifest.experiment_id,
@@ -2054,6 +2061,11 @@ def _report_payload(
         ),
         "promotion_grade_limitations": (
             statistical_evidence.get("promotion_grade_limitations") if statistical_evidence else []
+        ),
+        "official_promotion_grade_wrc_generation_available": (
+            statistical_evidence.get("official_promotion_grade_wrc_generation_available")
+            if statistical_evidence
+            else False
         ),
         "effective_trial_count": statistical_evidence.get("effective_trial_count") if statistical_evidence else None,
         "deployment_tier": manifest.deployment_tier,
@@ -2194,6 +2206,9 @@ def _attach_statistical_selection_to_candidates(
     family_trial_registry_prior_hash = evidence.get("family_trial_registry_prior_hash") if isinstance(evidence, dict) else None
     family_trial_registry_row_hash = evidence.get("family_trial_registry_row_hash") if isinstance(evidence, dict) else None
     limitations = evidence.get("promotion_grade_limitations") if isinstance(evidence, dict) else []
+    official_promotion_grade_wrc_generation_available = (
+        evidence.get("official_promotion_grade_wrc_generation_available") if isinstance(evidence, dict) else False
+    )
     for candidate in candidates:
         candidate["statistical_validation_required"] = required
         candidate["statistical_validation_contract"] = contract
@@ -2224,6 +2239,9 @@ def _attach_statistical_selection_to_candidates(
         candidate["white_reality_check_method"] = method
         candidate["bootstrap_sampling_contract_hash"] = bootstrap_sampling_contract_hash
         candidate["promotion_grade_limitations"] = list(limitations) if isinstance(limitations, list) else []
+        candidate["official_promotion_grade_wrc_generation_available"] = bool(
+            official_promotion_grade_wrc_generation_available
+        )
         candidate["effective_trial_count"] = effective_trial_count
         candidate.pop("candidate_profile_hash", None)
         candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))

@@ -161,6 +161,14 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  statistical_evidence_hash={report.get('statistical_evidence_hash') or 'none'}")
     print(f"  evidence_grade={report.get('evidence_grade') or 'none'}")
     print(f"  statistical_method={report.get('statistical_method') or 'none'}")
+    print(
+        "  official_promotion_grade_wrc_generation_available="
+        f"{1 if report.get('official_promotion_grade_wrc_generation_available') else 0}"
+    )
+    print(
+        "  promotion_grade_limitations="
+        f"{_format_items(tuple(str(item) for item in report.get('promotion_grade_limitations') or []))}"
+    )
     print(f"  return_panel_hash={report.get('return_panel_hash') or 'none'}")
     print(f"  return_unit={report.get('return_unit') or 'none'}")
     print(f"  return_panel_observation_count={report.get('return_panel_observation_count')}")
