@@ -44,7 +44,13 @@ from .family_registry import (
     family_trial_registry_path,
     registry_content_hash,
 )
-from .lineage import build_research_lineage
+from .experiment_registry import (
+    append_attempt_completion,
+    reserve_research_attempt,
+    research_freedom_hash,
+    validate_experiment_registry_binding,
+)
+from .lineage import build_research_lineage, compute_lineage_hash
 from .metrics_gate_policy import metrics_gate_policy_from_acceptance_gate, metrics_gate_policy_hash
 from .metrics_contract import METRICS_SCHEMA_VERSION
 from .parameter_space import candidate_id, iter_parameter_candidates
@@ -96,6 +102,26 @@ def _estimated_strategy_runs(
     return int(candidate_count) * int(scenario_count) * int(base_split_count + walk_forward_split_count)
 
 
+def _parameter_grid_size(manifest: ExperimentManifest) -> int:
+    size = 1
+    for values in manifest.parameter_space.values():
+        size *= len(values)
+    return size
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _production_registry_required(manifest: ExperimentManifest) -> bool:
+    return manifest.deployment_tier in {"paper_candidate", "live_dry_run_candidate", "small_live_candidate"}
+
+
 def _research_artifact_root(manager: PathManager, experiment_id: str) -> Path:
     root = manager.data_dir() / "derived" / "research" / experiment_id
     project_root = manager.project_root.resolve()
@@ -114,6 +140,100 @@ def _candidate_result_path(manager: PathManager, experiment_id: str, candidate_i
 
 def _candidate_failure_path(manager: PathManager, experiment_id: str, candidate_id: str) -> Path:
     return _research_artifact_root(manager, experiment_id) / "candidate_failures" / f"{candidate_id}.json"
+
+
+def _reserve_experiment_attempt(
+    *,
+    manifest: ExperimentManifest,
+    manager: PathManager,
+    snapshots: dict[str, DatasetSnapshot],
+    quality_reports: dict[str, DatasetQualityReport],
+    manifest_path: str | None,
+    command_name: str,
+    command_args: dict[str, Any] | None,
+    repository_version: str | None,
+    created_at: str | None,
+) -> dict[str, Any] | None:
+    if "final_holdout" not in snapshots:
+        return None
+    if not _production_registry_required(manifest):
+        return None
+    parameter_grid_size = _parameter_grid_size(manifest)
+    declared_attempt = _optional_int(manifest.raw.get("attempt_index"))
+    declared_reuse = _optional_int(manifest.raw.get("holdout_reuse_count"))
+    experiment_family_id = str(manifest.raw.get("experiment_family_id") or manifest.experiment_id)
+    hypothesis_id = str(manifest.raw.get("hypothesis_id") or manifest.hypothesis or manifest.experiment_id)
+    hypothesis_status = str(manifest.raw.get("hypothesis_status") or "pre_registered")
+    split_hashes = {name: snapshot.content_hash() for name, snapshot in snapshots.items()}
+    dataset_quality_hash = combined_dataset_quality_hash(tuple(quality_reports.values()))
+    base_payload = {
+        "run_id": manifest.experiment_id,
+        "experiment_family_id": experiment_family_id,
+        "hypothesis_id": hypothesis_id,
+        "hypothesis_status": hypothesis_status,
+        "experiment_id": manifest.experiment_id,
+        "manifest_hash": manifest.manifest_hash(),
+        "manifest_metadata_hash": sha256_prefixed(
+            {
+                "experiment_family_id": manifest.raw.get("experiment_family_id"),
+                "hypothesis_id": manifest.raw.get("hypothesis_id"),
+                "hypothesis_status": manifest.raw.get("hypothesis_status"),
+                "attempt_index": manifest.raw.get("attempt_index"),
+                "holdout_reuse_count": manifest.raw.get("holdout_reuse_count"),
+                "pre_registered_at": manifest.raw.get("pre_registered_at"),
+            }
+        ),
+        "dataset_snapshot_id": manifest.dataset.snapshot_id,
+        "dataset_content_hash": combined_dataset_fingerprint(tuple(snapshots.values())),
+        "dataset_quality_hash": dataset_quality_hash,
+        "train_split_hash": split_hashes.get("train"),
+        "validation_split_hash": split_hashes.get("validation"),
+        "final_holdout_split_hash": split_hashes.get("final_holdout"),
+        "final_holdout_fingerprint": sha256_prefixed(
+            {
+                "dataset_snapshot_id": manifest.dataset.snapshot_id,
+                "market": manifest.market,
+                "interval": manifest.interval,
+                "final_holdout": manifest.dataset.split.final_holdout.as_dict()
+                if manifest.dataset.split.final_holdout is not None
+                else None,
+                "final_holdout_split_hash": split_hashes.get("final_holdout"),
+            }
+        ),
+        "parameter_space_hash": sha256_prefixed(manifest.parameter_space),
+        "parameter_grid_size": parameter_grid_size,
+        "candidate_count": None,
+        "declared_attempt_index": declared_attempt,
+        "declared_holdout_reuse_count": declared_reuse,
+        "statistical_evidence_hash": None,
+        "return_panel_hash": None,
+        "promotion_artifact_hash": None,
+        "promoted_candidate_id": None,
+        "repository_version": repository_version,
+        "manifest_path": manifest_path,
+        "command_name": command_name,
+        "command_args_hash": sha256_prefixed(command_args or {}),
+    }
+    reservation = reserve_research_attempt(manager=manager, base_payload=base_payload, created_at=created_at)
+    gate_probe = {
+        **base_payload,
+        "experiment_registry_path": reservation["path"],
+        "experiment_registry_prior_hash": reservation["prior_hash"],
+        "experiment_registry_row_hash": reservation["row_hash"],
+        "computed_attempt_index": reservation["computed_attempt_index"],
+        "computed_holdout_reuse_count": reservation["computed_holdout_reuse_count"],
+        "declared_attempt_index": declared_attempt,
+        "declared_holdout_reuse_count": declared_reuse,
+        "statistical_validation_contract": (
+            manifest.statistical_validation.as_dict() if manifest.statistical_validation is not None else None
+        ),
+    }
+    reasons = validate_experiment_registry_binding(report=gate_probe, require_complete=False)
+    if _production_registry_required(manifest) and reasons:
+        raise ResearchValidationError("experiment_registry_preflight_failed: " + ",".join(reasons))
+    reservation["gate_fail_reasons"] = reasons
+    reservation["gate_result"] = "FAIL" if reasons else "PASS"
+    return reservation
 
 
 def _data_dir_relative_ref(manager: PathManager, path: Path) -> str:
@@ -233,6 +353,17 @@ def run_research_backtest(
             reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
         )
     _require_enough_candles(snapshots.values())
+    experiment_registry_reservation = _reserve_experiment_attempt(
+        manifest=manifest,
+        manager=manager,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        manifest_path=manifest_path,
+        command_name="research-backtest",
+        command_args=command_args,
+        repository_version=_repository_version(),
+        created_at=generated_at,
+    )
 
     candidates = _evaluate_candidates(
         manifest=manifest,
@@ -255,6 +386,7 @@ def run_research_backtest(
         command_args=command_args,
         execution_calibration=execution_calibration,
         manager=manager,
+        experiment_registry_reservation=experiment_registry_reservation,
     )
     _emit_progress(
         progress_callback,
@@ -321,6 +453,17 @@ def run_research_walk_forward(
             reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
         )
     _require_enough_candles(snapshots.values())
+    experiment_registry_reservation = _reserve_experiment_attempt(
+        manifest=manifest,
+        manager=manager,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        manifest_path=manifest_path,
+        command_name="research-walk-forward",
+        command_args=command_args,
+        repository_version=_repository_version(),
+        created_at=generated_at,
+    )
     candidates = _evaluate_candidates(
         manifest=manifest,
         manager=manager,
@@ -342,6 +485,7 @@ def run_research_walk_forward(
         command_args=command_args,
         execution_calibration=execution_calibration,
         manager=manager,
+        experiment_registry_reservation=experiment_registry_reservation,
     )
     _emit_progress(
         progress_callback,
@@ -1760,6 +1904,7 @@ def _report_payload(
     command_args: dict[str, Any] | None = None,
     execution_calibration: dict[str, Any] | None = None,
     manager: PathManager | None = None,
+    experiment_registry_reservation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     dataset_hash = combined_dataset_fingerprint(snapshots)
     dataset_quality_hash = combined_dataset_quality_hash(quality_reports)
@@ -1787,16 +1932,57 @@ def _report_payload(
         top_of_book_available=top_of_book_joined_count > 0,
     )
     report_capability_contract = _execution_capability_contract_from_reality(report_execution_contract)
-    parameter_grid_size = 1
-    for values in manifest.parameter_space.values():
-        parameter_grid_size *= len(values)
+    parameter_grid_size = _parameter_grid_size(manifest)
     failed_count = sum(1 for candidate in candidates if candidate.get("acceptance_gate_result") != "PASS")
-    attempt_index = int(manifest.raw.get("attempt_index") or 1)
-    holdout_reuse_count = int(manifest.raw.get("holdout_reuse_count") or 0)
+    declared_attempt_index = _optional_int(manifest.raw.get("attempt_index"))
+    declared_holdout_reuse_count = _optional_int(manifest.raw.get("holdout_reuse_count"))
+    attempt_index = int(
+        (experiment_registry_reservation or {}).get("computed_attempt_index")
+        or declared_attempt_index
+        or 1
+    )
+    holdout_reuse_count = int(
+        (experiment_registry_reservation or {}).get("computed_holdout_reuse_count")
+        or declared_holdout_reuse_count
+        or 0
+    )
     dataset_reuse_policy = str(manifest.raw.get("dataset_reuse_policy") or "single_final_holdout_for_experiment_family")
     experiment_family_id = str(manifest.raw.get("experiment_family_id") or manifest.experiment_id)
     hypothesis_id = manifest.raw.get("hypothesis_id")
     hypothesis_status = manifest.raw.get("hypothesis_status") or "pre_registered"
+    registry_row = (
+        experiment_registry_reservation.get("row")
+        if isinstance(experiment_registry_reservation, dict) and isinstance(experiment_registry_reservation.get("row"), dict)
+        else {}
+    )
+    experiment_registry_fields: dict[str, Any] = {}
+    if experiment_registry_reservation is not None:
+        experiment_registry_fields = {
+            "experiment_registry_path": experiment_registry_reservation.get("path"),
+            "experiment_registry_prior_hash": experiment_registry_reservation.get("prior_hash"),
+            "experiment_registry_row_hash": experiment_registry_reservation.get("row_hash"),
+            "experiment_registry_completion_row_hash": None,
+            "final_holdout_fingerprint": registry_row.get("final_holdout_fingerprint"),
+            "train_split_hash": registry_row.get("train_split_hash"),
+            "validation_split_hash": registry_row.get("validation_split_hash"),
+            "final_holdout_split_hash": registry_row.get("final_holdout_split_hash"),
+            "computed_attempt_index": attempt_index,
+            "computed_holdout_reuse_count": holdout_reuse_count,
+            "declared_attempt_index": declared_attempt_index,
+            "declared_holdout_reuse_count": declared_holdout_reuse_count,
+            "registry_gate_result": experiment_registry_reservation.get("gate_result") or "PASS",
+            "registry_gate_fail_reasons": list(experiment_registry_reservation.get("gate_fail_reasons") or []),
+            "research_freedom_hash": experiment_registry_reservation.get("research_freedom_hash"),
+        }
+    elif manager is None or (manifest.deployment_tier == "research_only" and manifest.dataset.split.final_holdout is not None):
+        experiment_registry_fields = {
+            "registry_gate_result": "WARN",
+            "registry_gate_fail_reasons": ["experiment_registry_missing"],
+            "computed_attempt_index": attempt_index,
+            "computed_holdout_reuse_count": holdout_reuse_count,
+            "declared_attempt_index": declared_attempt_index,
+            "declared_holdout_reuse_count": declared_holdout_reuse_count,
+        }
     lineage = build_research_lineage(
         experiment_id=manifest.experiment_id,
         experiment_family_id=experiment_family_id,
@@ -1829,6 +2015,19 @@ def _report_payload(
         attempt_index=attempt_index,
         failed_candidate_count=failed_count,
         holdout_reuse_count=holdout_reuse_count,
+        experiment_registry_path=experiment_registry_fields.get("experiment_registry_path"),
+        experiment_registry_prior_hash=experiment_registry_fields.get("experiment_registry_prior_hash"),
+        experiment_registry_row_hash=experiment_registry_fields.get("experiment_registry_row_hash"),
+        experiment_registry_completion_row_hash=experiment_registry_fields.get("experiment_registry_completion_row_hash"),
+        final_holdout_fingerprint=experiment_registry_fields.get("final_holdout_fingerprint"),
+        final_holdout_split_hash=experiment_registry_fields.get("final_holdout_split_hash"),
+        computed_attempt_index=experiment_registry_fields.get("computed_attempt_index"),
+        computed_holdout_reuse_count=experiment_registry_fields.get("computed_holdout_reuse_count"),
+        declared_attempt_index=experiment_registry_fields.get("declared_attempt_index"),
+        declared_holdout_reuse_count=experiment_registry_fields.get("declared_holdout_reuse_count"),
+        research_freedom_hash=experiment_registry_fields.get("research_freedom_hash"),
+        registry_gate_result=experiment_registry_fields.get("registry_gate_result"),
+        registry_gate_fail_reasons=experiment_registry_fields.get("registry_gate_fail_reasons"),
         dataset_reuse_policy=dataset_reuse_policy,
         created_at=generated_at,
     )
@@ -1910,6 +2109,7 @@ def _report_payload(
             family_trial_registry_prior_hash=family_registry_prior_hash,
             family_trial_registry_path=family_registry_path,
             family_trial_registry_row_hash=family_registry_row_hash,
+            experiment_registry=experiment_registry_fields or None,
         )
         if statistical_evidence is not None and manager is not None:
             statistical_evidence_path = write_statistical_selection_evidence(
@@ -1944,6 +2144,53 @@ def _report_payload(
                     experiment_id=manifest.experiment_id,
                     evidence=statistical_evidence,
                 )
+        if (
+            statistical_evidence is not None
+            and manager is not None
+            and experiment_registry_reservation is not None
+        ):
+            completion_result = append_attempt_completion(
+                manager=manager,
+                reservation=experiment_registry_reservation,
+                updates={
+                    "candidate_count": len(candidates),
+                    "return_panel_hash": str(return_panel.get("content_hash")) if isinstance(return_panel, dict) else None,
+                    "statistical_evidence_hash": str(statistical_evidence.get("content_hash") or ""),
+                    "statistical_gate_result": statistical_evidence.get("statistical_gate_result"),
+                },
+                result_status="COMPLETED",
+                created_at=generated_at,
+            )
+            experiment_registry_fields["experiment_registry_completion_row_hash"] = completion_result.get("row_hash")
+            experiment_registry_fields["research_freedom_hash"] = research_freedom_hash(
+                {
+                    **registry_row,
+                    "experiment_registry_path": experiment_registry_fields.get("experiment_registry_path"),
+                    "experiment_registry_prior_hash": experiment_registry_fields.get("experiment_registry_prior_hash"),
+                    "experiment_registry_row_hash": experiment_registry_fields.get("experiment_registry_row_hash"),
+                    "computed_attempt_index": attempt_index,
+                    "computed_holdout_reuse_count": holdout_reuse_count,
+                }
+            )
+            lineage.update(
+                {
+                    "experiment_registry_completion_row_hash": experiment_registry_fields.get(
+                        "experiment_registry_completion_row_hash"
+                    ),
+                    "research_freedom_hash": experiment_registry_fields.get("research_freedom_hash"),
+                }
+            )
+            lineage.pop("lineage_hash", None)
+            lineage["lineage_hash"] = compute_lineage_hash(lineage)
+            statistical_evidence.update(experiment_registry_fields)
+            statistical_evidence["content_hash"] = sha256_prefixed(
+                content_hash_payload({k: v for k, v in statistical_evidence.items() if k != "content_hash"})
+            )
+            statistical_evidence_path = write_statistical_selection_evidence(
+                manager=manager,
+                experiment_id=manifest.experiment_id,
+                evidence=statistical_evidence,
+            )
         _attach_statistical_selection_to_candidates(
             candidates=candidates,
             required=statistical_validation_required(manifest),
@@ -1957,6 +2204,8 @@ def _report_payload(
     if stress_summary_candidate is None and stress_suite_required(manifest) and candidates:
         stress_summary_candidate = candidates[0]
     warnings = {warning for candidate in candidates for warning in candidate.get("warnings", [])}
+    if experiment_registry_fields.get("registry_gate_result") == "WARN":
+        warnings.update(str(item) for item in experiment_registry_fields.get("registry_gate_fail_reasons") or [])
     if isinstance(statistical_evidence, dict) and not statistical_evidence.get(
         "official_promotion_grade_wrc_generation_available",
         False,
@@ -2066,6 +2315,7 @@ def _report_payload(
         "family_trial_registry_path": str(family_registry_path.resolve()) if family_registry_path else None,
         "family_trial_registry_prior_hash": family_registry_prior_hash,
         "family_trial_registry_row_hash": family_registry_row_hash,
+        **experiment_registry_fields,
         "statistical_gate_result": statistical_evidence.get("statistical_gate_result") if statistical_evidence else None,
         "statistical_gate_fail_reasons": statistical_evidence.get("gate_fail_reasons") if statistical_evidence else [],
         "white_reality_check_p_value": (
@@ -2226,6 +2476,24 @@ def _attach_statistical_selection_to_candidates(
     family_trial_registry_path = evidence.get("family_trial_registry_path") if isinstance(evidence, dict) else None
     family_trial_registry_prior_hash = evidence.get("family_trial_registry_prior_hash") if isinstance(evidence, dict) else None
     family_trial_registry_row_hash = evidence.get("family_trial_registry_row_hash") if isinstance(evidence, dict) else None
+    registry_fields = {
+        key: evidence.get(key)
+        for key in (
+            "experiment_registry_path",
+            "experiment_registry_prior_hash",
+            "experiment_registry_row_hash",
+            "experiment_registry_completion_row_hash",
+            "final_holdout_fingerprint",
+            "final_holdout_split_hash",
+            "computed_attempt_index",
+            "computed_holdout_reuse_count",
+            "declared_attempt_index",
+            "declared_holdout_reuse_count",
+            "research_freedom_hash",
+            "registry_gate_result",
+            "registry_gate_fail_reasons",
+        )
+    } if isinstance(evidence, dict) else {}
     limitations = evidence.get("promotion_grade_limitations") if isinstance(evidence, dict) else []
     official_promotion_grade_wrc_generation_available = (
         evidence.get("official_promotion_grade_wrc_generation_available") if isinstance(evidence, dict) else False
@@ -2253,6 +2521,7 @@ def _attach_statistical_selection_to_candidates(
         candidate["family_trial_registry_path"] = family_trial_registry_path
         candidate["family_trial_registry_prior_hash"] = family_trial_registry_prior_hash
         candidate["family_trial_registry_row_hash"] = family_trial_registry_row_hash
+        candidate.update(registry_fields)
         candidate["statistical_gate_result"] = gate_result
         candidate["statistical_gate_fail_reasons"] = list(gate_reasons) if isinstance(gate_reasons, list) else []
         candidate["white_reality_check_p_value"] = p_value

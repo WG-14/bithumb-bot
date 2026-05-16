@@ -110,6 +110,7 @@ def cmd_research_promote_candidate(
     print(f"  family_trial_registry_path={result.artifact.get('family_trial_registry_path') or 'none'}")
     print(f"  family_trial_registry_prior_hash={result.artifact.get('family_trial_registry_prior_hash') or 'none'}")
     print(f"  family_trial_registry_row_hash={result.artifact.get('family_trial_registry_row_hash') or 'none'}")
+    _print_experiment_registry_summary(result.artifact)
     print(f"  white_reality_check_p_value={result.artifact.get('white_reality_check_p_value')}")
     print(f"  white_reality_check_method={result.artifact.get('white_reality_check_method') or 'none'}")
     print(f"  summary_metric_max_bootstrap_p_value={result.artifact.get('summary_metric_max_bootstrap_p_value')}")
@@ -189,6 +190,7 @@ def _print_report_summary(label: str, report: dict[str, object]) -> None:
     print(f"  family_trial_registry_path={report.get('family_trial_registry_path') or 'none'}")
     print(f"  family_trial_registry_prior_hash={report.get('family_trial_registry_prior_hash') or 'none'}")
     print(f"  family_trial_registry_row_hash={report.get('family_trial_registry_row_hash') or 'none'}")
+    _print_experiment_registry_summary(report)
     print(f"  summary_metric_max_bootstrap_p_value={report.get('summary_metric_max_bootstrap_p_value')}")
     print(f"  white_reality_check_p_value={report.get('white_reality_check_p_value')}")
     print(f"  white_reality_check_method={report.get('white_reality_check_method') or 'none'}")
@@ -362,6 +364,25 @@ def _print_stress_suite_summary(payload: dict[str, object]) -> None:
     print(f"  stress_parameter_perturbation_pass_ratio={parameter_perturbation.get('pass_ratio')}")
     print(f"  stress_monte_carlo_survival_probability={monte_carlo.get('survival_probability')}")
     print(f"  stress_monte_carlo_max_drawdown_pct_p95={monte_carlo.get('max_drawdown_pct_p95')}")
+
+
+def _print_experiment_registry_summary(payload: dict[str, object]) -> None:
+    print(f"  experiment_registry_path={payload.get('experiment_registry_path') or 'none'}")
+    print(f"  experiment_registry_prior_hash={payload.get('experiment_registry_prior_hash') or 'none'}")
+    print(f"  experiment_registry_row_hash={payload.get('experiment_registry_row_hash') or 'none'}")
+    print(f"  experiment_registry_completion_row_hash={payload.get('experiment_registry_completion_row_hash') or 'none'}")
+    print(f"  final_holdout_fingerprint={payload.get('final_holdout_fingerprint') or 'none'}")
+    print(f"  final_holdout_split_hash={payload.get('final_holdout_split_hash') or 'none'}")
+    print(f"  computed_attempt_index={payload.get('computed_attempt_index')}")
+    print(f"  computed_holdout_reuse_count={payload.get('computed_holdout_reuse_count')}")
+    print(f"  declared_attempt_index={payload.get('declared_attempt_index')}")
+    print(f"  declared_holdout_reuse_count={payload.get('declared_holdout_reuse_count')}")
+    print(f"  registry_gate_result={payload.get('registry_gate_result') or 'none'}")
+    print(
+        "  registry_gate_fail_reasons="
+        f"{_format_items(tuple(str(item) for item in payload.get('registry_gate_fail_reasons') or []))}"
+    )
+    print(f"  research_freedom_hash={payload.get('research_freedom_hash') or 'none'}")
 
 
 def _format_counts(counts: dict[str, int]) -> str:

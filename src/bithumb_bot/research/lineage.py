@@ -11,6 +11,7 @@ from .hashing import content_hash_payload, report_content_hash_payload, sha256_p
 from .statistical_selection import recompute_candidate_metric_values_hash_from_report
 from .return_panel import validate_return_panel_binding
 from .family_registry import validate_family_registry_binding
+from .experiment_registry import validate_experiment_registry_binding
 
 
 LINEAGE_SCHEMA_VERSION = 1
@@ -88,6 +89,19 @@ def build_research_lineage(
     attempt_index: int | None = None,
     failed_candidate_count: int | None = None,
     holdout_reuse_count: int | None = None,
+    experiment_registry_path: str | None = None,
+    experiment_registry_prior_hash: str | None = None,
+    experiment_registry_row_hash: str | None = None,
+    experiment_registry_completion_row_hash: str | None = None,
+    final_holdout_fingerprint: str | None = None,
+    final_holdout_split_hash: str | None = None,
+    computed_attempt_index: int | None = None,
+    computed_holdout_reuse_count: int | None = None,
+    declared_attempt_index: int | None = None,
+    declared_holdout_reuse_count: int | None = None,
+    research_freedom_hash: str | None = None,
+    registry_gate_result: str | None = None,
+    registry_gate_fail_reasons: list[str] | None = None,
     dataset_reuse_policy: str | None = None,
     hypothesis_id: str | None = None,
     hypothesis_status: str | None = None,
@@ -122,6 +136,19 @@ def build_research_lineage(
         "attempt_index": attempt_index,
         "failed_candidate_count": failed_candidate_count,
         "holdout_reuse_count": holdout_reuse_count,
+        "experiment_registry_path": experiment_registry_path,
+        "experiment_registry_prior_hash": experiment_registry_prior_hash,
+        "experiment_registry_row_hash": experiment_registry_row_hash,
+        "experiment_registry_completion_row_hash": experiment_registry_completion_row_hash,
+        "final_holdout_fingerprint": final_holdout_fingerprint,
+        "final_holdout_split_hash": final_holdout_split_hash,
+        "computed_attempt_index": computed_attempt_index,
+        "computed_holdout_reuse_count": computed_holdout_reuse_count,
+        "declared_attempt_index": declared_attempt_index,
+        "declared_holdout_reuse_count": declared_holdout_reuse_count,
+        "research_freedom_hash": research_freedom_hash,
+        "registry_gate_result": registry_gate_result,
+        "registry_gate_fail_reasons": list(registry_gate_fail_reasons or []),
         "dataset_reuse_policy": dataset_reuse_policy,
         "created_at": created_at or datetime.now(timezone.utc).isoformat(),
     }
@@ -155,6 +182,13 @@ def build_promotion_lineage(
     return_panel_hash: str | None = None,
     selection_universe_hash: str | None = None,
     candidate_metric_values_hash: str | None = None,
+    experiment_registry_path: str | None = None,
+    experiment_registry_prior_hash: str | None = None,
+    experiment_registry_row_hash: str | None = None,
+    experiment_registry_completion_row_hash: str | None = None,
+    final_holdout_fingerprint: str | None = None,
+    final_holdout_split_hash: str | None = None,
+    research_freedom_hash: str | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     lineage = validate_lineage_artifact(base_lineage)
@@ -191,6 +225,14 @@ def build_promotion_lineage(
             "return_panel_hash": return_panel_hash,
             "selection_universe_hash": selection_universe_hash,
             "candidate_metric_values_hash": candidate_metric_values_hash,
+            "experiment_registry_path": experiment_registry_path or lineage.get("experiment_registry_path"),
+            "experiment_registry_prior_hash": experiment_registry_prior_hash or lineage.get("experiment_registry_prior_hash"),
+            "experiment_registry_row_hash": experiment_registry_row_hash or lineage.get("experiment_registry_row_hash"),
+            "experiment_registry_completion_row_hash": experiment_registry_completion_row_hash
+            or lineage.get("experiment_registry_completion_row_hash"),
+            "final_holdout_fingerprint": final_holdout_fingerprint or lineage.get("final_holdout_fingerprint"),
+            "final_holdout_split_hash": final_holdout_split_hash or lineage.get("final_holdout_split_hash"),
+            "research_freedom_hash": research_freedom_hash or lineage.get("research_freedom_hash"),
             "created_at": created_at or datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -232,6 +274,16 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
         "family_trial_registry_path": None,
         "family_trial_registry_prior_hash": None,
         "family_trial_registry_row_hash": None,
+        "experiment_registry_path": None,
+        "experiment_registry_prior_hash": None,
+        "experiment_registry_row_hash": None,
+        "experiment_registry_completion_row_hash": None,
+        "final_holdout_fingerprint": None,
+        "computed_attempt_index": None,
+        "computed_holdout_reuse_count": None,
+        "declared_attempt_index": None,
+        "declared_holdout_reuse_count": None,
+        "research_freedom_hash": None,
         "white_reality_check_p_value": None,
         "summary_metric_max_bootstrap_p_value": None,
         "statistical_gate_result": None,
@@ -299,6 +351,16 @@ def reproduce_promotion(promotion_path: str | Path) -> ReproducibilityResult:
     summary["family_trial_registry_path"] = promotion.get("family_trial_registry_path")
     summary["family_trial_registry_prior_hash"] = promotion.get("family_trial_registry_prior_hash")
     summary["family_trial_registry_row_hash"] = promotion.get("family_trial_registry_row_hash")
+    summary["experiment_registry_path"] = promotion.get("experiment_registry_path")
+    summary["experiment_registry_prior_hash"] = promotion.get("experiment_registry_prior_hash")
+    summary["experiment_registry_row_hash"] = promotion.get("experiment_registry_row_hash")
+    summary["experiment_registry_completion_row_hash"] = promotion.get("experiment_registry_completion_row_hash")
+    summary["final_holdout_fingerprint"] = promotion.get("final_holdout_fingerprint")
+    summary["computed_attempt_index"] = promotion.get("computed_attempt_index")
+    summary["computed_holdout_reuse_count"] = promotion.get("computed_holdout_reuse_count")
+    summary["declared_attempt_index"] = promotion.get("declared_attempt_index")
+    summary["declared_holdout_reuse_count"] = promotion.get("declared_holdout_reuse_count")
+    summary["research_freedom_hash"] = promotion.get("research_freedom_hash")
     summary["white_reality_check_p_value"] = promotion.get("white_reality_check_p_value")
     summary["summary_metric_max_bootstrap_p_value"] = promotion.get("summary_metric_max_bootstrap_p_value")
     summary["statistical_gate_result"] = promotion.get("statistical_gate_result")
@@ -545,6 +607,15 @@ def _verify_statistical_evidence_bindings(
         for reason in validate_family_registry_binding(report=report, evidence=payload):
             summary["mismatches"].append(
                 _mismatch("family_trial_registry", "valid_binding", reason, reason)
+            )
+        for reason in validate_experiment_registry_binding(
+            report=report,
+            evidence=payload,
+            promotion=promotion,
+            require_complete=is_production_bound_target(promotion.get("deployment_tier")),
+        ):
+            summary["mismatches"].append(
+                _mismatch("experiment_registry", "valid_binding", reason, reason)
             )
 
 

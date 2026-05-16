@@ -16,6 +16,7 @@ from bithumb_bot.execution_reality_contract import (
 
 from .hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
 from .lineage import build_promotion_lineage, validate_lineage_artifact, LineageValidationError
+from .experiment_registry import append_promotion_registry_event, validate_experiment_registry_binding
 from .deployment_policy import is_production_bound_target, validate_production_calibration_policy
 from .metrics_contract import METRICS_SCHEMA_VERSION
 from .metrics_gate_policy import metrics_gate_policy_hash
@@ -116,6 +117,19 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "family_trial_registry_path": candidate.get("family_trial_registry_path"),
         "family_trial_registry_prior_hash": candidate.get("family_trial_registry_prior_hash"),
         "family_trial_registry_row_hash": candidate.get("family_trial_registry_row_hash"),
+        "experiment_registry_path": candidate.get("experiment_registry_path"),
+        "experiment_registry_prior_hash": candidate.get("experiment_registry_prior_hash"),
+        "experiment_registry_row_hash": candidate.get("experiment_registry_row_hash"),
+        "experiment_registry_completion_row_hash": candidate.get("experiment_registry_completion_row_hash"),
+        "final_holdout_fingerprint": candidate.get("final_holdout_fingerprint"),
+        "final_holdout_split_hash": candidate.get("final_holdout_split_hash"),
+        "computed_attempt_index": candidate.get("computed_attempt_index"),
+        "computed_holdout_reuse_count": candidate.get("computed_holdout_reuse_count"),
+        "declared_attempt_index": candidate.get("declared_attempt_index"),
+        "declared_holdout_reuse_count": candidate.get("declared_holdout_reuse_count"),
+        "research_freedom_hash": candidate.get("research_freedom_hash"),
+        "registry_gate_result": candidate.get("registry_gate_result"),
+        "registry_gate_fail_reasons": candidate.get("registry_gate_fail_reasons"),
         "benchmark": candidate.get("benchmark"),
         "primary_metric": candidate.get("primary_metric"),
         "primary_metric_source": candidate.get("primary_metric_source"),
@@ -634,6 +648,17 @@ def promote_candidate(
         report=report,
         evidence=statistical_evidence,
     )
+    production_bound_candidate = is_production_bound_target(
+        backtest.candidate.get("deployment_tier") or report.get("deployment_tier")
+    )
+    if production_bound_candidate:
+        statistical_reasons.extend(
+            validate_experiment_registry_binding(
+                report=report,
+                evidence=statistical_evidence,
+                require_complete=True,
+            )
+        )
     if statistical_reasons:
         raise PromotionGateError(f"promotion refused: {','.join(statistical_reasons)}")
     base_lineage = report.get("lineage") if isinstance(report.get("lineage"), dict) else None
@@ -751,6 +776,19 @@ def promote_candidate(
         "family_trial_registry_path": report.get("family_trial_registry_path"),
         "family_trial_registry_prior_hash": report.get("family_trial_registry_prior_hash"),
         "family_trial_registry_row_hash": report.get("family_trial_registry_row_hash"),
+        "experiment_registry_path": report.get("experiment_registry_path"),
+        "experiment_registry_prior_hash": report.get("experiment_registry_prior_hash"),
+        "experiment_registry_row_hash": report.get("experiment_registry_row_hash"),
+        "experiment_registry_completion_row_hash": report.get("experiment_registry_completion_row_hash"),
+        "final_holdout_fingerprint": report.get("final_holdout_fingerprint"),
+        "final_holdout_split_hash": report.get("final_holdout_split_hash"),
+        "computed_attempt_index": report.get("computed_attempt_index"),
+        "computed_holdout_reuse_count": report.get("computed_holdout_reuse_count"),
+        "declared_attempt_index": report.get("declared_attempt_index"),
+        "declared_holdout_reuse_count": report.get("declared_holdout_reuse_count"),
+        "research_freedom_hash": report.get("research_freedom_hash"),
+        "registry_gate_result": report.get("registry_gate_result"),
+        "registry_gate_fail_reasons": report.get("registry_gate_fail_reasons") or [],
         "benchmark": candidate.get("benchmark"),
         "primary_metric": candidate.get("primary_metric"),
         "primary_metric_source": candidate.get("primary_metric_source"),
@@ -829,6 +867,13 @@ def promote_candidate(
                 return_panel_hash=artifact.get("return_panel_hash"),
                 selection_universe_hash=artifact.get("selection_universe_hash"),
                 candidate_metric_values_hash=artifact.get("candidate_metric_values_hash"),
+                experiment_registry_path=artifact.get("experiment_registry_path"),
+                experiment_registry_prior_hash=artifact.get("experiment_registry_prior_hash"),
+                experiment_registry_row_hash=artifact.get("experiment_registry_row_hash"),
+                experiment_registry_completion_row_hash=artifact.get("experiment_registry_completion_row_hash"),
+                final_holdout_fingerprint=artifact.get("final_holdout_fingerprint"),
+                final_holdout_split_hash=artifact.get("final_holdout_split_hash"),
+                research_freedom_hash=artifact.get("research_freedom_hash"),
                 created_at=artifact["generated_at"],
             )
         except LineageValidationError as exc:
@@ -838,6 +883,14 @@ def promote_candidate(
     content_hash = sha256_prefixed(content_hash_payload(artifact))
     artifact["content_hash"] = content_hash
     content_hash = str(artifact["content_hash"])
+    if artifact.get("experiment_registry_row_hash"):
+        append_promotion_registry_event(
+            manager=manager,
+            reservation_row_hash=str(artifact["experiment_registry_row_hash"]),
+            promotion_artifact_hash=content_hash,
+            promoted_candidate_id=candidate_id,
+            created_at=artifact["generated_at"],
+        )
     _ensure_research_output_path_allowed(manager, path)
     write_json_atomic(path, artifact)
     return PromotionResult(artifact=artifact, artifact_path=path, content_hash=content_hash)

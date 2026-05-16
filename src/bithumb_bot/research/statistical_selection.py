@@ -9,6 +9,7 @@ from bithumb_bot.storage_io import write_json_atomic
 
 from .deployment_policy import is_production_bound_target
 from .experiment_manifest import ExperimentManifest, StatisticalSelectionContract
+from .experiment_registry import validate_experiment_registry_binding
 from .family_registry import validate_family_registry_binding
 from .hashing import content_hash_payload, sha256_prefixed
 from .return_panel import validate_return_panel_binding
@@ -183,6 +184,7 @@ def build_statistical_selection_evidence(
     family_trial_registry_prior_hash: str | None = None,
     family_trial_registry_path: Path | None = None,
     family_trial_registry_row_hash: str | None = None,
+    experiment_registry: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     contract = manifest.statistical_validation
     if contract is None:
@@ -255,6 +257,10 @@ def build_statistical_selection_evidence(
         "parameter_grid_size": parameter_grid_size,
         "attempt_index": attempt_index,
         "holdout_reuse_count": holdout_reuse_count,
+        "computed_attempt_index": (experiment_registry or {}).get("computed_attempt_index", attempt_index),
+        "computed_holdout_reuse_count": (experiment_registry or {}).get("computed_holdout_reuse_count", holdout_reuse_count),
+        "declared_attempt_index": (experiment_registry or {}).get("declared_attempt_index"),
+        "declared_holdout_reuse_count": (experiment_registry or {}).get("declared_holdout_reuse_count"),
         "dataset_reuse_policy": dataset_reuse_policy,
         "benchmark": contract.benchmark,
         "primary_metric": contract.primary_metric,
@@ -278,6 +284,15 @@ def build_statistical_selection_evidence(
         "family_trial_registry_prior_hash": family_trial_registry_prior_hash,
         "family_trial_registry_row_hash": family_trial_registry_row_hash,
         "family_trial_registry_bound_evidence_hash": None,
+        "experiment_registry_path": (experiment_registry or {}).get("experiment_registry_path"),
+        "experiment_registry_prior_hash": (experiment_registry or {}).get("experiment_registry_prior_hash"),
+        "experiment_registry_row_hash": (experiment_registry or {}).get("experiment_registry_row_hash"),
+        "experiment_registry_completion_row_hash": (experiment_registry or {}).get("experiment_registry_completion_row_hash"),
+        "final_holdout_fingerprint": (experiment_registry or {}).get("final_holdout_fingerprint"),
+        "final_holdout_split_hash": (experiment_registry or {}).get("final_holdout_split_hash"),
+        "research_freedom_hash": (experiment_registry or {}).get("research_freedom_hash"),
+        "registry_gate_result": (experiment_registry or {}).get("registry_gate_result"),
+        "registry_gate_fail_reasons": list((experiment_registry or {}).get("registry_gate_fail_reasons") or []),
         "n_bootstrap": contract.bootstrap.n_bootstrap,
         "block_length": None,
         "block_length_policy": contract.bootstrap.block_length_policy,
@@ -396,6 +411,13 @@ def validate_statistical_evidence_for_candidate(
     if evidence_grade == SCREENING_SUMMARY_BOOTSTRAP and summary_p_value is None:
         reasons.append("summary_metric_max_bootstrap_p_value_missing")
     if production_bound:
+        reasons.extend(
+            validate_experiment_registry_binding(
+                report=report,
+                evidence=evidence,
+                require_complete=True,
+            )
+        )
         reasons.extend(validate_return_panel_binding(report=report, evidence=evidence, panel=_load_return_panel(evidence, report)))
         reasons.extend(validate_family_registry_binding(report=report, evidence=evidence))
     if evidence.get("effective_trial_count") is None:

@@ -12,6 +12,7 @@ from bithumb_bot.execution_reality_contract import execution_capability_contract
 from bithumb_bot.research import cli as research_cli
 from bithumb_bot.research.hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
 from bithumb_bot.research.lineage import build_research_lineage, compute_lineage_hash, reproduce_promotion
+from bithumb_bot.research.experiment_registry import append_attempt_completion, reserve_research_attempt
 from bithumb_bot.research.statistical_selection import (
     candidate_metric_values_hash,
     recompute_white_reality_check_block_bootstrap,
@@ -787,7 +788,110 @@ def _attach_statistical_evidence(
     registry_row["row_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in registry_row.items() if k != "row_hash"}))
     registry_path.write_text(json.dumps(registry_row, sort_keys=True) + "\n", encoding="utf-8")
     evidence["family_trial_registry_row_hash"] = registry_row["row_hash"]
+    registry_base = {
+        "run_id": report["experiment_id"],
+        "experiment_family_id": report.get("experiment_family_id"),
+        "hypothesis_id": report.get("hypothesis_id"),
+        "hypothesis_status": report.get("hypothesis_status"),
+        "experiment_id": report["experiment_id"],
+        "manifest_hash": report["manifest_hash"],
+        "manifest_metadata_hash": "sha256:metadata",
+        "dataset_snapshot_id": report.get("dataset_snapshot_id"),
+        "dataset_content_hash": report["dataset_content_hash"],
+        "dataset_quality_hash": report.get("dataset_quality_hash"),
+        "train_split_hash": "sha256:train",
+        "validation_split_hash": "sha256:validation",
+        "final_holdout_split_hash": "sha256:final-holdout",
+        "final_holdout_fingerprint": "sha256:final-holdout-fingerprint",
+        "parameter_space_hash": report.get("parameter_space_hash") or "sha256:parameter-space",
+        "parameter_grid_size": parameter_grid_size,
+        "candidate_count": None,
+        "declared_attempt_index": attempt_index,
+        "declared_holdout_reuse_count": holdout_reuse_count,
+        "statistical_evidence_hash": None,
+        "return_panel_hash": None,
+        "promotion_artifact_hash": None,
+        "promoted_candidate_id": None,
+        "repository_version": "test",
+        "command_args_hash": "sha256:args",
+    }
+    reserve_research_attempt(
+        manager=manager,
+        base_payload={**registry_base, "run_id": "prior_family", "experiment_id": "prior_family"},
+    )
+    for index in range(2):
+        reserve_research_attempt(
+            manager=manager,
+            base_payload={
+                **registry_base,
+                "run_id": f"prior_reuse_{index}",
+                "experiment_id": f"prior_reuse_{index}",
+                "experiment_family_id": f"other_family_{index}",
+                "hypothesis_id": f"other_hypothesis_{index}",
+            },
+        )
+    reservation = reserve_research_attempt(manager=manager, base_payload=registry_base)
+    completion = append_attempt_completion(
+        manager=manager,
+        reservation=reservation,
+        updates={
+            "candidate_count": candidate_count,
+            "return_panel_hash": panel["content_hash"],
+            "statistical_evidence_hash": None,
+            "statistical_gate_result": "PASS",
+        },
+        result_status="COMPLETED",
+        created_at="2026-05-04T00:00:00+00:00",
+    )
+    registry_fields = {
+        "experiment_registry_path": reservation["path"],
+        "experiment_registry_prior_hash": reservation["prior_hash"],
+        "experiment_registry_row_hash": reservation["row_hash"],
+        "experiment_registry_completion_row_hash": completion["row_hash"],
+        "final_holdout_fingerprint": registry_base["final_holdout_fingerprint"],
+        "final_holdout_split_hash": registry_base["final_holdout_split_hash"],
+        "computed_attempt_index": reservation["computed_attempt_index"],
+        "computed_holdout_reuse_count": reservation["computed_holdout_reuse_count"],
+        "declared_attempt_index": attempt_index,
+        "declared_holdout_reuse_count": holdout_reuse_count,
+        "registry_gate_result": "PASS",
+        "registry_gate_fail_reasons": [],
+    }
+    registry_fields["research_freedom_hash"] = sha256_prefixed(
+        {
+            "experiment_family_id": report.get("experiment_family_id"),
+            "hypothesis_id": report.get("hypothesis_id"),
+            "hypothesis_status": report.get("hypothesis_status"),
+            "dataset_snapshot_id": report.get("dataset_snapshot_id"),
+            "train_split_hash": registry_base["train_split_hash"],
+            "validation_split_hash": registry_base["validation_split_hash"],
+            "final_holdout_split_hash": registry_base["final_holdout_split_hash"],
+            "final_holdout_fingerprint": registry_base["final_holdout_fingerprint"],
+            "parameter_space_hash": registry_base["parameter_space_hash"],
+            "computed_attempt_index": reservation["computed_attempt_index"],
+            "computed_holdout_reuse_count": reservation["computed_holdout_reuse_count"],
+            "experiment_registry_path": reservation["path"],
+            "experiment_registry_prior_hash": reservation["prior_hash"],
+            "experiment_registry_row_hash": reservation["row_hash"],
+        }
+    )
+    evidence.update(registry_fields)
     evidence.update(overrides)
+    evidence["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "content_hash"}))
+    completion_row = completion["row"]
+    assert isinstance(completion_row, dict)
+    completion_row["statistical_evidence_hash"] = evidence["content_hash"]
+    completion_row["row_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in completion_row.items() if k != "row_hash"}))
+    rows = []
+    exp_registry_path = Path(str(reservation["path"]))
+    for line in exp_registry_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if row.get("event_type") == "research_attempt_completed" and row.get("reservation_row_hash") == reservation["row_hash"]:
+            row = completion_row
+        rows.append(row)
+    exp_registry_path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    registry_fields["experiment_registry_completion_row_hash"] = completion_row["row_hash"]
+    evidence["experiment_registry_completion_row_hash"] = completion_row["row_hash"]
     evidence["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in evidence.items() if k != "content_hash"}))
     evidence_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "statistical_selection_evidence.json"
     write_json_atomic(evidence_path, evidence)
@@ -812,6 +916,11 @@ def _attach_statistical_evidence(
     report["family_trial_registry_path"] = evidence.get("family_trial_registry_path")
     report["family_trial_registry_prior_hash"] = evidence.get("family_trial_registry_prior_hash")
     report["family_trial_registry_row_hash"] = evidence.get("family_trial_registry_row_hash")
+    report.update(registry_fields)
+    if isinstance(report.get("lineage"), dict):
+        report["lineage"].update(registry_fields)
+        report["lineage"]["lineage_hash"] = compute_lineage_hash(report["lineage"])
+        report["lineage_hash"] = report["lineage"]["lineage_hash"]
     report["statistical_gate_result"] = evidence.get("statistical_gate_result")
     report["statistical_gate_fail_reasons"] = evidence.get("gate_fail_reasons")
     report["white_reality_check_p_value"] = evidence.get("white_reality_check_p_value")
@@ -842,6 +951,7 @@ def _attach_statistical_evidence(
     candidate["family_trial_registry_path"] = evidence.get("family_trial_registry_path")
     candidate["family_trial_registry_prior_hash"] = evidence.get("family_trial_registry_prior_hash")
     candidate["family_trial_registry_row_hash"] = evidence.get("family_trial_registry_row_hash")
+    candidate.update(registry_fields)
     candidate["statistical_gate_result"] = evidence.get("statistical_gate_result")
     candidate["statistical_gate_fail_reasons"] = evidence.get("gate_fail_reasons")
     candidate["white_reality_check_p_value"] = evidence.get("white_reality_check_p_value")
@@ -1718,6 +1828,18 @@ def test_production_promotion_refuses_excessive_holdout_reuse_and_attempt_budget
     )
 
     with pytest.raises(PromotionGateError, match="attempt_budget_exceeded"):
+        promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_production_promotion_refuses_missing_experiment_registry_row(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate)
+    report_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "backtest_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    Path(str(report["experiment_registry_path"])).unlink()
+
+    with pytest.raises(PromotionGateError, match="experiment_registry_missing"):
         promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
 
 
