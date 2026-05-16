@@ -514,7 +514,7 @@ DATA_ROOT/<mode>/reports/research/<experiment_id>/statistical_selection_evidence
 
 This is a `reports` artifact. It is diagnostic/promotion evidence, not recovery-critical trade lifecycle state. Operators should regenerate it from the same manifest and dataset snapshot rather than editing recorded hashes.
 
-Stable statistical refusal reasons include `statistical_contract_missing`, `statistical_contract_mismatch`, `statistical_method_contract_mismatch`, `statistical_evidence_missing`, `statistical_evidence_hash_missing`, `statistical_evidence_hash_mismatch`, `statistical_evidence_grade_insufficient`, `selection_universe_hash_missing`, `selection_universe_hash_mismatch`, `candidate_metric_values_hash_missing`, `candidate_metric_values_hash_mismatch`, `candidate_metric_values_hash_recompute_mismatch`, `statistical_method_provenance_missing`, `statistical_method_unavailable`, `promotion_grade_statistical_computation_missing`, `bootstrap_sampling_contract_missing`, `bootstrap_sampling_contract_malformed`, `bootstrap_sampling_contract_method_mismatch`, `white_reality_check_p_value_recompute_mismatch`, `promotion_grade_requires_aligned_return_panel`, `experiment_family_statistical_universe_not_implemented`, `return_panel_missing`, `return_panel_hash_missing`, `return_panel_hash_mismatch`, `return_panel_candidate_count_mismatch`, `return_panel_observation_count_mismatch`, `return_panel_scenario_id_mismatch`, `return_panel_time_index_mismatch`, `return_panel_panel_content_hash_mismatch`, `return_panel_series_alignment_mismatch`, `return_panel_series_malformed`, `experiment_family_universe_missing`, `experiment_family_registry_row_hash_mismatch`, `experiment_family_registry_statistical_evidence_hash_mismatch`, `experiment_family_registry_prior_hash_mismatch`, `experiment_family_registry_return_panel_hash_mismatch`, `experiment_family_registry_stale`, `experiment_registry_missing`, `experiment_registry_path_missing`, `experiment_registry_row_hash_missing`, `experiment_registry_row_hash_mismatch`, `experiment_registry_prior_hash_mismatch`, `experiment_registry_stale`, `experiment_registry_attempt_index_mismatch`, `experiment_registry_holdout_reuse_count_mismatch`, `experiment_registry_final_holdout_fingerprint_mismatch`, `experiment_registry_budget_exceeded`, `experiment_registry_incomplete_attempt`, `declared_attempt_index_mismatch`, `declared_holdout_reuse_count_mismatch`, `statistical_metadata_mismatch`, `statistical_candidate_count_mismatch`, `statistical_attempt_index_mismatch`, `statistical_holdout_reuse_count_mismatch`, `statistical_search_budget_mismatch`, `statistical_parameter_grid_size_mismatch`, `statistical_dataset_reuse_policy_mismatch`, `statistical_benchmark_mismatch`, `statistical_primary_metric_mismatch`, `statistical_metric_values_missing`, `statistical_metric_value_count_mismatch`, `statistical_effective_trial_count_underreported`, `reality_check_p_value_missing`, `reality_check_p_value_failed`, `spa_method_unavailable`, `deflated_sharpe_missing`, `effective_trial_count_missing`, `holdout_reuse_budget_exceeded`, and `attempt_budget_exceeded`.
+Stable statistical refusal reasons include `statistical_contract_missing`, `statistical_contract_mismatch`, `statistical_method_contract_mismatch`, `statistical_evidence_missing`, `statistical_evidence_hash_missing`, `statistical_evidence_hash_mismatch`, `statistical_evidence_grade_insufficient`, `selection_universe_hash_missing`, `selection_universe_hash_mismatch`, `candidate_metric_values_hash_missing`, `candidate_metric_values_hash_mismatch`, `candidate_metric_values_hash_recompute_mismatch`, `statistical_method_provenance_missing`, `statistical_method_unavailable`, `promotion_grade_statistical_computation_missing`, `bootstrap_sampling_contract_missing`, `bootstrap_sampling_contract_malformed`, `bootstrap_sampling_contract_method_mismatch`, `white_reality_check_p_value_recompute_mismatch`, `promotion_grade_requires_aligned_return_panel`, `experiment_family_statistical_universe_not_implemented`, `return_panel_missing`, `return_panel_hash_missing`, `return_panel_hash_mismatch`, `return_panel_candidate_count_mismatch`, `return_panel_observation_count_mismatch`, `return_panel_scenario_id_mismatch`, `return_panel_time_index_mismatch`, `return_panel_panel_content_hash_mismatch`, `return_panel_series_alignment_mismatch`, `return_panel_series_malformed`, `experiment_family_universe_missing`, `experiment_family_registry_row_hash_mismatch`, `experiment_family_registry_statistical_evidence_hash_mismatch`, `experiment_family_registry_prior_hash_mismatch`, `experiment_family_registry_return_panel_hash_mismatch`, `experiment_family_registry_stale`, `experiment_registry_missing`, `experiment_registry_path_missing`, `experiment_registry_row_hash_missing`, `experiment_registry_row_hash_mismatch`, `experiment_registry_prior_hash_mismatch`, `experiment_registry_stale`, `experiment_registry_attempt_index_mismatch`, `experiment_registry_holdout_reuse_count_mismatch`, `experiment_registry_final_holdout_fingerprint_mismatch`, `experiment_registry_final_holdout_identity_mismatch`, `experiment_registry_final_holdout_content_mismatch`, `experiment_registry_final_holdout_reuse_key_mismatch`, `experiment_registry_identity_source_missing`, `experiment_registry_bound_evidence_hash_missing`, `experiment_registry_evidence_hash_phase_mismatch`, `experiment_registry_statistical_evidence_hash_mismatch`, `experiment_registry_artifact_bound_row_missing`, `experiment_registry_artifact_bound_row_hash_mismatch`, `experiment_registry_report_evidence_row_hash_mismatch`, `artifact_binding_not_checked`, `experiment_registry_budget_exceeded`, `experiment_registry_incomplete_attempt`, `declared_attempt_index_mismatch`, `declared_holdout_reuse_count_mismatch`, `statistical_metadata_mismatch`, `statistical_candidate_count_mismatch`, `statistical_attempt_index_mismatch`, `statistical_holdout_reuse_count_mismatch`, `statistical_search_budget_mismatch`, `statistical_parameter_grid_size_mismatch`, `statistical_dataset_reuse_policy_mismatch`, `statistical_benchmark_mismatch`, `statistical_primary_metric_mismatch`, `statistical_metric_values_missing`, `statistical_metric_value_count_mismatch`, `statistical_effective_trial_count_underreported`, `reality_check_p_value_missing`, `reality_check_p_value_failed`, `spa_method_unavailable`, `deflated_sharpe_missing`, `effective_trial_count_missing`, `holdout_reuse_budget_exceeded`, and `attempt_budget_exceeded`.
 
 ## Strategy Robustness Stress Suite
 
@@ -558,17 +558,142 @@ Production-bound research with a final holdout writes an append-only experiment 
 DATA_ROOT/<mode>/reports/research/_registry/experiment_registry.jsonl
 ```
 
-This is a managed `reports` artifact resolved through `PathManager`; it must remain outside the repository and mode-separated under `DATA_ROOT/<mode>`. The registry is diagnostic/promotion evidence, not trade lifecycle recovery state.
+This is a managed `reports` artifact resolved through `PathManager`; it must
+remain outside the repository and mode-separated under `DATA_ROOT/<mode>`. The
+registry is operator-auditable promotion evidence for overfitting defense. It is
+not trade lifecycle recovery state.
 
-Before final-holdout evaluation can influence candidate selection or artifacts, `research-backtest` and `research-walk-forward` append a `research_attempt_reserved` row. The row records experiment family, hypothesis, experiment id, manifest hash, manifest metadata hash, dataset snapshot/content/quality hashes, train/validation/final-holdout split hashes, final-holdout fingerprint, parameter-space hash, declared counters when present, registry-computed counters, command args hash, repository version, prior registry hash, and row hash. After statistical evidence and return-panel evidence are written, the command appends a `research_attempt_completed` row linked to the reservation row. If promotion succeeds, a promotion event is appended with the promotion artifact hash and promoted candidate id.
+Production-bound research with `final_holdout` performs checked registry
+reservation before the final-holdout split is loaded. The reservation row is the
+only counted attempt event and uses the semantic final-holdout identity while
+content is still unavailable. `research_attempt_reserved` rows count even if
+the run is interrupted later. `research_attempt_rejected` rows are audit
+evidence only: declared counter mismatches and budget excesses are checked
+under the registry lock, append `counted_attempt=false`, and do not append a
+counted reservation.
 
-`computed_attempt_index` is one plus the number of prior reservation rows for the same experiment family and hypothesis id. `computed_holdout_reuse_count` is the number of prior reservation rows with the same final-holdout fingerprint. Reserved attempts count even if the run is interrupted before completion. For production-bound tiers, registry-computed counters are authoritative. Manifest-declared `attempt_index` and `holdout_reuse_count`, when present, must match computed values or production-bound generation/promotion fails closed. If the declared fields are absent, the computed values are used and the declared fields remain null.
+The registry separates final-holdout reuse identity from content integrity:
 
-For `research_only`, the current workflow remains diagnostic and reproducible: registry absence is reported as `registry_gate_result=WARN` with `experiment_registry_missing`, but the run is not blocked. That compatibility does not apply to production-bound promotion.
+- `final_holdout_identity_hash` is the semantic reuse-counting key based on
+  dataset source, market, interval, and final-holdout date range.
+- `final_holdout_reuse_key_hash` is the actual key used to compute
+  `computed_holdout_reuse_count` and should equal the semantic identity hash.
+- `final_holdout_fingerprint` is retained only as a compatibility alias for the
+  semantic identity hash.
+- `final_holdout_content_hash` is the reproducibility/integrity key based on
+  dataset snapshot id, final-holdout split hash, and dataset quality hash.
+- `final_holdout_content_pending_until_completion=true` means reservation
+  occurred before final-holdout content was loaded; content fields must be
+  bound in completion, evidence, and report artifacts before promotion.
 
-Promotion and reproduction verify that the registry path exists, the referenced row exists, the row hash recomputes, the prior hash matches the content before the row, the final-holdout fingerprint and computed counters match report/evidence/promotion fields, and a completed row exists when production-bound promotion requires it. Missing, stale, tampered, mismatched, incomplete, or over-budget registry evidence fails closed for `paper_candidate`, `live_dry_run_candidate`, and `small_live_candidate`.
+`computed_attempt_index` is one plus the number of prior counted reservations
+for the same experiment family and hypothesis id. `computed_holdout_reuse_count`
+is the number of prior counted reservations with the same
+`final_holdout_reuse_key_hash`. Changing `dataset_snapshot_id`, backfilled
+candle content, or final-holdout split bytes does not reset semantic holdout
+reuse for the same market, interval, and date range. Content mismatches remain
+separate fail-closed integrity failures.
 
-Interrupted runs should be recovered by appending a completion or aborted event with the existing tooling or by regenerating the research from the manifest and dataset snapshot. Do not manually edit JSONL rows, prior hashes, row hashes, reports, evidence, or promotion artifacts as a normal recovery path. Manual hash editing invalidates the audit trail.
+Lifecycle status is append-only and separate from statistical gate result:
+
+- `IN_PROGRESS` is a counted reservation.
+- `COMPLETED` is a completed lifecycle event.
+- `ABORTED` is an interrupted counted attempt.
+- `REJECTED` is an uncounted preflight rejection.
+
+Only `COMPLETED` is promotion-permitted. Aborted attempts remain counted
+exposure but are not promotion-permitted. `statistical_gate_result` is
+`PASS|FAIL|UNKNOWN` and remains separate evidence about candidate/statistical
+quality; a completed row with `statistical_gate_result=FAIL` is complete audit
+evidence, not permission to promote.
+
+Completion uses two-phase evidence binding to avoid a recursive hash cycle.
+`research_attempt_completed` records the pre-completion statistical evidence
+hash. Final evidence stores that value in
+`experiment_registry_bound_evidence_hash` and must set
+`experiment_registry_evidence_hash_phase=pre_completion_evidence_hash`. The
+final statistical evidence `content_hash` is recomputed after
+`experiment_registry_completion_row_hash` and
+`experiment_registry_bound_evidence_hash` are inserted, so the final
+`content_hash` and bound evidence hash can intentionally differ.
+
+Promotion and reproduction validate the reservation row, prior registry hash,
+completion row, evidence phase, bound evidence hash, final-holdout
+identity/content/reuse-key fields, computed counters, declared counters, and
+budget compliance. Missing, stale, tampered, mismatched, incomplete, or
+over-budget registry evidence fails closed for `paper_candidate`,
+`live_dry_run_candidate`, and `small_live_candidate`.
+
+For `research_only`, the current workflow remains diagnostic and reproducible:
+registry absence is reported as `registry_gate_result=WARN` with
+`experiment_registry_missing`, but the run is not blocked. That compatibility
+does not apply to production-bound promotion.
+
+`research-registry-validate --experiment-id <id>` is an operator audit command.
+It prints `validation_scope=registry_only` when report/evidence/panel artifacts
+are absent; in that mode, artifact binding is not checked and
+`artifact_binding_valid=unknown` with `artifact_binding_not_checked` is not
+promotion-grade proof. It prints `validation_scope=registry_and_artifacts` when
+it loads report, evidence, or return-panel artifacts from
+`DATA_ROOT/<mode>/reports/research/<experiment_id>/`.
+
+In artifact scope, `artifact_bound_row_hash` identifies the reservation row
+referenced by report/evidence. `artifact_binding_valid` and `artifact_reasons`
+describe whether that artifact chain binds to the registry, evidence phase,
+content hashes, return panel, and lifecycle state. If report and evidence point
+at different rows, validation fails closed with
+`experiment_registry_report_evidence_row_hash_mismatch` and
+`experiment_registry_artifact_bound_row_hash_mismatch`. If the referenced row is
+missing from the registry, validation fails closed with
+`experiment_registry_artifact_bound_row_missing`.
+
+`registry_lifecycle_summary` lists all reservation rows for the experiment
+separately, so older incomplete or aborted rows remain visible without being
+falsely marked artifact-valid for the current report/evidence chain. Extra
+incomplete non-bound rows do not fail current artifact-bound validation.
+Artifact-bound incomplete rows do fail validation.
+
+Each `registry_lifecycle_summary` row uses these fields:
+
+- `registry_row_valid=true` means the reservation row hash recomputes.
+- `completion_row_valid=true` means the completion/abort row hash recomputes,
+  or is true when no completion/abort row exists.
+- `lifecycle_complete=true` means the lifecycle status is promotion-permitted,
+  currently only `COMPLETED`.
+- `promotion_permitted=true` mirrors `lifecycle_complete` at the registry
+  layer.
+- `row_valid_only=true` means the row hash is valid but the lifecycle is not
+  promotion-permitted.
+- `ok=true` means `registry_row_valid`, `completion_row_valid`, and
+  `lifecycle_complete` are all true.
+
+An incomplete row is expected to report `registry_row_valid=true`,
+`completion_row_valid=true`, `lifecycle_complete=false`,
+`promotion_permitted=false`, `row_valid_only=true`, `ok=false`, and reason
+`experiment_registry_incomplete_attempt`. A completed row is expected to report
+`registry_row_valid=true`, `completion_row_valid=true`,
+`lifecycle_complete=true`, `promotion_permitted=true`, `row_valid_only=false`,
+and `ok=true`.
+
+Stable experiment-registry refusal and validation reasons include
+`experiment_registry_bound_evidence_hash_missing`,
+`experiment_registry_evidence_hash_phase_mismatch`,
+`experiment_registry_statistical_evidence_hash_mismatch`,
+`experiment_registry_identity_source_missing`,
+`experiment_registry_final_holdout_identity_mismatch`,
+`experiment_registry_final_holdout_content_mismatch`,
+`experiment_registry_final_holdout_reuse_key_mismatch`,
+`experiment_registry_artifact_bound_row_missing`,
+`experiment_registry_artifact_bound_row_hash_mismatch`,
+`experiment_registry_report_evidence_row_hash_mismatch`,
+`artifact_binding_not_checked`, `attempt_budget_exceeded`, and
+`holdout_reuse_budget_exceeded`.
+
+Interrupted runs should be recovered by appending an aborted event with the
+existing tooling or by regenerating the research from the manifest and dataset
+snapshot. Do not manually edit JSONL rows, prior hashes, row hashes, reports,
+evidence, or promotion artifacts as a normal recovery path. Manual hash editing
+invalidates the audit trail.
 
 Currently supported research strategies:
 
