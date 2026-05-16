@@ -24,9 +24,15 @@ from bithumb_bot.research.execution_calibration import build_calibration_artifac
 from bithumb_bot.research.execution_model import ExecutionFill, ExecutionRequest, FixedBpsExecutionModel, StressExecutionModel
 from bithumb_bot.research.experiment_manifest import ExecutionTimingPolicy, ManifestValidationError, parse_manifest
 from bithumb_bot.research.cli import _print_report_summary
+from bithumb_bot.research.experiment_registry import (
+    experiment_registry_path,
+    load_experiment_registry_rows,
+    reserve_research_attempt_checked,
+)
 from bithumb_bot.research.parameter_space import candidate_id
 from bithumb_bot.research.promotion_gate import PromotionGateError, _verify_report_content_hash, promote_candidate
 from bithumb_bot.research.validation_protocol import _promotion_blocking_reasons, run_research_backtest
+from bithumb_bot.research import validation_protocol
 from bithumb_bot.strategy.sma import create_sma_with_filter_strategy
 
 
@@ -152,6 +158,44 @@ def _production_bound_statistical_manifest() -> dict[str, object]:
         },
     }
     payload["stress_suite"] = _stress_suite_contract()
+    return payload
+
+
+def _registry_payload_for_production_manifest(**overrides: object) -> dict[str, object]:
+    payload = {
+        "run_id": "deterministic_sma",
+        "experiment_family_id": "deterministic_sma",
+        "hypothesis_id": "SMA candidate remains deterministic across repeated research runs.",
+        "hypothesis_status": "pre_registered",
+        "hypothesis_identity_source": "manifest.hypothesis",
+        "experiment_family_identity_source": "experiment_id",
+        "experiment_id": "deterministic_sma",
+        "manifest_hash": "sha256:manifest",
+        "manifest_metadata_hash": "sha256:metadata",
+        "dataset_snapshot_id": "unit_candles_v1",
+        "dataset_content_hash": None,
+        "dataset_quality_hash": None,
+        "train_split_hash": "sha256:train",
+        "validation_split_hash": "sha256:validation",
+        "final_holdout_split_hash": None,
+        "final_holdout_fingerprint": "sha256:holdout-identity",
+        "final_holdout_identity_hash": "sha256:holdout-identity",
+        "final_holdout_content_hash": None,
+        "final_holdout_reuse_key_hash": "sha256:holdout-identity",
+        "final_holdout_content_pending_until_completion": True,
+        "parameter_space_hash": "sha256:space",
+        "parameter_grid_size": 1,
+        "candidate_count": None,
+        "declared_attempt_index": None,
+        "declared_holdout_reuse_count": None,
+        "statistical_evidence_hash": None,
+        "return_panel_hash": None,
+        "promotion_artifact_hash": None,
+        "promoted_candidate_id": None,
+        "repository_version": "test",
+        "command_args_hash": "sha256:args",
+    }
+    payload.update(overrides)
     return payload
 
 
@@ -299,6 +343,107 @@ def test_same_manifest_and_dataset_produce_same_content_hash(tmp_path, monkeypat
         "candidate_failures_dir": "derived/research/deterministic_sma/candidate_failures",
     }
     assert _verify_report_content_hash(persisted, label="backtest_report") == persisted["content_hash"]
+
+
+def test_production_declared_mismatch_rejects_before_final_holdout_split_load(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    reserve_research_attempt_checked(manager=manager, base_payload=_registry_payload_for_production_manifest())
+    manifest_payload = _production_bound_statistical_manifest()
+    manifest_payload["attempt_index"] = 1
+    manifest = parse_manifest(manifest_payload)
+    loaded_splits: list[str] = []
+    original_load = validation_protocol.load_dataset_split
+
+    def tracking_load_dataset_split(*args, **kwargs):
+        loaded_splits.append(str(kwargs.get("split_name")))
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(validation_protocol, "load_dataset_split", tracking_load_dataset_split)
+
+    with pytest.raises(Exception, match="experiment_registry_preflight_failed"):
+        run_research_backtest(manifest=manifest, db_path=db_path, manager=manager)
+
+    assert "final_holdout" not in loaded_splits
+    rows = load_experiment_registry_rows(experiment_registry_path(manager=manager))
+    assert rows[-1]["event_type"] == "research_attempt_rejected"
+    assert rows[-1]["counted_attempt"] is False
+
+
+def test_production_budget_exceeded_rejects_before_final_holdout_split_load(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    reserve_research_attempt_checked(manager=manager, base_payload=_registry_payload_for_production_manifest())
+    manifest_payload = _production_bound_statistical_manifest()
+    manifest = parse_manifest(manifest_payload)
+    loaded_splits: list[str] = []
+    original_load = validation_protocol.load_dataset_split
+
+    def tracking_load_dataset_split(*args, **kwargs):
+        loaded_splits.append(str(kwargs.get("split_name")))
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(validation_protocol, "load_dataset_split", tracking_load_dataset_split)
+
+    with pytest.raises(Exception, match="experiment_registry_preflight_failed"):
+        run_research_backtest(manifest=manifest, db_path=db_path, manager=manager)
+
+    assert "final_holdout" not in loaded_splits
+    rows = load_experiment_registry_rows(experiment_registry_path(manager=manager))
+    assert rows[-1]["event_type"] == "research_attempt_rejected"
+    assert "attempt_budget_exceeded" in rows[-1]["rejection_reasons"]
+
+
+def test_production_accepted_reservation_then_loads_final_holdout_split(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    manifest = parse_manifest(_production_bound_statistical_manifest())
+    loaded_splits: list[str] = []
+    original_load = validation_protocol.load_dataset_split
+
+    def tracking_load_dataset_split(*args, **kwargs):
+        loaded_splits.append(str(kwargs.get("split_name")))
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(validation_protocol, "load_dataset_split", tracking_load_dataset_split)
+
+    run_research_backtest(manifest=manifest, db_path=db_path, manager=manager)
+
+    assert loaded_splits.index("final_holdout") > loaded_splits.index("validation")
+    rows = load_experiment_registry_rows(experiment_registry_path(manager=manager))
+    assert rows[0]["event_type"] == "research_attempt_reserved"
+    assert rows[0]["final_holdout_content_pending_until_completion"] is True
+
+
+def test_pre_content_reservation_completion_binds_final_holdout_content_hash(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    manifest = parse_manifest(_production_bound_statistical_manifest())
+
+    report = run_research_backtest(manifest=manifest, db_path=db_path, manager=manager)
+
+    rows = load_experiment_registry_rows(experiment_registry_path(manager=manager))
+    reservation = rows[0]
+    completion = next(row for row in rows if row["event_type"] == "research_attempt_completed")
+    assert reservation["final_holdout_content_hash"] is None
+    assert completion["final_holdout_content_hash"] == report["final_holdout_content_hash"]
+    assert completion["final_holdout_split_hash"] == report["final_holdout_split_hash"]
 
 
 def test_required_stress_suite_is_attached_to_report_and_candidate(tmp_path, monkeypatch) -> None:

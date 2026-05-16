@@ -7,7 +7,9 @@ from bithumb_bot.config import PATH_MANAGER, settings
 
 from .experiment_manifest import ManifestValidationError, load_manifest
 from .experiment_registry import (
+    PROMOTION_PERMITTED_STATUSES,
     append_attempt_aborted,
+    compute_row_hash,
     experiment_registry_path,
     load_experiment_registry_rows,
     validate_experiment_registry_binding,
@@ -122,7 +124,6 @@ def cmd_research_registry_validate(*, experiment_id: str) -> int:
             "warning": "artifact_binding_not_checked",
         }, sort_keys=True, indent=2))
         return 1
-    results = []
     ok = True
     report_path = PATH_MANAGER.data_dir() / "reports" / "research" / experiment_id / "backtest_report.json"
     evidence_path = PATH_MANAGER.data_dir() / "reports" / "research" / experiment_id / "statistical_selection_evidence.json"
@@ -135,7 +136,19 @@ def cmd_research_registry_validate(*, experiment_id: str) -> int:
     report_loaded = isinstance(report, dict)
     evidence_loaded = isinstance(evidence, dict)
     return_panel_loaded = isinstance(panel, dict)
+    artifact_bound_row_hash: str | None = None
+    artifact_binding_valid: bool | str = "unknown"
     if report_loaded:
+        evidence_row_hash = str(evidence.get("experiment_registry_row_hash") or "").strip() if isinstance(evidence, dict) else ""
+        report_row_hash = str(report.get("experiment_registry_row_hash") or "").strip()
+        if evidence_row_hash and report_row_hash and evidence_row_hash != report_row_hash:
+            artifact_reasons.append("experiment_registry_report_evidence_row_hash_mismatch")
+            artifact_reasons.append("experiment_registry_artifact_bound_row_hash_mismatch")
+        artifact_bound_row_hash = evidence_row_hash or report_row_hash or None
+        if not artifact_bound_row_hash:
+            artifact_reasons.append("experiment_registry_row_hash_missing")
+        elif not any(row.get("row_hash") == artifact_bound_row_hash for row in reservations):
+            artifact_reasons.append("experiment_registry_artifact_bound_row_missing")
         artifact_reasons.extend(_content_hash_reasons(report, report_hash=True, label="backtest_report"))
         evidence_required = bool(report.get("statistical_validation_required")) or bool(report.get("statistical_evidence_hash"))
         if evidence_required and not evidence_loaded:
@@ -145,66 +158,105 @@ def cmd_research_registry_validate(*, experiment_id: str) -> int:
             artifact_reasons.extend(validate_return_panel_binding(report=report, evidence=evidence, panel=panel))
     else:
         artifact_reasons.append("artifact_binding_not_checked")
-    for row in reservations:
-        synthetic_report = {
-            **row,
-            "experiment_registry_path": str(path.resolve()),
-            "experiment_registry_prior_hash": row.get("prior_registry_hash"),
-            "experiment_registry_row_hash": row.get("row_hash"),
-        }
-        completion = next(
-            (
-                item
-                for item in reversed(rows)
-                if item.get("event_type") in {"research_attempt_completed", "research_attempt_aborted"}
-                and item.get("reservation_row_hash") == row.get("row_hash")
-            ),
-            None,
-        )
-        artifact_report = report if isinstance(report, dict) else synthetic_report
-        if isinstance(completion, dict) and artifact_report.get("experiment_registry_completion_row_hash") is None:
-            artifact_report = {**artifact_report, "experiment_registry_completion_row_hash": completion.get("row_hash")}
-        reasons = validate_experiment_registry_binding(
-            report=artifact_report,
+    if validation_scope == "registry_and_artifacts" and artifact_bound_row_hash and "experiment_registry_artifact_bound_row_missing" not in artifact_reasons:
+        bound_report = dict(report) if isinstance(report, dict) else {}
+        bound_completion = _completion_for_row(rows, artifact_bound_row_hash)
+        if isinstance(bound_completion, dict) and bound_report.get("experiment_registry_completion_row_hash") is None:
+            bound_report["experiment_registry_completion_row_hash"] = bound_completion.get("row_hash")
+        binding_reasons = validate_experiment_registry_binding(
+            report=bound_report,
             evidence=evidence if isinstance(evidence, dict) else None,
             require_complete=True,
         )
-        row_ok = not reasons
-        binding_reasons = sorted(set(reasons + artifact_reasons))
-        artifact_binding_valid: bool | str = "unknown" if validation_scope == "registry_only" else not artifact_reasons and not reasons
-        ok = ok and row_ok and (artifact_binding_valid is True or artifact_binding_valid == "unknown")
-        results.append(
-            {
-                "row_hash": row.get("row_hash"),
-                "registry_row_valid": not any(str(reason).startswith("experiment_registry_row_hash") for reason in reasons),
-                "completion_row_valid": "experiment_registry_incomplete_attempt" not in reasons,
-                "artifact_binding_valid": artifact_binding_valid,
-                "report_loaded": report_loaded,
-                "evidence_loaded": evidence_loaded,
-                "return_panel_loaded": return_panel_loaded,
-                "reasons": binding_reasons,
-                "ok": row_ok and (artifact_binding_valid is True or artifact_binding_valid == "unknown"),
-            }
-        )
+        artifact_reasons.extend(binding_reasons)
+        artifact_binding_valid = not artifact_reasons
+    elif validation_scope == "registry_and_artifacts":
+        artifact_binding_valid = False
+    lifecycle_summary = []
+    for row in reservations:
+        completion = _completion_for_row(rows, str(row.get("row_hash") or ""))
+        lifecycle = _registry_lifecycle_row(row=row, completion=completion, artifact_bound=row.get("row_hash") == artifact_bound_row_hash)
+        lifecycle["report_loaded"] = report_loaded
+        lifecycle["evidence_loaded"] = evidence_loaded
+        lifecycle["return_panel_loaded"] = return_panel_loaded
+        if lifecycle["artifact_bound"]:
+            lifecycle["artifact_binding_valid"] = artifact_binding_valid
+            lifecycle["reasons"] = sorted(set([str(item) for item in lifecycle["reasons"]] + artifact_reasons))
+        lifecycle_summary.append(lifecycle)
+        ok = ok and lifecycle["registry_row_valid"]
+    if validation_scope == "registry_and_artifacts":
+        ok = ok and artifact_binding_valid is True
     payload = {
         "ok": ok,
         "validation_scope": validation_scope,
         "experiment_id": experiment_id,
         "registry_path": str(path.resolve()),
+        "artifact_bound_row_hash": artifact_bound_row_hash,
+        "artifact_reasons": sorted(set(artifact_reasons)),
         "report_path": str(report_path.resolve()),
         "evidence_path": str(evidence_path.resolve()),
         "return_panel_path": str(panel_path.resolve()),
         "report_loaded": report_loaded,
         "evidence_loaded": evidence_loaded,
         "return_panel_loaded": return_panel_loaded,
-        "artifact_binding_valid": (
-            "unknown" if validation_scope == "registry_only" else not artifact_reasons and all(item["artifact_binding_valid"] is True for item in results)
-        ),
+        "artifact_binding_valid": artifact_binding_valid,
         "warning": "artifact_binding_not_checked" if validation_scope == "registry_only" else None,
-        "results": results,
+        "registry_lifecycle_summary": lifecycle_summary,
+        "results": lifecycle_summary,
     }
     print(json.dumps(payload, sort_keys=True, indent=2))
     return 0 if ok else 1
+
+
+def _completion_for_row(rows: list[dict[str, object]], row_hash: str) -> dict[str, object] | None:
+    return next(
+        (
+            item
+            for item in reversed(rows)
+            if item.get("event_type") in {"research_attempt_completed", "research_attempt_aborted"}
+            and item.get("reservation_row_hash") == row_hash
+        ),
+        None,
+    )
+
+
+def _registry_lifecycle_row(
+    *,
+    row: dict[str, object],
+    completion: dict[str, object] | None,
+    artifact_bound: bool,
+) -> dict[str, object]:
+    reasons: list[str] = []
+    registry_row_valid = compute_row_hash(row) == row.get("row_hash")
+    if not registry_row_valid:
+        reasons.append("experiment_registry_row_hash_mismatch")
+    completion_status = str(completion.get("result_status") or "") if isinstance(completion, dict) else str(row.get("result_status") or "")
+    incomplete = not isinstance(completion, dict) or completion_status not in PROMOTION_PERMITTED_STATUSES
+    if incomplete:
+        reasons.append("experiment_registry_incomplete_attempt")
+    completion_row_valid = True
+    if isinstance(completion, dict):
+        completion_row_valid = compute_row_hash(completion) == completion.get("row_hash")
+        if not completion_row_valid:
+            reasons.append("experiment_registry_row_hash_mismatch")
+    return {
+        "row_hash": row.get("row_hash"),
+        "artifact_bound": artifact_bound,
+        "event_type": row.get("event_type"),
+        "result_status": row.get("result_status"),
+        "registry_row_valid": registry_row_valid,
+        "completion_row_valid": completion_row_valid,
+        "completion_row_hash": completion.get("row_hash") if isinstance(completion, dict) else None,
+        "completion_status": completion_status,
+        "incomplete": incomplete,
+        "promotion_permitted": completion_status in PROMOTION_PERMITTED_STATUSES,
+        "artifact_binding_valid": "unknown",
+        "report_loaded": False,
+        "evidence_loaded": False,
+        "return_panel_loaded": False,
+        "ok": registry_row_valid,
+        "reasons": sorted(set(reasons)),
+    }
 
 
 def _load_json_if_exists(path: Path) -> dict[str, object] | None:

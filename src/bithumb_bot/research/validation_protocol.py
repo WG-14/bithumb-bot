@@ -47,6 +47,7 @@ from .family_registry import (
 from .experiment_registry import (
     EXPERIMENT_REGISTRY_EVIDENCE_HASH_PHASE,
     append_attempt_completion,
+    final_holdout_identity_hash_from_parts,
     final_holdout_hashes_from_manifest,
     reserve_research_attempt_checked,
     research_freedom_hash,
@@ -157,7 +158,8 @@ def _reserve_experiment_attempt(
     repository_version: str | None,
     created_at: str | None,
 ) -> dict[str, Any] | None:
-    if "final_holdout" not in snapshots:
+    has_final_holdout = manifest.dataset.split.final_holdout is not None
+    if not has_final_holdout:
         return None
     if not _production_registry_required(manifest):
         return None
@@ -169,12 +171,28 @@ def _reserve_experiment_attempt(
     hypothesis_id = str(identity["hypothesis_id"])
     hypothesis_status = str(identity["hypothesis_status"])
     split_hashes = {name: snapshot.content_hash() for name, snapshot in snapshots.items()}
-    dataset_quality_hash = combined_dataset_quality_hash(tuple(quality_reports.values()))
-    holdout_hashes = final_holdout_hashes_from_manifest(
-        manifest=manifest,
-        final_holdout_split_hash=split_hashes.get("final_holdout"),
-        dataset_quality_hash=dataset_quality_hash,
-    )
+    final_holdout_loaded = "final_holdout" in snapshots
+    dataset_quality_hash = combined_dataset_quality_hash(tuple(quality_reports.values())) if final_holdout_loaded else None
+    if final_holdout_loaded:
+        holdout_hashes = final_holdout_hashes_from_manifest(
+            manifest=manifest,
+            final_holdout_split_hash=split_hashes.get("final_holdout"),
+            dataset_quality_hash=dataset_quality_hash,
+        )
+    else:
+        holdout_payload = manifest.dataset.split.final_holdout.as_dict() if manifest.dataset.split.final_holdout is not None else None
+        identity_hash = final_holdout_identity_hash_from_parts(
+            dataset_source=manifest.dataset.source,
+            market=manifest.market,
+            interval=manifest.interval,
+            final_holdout=holdout_payload,
+        )
+        holdout_hashes = {
+            "final_holdout_identity_hash": identity_hash,
+            "final_holdout_content_hash": None,
+            "final_holdout_reuse_key_hash": identity_hash,
+            "final_holdout_fingerprint": identity_hash,
+        }
     base_payload = {
         "run_id": manifest.experiment_id,
         "experiment_family_id": experiment_family_id,
@@ -195,11 +213,12 @@ def _reserve_experiment_attempt(
             }
         ),
         "dataset_snapshot_id": manifest.dataset.snapshot_id,
-        "dataset_content_hash": combined_dataset_fingerprint(tuple(snapshots.values())),
+        "dataset_content_hash": combined_dataset_fingerprint(tuple(snapshots.values())) if final_holdout_loaded else None,
         "dataset_quality_hash": dataset_quality_hash,
         "train_split_hash": split_hashes.get("train"),
         "validation_split_hash": split_hashes.get("validation"),
         "final_holdout_split_hash": split_hashes.get("final_holdout"),
+        "final_holdout_content_pending_until_completion": not final_holdout_loaded,
         **holdout_hashes,
         "parameter_space_hash": sha256_prefixed(manifest.parameter_space),
         "parameter_grid_size": parameter_grid_size,
@@ -342,6 +361,26 @@ def run_research_backtest(
         snapshot = load_dataset_split(db_path=db_path, manifest=manifest, split_name=split_name)
         snapshots[split_name] = snapshot
         _emit_progress(progress_callback, stage="load_split", split=split_name, candles=len(snapshot.candles))
+    quality_reports = _quality_reports(db_path=db_path, snapshots=snapshots)
+    for split_name, report in sorted(quality_reports.items()):
+        _emit_progress(
+            progress_callback,
+            stage="quality_report",
+            split=split_name,
+            status=report.quality_gate_status,
+            reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
+        )
+    experiment_registry_reservation = _reserve_experiment_attempt(
+        manifest=manifest,
+        manager=manager,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        manifest_path=manifest_path,
+        command_name="research-backtest",
+        command_args=command_args,
+        repository_version=_repository_version(),
+        created_at=generated_at,
+    )
     if manifest.dataset.split.final_holdout is not None:
         snapshots["final_holdout"] = load_dataset_split(
             db_path=db_path,
@@ -354,27 +393,19 @@ def run_research_backtest(
             split="final_holdout",
             candles=len(snapshots["final_holdout"].candles),
         )
-    quality_reports = _quality_reports(db_path=db_path, snapshots=snapshots)
-    for split_name, report in sorted(quality_reports.items()):
+        quality_reports["final_holdout"] = _quality_reports(
+            db_path=db_path,
+            snapshots={"final_holdout": snapshots["final_holdout"]},
+        )["final_holdout"]
+        report = quality_reports["final_holdout"]
         _emit_progress(
             progress_callback,
             stage="quality_report",
-            split=split_name,
+            split="final_holdout",
             status=report.quality_gate_status,
             reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
         )
     _require_enough_candles(snapshots.values())
-    experiment_registry_reservation = _reserve_experiment_attempt(
-        manifest=manifest,
-        manager=manager,
-        snapshots=snapshots,
-        quality_reports=quality_reports,
-        manifest_path=manifest_path,
-        command_name="research-backtest",
-        command_args=command_args,
-        repository_version=_repository_version(),
-        created_at=generated_at,
-    )
 
     candidates = _evaluate_candidates(
         manifest=manifest,
@@ -463,7 +494,6 @@ def run_research_walk_forward(
             status=report.quality_gate_status,
             reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
         )
-    _require_enough_candles(snapshots.values())
     experiment_registry_reservation = _reserve_experiment_attempt(
         manifest=manifest,
         manager=manager,
@@ -475,6 +505,26 @@ def run_research_walk_forward(
         repository_version=_repository_version(),
         created_at=generated_at,
     )
+    if manifest.dataset.split.final_holdout is not None:
+        snapshots["final_holdout"] = load_dataset_split(
+            db_path=db_path,
+            manifest=manifest,
+            split_name="final_holdout",
+        )
+        _emit_progress(progress_callback, stage="load_split", split="final_holdout", candles=len(snapshots["final_holdout"].candles))
+        quality_reports["final_holdout"] = _quality_reports(
+            db_path=db_path,
+            snapshots={"final_holdout": snapshots["final_holdout"]},
+        )["final_holdout"]
+        report = quality_reports["final_holdout"]
+        _emit_progress(
+            progress_callback,
+            stage="quality_report",
+            split="final_holdout",
+            status=report.quality_gate_status,
+            reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
+        )
+    _require_enough_candles(snapshots.values())
     candidates = _evaluate_candidates(
         manifest=manifest,
         manager=manager,
@@ -1919,6 +1969,16 @@ def _report_payload(
 ) -> dict[str, Any]:
     dataset_hash = combined_dataset_fingerprint(snapshots)
     dataset_quality_hash = combined_dataset_quality_hash(quality_reports)
+    split_hashes = {snapshot.split_name: snapshot.content_hash() for snapshot in snapshots}
+    final_holdout_hashes = (
+        final_holdout_hashes_from_manifest(
+            manifest=manifest,
+            final_holdout_split_hash=split_hashes.get("final_holdout"),
+            dataset_quality_hash=dataset_quality_hash,
+        )
+        if manifest.dataset.split.final_holdout is not None and split_hashes.get("final_holdout") is not None
+        else {}
+    )
     dataset_quality_status, dataset_quality_reasons = _combined_dataset_quality_gate(
         {report.payload["split_name"]: report for report in quality_reports}
     )
@@ -1969,6 +2029,7 @@ def _report_payload(
     )
     experiment_registry_fields: dict[str, Any] = {}
     if experiment_registry_reservation is not None:
+        content_pending = bool(registry_row.get("final_holdout_content_pending_until_completion"))
         experiment_registry_fields = {
             "experiment_registry_path": experiment_registry_reservation.get("path"),
             "experiment_registry_prior_hash": experiment_registry_reservation.get("prior_hash"),
@@ -1976,11 +2037,17 @@ def _report_payload(
             "experiment_registry_completion_row_hash": None,
             "final_holdout_fingerprint": registry_row.get("final_holdout_fingerprint"),
             "final_holdout_identity_hash": registry_row.get("final_holdout_identity_hash"),
-            "final_holdout_content_hash": registry_row.get("final_holdout_content_hash"),
+            "final_holdout_content_hash": (
+                final_holdout_hashes.get("final_holdout_content_hash")
+                if content_pending
+                else registry_row.get("final_holdout_content_hash")
+            ),
             "final_holdout_reuse_key_hash": registry_row.get("final_holdout_reuse_key_hash"),
             "train_split_hash": registry_row.get("train_split_hash"),
             "validation_split_hash": registry_row.get("validation_split_hash"),
-            "final_holdout_split_hash": registry_row.get("final_holdout_split_hash"),
+            "final_holdout_split_hash": (
+                split_hashes.get("final_holdout") if content_pending else registry_row.get("final_holdout_split_hash")
+            ),
             "hypothesis_identity_source": identity["hypothesis_identity_source"],
             "experiment_family_identity_source": identity["experiment_family_identity_source"],
             "computed_attempt_index": attempt_index,
@@ -1990,6 +2057,7 @@ def _report_payload(
             "registry_gate_result": experiment_registry_reservation.get("gate_result") or "PASS",
             "registry_gate_fail_reasons": list(experiment_registry_reservation.get("gate_fail_reasons") or []),
             "research_freedom_hash": experiment_registry_reservation.get("research_freedom_hash"),
+            "final_holdout_content_pending_until_completion": content_pending,
         }
     elif manager is None or (manifest.deployment_tier == "research_only" and manifest.dataset.split.final_holdout is not None):
         experiment_registry_fields = {
@@ -2180,6 +2248,10 @@ def _report_payload(
                 manager=manager,
                 reservation=experiment_registry_reservation,
                 updates={
+                    "dataset_content_hash": dataset_hash,
+                    "dataset_quality_hash": dataset_quality_hash,
+                    "final_holdout_split_hash": experiment_registry_fields.get("final_holdout_split_hash"),
+                    "final_holdout_content_hash": experiment_registry_fields.get("final_holdout_content_hash"),
                     "candidate_count": len(candidates),
                     "return_panel_hash": str(return_panel.get("content_hash")) if isinstance(return_panel, dict) else None,
                     "statistical_evidence_hash": pre_completion_evidence_hash,
@@ -3176,12 +3248,6 @@ def _load_walk_forward_snapshots(
         "train": load_dataset_split(db_path=db_path, manifest=manifest, split_name="train"),
         "validation": load_dataset_split(db_path=db_path, manifest=manifest, split_name="validation"),
     }
-    if manifest.dataset.split.final_holdout is not None:
-        snapshots["final_holdout"] = load_dataset_split(
-            db_path=db_path,
-            manifest=manifest,
-            split_name="final_holdout",
-        )
     for index, window in enumerate(windows, start=1):
         window_id = f"window_{index:03d}"
         snapshots[f"{window_id}_train"] = load_dataset_range(

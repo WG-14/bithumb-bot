@@ -17,6 +17,12 @@ EXPERIMENT_REGISTRY_SCHEMA_VERSION = 1
 EMPTY_EXPERIMENT_REGISTRY_HASH = sha256_prefixed([])
 PROMOTION_PERMITTED_STATUSES = {"COMPLETED"}
 EXPERIMENT_REGISTRY_EVIDENCE_HASH_PHASE = "pre_completion_evidence_hash"
+PRE_CONTENT_COMPLETION_BOUND_FIELDS = {
+    "dataset_content_hash",
+    "dataset_quality_hash",
+    "final_holdout_split_hash",
+    "final_holdout_content_hash",
+}
 
 
 def experiment_registry_path(*, manager: PathManager) -> Path:
@@ -499,7 +505,6 @@ def validate_experiment_registry_binding(
     expected_prior = sha256_prefixed(rows[:row_index]) if row_index else EMPTY_EXPERIMENT_REGISTRY_HASH
     if str(row.get("prior_registry_hash") or "") != expected_prior or (prior_hash and prior_hash != expected_prior):
         reasons.append("experiment_registry_prior_hash_mismatch")
-    _extend_registry_field_mismatch_reasons(reasons, row=row, report=report, evidence=evidence, promotion=promotion)
     completion_hash = str(
         source.get("experiment_registry_completion_row_hash")
         or report.get("experiment_registry_completion_row_hash")
@@ -507,6 +512,14 @@ def validate_experiment_registry_binding(
         or ""
     ).strip()
     completion = _completion_for_reservation(rows, row_hash, completion_hash)
+    _extend_registry_field_mismatch_reasons(
+        reasons,
+        row=row,
+        completion=completion,
+        report=report,
+        evidence=evidence,
+        promotion=promotion,
+    )
     if require_complete:
         if not isinstance(completion, dict):
             reasons.append("experiment_registry_incomplete_attempt")
@@ -535,11 +548,14 @@ def _extend_registry_field_mismatch_reasons(
     reasons: list[str],
     *,
     row: dict[str, Any],
+    completion: dict[str, Any] | None,
     report: dict[str, Any],
     evidence: dict[str, Any] | None,
     promotion: dict[str, Any],
 ) -> None:
     evidence = evidence if isinstance(evidence, dict) else {}
+    completion = completion if isinstance(completion, dict) else {}
+    content_pending = bool(row.get("final_holdout_content_pending_until_completion"))
     for field in (
         "experiment_id",
         "experiment_family_id",
@@ -564,9 +580,13 @@ def _extend_registry_field_mismatch_reasons(
             expected = report.get(field)
         if expected is None:
             expected = promotion.get(field)
+        actual = row.get(field)
+        if content_pending and field in PRE_CONTENT_COMPLETION_BOUND_FIELDS and actual is None:
+            actual = completion.get(field)
         if expected is not None and str(row.get(field) or "") != str(expected or ""):
-            reasons.append("experiment_registry_stale")
-            break
+            if not (content_pending and field in PRE_CONTENT_COMPLETION_BOUND_FIELDS and str(actual or "") == str(expected or "")):
+                reasons.append("experiment_registry_stale")
+                break
         if expected is None and row.get(field) is not None and field.endswith("_identity_source"):
             reasons.append("experiment_registry_identity_source_missing")
             break
@@ -577,7 +597,10 @@ def _extend_registry_field_mismatch_reasons(
     if identity is not None and str(row.get("final_holdout_identity_hash") or "") != str(identity or ""):
         reasons.append("experiment_registry_final_holdout_identity_mismatch")
     content = evidence.get("final_holdout_content_hash") or report.get("final_holdout_content_hash") or promotion.get("final_holdout_content_hash")
-    if content is not None and str(row.get("final_holdout_content_hash") or "") != str(content or ""):
+    actual_content = row.get("final_holdout_content_hash")
+    if content_pending and actual_content is None:
+        actual_content = completion.get("final_holdout_content_hash")
+    if content is not None and str(actual_content or "") != str(content or ""):
         reasons.append("experiment_registry_final_holdout_content_mismatch")
     reuse_key = evidence.get("final_holdout_reuse_key_hash") or report.get("final_holdout_reuse_key_hash") or promotion.get("final_holdout_reuse_key_hash")
     if reuse_key is not None and str(row.get("final_holdout_reuse_key_hash") or row.get("final_holdout_identity_hash") or "") != str(reuse_key or ""):

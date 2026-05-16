@@ -90,6 +90,16 @@ records reserved, completed, rejected, promoted, and aborted attempt events as
 append-only JSONL rows with row hashes and prior-registry hashes. Manual JSONL or
 hash editing is not valid recovery.
 
+For production-bound manifests, checked reservation happens before the
+`final_holdout` split is loaded. The reservation row uses only the semantic
+final-holdout identity needed for reuse counting. The final-holdout split hash,
+content hash, full dataset content hash, and full dataset quality hash are bound
+later in the append-only `research_attempt_completed` row and in the report /
+statistical evidence artifacts. A reservation row with
+`final_holdout_content_pending_until_completion=true` is therefore not missing
+content evidence; it is a pre-content reservation that must have matching
+completion/artifact content before promotion.
+
 The registry separates final-holdout meaning from artifact integrity:
 
 - `final_holdout_identity_hash` / `final_holdout_reuse_key_hash` hash the
@@ -182,11 +192,35 @@ When `backtest_report.json` is unavailable, output is `validation_scope=registry
 `warning=artifact_binding_not_checked`; this means the command validated registry
 row shape and lifecycle only, not promotion-grade artifact binding. When the
 report is present under `DATA_ROOT/<mode>/reports/research/<id>/`, output is
-`validation_scope=registry_and_artifacts` and includes `report_loaded`,
-`evidence_loaded`, `return_panel_loaded`, `artifact_binding_valid`, and specific
-reasons for content-hash, registry-binding, evidence-binding, or return-panel
-mismatches. Operators must not treat registry-only validation as proof that the
-final report/evidence/promotion artifact chain is current.
+`validation_scope=registry_and_artifacts`. The command determines one
+`artifact_bound_row_hash` from
+`statistical_selection_evidence.experiment_registry_row_hash`, falling back to
+`backtest_report.experiment_registry_row_hash`, validates artifact binding for
+that row exactly once, and reports `artifact_binding_valid` plus
+`artifact_reasons` for content-hash, registry-binding, evidence-binding, or
+return-panel mismatches. All reservation rows for the experiment remain visible
+in `registry_lifecycle_summary`; extra incomplete or aborted rows are lifecycle
+evidence, not proof that the current artifacts are bound to those rows. If
+report and evidence disagree on the bound row hash, validation fails closed with
+`experiment_registry_report_evidence_row_hash_mismatch`. If the artifact-bound
+row is absent from the registry, validation fails closed with
+`experiment_registry_artifact_bound_row_missing`. Operators must not treat
+registry-only validation as proof that the final report/evidence/promotion
+artifact chain is current.
+
+Current stable registry refusal and validation reasons include:
+`experiment_registry_bound_evidence_hash_missing`,
+`experiment_registry_evidence_hash_phase_mismatch`,
+`experiment_registry_statistical_evidence_hash_mismatch`,
+`experiment_registry_identity_source_missing`,
+`experiment_registry_final_holdout_identity_mismatch`,
+`experiment_registry_final_holdout_content_mismatch`,
+`experiment_registry_final_holdout_reuse_key_mismatch`,
+`experiment_registry_artifact_bound_row_missing`,
+`experiment_registry_artifact_bound_row_hash_mismatch`,
+`experiment_registry_report_evidence_row_hash_mismatch`,
+`artifact_binding_not_checked`, `attempt_budget_exceeded`, and
+`holdout_reuse_budget_exceeded`.
 
 The research engine is a pure replay/simulation path. It does not call the live broker, order lifecycle, run loop, recovery commands, or lot-native SELL authority code.
 
