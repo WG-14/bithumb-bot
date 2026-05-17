@@ -2490,6 +2490,40 @@ def test_research_promote_refuses_regenerating_different_artifact_for_bound_vali
     assert not initial.artifact_path.exists()
 
 
+def test_production_promotion_refuses_already_bound_validation_run(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    _write_report_with_lineage(manager, _production_candidate())
+    validation_run_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "validation_run.json"
+    candidate_output_path = validation_run_path.with_name("promotion_candidate_001.json")
+    payload = json.loads(validation_run_path.read_text(encoding="utf-8"))
+    existing_hash = "sha256:" + "a" * 64
+    payload["promotion_artifact_hash"] = existing_hash
+    payload["validation_run_binding_hash"] = validation_run_binding_hash(payload)
+    payload["content_hash"] = validation_run_content_hash(payload)
+    write_json_atomic(validation_run_path, payload)
+
+    with pytest.raises(PromotionGateError) as excinfo:
+        promote_candidate(
+            experiment_id="promo_exp",
+            candidate_id="candidate_001",
+            manager=manager,
+            validation_run_path=validation_run_path,
+        )
+
+    message = str(excinfo.value)
+    assert "validation_run_promotion_already_bound" in message
+    assert f"existing_promotion_artifact_hash={existing_hash}" in message
+    assert f"candidate_output_path={candidate_output_path.resolve()}" in message
+    assert (
+        "operator_next_step="
+        "use_existing_validation_run_bound_promotion_artifact_or_rerun_research_validate_from_fixed_manifest"
+    ) in message
+    assert not candidate_output_path.exists()
+
+
 def test_research_promote_refuses_existing_validation_run_bound_promotion_artifact(
     tmp_path,
     monkeypatch,
