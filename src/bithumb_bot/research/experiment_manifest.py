@@ -956,7 +956,10 @@ def _parse_execution_model(value: Any, cost_model: CostModel) -> ExecutionModelC
     else:
         model_type = _required_str(value, "type")
         if model_type not in {"fixed_bps", "stress"}:
-            raise ManifestValidationError("execution_model.type must be fixed_bps or stress")
+            raise ManifestValidationError(
+                "execution_model.type must be fixed_bps or stress; depth_walk is a standalone "
+                "experimental primitive and is not wired to research-backtest"
+            )
         scenario_role = _optional_scenario_role(value.get("scenario_role"))
         scenario_role_source = "manifest" if scenario_role is not None else "derived"
         fees = _number_array(value, "fee_rate", default=(cost_model.fee_rate,))
@@ -1067,7 +1070,10 @@ def _parse_explicit_execution_scenario(
         raise ManifestValidationError(f"execution_model.scenarios unsupported fields: {','.join(unknown)}")
     model_type = str(raw.get("type") or parent.get("type") or "fixed_bps").strip()
     if model_type not in {"fixed_bps", "stress"}:
-        raise ManifestValidationError("execution_model.scenarios.type must be fixed_bps or stress")
+        raise ManifestValidationError(
+            "execution_model.scenarios.type must be fixed_bps or stress; depth_walk is a standalone "
+            "experimental primitive and is not wired to research-backtest"
+        )
     role = _optional_scenario_role(raw.get("scenario_role"))
     if role is None:
         raise ManifestValidationError("execution_model.scenarios.scenario_role must be base or stress")

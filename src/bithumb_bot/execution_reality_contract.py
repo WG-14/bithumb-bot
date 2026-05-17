@@ -265,7 +265,7 @@ def build_execution_reality_contract(
         queue_position_required=bool(queue_position_required),
         market_impact_model_required=bool(market_impact_required),
         intra_candle_path_required=bool(payload.get("intra_candle_path_required", False)),
-        full_orderbook_depth_available=bool(payload.get("depth_available", False)),
+        full_orderbook_depth_available=bool(payload.get("full_orderbook_depth_available", False)),
         trade_ticks_available=bool(payload.get("trade_ticks_available", False)),
         queue_position_available=bool(payload.get("queue_position_available", False)),
         market_impact_model_available=bool(payload.get("market_impact_model_available", False)),

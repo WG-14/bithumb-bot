@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import sqlite3
 from dataclasses import dataclass
+from typing import Any
 
 from .markets import parse_user_market_input
 from .orderbook_top_store import ORDERBOOK_TOP_SOURCE
@@ -241,6 +244,111 @@ def has_orderbook_depth_evidence(
         tuple(params),
     ).fetchone()
     return row is not None
+
+
+def summarize_orderbook_depth_evidence(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='orderbook_depth_levels'"
+    ).fetchone() is not None
+    base_payload: dict[str, Any] = {
+        "l2_depth_table_exists": table_exists,
+        "l2_depth_rows_available": False,
+        "l2_depth_snapshot_count": 0,
+        "l2_depth_row_count": 0,
+        "l2_depth_first_ts": None,
+        "l2_depth_last_ts": None,
+        "l2_depth_sources": [],
+        "l2_depth_content_hash": None,
+        "depth_snapshot_selection_policy": "first_snapshot_after_or_equal_reference_ts_with_max_wait",
+        "depth_walk_execution_model_available": True,
+        "depth_walk_execution_model_used": False,
+        "full_orderbook_depth_available": False,
+        "queue_position_available": False,
+        "trade_ticks_available": False,
+        "market_impact_model_available": False,
+        "intra_candle_path_available": False,
+    }
+    if not table_exists:
+        base_payload["l2_depth_content_hash"] = _depth_evidence_hash([])
+        return base_payload
+
+    market = parse_user_market_input(pair)
+    clauses = ["pair=?"]
+    params: list[object] = [market]
+    if start_ts is not None:
+        clauses.append("ts >= ?")
+        params.append(int(start_ts))
+    if end_ts is not None:
+        clauses.append("ts <= ?")
+        params.append(int(end_ts))
+    if source is not None:
+        clauses.append("source=?")
+        params.append(source)
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        f"""
+        SELECT ts, pair, source, side, level_index, price, size, cumulative_size, cumulative_notional
+        FROM orderbook_depth_levels
+        WHERE {where}
+        ORDER BY ts ASC, pair ASC, source ASC, side ASC, level_index ASC
+        """,
+        tuple(params),
+    ).fetchall()
+    if not rows:
+        base_payload["l2_depth_content_hash"] = _depth_evidence_hash([])
+        return base_payload
+
+    row_payloads = [
+        {
+            "ts": int(row[0]),
+            "pair": str(row[1]),
+            "source": str(row[2]),
+            "side": str(row[3]),
+            "level_index": int(row[4]),
+            "price": float(row[5]),
+            "size": float(row[6]),
+            "cumulative_size": float(row[7]),
+            "cumulative_notional": float(row[8]),
+        }
+        for row in rows
+    ]
+    sides_by_snapshot: dict[tuple[int, str], set[str]] = {}
+    for item in row_payloads:
+        sides_by_snapshot.setdefault((int(item["ts"]), str(item["source"])), set()).add(str(item["side"]))
+    complete_snapshots = {
+        key
+        for key, sides in sides_by_snapshot.items()
+        if {"bid", "ask"} <= sides
+    }
+    timestamps = [int(item["ts"]) for item in row_payloads]
+    base_payload.update(
+        {
+            "l2_depth_rows_available": True,
+            "l2_depth_snapshot_count": len(complete_snapshots),
+            "l2_depth_row_count": len(row_payloads),
+            "l2_depth_first_ts": min(timestamps),
+            "l2_depth_last_ts": max(timestamps),
+            "l2_depth_sources": sorted({str(item["source"]) for item in row_payloads}),
+            "l2_depth_content_hash": _depth_evidence_hash(row_payloads),
+        }
+    )
+    return base_payload
+
+
+def _depth_evidence_hash(rows: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        encoded = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        digest.update(encoded.encode("utf-8"))
+        digest.update(b"\n")
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _build_side_levels(

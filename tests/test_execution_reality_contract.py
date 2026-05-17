@@ -200,6 +200,40 @@ def test_unknown_evidence_tier_is_blocking_reason() -> None:
     assert "execution_evidence_tier_unsupported" in unsupported_capability_reasons(contract)
 
 
+def test_l2_depth_rows_do_not_imply_full_orderbook_depth_capability() -> None:
+    contract = build_execution_reality_contract(
+        fill_reference_policy="first_orderbook_after_decision",
+        missing_quote_policy="fail",
+        min_execution_reality_level_for_promotion="top_of_book_after_decision",
+        allow_same_candle_close_fill=False,
+        top_of_book_required=True,
+        top_of_book_available=True,
+        top_of_book_is_full_depth=False,
+        depth_required=True,
+        latency_model={"type": "fixed_bps", "latency_ms": 0},
+        partial_fill_model={"type": "fixed_bps", "partial_fill_rate": 0.0},
+        order_failure_model={"type": "fixed_bps", "order_failure_rate": 0.0},
+        fee_source="test_fee",
+        slippage_source="test_slippage",
+        calibration_required=False,
+        extra={
+            "quote_evidence_available": True,
+            "depth_available": True,
+            "depth_available_semantics": "stored_l2_depth_rows_exist_not_execution_model_used",
+            "l2_depth_rows_available": True,
+            "depth_walk_execution_model_available": True,
+            "depth_walk_execution_model_used": False,
+            "full_orderbook_depth_available": False,
+        },
+    )
+
+    capability = contract["execution_capability_contract"]
+    assert contract["depth_available"] is True
+    assert capability["available_capabilities"]["full_orderbook_depth"] is False
+    assert capability["available_capabilities"]["top_of_book_is_full_depth"] is False
+    assert "execution_depth_required_but_unavailable" in unsupported_capability_reasons(contract)
+
+
 def test_capability_validation_recomputes_required_availability_consistency() -> None:
     capability = build_execution_capability_contract(
         fill_reference_policy="first_orderbook_after_decision",
@@ -427,6 +461,18 @@ def test_market_order_extra_cost_bps_does_not_satisfy_market_impact_required() -
     payload["execution_timing"] = {"market_impact_required": True}
 
     with pytest.raises(ManifestValidationError, match="execution_market_impact_required_but_unavailable"):
+        parse_manifest(payload)
+
+
+def test_depth_walk_manifest_type_is_explicitly_not_wired_to_research_backtest() -> None:
+    payload = _manifest_payload()
+    payload["execution_model"] = {
+        "type": "depth_walk",
+        "fee_rate": 0.0004,
+        "slippage_bps": 0.0,
+    }
+
+    with pytest.raises(ManifestValidationError, match="depth_walk is a standalone experimental primitive"):
         parse_manifest(payload)
 
 
@@ -768,7 +814,7 @@ def test_depth_availability_does_not_satisfy_queue_ticks_impact_or_intracandle()
 
     reasons = unsupported_capability_reasons(contract)
 
-    assert "execution_depth_required_but_unavailable" not in reasons
+    assert "execution_depth_required_but_unavailable" in reasons
     assert "execution_trade_ticks_required_but_unavailable" in reasons
     assert "execution_queue_position_required_but_unavailable" in reasons
     assert "execution_market_impact_required_but_unavailable" in reasons

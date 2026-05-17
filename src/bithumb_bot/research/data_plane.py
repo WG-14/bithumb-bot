@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from bithumb_bot.bootstrap import get_last_explicit_env_load_summary
 from bithumb_bot.config import PROJECT_ROOT, settings
 from bithumb_bot.historical_backfill import backfill_candles
-from bithumb_bot.orderbook_depth_store import has_orderbook_depth_evidence
+from bithumb_bot.orderbook_depth_store import summarize_orderbook_depth_evidence
 from bithumb_bot.paths import PathManager
 from bithumb_bot.storage_io import write_json_atomic
 
@@ -125,12 +125,13 @@ def build_dataset_quality_report_sql(
     if int(stats["unexpected_bucket_count"]):
         reasons.append("unexpected_candle_bucket")
 
-    depth_available = _depth_available_sql(
+    depth_summary = _depth_summary_sql(
         db_path=db_path,
         market=manifest.market,
         start_ts=start_ts,
         end_ts=end_ts,
     )
+    depth_available = bool(depth_summary["l2_depth_rows_available"])
     payload: dict[str, Any] = {
         "schema_version": 1,
         "artifact_type": "dataset_quality_report",
@@ -167,6 +168,8 @@ def build_dataset_quality_report_sql(
         "limitations": {
             "orderbook_depth_available": depth_available,
             "l2_depth_evidence_available": depth_available,
+            "l2_depth_rows_available": depth_available,
+            "full_orderbook_depth_available": False,
             "trade_tick_evidence_available": False,
             "queue_evidence_available": False,
             "impact_model_evidence_available": False,
@@ -181,9 +184,14 @@ def build_dataset_quality_report_sql(
             "top_of_book_is_full_depth": False,
         },
         "depth_available": depth_available,
+        "depth_available_semantics": "stored_l2_depth_rows_exist_not_execution_model_used",
         "depth_availability_source": (
             "sqlite_orderbook_depth_levels" if depth_available else "orderbook_depth_levels_missing_or_empty"
         ),
+        **depth_summary,
+        "signal_level_depth_coverage_pct": None,
+        "signal_level_depth_coverage_status": "not_computed_depth_walk_not_wired_to_research_backtest",
+        "depth_liquidity_sufficiency_status": "not_computed_depth_walk_not_wired_to_research_backtest",
     }
     if top_of_book:
         payload.update(top_of_book)
@@ -825,18 +833,35 @@ def _top_of_book_split_sql(
     }
 
 
-def _depth_available_sql(
+def _depth_summary_sql(
     *,
     db_path: str | Path,
     market: str,
     start_ts: int,
     end_ts: int,
-) -> bool:
+) -> dict[str, Any]:
     if not Path(db_path).expanduser().resolve().exists():
-        return False
+        return {
+            "l2_depth_table_exists": False,
+            "l2_depth_rows_available": False,
+            "l2_depth_snapshot_count": 0,
+            "l2_depth_row_count": 0,
+            "l2_depth_first_ts": None,
+            "l2_depth_last_ts": None,
+            "l2_depth_sources": [],
+            "l2_depth_content_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "depth_snapshot_selection_policy": "first_snapshot_after_or_equal_reference_ts_with_max_wait",
+            "depth_walk_execution_model_available": True,
+            "depth_walk_execution_model_used": False,
+            "full_orderbook_depth_available": False,
+            "queue_position_available": False,
+            "trade_ticks_available": False,
+            "market_impact_model_available": False,
+            "intra_candle_path_available": False,
+        }
     conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
     try:
-        return has_orderbook_depth_evidence(
+        return summarize_orderbook_depth_evidence(
             conn,
             pair=market,
             start_ts=start_ts,

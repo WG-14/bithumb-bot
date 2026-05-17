@@ -807,7 +807,10 @@ def test_research_readiness_json_reports_operator_fields_and_top_of_book_policy(
         == "not_computable_without_strategy_signal_run"
     )
     assert payload["top_of_book"]["signal_level_depth_coverage_pct"] is None
-    assert payload["top_of_book"]["signal_level_depth_coverage_status"] == "not_computable_without_strategy_signal_run"
+    assert (
+        payload["top_of_book"]["signal_level_depth_coverage_status"]
+        == "not_computed_depth_walk_not_wired_to_research_backtest"
+    )
     assert payload["top_of_book"]["depth_available"] is False
     assert payload["execution_capability"]["depth_available"] is False
     assert payload["splits"]["train"]["top_of_book_missing_policy"] is None

@@ -2001,7 +2001,7 @@ def _report_payload(
         int(report.payload.get("top_of_book_joined_count") or 0)
         for report in quality_reports
     )
-    depth_available = any(bool(report.payload.get("depth_available")) for report in quality_reports)
+    l2_depth_rows_available = any(bool(report.payload.get("l2_depth_rows_available")) for report in quality_reports)
     repository_version = _repository_version()
     calibration_hash = (
         str(execution_calibration.get("content_hash"))
@@ -2013,7 +2013,7 @@ def _report_payload(
         scenario=_base_report_scenario(manifest),
         calibration_hash=calibration_hash,
         top_of_book_available=top_of_book_joined_count > 0,
-        depth_available=depth_available,
+        depth_available=l2_depth_rows_available,
     )
     report_capability_contract = _execution_capability_contract_from_reality(report_execution_contract)
     parameter_grid_size = _parameter_grid_size(manifest)
@@ -2386,8 +2386,27 @@ def _report_payload(
             "top_of_book_required": bool(manifest.dataset.top_of_book.required) if manifest.dataset.top_of_book else False,
             "top_of_book_available": top_of_book_joined_count > 0,
             "top_of_book_is_full_depth": False,
-            "orderbook_depth_available": depth_available,
-            "l2_depth_evidence_available": depth_available,
+            "orderbook_depth_available": l2_depth_rows_available,
+            "depth_available": l2_depth_rows_available,
+            "depth_available_semantics": "stored_l2_depth_rows_exist_not_execution_model_used",
+            "l2_depth_evidence_available": l2_depth_rows_available,
+            "l2_depth_rows_available": l2_depth_rows_available,
+            "l2_depth_snapshot_count": top_of_book_quality_summary.get("l2_depth_snapshot_count"),
+            "l2_depth_row_count": top_of_book_quality_summary.get("l2_depth_row_count"),
+            "l2_depth_first_ts": top_of_book_quality_summary.get("l2_depth_first_ts"),
+            "l2_depth_last_ts": top_of_book_quality_summary.get("l2_depth_last_ts"),
+            "l2_depth_sources": top_of_book_quality_summary.get("l2_depth_sources"),
+            "l2_depth_content_hashes": top_of_book_quality_summary.get("l2_depth_content_hashes"),
+            "signal_level_depth_coverage_pct": top_of_book_quality_summary.get("signal_level_depth_coverage_pct"),
+            "signal_level_depth_coverage_status": top_of_book_quality_summary.get("signal_level_depth_coverage_status"),
+            "depth_snapshot_selection_policy": top_of_book_quality_summary.get("depth_snapshot_selection_policy"),
+            "depth_liquidity_sufficiency_status": top_of_book_quality_summary.get("depth_liquidity_sufficiency_status"),
+            "depth_walk_execution_model_available": top_of_book_quality_summary.get("depth_walk_execution_model_available"),
+            "depth_walk_execution_model_used": top_of_book_quality_summary.get("depth_walk_execution_model_used"),
+            "full_orderbook_depth_available": False,
+            "queue_position_available": False,
+            "trade_ticks_available": False,
+            "market_impact_model_available": False,
             "trade_tick_evidence_available": False,
             "queue_evidence_available": False,
             "impact_model_evidence_available": False,
@@ -3044,6 +3063,11 @@ def _execution_reality_contract(
         extra={
             "quote_evidence_available": bool(top_of_book_available),
             "depth_available": bool(depth_available),
+            "depth_available_semantics": "stored_l2_depth_rows_exist_not_execution_model_used",
+            "l2_depth_rows_available": bool(depth_available),
+            "depth_walk_execution_model_available": True,
+            "depth_walk_execution_model_used": False,
+            "full_orderbook_depth_available": False,
             "trade_ticks_available": False,
             "queue_position_available": False,
             "market_impact_model_available": False,
@@ -3069,7 +3093,7 @@ def _execution_capability_contract_from_reality(contract: dict[str, Any]) -> dic
         queue_position_required=bool(contract.get("queue_position_required")),
         market_impact_model_required=bool(contract.get("market_impact_required")),
         intra_candle_path_required=bool(contract.get("intra_candle_path_required")),
-        full_orderbook_depth_available=bool(contract.get("depth_available")),
+        full_orderbook_depth_available=bool(contract.get("full_orderbook_depth_available")),
         trade_ticks_available=bool(contract.get("trade_ticks_available")),
         queue_position_available=bool(contract.get("queue_position_available")),
         market_impact_model_available=bool(contract.get("market_impact_model_available")),
@@ -3239,6 +3263,8 @@ def _dataset_quality_warning_codes(reports: dict[str, DatasetQualityReport]) -> 
 
 
 def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> dict[str, Any]:
+    all_report_payloads = [report.payload for _, report in sorted(reports.items())]
+    depth_summary = _combined_l2_depth_summary(all_report_payloads)
     requested_reports = [
         (split_name, report.payload)
         for split_name, report in sorted(reports.items())
@@ -3261,10 +3287,10 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
             "signal_execution_quote_coverage_pct": None,
             "signal_execution_quote_coverage_status": "not_computable_without_strategy_signal_run",
             "signal_level_depth_coverage_pct": None,
-            "signal_level_depth_coverage_status": "not_computable_without_strategy_signal_run",
+            "signal_level_depth_coverage_status": "not_computed_depth_walk_not_wired_to_research_backtest",
             "depth_available": False,
             "depth_evidence_available": False,
-            "depth_liquidity_sufficiency_status": "not_implemented_order_size_depth_walk_required",
+            **depth_summary,
             "affected_splits": [],
             "next_action": None,
             "limitations": [
@@ -3315,7 +3341,6 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
             if payload.get("top_of_book_source")
         }
     )
-    depth_available = any(bool(payload.get("depth_available")) for _, payload in requested_reports)
     return {
         "requested": True,
         "required": required,
@@ -3333,10 +3358,8 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
         "signal_execution_quote_coverage_pct": None,
         "signal_execution_quote_coverage_status": "not_computable_without_strategy_signal_run",
         "signal_level_depth_coverage_pct": None,
-        "signal_level_depth_coverage_status": "not_computable_without_strategy_signal_run",
-        "depth_available": depth_available,
-        "depth_evidence_available": depth_available,
-        "depth_liquidity_sufficiency_status": "not_implemented_order_size_depth_walk_required",
+        "signal_level_depth_coverage_status": "not_computed_depth_walk_not_wired_to_research_backtest",
+        **depth_summary,
         "join_tolerance_ms": join_tolerances[0] if len(join_tolerances) == 1 else join_tolerances,
         "sources": sources,
         "affected_splits": affected_splits,
@@ -3350,6 +3373,44 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
             "intra_candle_path_unavailable",
             "execution_reference_requires_execution_timing_policy",
         ],
+    }
+
+
+def _combined_l2_depth_summary(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    rows_available = any(bool(payload.get("l2_depth_rows_available")) for payload in payloads)
+    first_values = [int(payload["l2_depth_first_ts"]) for payload in payloads if payload.get("l2_depth_first_ts") is not None]
+    last_values = [int(payload["l2_depth_last_ts"]) for payload in payloads if payload.get("l2_depth_last_ts") is not None]
+    hashes = [
+        str(payload.get("l2_depth_content_hash"))
+        for payload in payloads
+        if isinstance(payload.get("l2_depth_content_hash"), str)
+    ]
+    return {
+        "depth_available": rows_available,
+        "depth_available_semantics": "stored_l2_depth_rows_exist_not_execution_model_used",
+        "depth_evidence_available": rows_available,
+        "l2_depth_rows_available": rows_available,
+        "l2_depth_snapshot_count": sum(int(payload.get("l2_depth_snapshot_count") or 0) for payload in payloads),
+        "l2_depth_row_count": sum(int(payload.get("l2_depth_row_count") or 0) for payload in payloads),
+        "l2_depth_first_ts": min(first_values) if first_values else None,
+        "l2_depth_last_ts": max(last_values) if last_values else None,
+        "l2_depth_sources": sorted(
+            {
+                str(source)
+                for payload in payloads
+                for source in payload.get("l2_depth_sources") or []
+            }
+        ),
+        "l2_depth_content_hashes": hashes,
+        "depth_snapshot_selection_policy": "first_snapshot_after_or_equal_reference_ts_with_max_wait",
+        "depth_liquidity_sufficiency_status": "not_computed_depth_walk_not_wired_to_research_backtest",
+        "depth_walk_execution_model_available": True,
+        "depth_walk_execution_model_used": False,
+        "full_orderbook_depth_available": False,
+        "queue_position_available": False,
+        "trade_ticks_available": False,
+        "market_impact_model_available": False,
+        "intra_candle_path_available": False,
     }
 
 
