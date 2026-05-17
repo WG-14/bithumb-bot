@@ -406,6 +406,10 @@ def cmd_research_promote_candidate(
     print(f"  validation_run_hash={result.artifact.get('validation_run_hash') or 'none'}")
     print(f"  validation_run_binding_hash={result.artifact.get('validation_run_binding_hash') or 'none'}")
     print(
+        "  validation_run_promotion_artifact_hash="
+        f"{result.artifact.get('validation_run_promotion_artifact_hash') or 'none'}"
+    )
+    print(
         "  dataset_quality_legacy_bypass_used="
         f"{1 if result.artifact.get('dataset_quality_legacy_bypass_used') else 0}"
     )

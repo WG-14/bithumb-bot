@@ -355,6 +355,34 @@ def test_profile_or_promotion_refuses_validation_run_binding_hash_mismatch(tmp_p
         )
 
 
+def test_promotion_refuses_validation_run_promotion_artifact_hash_mismatch(tmp_path: Path) -> None:
+    validation_run_path = tmp_path / "validation_run.json"
+    promotion = _promotion(
+        validation_run_required=True,
+        validation_run_binding_status="verified_pre_promotion_binding",
+        validation_run_path=str(validation_run_path.resolve()),
+        validation_run_hash=None,
+        backtest_report_hash="sha256:backtest",
+        walk_forward_required=False,
+    )
+    promotion_path = tmp_path / "promotion.json"
+    promotion["artifact_path"] = str(promotion_path.resolve())
+    validation_run = _validation_run_for_promotion(validation_run_path, promotion)
+    promotion["validation_run_binding_hash"] = validation_run["validation_run_binding_hash"]
+    validation_run = json.loads(validation_run_path.read_text(encoding="utf-8"))
+    validation_run["promotion_artifact_hash"] = "sha256:" + "0" * 64
+    validation_run.pop("content_hash", None)
+    validation_run["content_hash"] = validation_run_content_hash(validation_run)
+    write_json_atomic(validation_run_path, validation_run)
+    promotion.pop("artifact_path", None)
+    promotion.pop("content_hash", None)
+    promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
+    write_json_atomic(promotion_path, promotion)
+
+    with pytest.raises(ApprovedProfileError, match="validation_run_promotion_artifact_hash_mismatch"):
+        verify_promotion_artifact(promotion)
+
+
 def _profile_with_mutated_evidence_tier(source_promotion_path: str, tier: str) -> dict[str, object]:
     profile = _profile(source_promotion_path)
     contract = dict(profile["execution_reality_contract"])

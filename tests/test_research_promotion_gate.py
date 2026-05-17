@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,7 +30,9 @@ from bithumb_bot.research.promotion_gate import (
     promote_candidate,
     validate_backtest_candidate_for_promotion,
 )
+from bithumb_bot.research import validation_pipeline as pipeline
 from bithumb_bot.research.validation_pipeline import validation_run_binding_hash, validation_run_content_hash
+from bithumb_bot.approved_profile import build_approved_profile, verify_promotion_artifact
 from bithumb_bot.storage_io import write_json_atomic
 
 
@@ -1221,6 +1224,19 @@ def _rewrite_promotion_artifact(path: Path, payload: dict[str, object]) -> None:
     payload.pop("content_hash", None)
     payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
     write_json_atomic(path, payload)
+
+
+def _bind_validation_run_to_promotion(validation_run_path: Path, promotion: dict[str, object], promotion_path: Path) -> None:
+    payload = json.loads(validation_run_path.read_text(encoding="utf-8"))
+    payload["promotion_artifact_path"] = str(promotion_path.resolve())
+    payload["promotion_artifact_hash"] = promotion["content_hash"]
+    for stage in payload.get("stages") or []:
+        if isinstance(stage, dict) and stage.get("name") == "promotion":
+            stage["artifact_paths"] = {"promotion_artifact_path": str(promotion_path.resolve())}
+            stage["artifact_hashes"] = {"promotion_artifact_hash": promotion["content_hash"]}
+    payload.pop("content_hash", None)
+    payload["content_hash"] = validation_run_content_hash(payload)
+    write_json_atomic(validation_run_path, payload)
 
 
 def _statistical_metric_hash_for_report(report: dict[str, object]) -> str:
@@ -2437,6 +2453,128 @@ def test_production_promotion_refuses_orderbook_policy_without_top_of_book_evide
 
     with pytest.raises(PromotionGateError, match="production_top_of_book_required"):
         promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+
+
+def test_research_promote_refuses_regenerating_different_artifact_for_bound_validation_run(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    _write_report_with_lineage(manager, _production_candidate())
+    validation_run_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "validation_run.json"
+    initial = promote_candidate(
+        experiment_id="promo_exp",
+        candidate_id="candidate_001",
+        manager=manager,
+        validation_run_path=validation_run_path,
+    )
+    _bind_validation_run_to_promotion(validation_run_path, initial.artifact, initial.artifact_path)
+    initial.artifact_path.unlink()
+
+    with pytest.raises(PromotionGateError) as excinfo:
+        promote_candidate(
+            experiment_id="promo_exp",
+            candidate_id="candidate_001",
+            manager=manager,
+            validation_run_path=validation_run_path,
+        )
+
+    message = str(excinfo.value)
+    assert "validation_run_promotion_already_bound" in message
+    assert f"existing_promotion_artifact_hash={initial.content_hash}" in message
+    assert f"candidate_output_path={initial.artifact_path.resolve()}" in message
+    assert (
+        "operator_next_step="
+        "use_existing_validation_run_bound_promotion_artifact_or_rerun_research_validate_from_fixed_manifest"
+    ) in message
+    assert not initial.artifact_path.exists()
+
+
+def test_research_promote_refuses_existing_validation_run_bound_promotion_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    _write_report_with_lineage(manager, _production_candidate())
+    validation_run_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "validation_run.json"
+    initial = promote_candidate(
+        experiment_id="promo_exp",
+        candidate_id="candidate_001",
+        manager=manager,
+        validation_run_path=validation_run_path,
+    )
+    before = initial.artifact_path.read_text(encoding="utf-8")
+    _bind_validation_run_to_promotion(validation_run_path, initial.artifact, initial.artifact_path)
+
+    with pytest.raises(PromotionGateError, match="validation_run_promotion_already_bound"):
+        promote_candidate(
+            experiment_id="promo_exp",
+            candidate_id="candidate_001",
+            manager=manager,
+            validation_run_path=validation_run_path,
+        )
+
+    assert initial.artifact_path.read_text(encoding="utf-8") == before
+
+
+def test_research_validate_success_real_promotion_artifact_passes_profile_source_verification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(
+        manager,
+        candidate,
+        report_overrides={
+            "promotion_eligibility_gate_result": "PASS",
+            "promotion_blocking_reasons": [],
+        },
+    )
+    report_path = manager.data_dir() / "reports" / "research" / "promo_exp" / "backtest_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    manifest = SimpleNamespace(
+        experiment_id="promo_exp",
+        deployment_tier="paper_candidate",
+        acceptance_gate=SimpleNamespace(walk_forward_required=False),
+        manifest_hash=lambda: "sha256:manifest",
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "build_research_readiness_report",
+        lambda **kwargs: {"status": "PASS", "next_actions": []},
+    )
+    monkeypatch.setattr(pipeline, "run_research_backtest", lambda **kwargs: report)
+
+    payload = pipeline.run_research_validation(
+        manifest=manifest,
+        db_path=tmp_path / "paper.sqlite",
+        manager=manager,
+        manifest_path=str(tmp_path / "manifest.json"),
+        generated_at="2026-05-04T00:00:00+00:00",
+    )
+
+    promotion_path = Path(str(payload["promotion_artifact_path"]))
+    promotion = json.loads(promotion_path.read_text(encoding="utf-8"))
+    verified = verify_promotion_artifact(promotion)
+    profile = build_approved_profile(
+        promotion=promotion,
+        mode="paper",
+        source_promotion_path=str(promotion_path.resolve()),
+        market="KRW-BTC",
+        interval="1m",
+        generated_at="2026-05-04T00:00:00+00:00",
+        manager=manager,
+    )
+
+    assert payload["end_to_end_validation_result"] == "PASS"
+    assert str(payload["validation_run_binding_hash"]).startswith("sha256:")
+    assert payload["promotion_artifact_hash"] == promotion["content_hash"]
+    assert promotion["validation_run_binding_status"] == "verified_pre_promotion_binding"
+    assert promotion["validation_run_binding_hash"] == payload["validation_run_binding_hash"]
+    assert verified["content_hash"] == promotion["content_hash"]
+    assert profile["source_promotion_content_hash"] == promotion["content_hash"]
 
 
 def test_promotion_refuses_missing_lineage_by_default(tmp_path, monkeypatch) -> None:

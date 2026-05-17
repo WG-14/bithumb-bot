@@ -625,6 +625,7 @@ def promote_candidate(
 ) -> PromotionResult:
     research_report_dir = manager.data_dir() / "reports" / "research" / experiment_id
     candidate_report_path = research_report_dir / "backtest_report.json"
+    promotion_artifact_path = research_report_dir / f"promotion_{candidate_id}.json"
     if not candidate_report_path.exists():
         raise PromotionGateError(f"candidate report not found: {candidate_report_path}")
 
@@ -719,6 +720,7 @@ def promote_candidate(
     verified_validation_run_binding_hash: str | None = None
     validation_run_resolved_path: Path | None = None
     validation_run_binding_status = "not_required"
+    validation_run_promotion_artifact_hash: str | None = None
     validation_run_reasons: list[str] = []
     from .validation_pipeline import (
         default_validation_run_path,
@@ -774,6 +776,20 @@ def promote_candidate(
                 raise PromotionGateError(f"promotion refused: {','.join(binding_reasons)}")
             verified_validation_run_binding_hash = str(validation_run_payload.get("validation_run_binding_hash") or "")
             validation_run_binding_status = "verified"
+            bound_promotion_hash = str(validation_run_payload.get("promotion_artifact_hash") or "").strip()
+            validation_run_promotion_artifact_hash = bound_promotion_hash or None
+            if bound_promotion_hash.startswith("sha256:"):
+                # A final validation run is immutable custody evidence for its bound
+                # promotion artifact. Operators should use that artifact or rerun the
+                # full validation pipeline from a fixed manifest, not regenerate a
+                # different standalone promotion against the same validation run.
+                raise PromotionGateError(
+                    "promotion refused: validation_run_promotion_already_bound "
+                    f"existing_promotion_artifact_hash={bound_promotion_hash} "
+                    f"candidate_output_path={promotion_artifact_path.resolve()} "
+                    "operator_next_step="
+                    "use_existing_validation_run_bound_promotion_artifact_or_rerun_research_validate_from_fixed_manifest"
+                )
     artifact = {
         "promotion_schema_version": 1,
         "strategy_name": candidate["strategy_name"],
@@ -799,6 +815,7 @@ def promote_candidate(
         "validation_run_path": str(validation_run_resolved_path.resolve()) if validation_run_resolved_path else None,
         "validation_run_hash": validation_run_hash,
         "validation_run_binding_hash": verified_validation_run_binding_hash,
+        "validation_run_promotion_artifact_hash": validation_run_promotion_artifact_hash,
         "validation_run_reasons": validation_run_reasons,
         "backtest_report_path": str(candidate_report_path.resolve()),
         "backtest_report_hash": backtest_report_hash,
@@ -954,7 +971,7 @@ def promote_candidate(
     }
     if walk_forward_required:
         artifact["walk_forward_report_hash"] = walk_forward.source_report_hash if walk_forward else None
-    path = manager.data_dir() / "reports" / "research" / experiment_id / f"promotion_{candidate_id}.json"
+    path = promotion_artifact_path
     if base_lineage is not None:
         try:
             lineage = build_promotion_lineage(

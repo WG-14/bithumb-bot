@@ -368,35 +368,28 @@ def _verify_validation_run_binding_for_promotion(payload: dict[str, Any]) -> Non
 def _candidate_like_from_promotion(payload: dict[str, Any]) -> dict[str, Any]:
     profile = payload.get("candidate_profile") if isinstance(payload.get("candidate_profile"), dict) else {}
     live_policy = payload.get("live_regime_policy") if isinstance(payload.get("live_regime_policy"), dict) else {}
-    return {
-        "strategy_name": payload.get("strategy_name") or profile.get("strategy_name"),
-        "parameter_candidate_id": payload.get("candidate_id") or profile.get("candidate_id"),
-        "parameter_values": profile.get("parameter_values"),
-        "cost_model": profile.get("cost_model"),
-        "base_cost_assumption": profile.get("base_cost_assumption"),
-        "cost_assumption_contract": profile.get("cost_assumption_contract"),
-        "execution_model": profile.get("execution_model"),
-        "execution_calibration_required": profile.get("execution_calibration_required"),
-        "execution_calibration_strictness": profile.get("execution_calibration_strictness"),
-        "execution_calibration_gate": profile.get("execution_calibration_gate"),
-        "execution_calibration_artifact_hash": profile.get("execution_calibration_artifact_hash"),
-        "execution_calibration_artifact_hashes": profile.get("execution_calibration_artifact_hashes"),
-        "execution_calibration_policy_source": profile.get("execution_calibration_policy_source"),
-        "production_calibration_policy_result": profile.get("production_calibration_policy_result"),
-        "production_calibration_policy_reasons": profile.get("production_calibration_policy_reasons"),
-        "execution_reality_contract": profile.get("execution_reality_contract"),
-        "execution_contract_hash": profile.get("execution_contract_hash"),
-        "execution_capability_contract": profile.get("execution_capability_contract"),
-        "execution_capability_contract_hash": profile.get("execution_capability_contract_hash"),
-        "deployment_tier": profile.get("deployment_tier") or payload.get("deployment_tier"),
-        "experiment_id": payload.get("strategy_profile_source_experiment") or profile.get("source_experiment"),
-        "manifest_hash": payload.get("manifest_hash") or profile.get("manifest_hash"),
-        "dataset_snapshot_id": payload.get("dataset_snapshot_id") or profile.get("dataset_snapshot_id"),
-        "dataset_content_hash": payload.get("dataset_content_hash") or profile.get("dataset_content_hash"),
-        "regime_classifier_version": payload.get("regime_classifier_version") or live_policy.get("regime_classifier_version"),
-        "allowed_live_regimes": payload.get("allowed_regimes") or live_policy.get("allowed_regimes"),
-        "blocked_live_regimes": payload.get("blocked_regimes") or live_policy.get("blocked_regimes"),
-    }
+    candidate_like = dict(profile)
+    candidate_like.update(
+        {
+            "strategy_name": payload.get("strategy_name") or profile.get("strategy_name"),
+            "parameter_candidate_id": payload.get("candidate_id") or profile.get("candidate_id"),
+            "experiment_id": payload.get("strategy_profile_source_experiment") or profile.get("source_experiment"),
+            "deployment_tier": profile.get("deployment_tier") or payload.get("deployment_tier"),
+            "manifest_hash": payload.get("manifest_hash") or profile.get("manifest_hash"),
+            "dataset_snapshot_id": payload.get("dataset_snapshot_id") or profile.get("dataset_snapshot_id"),
+            "dataset_content_hash": payload.get("dataset_content_hash") or profile.get("dataset_content_hash"),
+            "regime_classifier_version": payload.get("regime_classifier_version")
+            or profile.get("regime_classifier_version")
+            or live_policy.get("regime_classifier_version"),
+            "allowed_live_regimes": payload.get("allowed_regimes")
+            or profile.get("allowed_live_regimes")
+            or live_policy.get("allowed_regimes"),
+            "blocked_live_regimes": payload.get("blocked_regimes")
+            or profile.get("blocked_live_regimes")
+            or live_policy.get("blocked_regimes"),
+        }
+    )
+    return candidate_like
 
 
 def _strategy_parameters_from_promotion(payload: dict[str, Any]) -> dict[str, object]:
