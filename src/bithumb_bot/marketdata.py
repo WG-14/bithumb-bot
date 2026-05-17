@@ -17,8 +17,13 @@ from .public_api_minute_candles import (
     fetch_minute_candles,
     interval_to_minute_unit,
 )
-from .public_api_orderbook import BestQuote, fetch_orderbook_tops as fetch_public_orderbook_tops
+from .public_api_orderbook import (
+    BestQuote,
+    fetch_orderbook_snapshot,
+    fetch_orderbook_tops as fetch_public_orderbook_tops,
+)
 from .public_api_ticker import fetch_ticker_single
+from .orderbook_depth_store import depth_snapshot_from_orderbook_snapshot, upsert_orderbook_depth_snapshot
 from .orderbook_top_store import snapshot_from_best_quote, upsert_orderbook_top_snapshot
 
 
@@ -228,16 +233,35 @@ def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
 
 def cmd_sync_orderbook_top(quiet: bool = False, pair: str | None = None) -> None:
     market = canonical_market_id(pair or settings.PAIR)
-    quote = fetch_orderbook_top(market)
-    observed = float(quote.observed_at_epoch_sec or time.time())
+    observed = time.time()
+    with httpx.Client(base_url=BASE_URL, timeout=ORDERBOOK_FETCH_TIMEOUT_SEC) as c:
+        orderbook = fetch_orderbook_snapshot(c, market=market, max_retries=ORDERBOOK_FETCH_MAX_RETRIES)
+    quote = BestQuote(
+        market=orderbook.market,
+        bid_price=orderbook.orderbook_units[0].bid_price,
+        ask_price=orderbook.orderbook_units[0].ask_price,
+        observed_at_epoch_sec=observed,
+        source="bithumb_public_v1_orderbook",
+    )
     snapshot = snapshot_from_best_quote(
         ts=int(observed * 1000),
         quote=quote,
         requested_pair=market,
     )
+    depth_snapshot = depth_snapshot_from_orderbook_snapshot(
+        ts=snapshot.ts,
+        snapshot=orderbook,
+        source=snapshot.source,
+        observed_at_epoch_sec=snapshot.observed_at_epoch_sec,
+    )
     conn = ensure_db()
     try:
         row_count = upsert_orderbook_top_snapshot(conn, snapshot)
+        depth_row_count = (
+            upsert_orderbook_depth_snapshot(conn, depth_snapshot)
+            if depth_snapshot is not None
+            else 0
+        )
         conn.commit()
     finally:
         conn.close()
@@ -246,11 +270,12 @@ def cmd_sync_orderbook_top(quiet: bool = False, pair: str | None = None) -> None
         print(
             "[SYNC-ORDERBOOK-TOP] "
             f"pair={snapshot.pair} bid={snapshot.bid_price} ask={snapshot.ask_price} "
-            f"spread_bps={snapshot.spread_bps:.8f} source={snapshot.source} row_count={row_count}"
+            f"spread_bps={snapshot.spread_bps:.8f} source={snapshot.source} row_count={row_count} "
+            f"depth_row_count={depth_row_count}"
         )
         print(
             "  next_action=collect orderbook top snapshots with sync-orderbook-top, rerun research-backtest, "
-            "and verify top_of_book_coverage_pct"
+            "and verify top_of_book_coverage_pct; depth rows remain unavailable unless the raw payload includes bid_size/ask_size"
         )
 
 

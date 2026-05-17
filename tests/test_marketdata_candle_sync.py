@@ -12,7 +12,7 @@ from bithumb_bot.marketdata import (
     fetch_orderbook_tops as fetch_marketdata_orderbook_tops,
 )
 from bithumb_bot.public_api import PublicApiSchemaError
-from bithumb_bot.public_api_orderbook import BestQuote
+from bithumb_bot.public_api_orderbook import BestQuote, OrderbookSnapshot, OrderbookUnit
 from bithumb_bot.public_api_minute_candles import MinuteCandle
 from bithumb_bot.public_api_ticker import TickerLiteSnapshot
 
@@ -232,16 +232,15 @@ def test_marketdata_orderbook_multi_market_fetch(monkeypatch, _settings_guard) -
 
 def test_cmd_sync_orderbook_top_persists_validated_quote(monkeypatch, capsys, _settings_guard) -> None:
     monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.time.time", lambda: 1_700_000_000.0)
     monkeypatch.setattr(
-        "bithumb_bot.marketdata.fetch_orderbook_top",
-        lambda _market: BestQuote(
+        "bithumb_bot.marketdata.fetch_orderbook_snapshot",
+        lambda _client, *, market, max_retries: OrderbookSnapshot(
             market="KRW-BTC",
-            bid_price=99.0,
-            ask_price=101.0,
-            observed_at_epoch_sec=1_700_000_000.0,
-            source="bithumb_public_v1_orderbook",
+            orderbook_units=(OrderbookUnit(bid_price=99.0, ask_price=101.0),),
         ),
     )
+    monkeypatch.setattr("bithumb_bot.marketdata.httpx.Client", lambda *args, **kwargs: _DummyClient())
 
     cmd_sync_orderbook_top(pair="BTC_KRW")
 
@@ -252,6 +251,7 @@ def test_cmd_sync_orderbook_top_persists_validated_quote(monkeypatch, capsys, _s
     assert "spread_bps=200.00000000" in captured.out
     assert "source=bithumb_public_v1_orderbook" in captured.out
     assert "row_count=1" in captured.out
+    assert "depth_row_count=0" in captured.out
     assert (
         "next_action=collect orderbook top snapshots with sync-orderbook-top, "
         "rerun research-backtest, and verify top_of_book_coverage_pct"

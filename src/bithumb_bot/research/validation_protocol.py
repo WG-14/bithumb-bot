@@ -629,6 +629,7 @@ def _evaluate_candidates(
             scenario=scenario,
             calibration_hash=expected_calibration_hash,
             top_of_book_available=int(top_of_book_quality_summary.get("joined_quote_count") or 0) > 0,
+            depth_available=bool(top_of_book_quality_summary.get("depth_available")),
         )
         calibration_gate = compare_calibration_to_scenario(
             calibration=execution_calibration,
@@ -892,6 +893,7 @@ def _evaluate_candidates(
                 scenario=scenario,
                 calibration_hash=calibration_gate.get("artifact_hash") if isinstance(calibration_gate, dict) else None,
                 top_of_book_available=int(top_of_book_quality_summary.get("joined_quote_count") or 0) > 0,
+                depth_available=bool(top_of_book_quality_summary.get("depth_available")),
             )
             capability_contract = _execution_capability_contract_from_reality(execution_contract)
             scenario_result = {
@@ -1999,6 +2001,7 @@ def _report_payload(
         int(report.payload.get("top_of_book_joined_count") or 0)
         for report in quality_reports
     )
+    depth_available = any(bool(report.payload.get("depth_available")) for report in quality_reports)
     repository_version = _repository_version()
     calibration_hash = (
         str(execution_calibration.get("content_hash"))
@@ -2010,6 +2013,7 @@ def _report_payload(
         scenario=_base_report_scenario(manifest),
         calibration_hash=calibration_hash,
         top_of_book_available=top_of_book_joined_count > 0,
+        depth_available=depth_available,
     )
     report_capability_contract = _execution_capability_contract_from_reality(report_execution_contract)
     parameter_grid_size = _parameter_grid_size(manifest)
@@ -2382,7 +2386,11 @@ def _report_payload(
             "top_of_book_required": bool(manifest.dataset.top_of_book.required) if manifest.dataset.top_of_book else False,
             "top_of_book_available": top_of_book_joined_count > 0,
             "top_of_book_is_full_depth": False,
-            "orderbook_depth_available": False,
+            "orderbook_depth_available": depth_available,
+            "l2_depth_evidence_available": depth_available,
+            "trade_tick_evidence_available": False,
+            "queue_evidence_available": False,
+            "impact_model_evidence_available": False,
             "intra_candle_path_available": False,
             "execution_reference_price": manifest.execution_timing.fill_reference_policy,
             "intra_candle_policy": _policy_intra_candle_limitation(manifest.execution_timing.fill_reference_policy),
@@ -2981,6 +2989,7 @@ def _execution_reality_contract(
     scenario: ExecutionScenario,
     calibration_hash: object | None,
     top_of_book_available: bool,
+    depth_available: bool = False,
 ) -> dict[str, Any]:
     top = manifest.dataset.top_of_book
     cost = scenario.cost_assumption.as_dict() if scenario.cost_assumption is not None else {}
@@ -3034,7 +3043,7 @@ def _execution_reality_contract(
         limitations=limitations,
         extra={
             "quote_evidence_available": bool(top_of_book_available),
-            "depth_available": False,
+            "depth_available": bool(depth_available),
             "trade_ticks_available": False,
             "queue_position_available": False,
             "market_impact_model_available": False,
@@ -3250,7 +3259,12 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
             "top_of_book_candle_quote_joined_count": 0,
             "signal_execution_quote_coverage": None,
             "signal_execution_quote_coverage_pct": None,
-            "signal_execution_quote_coverage_status": "not_evaluated_by_readiness_or_dataset_quality",
+            "signal_execution_quote_coverage_status": "not_computable_without_strategy_signal_run",
+            "signal_level_depth_coverage_pct": None,
+            "signal_level_depth_coverage_status": "not_computable_without_strategy_signal_run",
+            "depth_available": False,
+            "depth_evidence_available": False,
+            "depth_liquidity_sufficiency_status": "not_implemented_order_size_depth_walk_required",
             "affected_splits": [],
             "next_action": None,
             "limitations": [
@@ -3301,6 +3315,7 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
             if payload.get("top_of_book_source")
         }
     )
+    depth_available = any(bool(payload.get("depth_available")) for _, payload in requested_reports)
     return {
         "requested": True,
         "required": required,
@@ -3316,7 +3331,12 @@ def _top_of_book_quality_summary(reports: dict[str, DatasetQualityReport]) -> di
         "top_of_book_candle_quote_joined_count": joined,
         "signal_execution_quote_coverage": None,
         "signal_execution_quote_coverage_pct": None,
-        "signal_execution_quote_coverage_status": "not_evaluated_by_readiness_or_dataset_quality",
+        "signal_execution_quote_coverage_status": "not_computable_without_strategy_signal_run",
+        "signal_level_depth_coverage_pct": None,
+        "signal_level_depth_coverage_status": "not_computable_without_strategy_signal_run",
+        "depth_available": depth_available,
+        "depth_evidence_available": depth_available,
+        "depth_liquidity_sufficiency_status": "not_implemented_order_size_depth_walk_required",
         "join_tolerance_ms": join_tolerances[0] if len(join_tolerances) == 1 else join_tolerances,
         "sources": sources,
         "affected_splits": affected_splits,

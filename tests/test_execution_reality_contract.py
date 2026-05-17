@@ -743,6 +743,38 @@ def test_top_of_book_only_contract_cannot_satisfy_depth_trade_tick_or_queue_requ
     assert "execution_queue_position_required_but_unavailable" in reasons
 
 
+def test_depth_availability_does_not_satisfy_queue_ticks_impact_or_intracandle() -> None:
+    contract = build_execution_reality_contract(
+        fill_reference_policy="latency_adjusted_orderbook",
+        missing_quote_policy="fail",
+        min_execution_reality_level_for_promotion="latency_adjusted_top_of_book",
+        allow_same_candle_close_fill=False,
+        top_of_book_required=True,
+        top_of_book_available=True,
+        depth_required=True,
+        trade_tick_required=True,
+        queue_position_required=True,
+        market_impact_required=True,
+        extra={
+            "quote_evidence_available": True,
+            "depth_available": True,
+            "trade_ticks_available": False,
+            "queue_position_available": False,
+            "market_impact_model_available": False,
+            "intra_candle_path_required": True,
+            "intra_candle_path_available": False,
+        },
+    )
+
+    reasons = unsupported_capability_reasons(contract)
+
+    assert "execution_depth_required_but_unavailable" not in reasons
+    assert "execution_trade_ticks_required_but_unavailable" in reasons
+    assert "execution_queue_position_required_but_unavailable" in reasons
+    assert "execution_market_impact_required_but_unavailable" in reasons
+    assert "execution_intra_candle_path_required_but_unavailable" in reasons
+
+
 def test_profile_runtime_execution_contract_mismatch_is_reason_coded() -> None:
     profile_contract = _contract()
     runtime_contract = _contract(fill_reference_policy="latency_adjusted_orderbook")

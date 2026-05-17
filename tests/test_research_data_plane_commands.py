@@ -804,10 +804,15 @@ def test_research_readiness_json_reports_operator_fields_and_top_of_book_policy(
     assert payload["top_of_book"]["signal_execution_quote_coverage_pct"] is None
     assert (
         payload["top_of_book"]["signal_execution_quote_coverage_status"]
-        == "not_evaluated_by_readiness_or_dataset_quality"
+        == "not_computable_without_strategy_signal_run"
     )
+    assert payload["top_of_book"]["signal_level_depth_coverage_pct"] is None
+    assert payload["top_of_book"]["signal_level_depth_coverage_status"] == "not_computable_without_strategy_signal_run"
+    assert payload["top_of_book"]["depth_available"] is False
+    assert payload["execution_capability"]["depth_available"] is False
     assert payload["splits"]["train"]["top_of_book_missing_policy"] is None
     assert payload["splits"]["train"]["signal_execution_quote_coverage_pct"] is None
+    assert payload["splits"]["train"]["depth_available"] is False
     assert payload["execution_calibration"]["status"] == "WARN"
     assert payload["walk_forward"]["status"] == "NOT_REQUIRED"
     assert payload["next_actions"] == ["none"]

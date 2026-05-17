@@ -41,6 +41,39 @@ def test_parse_orderbook_snapshots_preserves_units() -> None:
     ]
 
 
+def test_parse_orderbook_snapshots_preserves_depth_sizes_when_present() -> None:
+    payload = [
+        {
+            "market": "KRW-BTC",
+            "orderbook_units": [
+                {"ask_price": "101.0", "ask_size": "1.5", "bid_price": "100.0", "bid_size": "2.0"},
+                {"ask_price": "102.0", "ask_size": "3.5", "bid_price": "99.5", "bid_size": "4.0"},
+            ],
+        }
+    ]
+
+    snapshots = parse_orderbook_snapshots(payload)
+
+    assert snapshots[0].orderbook_units == (
+        OrderbookUnit(bid_price=100.0, ask_price=101.0, bid_size=2.0, ask_size=1.5),
+        OrderbookUnit(bid_price=99.5, ask_price=102.0, bid_size=4.0, ask_size=3.5),
+    )
+
+
+def test_parse_orderbook_snapshots_requires_bid_and_ask_size_together() -> None:
+    payload = [
+        {
+            "market": "KRW-BTC",
+            "orderbook_units": [
+                {"ask_price": "101.0", "ask_size": "1.5", "bid_price": "100.0"},
+            ],
+        }
+    ]
+
+    with pytest.raises(PublicApiSchemaError, match="bid_size_and_ask_size_together"):
+        parse_orderbook_snapshots(payload)
+
+
 def test_parse_orderbook_snapshots_rejects_missing_market() -> None:
     with pytest.raises(PublicApiSchemaError, match="field=market"):
         parse_orderbook_snapshots([{"orderbook_units": [{"ask_price": 1, "bid_price": 1}]}])

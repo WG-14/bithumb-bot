@@ -980,7 +980,7 @@ def test_missing_quote_policy_warn_records_warning_without_promotion_grade_pass(
     assert summary["skipped_execution_signal_count"] == summary["signal_event_count"]
     assert "top_of_book_candle_quote_coverage" in top_summary
     assert top_summary["signal_execution_quote_coverage"] is None
-    assert top_summary["signal_execution_quote_coverage_status"] == "not_evaluated_by_readiness_or_dataset_quality"
+    assert top_summary["signal_execution_quote_coverage_status"] == "not_computable_without_strategy_signal_run"
     assert summary["quote_after_decision_coverage_pct"] is not top_summary["signal_execution_quote_coverage"]
     assert report["gate_result"] == "FAIL"
     assert "quote_after_decision_signal_coverage_below_threshold" in candidate["gate_fail_reasons"]

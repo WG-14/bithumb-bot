@@ -13,6 +13,12 @@ from .public_api import PublicApiSchemaError, get_public_json_with_retry
 class OrderbookUnit:
     bid_price: float
     ask_price: float
+    bid_size: float | None = None
+    ask_size: float | None = None
+
+    @property
+    def has_depth_size(self) -> bool:
+        return self.bid_size is not None and self.ask_size is not None
 
 
 @dataclass(frozen=True)
@@ -91,10 +97,19 @@ def parse_orderbook_snapshots(payload: object) -> list[OrderbookSnapshot]:
         parsed_units: list[OrderbookUnit] = []
         for idx, raw_unit in enumerate(units):
             unit = _require_row_dict(payload=raw_unit, where=f"orderbook_units[{idx}]")
+            bid_size = _optional_number(row=unit, field="bid_size")
+            ask_size = _optional_number(row=unit, field="ask_size")
+            if (bid_size is None) != (ask_size is None):
+                raise PublicApiSchemaError(
+                    "orderbook schema mismatch expected=bid_size_and_ask_size_together "
+                    f"where=orderbook_units[{idx}]"
+                )
             parsed_units.append(
                 OrderbookUnit(
                     bid_price=_require_number(row=unit, field="bid_price"),
                     ask_price=_require_number(row=unit, field="ask_price"),
+                    bid_size=bid_size,
+                    ask_size=ask_size,
                 )
             )
 
@@ -123,6 +138,12 @@ def extract_top_quotes(snapshots: list[OrderbookSnapshot]) -> list[BestQuote]:
 
 def parse_orderbook_top(payload: object) -> list[OrderbookTop]:
     return extract_top_quotes(parse_orderbook_snapshots(payload))
+
+
+def _optional_number(*, row: dict[str, Any], field: str) -> float | None:
+    if field not in row:
+        return None
+    return _require_number(row=row, field=field)
 
 
 def _canonicalize_market_set(markets: Sequence[str]) -> set[str]:

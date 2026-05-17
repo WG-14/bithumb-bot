@@ -36,6 +36,19 @@ class ExecutionRequest:
     fill_reference_policy: str | None = None
     top_of_book_source: str | None = None
     top_of_book_is_full_depth: bool | None = None
+    depth_snapshot_ts: int | None = None
+    depth_snapshot_age_ms: int | None = None
+    depth_levels_consumed: int | None = None
+    depth_available: bool = False
+    depth_sufficient: bool | None = None
+    queue_position_mode: str = "unavailable"
+    market_impact_mode: str = "unavailable"
+    execution_liquidity_evidence_type: str = "top_of_book_quote_only"
+    execution_realism_limitations: tuple[str, ...] = (
+        "full_orderbook_depth_unavailable",
+        "queue_position_unavailable",
+        "market_impact_model_unavailable",
+    )
     execution_reference_failure_reason: str | None = None
     latency_applied_to_reference: bool | None = None
     latency_applied_to_submit_ts: bool | None = None
@@ -79,6 +92,21 @@ class ExecutionFill:
     best_ask: float | None = None
     spread_bps: float | None = None
     orderbook_depth_ref: str | None = None
+    requested_notional: float | None = None
+    filled_notional: float | None = None
+    depth_snapshot_ts: int | None = None
+    depth_snapshot_age_ms: int | None = None
+    depth_levels_consumed: int | None = None
+    depth_available: bool = False
+    depth_sufficient: bool | None = None
+    queue_position_mode: str = "unavailable"
+    market_impact_mode: str = "unavailable"
+    execution_liquidity_evidence_type: str = "top_of_book_quote_only"
+    execution_realism_limitations: tuple[str, ...] = (
+        "full_orderbook_depth_unavailable",
+        "queue_position_unavailable",
+        "market_impact_model_unavailable",
+    )
     execution_reality_level: str | None = None
     allow_same_candle_close_fill: bool | None = None
     quote_selection: str | None = None
@@ -130,6 +158,17 @@ class ExecutionFill:
             "best_ask": self.best_ask,
             "spread_bps": self.spread_bps,
             "orderbook_depth_ref": self.orderbook_depth_ref,
+            "requested_notional": self.requested_notional,
+            "filled_notional": self.filled_notional,
+            "depth_snapshot_ts": self.depth_snapshot_ts,
+            "depth_snapshot_age_ms": self.depth_snapshot_age_ms,
+            "depth_levels_consumed": self.depth_levels_consumed,
+            "depth_available": self.depth_available,
+            "depth_sufficient": self.depth_sufficient,
+            "queue_position_mode": self.queue_position_mode,
+            "market_impact_mode": self.market_impact_mode,
+            "execution_liquidity_evidence_type": self.execution_liquidity_evidence_type,
+            "execution_realism_limitations": list(self.execution_realism_limitations),
             "execution_reality_level": self.execution_reality_level,
             "allow_same_candle_close_fill": self.allow_same_candle_close_fill,
             "quote_selection": self.quote_selection,

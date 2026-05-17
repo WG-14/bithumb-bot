@@ -861,6 +861,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ON orderbook_top_snapshots(pair, ts)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orderbook_depth_levels (
+            ts INTEGER NOT NULL,
+            pair TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('bid', 'ask')),
+            level_index INTEGER NOT NULL CHECK (level_index >= 0),
+            price REAL NOT NULL CHECK (price > 0),
+            size REAL NOT NULL CHECK (size > 0),
+            cumulative_size REAL NOT NULL CHECK (cumulative_size > 0),
+            cumulative_notional REAL NOT NULL CHECK (cumulative_notional > 0),
+            source TEXT NOT NULL,
+            observed_at_epoch_sec REAL,
+            PRIMARY KEY (ts, pair, source, side, level_index)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_orderbook_depth_pair_ts
+        ON orderbook_depth_levels(pair, ts)
+        """
+    )
 
     conn.execute(
         """

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from bithumb_bot.bootstrap import get_last_explicit_env_load_summary
 from bithumb_bot.config import PROJECT_ROOT, settings
 from bithumb_bot.historical_backfill import backfill_candles
+from bithumb_bot.orderbook_depth_store import has_orderbook_depth_evidence
 from bithumb_bot.paths import PathManager
 from bithumb_bot.storage_io import write_json_atomic
 
@@ -124,6 +125,12 @@ def build_dataset_quality_report_sql(
     if int(stats["unexpected_bucket_count"]):
         reasons.append("unexpected_candle_bucket")
 
+    depth_available = _depth_available_sql(
+        db_path=db_path,
+        market=manifest.market,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
     payload: dict[str, Any] = {
         "schema_version": 1,
         "artifact_type": "dataset_quality_report",
@@ -158,7 +165,11 @@ def build_dataset_quality_report_sql(
         "quality_gate_status": "PASS" if not reasons else "FAIL",
         "quality_gate_reasons": reasons,
         "limitations": {
-            "orderbook_depth_available": False,
+            "orderbook_depth_available": depth_available,
+            "l2_depth_evidence_available": depth_available,
+            "trade_tick_evidence_available": False,
+            "queue_evidence_available": False,
+            "impact_model_evidence_available": False,
             "top_of_book_available": top_of_book.get("top_of_book_joined_count", 0) > 0,
             "intra_candle_path_available": False,
             "execution_reference_price": "configured_by_execution_timing_policy",
@@ -169,6 +180,10 @@ def build_dataset_quality_report_sql(
             "intra_candle_policy": "configured_by_execution_timing_policy",
             "top_of_book_is_full_depth": False,
         },
+        "depth_available": depth_available,
+        "depth_availability_source": (
+            "sqlite_orderbook_depth_levels" if depth_available else "orderbook_depth_levels_missing_or_empty"
+        ),
     }
     if top_of_book:
         payload.update(top_of_book)
@@ -808,6 +823,27 @@ def _top_of_book_split_sql(
         "top_of_book_gate_status": gate_status,
         "top_of_book_gate_reasons": reasons,
     }
+
+
+def _depth_available_sql(
+    *,
+    db_path: str | Path,
+    market: str,
+    start_ts: int,
+    end_ts: int,
+) -> bool:
+    if not Path(db_path).expanduser().resolve().exists():
+        return False
+    conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
+    try:
+        return has_orderbook_depth_evidence(
+            conn,
+            pair=market,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+    finally:
+        conn.close()
 
 
 def _top_of_book_fail_payload(*, spec: Any, expected: int, reason: str) -> dict[str, Any]:

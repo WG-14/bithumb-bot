@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from bithumb_bot.paths import PathManager
+from bithumb_bot.db_core import ensure_db
+from bithumb_bot.orderbook_depth_store import build_orderbook_depth_snapshot, upsert_orderbook_depth_snapshot
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot, build_dataset_quality_report, load_dataset_split
 from bithumb_bot.research.experiment_manifest import DateRange, ManifestValidationError, parse_manifest
 from bithumb_bot.research.promotion_gate import PromotionGateError, promote_candidate
@@ -102,6 +104,7 @@ def test_dataset_quality_report_passes_complete_valid_candles(tmp_path: Path) ->
     assert report.payload["coverage_pct"] == 100.0
     assert report.content_hash.startswith("sha256:")
     limitations = report.payload["limitations"]
+    assert report.payload["depth_available"] is False
     assert limitations["execution_reference_price"] == "configured_by_execution_timing_policy"
     assert limitations["available_execution_reference_sources"] == [
         "candle_ohlcv",
@@ -109,6 +112,37 @@ def test_dataset_quality_report_passes_complete_valid_candles(tmp_path: Path) ->
     ]
     assert limitations["intra_candle_policy"] == "configured_by_execution_timing_policy"
     assert limitations["top_of_book_is_full_depth"] is False
+
+
+def test_dataset_quality_depth_available_only_when_depth_rows_exist(tmp_path: Path) -> None:
+    db_path = tmp_path / "quality.sqlite"
+    _create_db(db_path)
+    snapshot = load_dataset_split(db_path=db_path, manifest=_manifest(), split_name="train")
+
+    without_depth = build_dataset_quality_report(db_path=db_path, snapshot=snapshot)
+    assert without_depth.payload["depth_available"] is False
+    assert without_depth.payload["limitations"]["orderbook_depth_available"] is False
+
+    conn = ensure_db(str(db_path))
+    try:
+        upsert_orderbook_depth_snapshot(
+            conn,
+            build_orderbook_depth_snapshot(
+                ts=_ts("2023-01-01", 10),
+                pair="KRW-BTC",
+                bid_levels=[(100.0, 1.0)],
+                ask_levels=[(101.0, 1.0)],
+                source="bithumb_public_v1_orderbook",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with_depth = build_dataset_quality_report(db_path=db_path, snapshot=snapshot)
+    assert with_depth.payload["depth_available"] is True
+    assert with_depth.payload["limitations"]["orderbook_depth_available"] is True
+    assert with_depth.payload["limitations"]["top_of_book_is_full_depth"] is False
 
 
 def test_dataset_quality_report_detects_missing_candles_deterministically(tmp_path: Path) -> None:

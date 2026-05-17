@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from bithumb_bot.public_api_minute_candles import interval_to_minute_unit
+from bithumb_bot.orderbook_depth_store import has_orderbook_depth_evidence
 
 from .experiment_manifest import DateRange, ExperimentManifest, ManifestValidationError
 from .hashing import sha256_prefixed
@@ -327,6 +328,7 @@ def build_dataset_quality_report(
     actual_count = len(candles)
     present_expected_count = len(actual_expected_ts)
     coverage_pct = (present_expected_count / expected_count * 100.0) if expected_count else 0.0
+    depth_available = _orderbook_depth_available(db_path=db_path, snapshot=snapshot)
     payload: dict[str, Any] = {
         "schema_version": 1,
         "artifact_type": "dataset_quality_report",
@@ -358,7 +360,11 @@ def build_dataset_quality_report(
         "quality_gate_status": "PASS" if not reasons else "FAIL",
         "quality_gate_reasons": reasons,
         "limitations": {
-            "orderbook_depth_available": False,
+            "orderbook_depth_available": depth_available,
+            "l2_depth_evidence_available": depth_available,
+            "trade_tick_evidence_available": False,
+            "queue_evidence_available": False,
+            "impact_model_evidence_available": False,
             "top_of_book_available": any(quote is not None for quote in snapshot.top_of_book_quotes),
             "intra_candle_path_available": False,
             "execution_reference_price": "configured_by_execution_timing_policy",
@@ -369,6 +375,10 @@ def build_dataset_quality_report(
             "intra_candle_policy": "configured_by_execution_timing_policy",
             "top_of_book_is_full_depth": False,
         },
+        "depth_available": depth_available,
+        "depth_availability_source": (
+            "sqlite_orderbook_depth_levels" if depth_available else "orderbook_depth_levels_missing_or_empty"
+        ),
     }
     if snapshot.top_of_book_requested:
         _add_top_of_book_quality_fields(payload=payload, snapshot=snapshot)
@@ -513,6 +523,19 @@ def _db_schema_fingerprint(db_path: str | Path) -> str:
             "index_info": index_info,
         }
     )
+
+
+def _orderbook_depth_available(*, db_path: str | Path, snapshot: DatasetSnapshot) -> bool:
+    conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
+    try:
+        return has_orderbook_depth_evidence(
+            conn,
+            pair=snapshot.market,
+            start_ts=snapshot.date_range.start_ts_ms(),
+            end_ts=snapshot.date_range.end_ts_ms(),
+        )
+    finally:
+        conn.close()
 
 
 def _load_top_of_book_quotes(
