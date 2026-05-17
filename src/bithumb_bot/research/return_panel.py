@@ -12,10 +12,44 @@ from .hashing import content_hash_payload, sha256_prefixed
 CANDIDATE_RETURN_PANEL_SCHEMA_VERSION = 1
 RETURN_PANEL_ARTIFACT_TYPE = "candidate_return_panel"
 DEFAULT_RETURN_UNIT = "trade_return"
+PROMOTION_GRADE_RETURN_UNIT = "portfolio_bar_return"
 DEFAULT_MISSING_OBSERVATION_POLICY = "skip_missing_candidate_trade_returns"
+PROMOTION_MISSING_OBSERVATION_POLICY = "fail_closed_complete_candidate_bar_alignment_required"
 
 
 def build_candidate_return_panel(
+    *,
+    experiment_id: str,
+    manifest_hash: str,
+    dataset_content_hash: str,
+    dataset_quality_hash: str | None,
+    split: str,
+    benchmark: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    aligned = _build_aligned_portfolio_return_panel(
+        experiment_id=experiment_id,
+        manifest_hash=manifest_hash,
+        dataset_content_hash=dataset_content_hash,
+        dataset_quality_hash=dataset_quality_hash,
+        split=split,
+        benchmark=benchmark,
+        candidates=candidates,
+    )
+    if aligned is not None:
+        return aligned
+    return _build_trade_return_panel(
+        experiment_id=experiment_id,
+        manifest_hash=manifest_hash,
+        dataset_content_hash=dataset_content_hash,
+        dataset_quality_hash=dataset_quality_hash,
+        split=split,
+        benchmark=benchmark,
+        candidates=candidates,
+    )
+
+
+def _build_trade_return_panel(
     *,
     experiment_id: str,
     manifest_hash: str,
@@ -78,23 +112,124 @@ def build_candidate_return_panel(
         "candidate_return_series": rows,
         "observation_count": sum(int(row["observation_count"]) for row in rows),
         "missing_observation_policy": DEFAULT_MISSING_OBSERVATION_POLICY,
+        "attempted_promotion_grade_return_unit": PROMOTION_GRADE_RETURN_UNIT,
         "limitations": [
             "trade_return_panel_from_closed_trade_records",
             "bar_level_portfolio_return_panel_not_available",
             "aligned_bar_portfolio_return_panel_not_generated",
+            "official_candidate_equity_curve_missing_or_unaligned",
             "trade_return_panel_cannot_satisfy_promotion_grade_wrc",
             "official_wrc_generation_requires_aligned_bar_return_panel",
             "cash_benchmark_zero_return_series",
         ],
         "promotion_grade_available": False,
+        "official_promotion_grade_wrc_generation_available": False,
         "promotion_grade_fail_reasons": [
             "promotion_grade_requires_aligned_return_panel",
             "trade_return_panel_cannot_satisfy_promotion_grade_wrc",
+            "official_candidate_equity_curve_missing_or_unaligned",
         ],
         "operator_next_step": (
             "retain and emit aligned candidate bar-level portfolio return series, then rerun "
             "with an official promotion-grade WRC implementation bound to that panel"
         ),
+    }
+    payload["panel_content_hash"] = sha256_prefixed(content_hash_payload(payload))
+    payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
+    return payload
+
+
+def _build_aligned_portfolio_return_panel(
+    *,
+    experiment_id: str,
+    manifest_hash: str,
+    dataset_content_hash: str,
+    dataset_quality_hash: str | None,
+    split: str,
+    benchmark: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if benchmark != "cash":
+        return None
+    rows: list[dict[str, Any]] = []
+    canonical_index: list[int] | None = None
+    for candidate in sorted(candidates, key=lambda item: str(item.get("parameter_candidate_id") or "")):
+        series = _candidate_portfolio_bar_return_series(candidate, split=split)
+        if not series:
+            return None
+        timestamps = [int(row["ts"]) for row in series]
+        if canonical_index is None:
+            canonical_index = timestamps
+        elif timestamps != canonical_index:
+            return None
+        benchmark_series = [{"ts": row["ts"], "sequence": row["sequence"], "return_pct": 0.0} for row in series]
+        excess_series = [
+            {
+                "ts": row["ts"],
+                "sequence": row["sequence"],
+                "excess_return_pct": float(row["return_pct"]),
+            }
+            for row in series
+        ]
+        row_metadata = {
+            "candidate_id": str(candidate.get("parameter_candidate_id") or ""),
+            "parameter_values": candidate.get("parameter_values") or {},
+            "scenario_ids": _candidate_scenario_ids(candidate),
+            "return_unit": PROMOTION_GRADE_RETURN_UNIT,
+            "benchmark": benchmark,
+            "split": split,
+            "missing_observation_policy": PROMOTION_MISSING_OBSERVATION_POLICY,
+        }
+        rows.append(
+            {
+                **row_metadata,
+                "metadata_hash": sha256_prefixed(row_metadata),
+                "observation_count": len(series),
+                "time_index": timestamps,
+                "time_index_hash": sha256_prefixed(timestamps),
+                "candidate_return_series_values": series,
+                "candidate_return_series_hash": sha256_prefixed(series),
+                "benchmark_return_series_values": benchmark_series,
+                "benchmark_series_hash": sha256_prefixed(benchmark_series),
+                "excess_return_series_values": excess_series,
+                "benchmark_excess_return_series_hash": sha256_prefixed(excess_series),
+                "return_series_available": True,
+            }
+        )
+    if canonical_index is None or not canonical_index:
+        return None
+    metadata = {
+        "experiment_id": experiment_id,
+        "manifest_hash": manifest_hash,
+        "dataset_content_hash": dataset_content_hash,
+        "dataset_quality_hash": dataset_quality_hash,
+        "split": split,
+        "return_unit": PROMOTION_GRADE_RETURN_UNIT,
+        "benchmark": benchmark,
+        "missing_observation_policy": PROMOTION_MISSING_OBSERVATION_POLICY,
+        "candidate_ids": [row["candidate_id"] for row in rows],
+        "scenario_ids_by_candidate": {row["candidate_id"]: row["scenario_ids"] for row in rows},
+    }
+    payload: dict[str, Any] = {
+        "artifact_type": RETURN_PANEL_ARTIFACT_TYPE,
+        "schema_version": CANDIDATE_RETURN_PANEL_SCHEMA_VERSION,
+        **metadata,
+        "metadata_hash": sha256_prefixed(metadata),
+        "ordered_time_index": canonical_index,
+        "ordered_time_index_hash": sha256_prefixed(canonical_index),
+        "candidate_count": len(rows),
+        "candidate_return_series": rows,
+        "observation_count": sum(int(row["observation_count"]) for row in rows),
+        "per_candidate_observation_count": len(canonical_index),
+        "limitations": [
+            "cash_benchmark_zero_return_series",
+            "spa_not_implemented",
+            "deflated_sharpe_not_implemented",
+        ],
+        "promotion_grade_available": True,
+        "official_promotion_grade_wrc_generation_available": True,
+        "promotion_grade_fail_reasons": [],
+        "operator_next_step": "review recomputable WRC evidence and keep SPA/DSR gates fail-closed unless implemented",
     }
     payload["panel_content_hash"] = sha256_prefixed(content_hash_payload(payload))
     payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
@@ -141,7 +276,12 @@ def validate_return_panel_binding(
         reasons.append("return_panel_panel_content_hash_mismatch")
     if panel.get("schema_version") != CANDIDATE_RETURN_PANEL_SCHEMA_VERSION:
         reasons.append("return_panel_schema_version_mismatch")
+    evidence_return_unit = evidence.get("return_unit") or report.get("return_unit")
+    if evidence_return_unit is not None and str(evidence_return_unit) != str(panel.get("return_unit") or ""):
+        reasons.append("return_panel_return_unit_mismatch")
     if panel.get("return_unit") == DEFAULT_RETURN_UNIT and panel.get("promotion_grade_available") is True:
+        reasons.append("return_panel_promotion_grade_misclassified")
+    if panel.get("promotion_grade_available") is True and panel.get("return_unit") not in {PROMOTION_GRADE_RETURN_UNIT, "bar_excess_return"}:
         reasons.append("return_panel_promotion_grade_misclassified")
     for field in ("manifest_hash", "dataset_content_hash", "dataset_quality_hash"):
         expected = report.get(field)
@@ -241,6 +381,12 @@ def _return_panel_series_reasons(panel: dict[str, Any]) -> list[str]:
             reasons.append("return_panel_series_malformed")
     if parsed_ordered_index != sorted(union_index):
         reasons.append("return_panel_time_index_mismatch")
+    if panel.get("promotion_grade_available") is True:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("time_index") != parsed_ordered_index:
+                reasons.append("return_panel_time_index_mismatch")
     return sorted(set(reasons))
 
 
@@ -307,6 +453,66 @@ def _candidate_trade_return_series(candidate: dict[str, Any], *, split: str) -> 
             continue
         rows.append({"ts": ts, "sequence": index, "return_pct": value})
     return sorted(rows, key=lambda row: (int(row["ts"]), int(row["sequence"])))
+
+
+def _candidate_portfolio_bar_return_series(candidate: dict[str, Any], *, split: str) -> list[dict[str, Any]]:
+    curve = _candidate_equity_curve(candidate, split=split)
+    if len(curve) < 2:
+        return []
+    rows: list[dict[str, Any]] = []
+    for index, (previous, current) in enumerate(zip(curve, curve[1:])):
+        previous_equity = _as_float(previous.get("equity"))
+        current_equity = _as_float(current.get("equity"))
+        ts = _as_int(current.get("ts"))
+        if previous_equity is None or current_equity is None or ts is None or previous_equity <= 0.0:
+            return []
+        rows.append(
+            {
+                "ts": ts,
+                "sequence": index,
+                "return_pct": ((current_equity / previous_equity) - 1.0) * 100.0,
+            }
+        )
+    return rows
+
+
+def _candidate_equity_curve(candidate: dict[str, Any], *, split: str) -> list[dict[str, Any]]:
+    key = f"{split}_equity_curve"
+    curve = candidate.get(key)
+    if not isinstance(curve, list):
+        scenario_results = candidate.get("scenario_results")
+        if isinstance(scenario_results, list):
+            for scenario in scenario_results:
+                if not isinstance(scenario, dict):
+                    continue
+                if scenario.get("scenario_role") not in {None, "base"}:
+                    continue
+                curve = scenario.get(key)
+                if isinstance(curve, list):
+                    break
+    if not isinstance(curve, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in curve:
+        if hasattr(item, "as_dict"):
+            item = item.as_dict()
+        if not isinstance(item, dict):
+            return []
+        ts = _as_int(item.get("ts"))
+        equity = _as_float(item.get("equity"))
+        cash = _as_float(item.get("cash"))
+        asset_qty = _as_float(item.get("asset_qty"))
+        if ts is None or equity is None:
+            return []
+        rows.append(
+            {
+                "ts": ts,
+                "equity": equity,
+                "cash": cash,
+                "asset_qty": asset_qty,
+            }
+        )
+    return sorted(rows, key=lambda row: int(row["ts"]))
 
 
 def _candidate_scenario_ids(candidate: dict[str, Any]) -> list[str]:

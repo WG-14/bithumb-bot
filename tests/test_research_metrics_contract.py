@@ -62,8 +62,34 @@ def test_metrics_v2_marks_sharpe_sortino_unavailable_without_period_return_contr
 
     assert "sharpe_unavailable_without_period_return_series" in metrics.limitation_reasons
     assert "sortino_unavailable_without_period_return_series" in metrics.limitation_reasons
-    assert "sharpe_ratio" not in metrics.as_dict()["return_risk"]
-    assert "sortino_ratio" not in metrics.as_dict()["return_risk"]
+    assert metrics.as_dict()["return_risk"]["sharpe_ratio"] is None
+    assert metrics.as_dict()["return_risk"]["sortino_ratio"] is None
+
+
+def test_metrics_v2_computes_sharpe_sortino_from_period_returns() -> None:
+    metrics = build_metrics_v2(
+        starting_cash=1000.0,
+        final_cash=1020.0,
+        final_asset_qty=0.0,
+        final_mark_price=0.0,
+        equity_curve=(
+            _point(0, 1000.0),
+            _point(60_000, 1010.0),
+            _point(120_000, 1005.0),
+            _point(180_000, 1020.0),
+        ),
+        position_intervals=(),
+        closed_trades=(),
+        execution_records=(),
+    )
+
+    payload = metrics.as_dict()["return_risk"]
+    assert payload["period_return_unit"] == "portfolio_bar_return"
+    assert payload["period_return_observation_count"] == 3
+    assert payload["sharpe_ratio"] is not None
+    assert payload["sortino_ratio"] is not None
+    assert "sharpe_unavailable_without_period_return_series" not in metrics.limitation_reasons
+    assert "sortino_unavailable_without_period_return_series" not in metrics.limitation_reasons
 
 
 def test_same_return_with_different_exposure_reports_different_time_in_market() -> None:

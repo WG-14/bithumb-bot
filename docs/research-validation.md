@@ -44,12 +44,13 @@ The existing centered max bootstrap over candidate summary metrics is
 `summary_metric_max_bootstrap_p_value` / `selection_adjusted_summary_p_value`,
 but it must not populate `white_reality_check_p_value` or claim a full White's
 Reality Check method.
-Official `research-backtest` manifest parsing currently accepts only
-`statistical_validation.bootstrap.method=metric_centered_max_bootstrap`.
-`white_reality_check_block_bootstrap` is rejected at parse time until official
-aligned-return-panel WRC generation exists. Operators must treat this as an
-explicit fail-closed condition, not as permission to fall back to summary
-bootstrap evidence.
+Official `research-backtest` manifest parsing accepts
+`statistical_validation.bootstrap.method=metric_centered_max_bootstrap` for
+screening evidence and `white_reality_check_block_bootstrap` for promotion-grade
+WRC evidence. The WRC path only generates `PROMOTION_GRADE_WRC` when the official
+candidate return panel is an aligned `portfolio_bar_return` panel built from
+retained bar-level equity curves. If that panel cannot be generated or validated,
+the run remains fail-closed with machine-readable promotion-grade limitations.
 
 Production-bound promotion requires `PROMOTION_GRADE_WRC` or
 `PROMOTION_GRADE_WRC_SPA_DSR` evidence. If only screening evidence is present,
@@ -58,26 +59,24 @@ SPA and Deflated Sharpe gates remain fail-closed when configured and unavailable
 no placeholder p-values are acceptable.
 
 Every statistical evidence artifact is bound to a canonical
-`candidate_return_panel` artifact. The current panel is the smallest honest panel
-available from the engine: validation split `trade_return` series derived from
-closed trade records, with a cash benchmark, ordered time index, candidate ids,
-scenario ids where present, per-candidate return series values, benchmark series
-values, excess-return series values, observation counts, missing-observation
-policy, return unit, split, hashes, and explicit limitations noting that
-bar-level portfolio return panels are not yet available.
-Promotion-grade methods that require unavailable return units must fail closed
-rather than infer precision.
+`candidate_return_panel` artifact. When all candidates retain complete and
+matching validation equity curves, the official panel is an aligned
+`portfolio_bar_return` panel with a cash benchmark, excess-return series,
+ordered bar time index, candidate ids, scenario ids where present, parameter
+values, observation counts, missing-observation policy, return unit, split,
+metadata hashes, series hashes, and content hashes. This panel is marked
+`promotion_grade_available=true` and is the only current input accepted for
+official WRC generation.
 
-The current research report path does not retain an aligned candidate
-bar/portfolio return panel for official evidence generation. The backtest engine
-can produce an in-memory equity curve when detail retention permits it, but the
-official report/panel artifact path still emits only closed-trade-derived
-`trade_return` rows by default. That artifact is machine-marked with
-`promotion_grade_available=false`,
+If the aligned panel cannot be generated, the official path falls back to the
+smallest honest diagnostic panel available from the engine: validation split
+`trade_return` series derived from closed trade records. That artifact is
+machine-marked with `promotion_grade_available=false`,
+`official_candidate_equity_curve_missing_or_unaligned`,
 `trade_return_panel_cannot_satisfy_promotion_grade_wrc`, and
 `official_wrc_generation_requires_aligned_bar_return_panel`. It must not be
-treated as WRC input. The operator next step is to add and validate a retained,
-aligned candidate bar return artifact before enabling official WRC generation.
+treated as WRC input. Promotion-grade methods that require unavailable return
+units fail closed rather than infer precision.
 `sharpe_like` is not accepted for production-bound statistical selection because
 it is not period-return Sharpe evidence and must not fall back to `return_pct`.
 

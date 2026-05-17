@@ -509,23 +509,31 @@ def analyze_risk_adjusted_score(*, contract: dict[str, Any], metrics_v2: dict[st
     cagr = _finite_or_none(return_risk.get("cagr_pct"))
     mdd = _finite_or_none(return_risk.get("max_drawdown_pct"))
     calmar = (cagr / mdd) if cagr is not None and mdd is not None and mdd > 0.0 else None
-    limitations: list[str] = [
-        "sharpe_unavailable_without_period_return_series",
-        "sortino_unavailable_without_period_return_series",
+    sharpe = _finite_or_none(return_risk.get("sharpe_ratio"))
+    sortino = _finite_or_none(return_risk.get("sortino_ratio"))
+    limitations = [str(item) for item in (metrics_v2 or {}).get("limitation_reasons", [])] if isinstance(metrics_v2, dict) else []
+    limitations = [
+        item
+        for item in limitations
+        if item in {"sharpe_unavailable_without_period_return_series", "sortino_unavailable_without_period_return_series"}
     ]
+    if sharpe is None:
+        limitations.append("sharpe_unavailable_without_period_return_series")
+    if sortino is None:
+        limitations.append("sortino_unavailable_without_period_return_series")
     fail_reasons: list[str] = []
     required = {str(item) for item in contract.get("required_metrics") or []}
     if "calmar" in required and calmar is None:
         fail_reasons.append("stress_risk_adjusted_calmar_missing")
-    if "sharpe" in required:
+    if "sharpe" in required and sharpe is None:
         fail_reasons.append("stress_risk_adjusted_sharpe_missing")
-    if "sortino" in required:
+    if "sortino" in required and sortino is None:
         fail_reasons.append("stress_risk_adjusted_sortino_missing")
     return _json_safe(
         {
             "calmar_ratio": calmar,
-            "sortino_ratio": None,
-            "sharpe_ratio": None,
+            "sortino_ratio": sortino,
+            "sharpe_ratio": sharpe,
             "ranking": list(contract.get("ranking") or []),
             "limitations": limitations,
             "fail_reasons": fail_reasons,

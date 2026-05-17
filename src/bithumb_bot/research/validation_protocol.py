@@ -962,6 +962,9 @@ def _evaluate_candidates(
                     trade.as_dict() if hasattr(trade, "as_dict") else trade
                     for trade in (base.get("validation_closed_trades") or [])
                 ],
+                "train_equity_curve": list(base.get("train_equity_curve") or []),
+                "validation_equity_curve": list(base.get("validation_equity_curve") or []),
+                "final_holdout_equity_curve": list(base.get("final_holdout_equity_curve") or []),
             }
             candidate_payload = aggregates.setdefault(
                 base["candidate_id"],
@@ -1081,6 +1084,8 @@ def _evaluate_candidates(
                 "train_resource_usage": primary.get("train_resource_usage"),
                 "validation_resource_usage": primary.get("validation_resource_usage"),
                 "final_holdout_resource_usage": primary.get("final_holdout_resource_usage"),
+                "validation_equity_curve": primary.get("validation_equity_curve") or [],
+                "final_holdout_equity_curve": primary.get("final_holdout_equity_curve") or [],
             }
         )
         warning_reasons = _execution_calibration_warning_reasons(candidate_payload)
@@ -1211,6 +1216,9 @@ def _evaluate_candidate_base_result(
         "train_closed_trades": train.closed_trades,
         "validation_closed_trades": validation.closed_trades,
         "final_holdout_closed_trades": final_holdout.closed_trades if final_holdout else (),
+        "train_equity_curve": [point.as_dict() for point in train.equity_curve],
+        "validation_equity_curve": [point.as_dict() for point in validation.equity_curve],
+        "final_holdout_equity_curve": [point.as_dict() for point in final_holdout.equity_curve] if final_holdout else [],
         "train_execution_metadata": _execution_metadata(train.trades),
         "validation_execution_metadata": _execution_metadata(validation.trades),
         "final_holdout_execution_metadata": _execution_metadata(final_holdout.trades) if final_holdout else None,

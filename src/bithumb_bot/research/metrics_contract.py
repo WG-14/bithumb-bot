@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import isfinite
-from statistics import median
+from statistics import mean, median, pstdev
 from typing import Any
 
 
@@ -93,6 +93,11 @@ class ReturnRiskMetrics:
     realized_return_pct: float
     unrealized_pnl_end: float
     open_position_at_end: bool
+    period_return_unit: str | None = None
+    period_return_observation_count: int = 0
+    sharpe_ratio: float | None = None
+    sortino_ratio: float | None = None
+    annualization_policy: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return self.__dict__.copy()
@@ -194,10 +199,7 @@ def build_metrics_v2(
     summary_active_bar_count: int | None = None,
     summary_exposure_ms: int | None = None,
 ) -> MetricContractV2:
-    limitations: list[str] = [
-        "sharpe_unavailable_without_period_return_series",
-        "sortino_unavailable_without_period_return_series",
-    ]
+    limitations: list[str] = []
     points = tuple(sorted(equity_curve, key=lambda item: item.ts))
     period_start = points[0].ts if points else summary_period_start_ts
     period_end = points[-1].ts if points else summary_period_end_ts
@@ -226,6 +228,11 @@ def build_metrics_v2(
     unrealized_pnl_end = (float(final_asset_qty) * float(final_mark_price)) - float(final_open_cost_basis)
     if open_position_at_end:
         limitations.append("open_position_excluded_from_holding_time_stats")
+    period_return_stats = _period_return_stats(points)
+    if period_return_stats["sharpe_ratio"] is None:
+        limitations.append("sharpe_unavailable_without_period_return_series")
+    if period_return_stats["sortino_ratio"] is None:
+        limitations.append("sortino_unavailable_without_period_return_series")
     wins = [value for value in net_values if value > 0.0]
     losses = [value for value in net_values if value < 0.0]
     gross_profit = sum(wins)
@@ -291,6 +298,11 @@ def build_metrics_v2(
             realized_return_pct=float(realized_return_pct),
             unrealized_pnl_end=float(unrealized_pnl_end),
             open_position_at_end=bool(open_position_at_end),
+            period_return_unit=period_return_stats["period_return_unit"],
+            period_return_observation_count=int(period_return_stats["period_return_observation_count"] or 0),
+            sharpe_ratio=period_return_stats["sharpe_ratio"],
+            sortino_ratio=period_return_stats["sortino_ratio"],
+            annualization_policy=period_return_stats["annualization_policy"],
         ),
         trade_quality=TradeQualityMetrics(
             closed_trade_count=len(closed_trades),
@@ -356,6 +368,45 @@ def _max_drawdown_pct(points: tuple[EquityPoint, ...]) -> float:
         if peak and peak > 0.0:
             max_drawdown = max(max_drawdown, (peak - equity) / peak)
     return max_drawdown * 100.0
+
+
+def _period_return_stats(points: tuple[EquityPoint, ...]) -> dict[str, object]:
+    ordered = tuple(sorted(points, key=lambda item: item.ts))
+    returns: list[float] = []
+    intervals: list[int] = []
+    for previous, current in zip(ordered, ordered[1:]):
+        previous_equity = float(previous.equity)
+        current_equity = float(current.equity)
+        if previous_equity <= 0.0 or not isfinite(previous_equity) or not isfinite(current_equity):
+            continue
+        returns.append((current_equity / previous_equity) - 1.0)
+        intervals.append(int(current.ts) - int(previous.ts))
+    if len(returns) < 2 or not intervals or any(interval <= 0 for interval in intervals):
+        return {
+            "period_return_unit": "portfolio_bar_return" if returns else None,
+            "period_return_observation_count": len(returns),
+            "sharpe_ratio": None,
+            "sortino_ratio": None,
+            "annualization_policy": None,
+        }
+    interval_ms = median(intervals)
+    if interval_ms <= 0:
+        scale = None
+    else:
+        scale = (MS_PER_YEAR / float(interval_ms)) ** 0.5
+    avg = mean(returns)
+    volatility = pstdev(returns)
+    downside = [min(0.0, value) for value in returns]
+    downside_deviation = (sum(value * value for value in downside) / len(downside)) ** 0.5
+    sharpe = (avg / volatility * scale) if scale is not None and volatility > 0.0 else None
+    sortino = (avg / downside_deviation * scale) if scale is not None and downside_deviation > 0.0 else None
+    return {
+        "period_return_unit": "portfolio_bar_return",
+        "period_return_observation_count": len(returns),
+        "sharpe_ratio": float(sharpe) if sharpe is not None and isfinite(sharpe) else None,
+        "sortino_ratio": float(sortino) if sortino is not None and isfinite(sortino) else None,
+        "annualization_policy": "sqrt_periods_per_year_from_median_equity_point_interval",
+    }
 
 
 def _exposure_ms(*, position_intervals: tuple[PositionInterval, ...], period_end: int | None) -> int:

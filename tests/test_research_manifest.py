@@ -173,7 +173,7 @@ def test_manifest_parses_statistical_validation_and_binds_hash() -> None:
     assert parse_manifest(changed).manifest_hash() != baseline_hash
 
 
-def test_manifest_rejects_wrc_bootstrap_until_official_generation_exists() -> None:
+def test_manifest_accepts_wrc_bootstrap_for_official_aligned_panel_generation() -> None:
     payload = _manifest()
     payload["statistical_validation"] = _statistical_validation()
     payload["statistical_validation"]["bootstrap"] = {
@@ -183,14 +183,9 @@ def test_manifest_rejects_wrc_bootstrap_until_official_generation_exists() -> No
         "seed_policy": "derived_from_selection_universe_hash",
     }
 
-    with pytest.raises(
-        ManifestValidationError,
-        match=(
-            "statistical_validation.bootstrap.method white_reality_check_block_bootstrap "
-            "is not available in official research-backtest generation"
-        ),
-    ):
-        parse_manifest(payload)
+    manifest = parse_manifest(payload)
+
+    assert manifest.statistical_validation.bootstrap.method == "white_reality_check_block_bootstrap"
 
 
 def test_production_bound_manifest_rejects_sharpe_like_primary_metric() -> None:

@@ -212,19 +212,6 @@ def build_statistical_selection_evidence(
         attempt_index=attempt_index,
         holdout_reuse_count=holdout_reuse_count,
     )
-    p_value, seed = _metric_centered_max_bootstrap_p_value(
-        metric_values=metric_values,
-        n_bootstrap=contract.bootstrap.n_bootstrap,
-        selection_hash=selection_hash,
-    )
-    gate_reasons = _statistical_gate_fail_reasons(
-        contract=contract,
-        p_value=p_value,
-        attempt_index=attempt_index,
-        holdout_reuse_count=holdout_reuse_count,
-        metric_values=metric_values,
-        candidate_count=len(candidates),
-    )
     sampling_contract = _bootstrap_sampling_contract(
         contract=contract,
         selection_hash=selection_hash,
@@ -232,6 +219,62 @@ def build_statistical_selection_evidence(
         return_unit=str(return_panel.get("return_unit") or "unavailable") if isinstance(return_panel, dict) else "unavailable",
         benchmark=contract.benchmark,
     )
+    screening_p_value: float | None = None
+    seed: int | None = sampling_contract.get("derived_seed") if isinstance(sampling_contract.get("derived_seed"), int) else None
+    wrc_p_value: float | None = None
+    promotion_grade_generation_available = False
+    evidence_grade = SCREENING_SUMMARY_BOOTSTRAP
+    statistical_method = SCREENING_METHOD_DETAIL
+    white_reality_check_method: str | None = None
+    white_reality_check_available = False
+    method_provenance: dict[str, Any] | None = None
+    if contract.bootstrap.method == "metric_centered_max_bootstrap":
+        screening_p_value, seed = _metric_centered_max_bootstrap_p_value(
+            metric_values=metric_values,
+            n_bootstrap=contract.bootstrap.n_bootstrap,
+            selection_hash=selection_hash,
+        )
+        gate_p_value = screening_p_value
+    elif _return_panel_supports_promotion_wrc(return_panel):
+        wrc_p_value = recompute_white_reality_check_block_bootstrap(
+            panel=return_panel or {},
+            sampling_contract=sampling_contract,
+        )
+        promotion_grade_generation_available = wrc_p_value is not None
+        evidence_grade = PROMOTION_GRADE_WRC if promotion_grade_generation_available else SCREENING_SUMMARY_BOOTSTRAP
+        statistical_method = contract.bootstrap.method if promotion_grade_generation_available else SCREENING_METHOD_DETAIL
+        white_reality_check_method = contract.bootstrap.method if promotion_grade_generation_available else None
+        white_reality_check_available = promotion_grade_generation_available
+        method_provenance = (
+            {
+                "implementation": "bithumb_bot.research.statistical_selection.recompute_white_reality_check_block_bootstrap",
+                "panel_source": "official_candidate_return_panel",
+                "return_unit": return_panel.get("return_unit") if isinstance(return_panel, dict) else None,
+                "recomputable": True,
+            }
+            if promotion_grade_generation_available
+            else None
+        )
+        gate_p_value = wrc_p_value
+    else:
+        gate_p_value = None
+    gate_reasons = _statistical_gate_fail_reasons(
+        contract=contract,
+        p_value=gate_p_value,
+        attempt_index=attempt_index,
+        holdout_reuse_count=holdout_reuse_count,
+        metric_values=metric_values,
+        candidate_count=len(candidates),
+    )
+    if contract.bootstrap.method in PROMOTION_GRADE_METHODS and not promotion_grade_generation_available:
+        gate_reasons = sorted(
+            set(gate_reasons)
+            | {
+                "promotion_grade_requires_aligned_return_panel",
+                "return_panel_promotion_grade_unavailable",
+                "promotion_grade_statistical_computation_missing",
+            }
+        )
     payload: dict[str, Any] = {
         "artifact_type": "statistical_selection_evidence",
         "schema_version": STATISTICAL_SELECTION_EVIDENCE_SCHEMA_VERSION,
@@ -272,12 +315,12 @@ def build_statistical_selection_evidence(
         "primary_metric": contract.primary_metric,
         "primary_metric_source": primary_metric_source,
         "bootstrap_method": contract.bootstrap.method,
-        "statistical_method": SCREENING_METHOD_DETAIL,
-        "evidence_grade": SCREENING_SUMMARY_BOOTSTRAP,
+        "statistical_method": statistical_method,
+        "evidence_grade": evidence_grade,
         "minimum_promotion_evidence_grade": PROMOTION_GRADE_WRC,
-        "promotion_grade_available": False,
-        "official_promotion_grade_wrc_generation_available": False,
-        "warnings": [PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING],
+        "promotion_grade_available": promotion_grade_generation_available,
+        "official_promotion_grade_wrc_generation_available": promotion_grade_generation_available,
+        "warnings": [] if promotion_grade_generation_available else [PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING],
         "bootstrap_sampling_contract": sampling_contract,
         "bootstrap_sampling_contract_hash": sampling_contract["content_hash"],
         "return_panel_path": str(return_panel_path.resolve()) if return_panel_path else None,
@@ -305,19 +348,23 @@ def build_statistical_selection_evidence(
         "registry_gate_result": (experiment_registry or {}).get("registry_gate_result"),
         "registry_gate_fail_reasons": list((experiment_registry or {}).get("registry_gate_fail_reasons") or []),
         "n_bootstrap": contract.bootstrap.n_bootstrap,
-        "block_length": None,
+        "block_length": sampling_contract.get("block_length"),
         "block_length_policy": contract.bootstrap.block_length_policy,
         "seed": seed,
         "effective_trial_count": effective_trial_count,
-        "summary_metric_max_bootstrap_p_value": p_value,
-        "selection_adjusted_summary_p_value": p_value,
-        "white_reality_check_p_value": None,
-        "white_reality_check_method": None,
-        "white_reality_check_available": False,
+        "summary_metric_max_bootstrap_p_value": screening_p_value,
+        "selection_adjusted_summary_p_value": screening_p_value,
+        "white_reality_check_p_value": wrc_p_value,
+        "white_reality_check_method": white_reality_check_method,
+        "white_reality_check_available": white_reality_check_available,
+        "method_provenance": method_provenance,
         "statistical_gate_result": "FAIL" if gate_reasons else "PASS",
         "gate_fail_reasons": gate_reasons,
-        "limitations": _limitations(contract),
-        "promotion_grade_limitations": _promotion_grade_limitations(contract),
+        "limitations": _limitations(contract, promotion_grade_generation_available=promotion_grade_generation_available),
+        "promotion_grade_limitations": _promotion_grade_limitations(
+            contract,
+            promotion_grade_generation_available=promotion_grade_generation_available,
+        ),
         "statistical_validation_contract": contract_payload,
     }
     payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
@@ -742,7 +789,12 @@ def _statistical_gate_fail_reasons(
     return sorted(set(reasons))
 
 
-def _limitations(contract: StatisticalSelectionContract) -> list[str]:
+def _limitations(contract: StatisticalSelectionContract, *, promotion_grade_generation_available: bool = False) -> list[str]:
+    if promotion_grade_generation_available:
+        return [
+            "spa_not_implemented",
+            "deflated_sharpe_not_implemented",
+        ]
     limitations = [
         "metric_summary_bootstrap_not_trade_or_bar_return_bootstrap",
         "summary_metric_centered_max_bootstrap_screening_only",
@@ -756,7 +808,16 @@ def _limitations(contract: StatisticalSelectionContract) -> list[str]:
     return limitations
 
 
-def _promotion_grade_limitations(contract: StatisticalSelectionContract) -> list[str]:
+def _promotion_grade_limitations(
+    contract: StatisticalSelectionContract,
+    *,
+    promotion_grade_generation_available: bool = False,
+) -> list[str]:
+    if promotion_grade_generation_available:
+        return [
+            "spa_not_implemented",
+            "deflated_sharpe_not_implemented",
+        ]
     limitations = [
         "not_full_white_reality_check",
         "not_bar_return_bootstrap",
@@ -779,22 +840,39 @@ def _bootstrap_sampling_contract(
     return_unit: str,
     benchmark: str,
 ) -> dict[str, Any]:
+    block_length = None
+    if contract.bootstrap.method == "white_reality_check_block_bootstrap":
+        if contract.bootstrap.block_length_policy == "fixed":
+            block_length = max(1, min(5, int(observation_count)))
     payload: dict[str, Any] = {
         "method": contract.bootstrap.method,
         "method_name": contract.bootstrap.method,
         "n_bootstrap": contract.bootstrap.n_bootstrap,
         "seed_policy": contract.bootstrap.seed_policy,
         "derived_seed": _seed_from_hash(selection_hash),
-        "block_length": None,
+        "block_length": block_length,
         "block_length_policy": contract.bootstrap.block_length_policy,
         "stationary_bootstrap_probability": None,
         "observation_count": int(observation_count),
         "return_unit": return_unit,
         "benchmark": benchmark,
-        "missing_observation_policy": "skip_missing_candidate_trade_returns",
+        "missing_observation_policy": (
+            "fail_closed_complete_candidate_bar_alignment_required"
+            if return_unit in PROMOTION_GRADE_RETURN_UNITS
+            else "skip_missing_candidate_trade_returns"
+        ),
     }
     payload["content_hash"] = sha256_prefixed(content_hash_payload(payload))
     return payload
+
+
+def _return_panel_supports_promotion_wrc(panel: dict[str, Any] | None) -> bool:
+    return (
+        isinstance(panel, dict)
+        and panel.get("return_unit") in PROMOTION_GRADE_RETURN_UNITS
+        and panel.get("promotion_grade_available") is True
+        and bool(panel.get("candidate_return_series"))
+    )
 
 
 def recompute_white_reality_check_block_bootstrap(

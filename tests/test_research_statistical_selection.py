@@ -84,6 +84,23 @@ def _candidates() -> list[dict[str, object]]:
     ]
 
 
+def _aligned_return_candidates() -> list[dict[str, object]]:
+    candidates = _candidates()
+    candidates[0]["validation_equity_curve"] = [
+        {"ts": 0, "equity": 1000.0, "cash": 1000.0, "asset_qty": 0.0},
+        {"ts": 60_000, "equity": 1010.0, "cash": 1010.0, "asset_qty": 0.0},
+        {"ts": 120_000, "equity": 1005.0, "cash": 1005.0, "asset_qty": 0.0},
+        {"ts": 180_000, "equity": 1020.0, "cash": 1020.0, "asset_qty": 0.0},
+    ]
+    candidates[1]["validation_equity_curve"] = [
+        {"ts": 0, "equity": 1000.0, "cash": 1000.0, "asset_qty": 0.0},
+        {"ts": 60_000, "equity": 1001.0, "cash": 1001.0, "asset_qty": 0.0},
+        {"ts": 120_000, "equity": 1002.0, "cash": 1002.0, "asset_qty": 0.0},
+        {"ts": 180_000, "equity": 1003.0, "cash": 1003.0, "asset_qty": 0.0},
+    ]
+    return candidates
+
+
 def test_selection_universe_hash_is_deterministic_and_binds_candidates() -> None:
     manifest = _manifest()
     contract = manifest.statistical_validation.as_dict()
@@ -1369,6 +1386,150 @@ def test_recompute_white_reality_check_refuses_trade_return_panel_with_excess_va
             "block_length": 2,
         },
     ) is None
+
+
+def test_aligned_portfolio_return_panel_hashes_bind_values_and_metadata() -> None:
+    panel = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=_aligned_return_candidates(),
+    )
+
+    assert panel["return_unit"] == "portfolio_bar_return"
+    assert panel["promotion_grade_available"] is True
+    assert panel["ordered_time_index"] == [60_000, 120_000, 180_000]
+    assert validate_return_panel_binding(
+        report={
+            "manifest_hash": "sha256:manifest",
+            "dataset_content_hash": "sha256:dataset",
+            "dataset_quality_hash": "sha256:quality",
+            "return_unit": "portfolio_bar_return",
+            "return_panel_hash": panel["content_hash"],
+            "candidates": _aligned_return_candidates(),
+        },
+        evidence={"return_unit": "portfolio_bar_return", "return_panel_hash": panel["content_hash"]},
+        panel=panel,
+    ) == []
+
+    tampered_values = json.loads(json.dumps(panel))
+    tampered_values["candidate_return_series"][0]["candidate_return_series_values"][0]["return_pct"] += 1.0
+    assert "return_panel_series_malformed" in validate_return_panel_binding(
+        report={"return_panel_hash": panel["content_hash"], "candidates": _aligned_return_candidates()},
+        evidence={"return_unit": "portfolio_bar_return", "return_panel_hash": panel["content_hash"]},
+        panel=tampered_values,
+    )
+
+    tampered_index = json.loads(json.dumps(panel))
+    tampered_index["ordered_time_index"][0] = 61_000
+    assert "return_panel_time_index_mismatch" in validate_return_panel_binding(
+        report={"return_panel_hash": panel["content_hash"], "candidates": _aligned_return_candidates()},
+        evidence={"return_unit": "portfolio_bar_return", "return_panel_hash": panel["content_hash"]},
+        panel=tampered_index,
+    )
+
+    tampered_benchmark = json.loads(json.dumps(panel))
+    tampered_benchmark["candidate_return_series"][0]["benchmark_return_series_values"][0]["return_pct"] = 0.1
+    assert "return_panel_series_malformed" in validate_return_panel_binding(
+        report={"return_panel_hash": panel["content_hash"], "candidates": _aligned_return_candidates()},
+        evidence={"return_unit": "portfolio_bar_return", "return_panel_hash": panel["content_hash"]},
+        panel=tampered_benchmark,
+    )
+
+
+def test_wrc_generation_succeeds_only_from_aligned_promotion_grade_panel(tmp_path: Path) -> None:
+    payload = _manifest().raw
+    payload["statistical_validation"]["bootstrap"] = {
+        "method": "white_reality_check_block_bootstrap",
+        "n_bootstrap": 25,
+        "block_length_policy": "fixed",
+        "seed_policy": "derived_from_selection_universe_hash",
+    }
+    manifest = parse_manifest(payload)
+    candidates = _aligned_return_candidates()
+    panel = build_candidate_return_panel(
+        experiment_id="stat_exp",
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        split="validation",
+        benchmark="cash",
+        candidates=candidates,
+    )
+    panel_path = tmp_path / "candidate_return_panel.json"
+    panel_path.write_text(json.dumps(panel, sort_keys=True), encoding="utf-8")
+    selection_hash = selection_universe_hash(
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        candidates=candidates,
+        required_scenario_ids=[],
+        primary_metric_source="validation_metrics",
+        benchmark="cash",
+        statistical_validation_contract=manifest.statistical_validation.as_dict(),
+    )
+
+    evidence = build_statistical_selection_evidence(
+        manifest=manifest,
+        candidates=candidates,
+        manifest_hash=manifest.manifest_hash(),
+        dataset_content_hash="sha256:dataset",
+        dataset_quality_hash="sha256:quality",
+        experiment_family_id="family",
+        hypothesis_id="hypothesis",
+        hypothesis_status="pre_registered",
+        selection_hash=selection_hash,
+        required_scenario_ids=[],
+        search_budget=2,
+        parameter_grid_size=2,
+        attempt_index=1,
+        holdout_reuse_count=0,
+        dataset_reuse_policy="single_final_holdout_for_experiment_family",
+        return_panel=panel,
+        return_panel_path=panel_path,
+    )
+
+    assert evidence["evidence_grade"] == "PROMOTION_GRADE_WRC"
+    assert evidence["official_promotion_grade_wrc_generation_available"] is True
+    assert evidence["white_reality_check_p_value"] == recompute_white_reality_check_block_bootstrap(
+        panel=panel,
+        sampling_contract=evidence["bootstrap_sampling_contract"],
+    )
+
+    tampered = dict(evidence)
+    tampered["white_reality_check_p_value"] = 0.999
+    tampered["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in tampered.items() if k != "content_hash"}))
+    report = {
+        "deployment_tier": "paper_candidate",
+        "manifest_hash": manifest.manifest_hash(),
+        "dataset_content_hash": "sha256:dataset",
+        "dataset_quality_hash": "sha256:quality",
+        "statistical_validation_contract": manifest.statistical_validation.as_dict(),
+        "selection_universe_hash": selection_hash,
+        "candidate_metric_values_hash": evidence["candidate_metric_values_hash"],
+        "candidate_count": 2,
+        "metric_value_count": 2,
+        "missing_metric_count": 0,
+        "search_budget": 2,
+        "parameter_grid_size": 2,
+        "attempt_index": 1,
+        "holdout_reuse_count": 0,
+        "dataset_reuse_policy": "single_final_holdout_for_experiment_family",
+        "statistical_evidence_hash": tampered["content_hash"],
+        "return_panel_hash": panel["content_hash"],
+        "return_panel_path": str(panel_path),
+        "return_unit": "portfolio_bar_return",
+        "candidates": candidates,
+    }
+    candidate = {**candidates[0], "deployment_tier": "paper_candidate", "statistical_validation_required": True}
+    reasons = validate_statistical_evidence_for_candidate(candidate=candidate, report=report, evidence=tampered)
+    assert "white_reality_check_p_value_recompute_mismatch" in reasons
 
 
 def test_family_registry_binding_detects_hash_tampering(tmp_path) -> None:

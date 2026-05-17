@@ -1492,20 +1492,19 @@ def _parse_statistical_bootstrap(value: Any) -> StatisticalBootstrapConfig:
     if unknown:
         raise ManifestValidationError(f"statistical_validation.bootstrap unsupported fields: {','.join(unknown)}")
     method = str(value.get("method") or "").strip()
-    if method == "white_reality_check_block_bootstrap":
+    if method not in {"metric_centered_max_bootstrap", "white_reality_check_block_bootstrap"}:
         raise ManifestValidationError(
-            "statistical_validation.bootstrap.method white_reality_check_block_bootstrap "
-            "is not available in official research-backtest generation"
-        )
-    if method != "metric_centered_max_bootstrap":
-        raise ManifestValidationError(
-            "statistical_validation.bootstrap.method must be metric_centered_max_bootstrap"
+            "statistical_validation.bootstrap.method must be metric_centered_max_bootstrap or white_reality_check_block_bootstrap"
         )
     n_bootstrap = _positive_int(value.get("n_bootstrap"), "statistical_validation.bootstrap.n_bootstrap")
     block_length_policy = str(value.get("block_length_policy") or "").strip()
     if method == "metric_centered_max_bootstrap" and block_length_policy != "not_applicable_summary_metric":
         raise ManifestValidationError(
             "statistical_validation.bootstrap.block_length_policy must be not_applicable_summary_metric for metric_centered_max_bootstrap"
+        )
+    if method == "white_reality_check_block_bootstrap" and block_length_policy != "fixed":
+        raise ManifestValidationError(
+            "statistical_validation.bootstrap.block_length_policy must be fixed for white_reality_check_block_bootstrap"
         )
     seed_policy = str(value.get("seed_policy") or "").strip()
     if seed_policy != "derived_from_selection_universe_hash":
