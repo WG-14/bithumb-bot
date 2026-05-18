@@ -6,6 +6,26 @@ from bithumb_bot.research.deployment_policy import validate_production_calibrati
 from bithumb_bot.research.experiment_manifest import ManifestValidationError, parse_manifest
 
 
+def _portfolio_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "starting_cash_krw": 1_000_000.0,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": 0.99,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
+
+
 def _manifest(*, deployment_tier: str = "paper_candidate") -> dict[str, object]:
     payload: dict[str, object] = {
         "experiment_id": "cost_contract_test",
@@ -68,6 +88,7 @@ def _manifest(*, deployment_tier: str = "paper_candidate") -> dict[str, object]:
         },
     }
     if deployment_tier != "research_only":
+        payload["portfolio_policy"] = _portfolio_policy()
         payload["execution_timing"] = {
             "fill_reference_policy": "next_candle_open",
             "allow_same_candle_close_fill": False,

@@ -6,7 +6,7 @@ from typing import Any, Callable
 from .backtest_engine import BacktestRun, BacktestRunContext, run_sma_backtest
 from .dataset_snapshot import DatasetSnapshot
 from .execution_model import ExecutionModel
-from .experiment_manifest import ExecutionTimingPolicy
+from .experiment_manifest import ExecutionTimingPolicy, PortfolioPolicy
 
 
 ResearchStrategyRunner = Callable[
@@ -18,6 +18,7 @@ ResearchStrategyRunner = Callable[
         float | None,
         ExecutionModel | None,
         ExecutionTimingPolicy | None,
+        PortfolioPolicy | None,
         BacktestRunContext | None,
     ],
     BacktestRun,
@@ -60,6 +61,7 @@ def _run_sma_with_filter(
     parameter_stability_score: float | None = None,
     execution_model: ExecutionModel | None = None,
     execution_timing_policy: ExecutionTimingPolicy | None = None,
+    portfolio_policy: PortfolioPolicy | None = None,
     context: BacktestRunContext | None = None,
 ) -> BacktestRun:
     _require_parameter(parameter_values, "SMA_SHORT")
@@ -72,6 +74,7 @@ def _run_sma_with_filter(
         parameter_stability_score=parameter_stability_score,
         execution_model=execution_model,
         execution_timing_policy=execution_timing_policy,
+        portfolio_policy=portfolio_policy,
         context=context,
     )
 

@@ -393,6 +393,26 @@ def _manifest_payload() -> dict[str, object]:
     }
 
 
+def _portfolio_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "starting_cash_krw": 1_000_000.0,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": 0.99,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
+
+
 def _statistical_validation() -> dict[str, object]:
     return {
         "required_for_promotion": True,
@@ -438,6 +458,7 @@ def _production_bound_manifest_payload(**overrides: object) -> dict[str, object]
     payload.update(
         {
             "deployment_tier": "paper_candidate",
+            "portfolio_policy": _portfolio_policy(),
             "statistical_validation": _statistical_validation(),
             "stress_suite": _stress_suite(),
             "final_selection": _final_selection(),

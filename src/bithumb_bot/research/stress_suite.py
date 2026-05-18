@@ -33,6 +33,8 @@ class StressSuiteContext:
     scenario_id: str
     split_name: str
     parameter_values: dict[str, Any]
+    portfolio_policy_hash: str | None = None
+    simulation_policy_hash: str | None = None
 
 
 def stress_suite_required(manifest_or_payload: Any) -> bool:
@@ -75,6 +77,9 @@ def analyze_stress_suite(
         "split_name": context.split_name,
         "parameter_values": context.parameter_values,
         "contract_hash": contract_hash,
+        "portfolio_policy_hash": context.portfolio_policy_hash,
+        "simulation_policy_hash": context.simulation_policy_hash,
+        "starting_cash": float(starting_cash),
     }
     fail_reasons: list[str] = []
     limitations: list[str] = []
@@ -87,7 +92,10 @@ def analyze_stress_suite(
             "candidate_id": context.candidate_id,
             "scenario_id": context.scenario_id,
             "split_name": context.split_name,
+            "portfolio_policy_hash": context.portfolio_policy_hash,
+            "simulation_policy_hash": context.simulation_policy_hash,
         },
+        "starting_cash": float(starting_cash),
     }
     if contract.period_ablation is not None:
         section = analyze_period_ablation(

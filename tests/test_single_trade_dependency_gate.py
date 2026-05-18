@@ -6,6 +6,26 @@ from bithumb_bot.research.metrics_gate_policy import metrics_gate_policy_from_ac
 from bithumb_bot.research.validation_protocol import _metrics_v2_gate_reasons
 
 
+def _portfolio_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "starting_cash_krw": 1_000_000.0,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": 0.99,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
+
+
 def _production_manifest() -> dict[str, object]:
     return {
         "experiment_id": "single_trade_dependency_test",
@@ -14,6 +34,7 @@ def _production_manifest() -> dict[str, object]:
         "deployment_tier": "paper_candidate",
         "market": "KRW-BTC",
         "interval": "1m",
+        "portfolio_policy": _portfolio_policy(),
         "dataset": {
             "source": "sqlite_candles",
             "snapshot_id": "candles_v1",

@@ -22,6 +22,9 @@ class ManifestValidationError(ValueError):
     pass
 
 
+LEGACY_PORTFOLIO_POLICY_WARNING = "legacy_portfolio_policy_default_used"
+
+
 @dataclass(frozen=True)
 class DateRange:
     start: str
@@ -103,6 +106,78 @@ class CostModel:
             "fee_rate": self.fee_rate,
             "slippage_bps": list(self.slippage_bps),
         }
+
+
+@dataclass(frozen=True)
+class PositionSizingPolicy:
+    type: str
+    buy_fraction: float
+    sell_policy: str
+    cash_buffer_policy: str
+    min_order_krw: float | None = None
+    max_order_krw: float | None = None
+    rounding_policy: str = "engine_float_no_exchange_lot_rounding"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "type": self.type,
+            "buy_fraction": self.buy_fraction,
+            "sell_policy": self.sell_policy,
+            "cash_buffer_policy": self.cash_buffer_policy,
+            "min_order_krw": self.min_order_krw,
+            "max_order_krw": self.max_order_krw,
+            "rounding_policy": self.rounding_policy,
+        }
+
+
+@dataclass(frozen=True)
+class PortfolioPolicy:
+    schema_version: int
+    starting_cash_krw: float
+    quote_currency: str
+    initial_position_qty: float
+    cash_interest_policy: str
+    position_sizing: PositionSizingPolicy
+    source: str = "manifest"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "starting_cash_krw": self.starting_cash_krw,
+            "quote_currency": self.quote_currency,
+            "initial_position_qty": self.initial_position_qty,
+            "cash_interest_policy": self.cash_interest_policy,
+            "position_sizing": self.position_sizing.as_dict(),
+            "source": self.source,
+        }
+
+    def warning_codes(self) -> tuple[str, ...]:
+        if self.source == "legacy_research_default":
+            return (LEGACY_PORTFOLIO_POLICY_WARNING,)
+        return ()
+
+    def policy_hash(self) -> str:
+        return sha256_prefixed(self.as_dict())
+
+
+def legacy_research_portfolio_policy() -> PortfolioPolicy:
+    return PortfolioPolicy(
+        schema_version=1,
+        starting_cash_krw=1_000_000.0,
+        quote_currency="KRW",
+        initial_position_qty=0.0,
+        cash_interest_policy="zero",
+        position_sizing=PositionSizingPolicy(
+            type="fractional_cash",
+            buy_fraction=0.99,
+            sell_policy="sell_all_available_position",
+            cash_buffer_policy="retain_1_percent_before_fees",
+            min_order_krw=None,
+            max_order_krw=None,
+            rounding_policy="engine_float_no_exchange_lot_rounding",
+        ),
+        source="legacy_research_default",
+    )
 
 
 @dataclass(frozen=True)
@@ -572,6 +647,7 @@ class ExperimentManifest:
     cost_model: CostModel
     execution_model: ExecutionModelConfig
     execution_timing: ExecutionTimingPolicy
+    portfolio_policy: PortfolioPolicy
     deployment_tier: str
     acceptance_gate: AcceptanceGate
     statistical_validation: StatisticalSelectionContract | None
@@ -593,6 +669,7 @@ class ExperimentManifest:
             "cost_model": self.cost_model.as_dict(),
             "execution_model": self.execution_model.as_dict(),
             "execution_timing": self.execution_timing.as_dict(),
+            "portfolio_policy": self.portfolio_policy.as_dict(),
             "deployment_tier": self.deployment_tier,
             "dataset_quality_policy": _canonical_dataset_quality_policy(self.raw.get("dataset_quality_policy")),
             "acceptance_gate": self.acceptance_gate.as_dict(),
@@ -613,6 +690,19 @@ class ExperimentManifest:
 
     def manifest_hash(self) -> str:
         return sha256_prefixed(self.canonical_payload())
+
+    def portfolio_policy_hash(self) -> str:
+        return self.portfolio_policy.policy_hash()
+
+    def simulation_policy_hash(self) -> str:
+        return sha256_prefixed(
+            {
+                "portfolio_policy_hash": self.portfolio_policy_hash(),
+                "execution_model_hash": sha256_prefixed(self.execution_model.as_dict()),
+                "execution_timing_hash": sha256_prefixed(self.execution_timing.as_dict()),
+                "cost_model_hash": sha256_prefixed(self.cost_model.as_dict()),
+            }
+        )
 
 
 def load_manifest(path: str | Path) -> ExperimentManifest:
@@ -646,6 +736,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
     )
     _parse_dataset_quality_policy(payload.get("dataset_quality_policy"))
     deployment_tier = _parse_deployment_tier(payload.get("deployment_tier") or payload.get("promotion_target"))
+    portfolio_policy = _parse_portfolio_policy(payload.get("portfolio_policy"), deployment_tier=deployment_tier)
     acceptance_gate = _parse_acceptance_gate(_required_dict(payload, "acceptance_gate"))
     if is_production_bound_target(deployment_tier) and acceptance_gate.max_single_trade_dependency_score is None:
         acceptance_gate = replace(acceptance_gate, max_single_trade_dependency_score=0.8)
@@ -690,6 +781,7 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
         cost_model=cost_model,
         execution_model=execution_model,
         execution_timing=execution_timing,
+        portfolio_policy=portfolio_policy,
         deployment_tier=deployment_tier,
         acceptance_gate=acceptance_gate,
         statistical_validation=statistical_validation,
@@ -876,6 +968,114 @@ def _parse_cost_model(payload: Any) -> CostModel:
     return CostModel(
         fee_rate=fee_rate,
         slippage_bps=tuple(_finite_non_negative_float(value, "cost_model.slippage_bps") for value in slippage),
+    )
+
+
+def _parse_portfolio_policy(value: Any, *, deployment_tier: str) -> PortfolioPolicy:
+    if value is None:
+        if is_production_bound_target(deployment_tier):
+            raise ManifestValidationError("portfolio_policy is required for production-bound manifests")
+        return legacy_research_portfolio_policy()
+    if not isinstance(value, dict):
+        raise ManifestValidationError("portfolio_policy must be an object")
+    allowed_fields = {
+        "schema_version",
+        "starting_cash_krw",
+        "quote_currency",
+        "initial_position_qty",
+        "cash_interest_policy",
+        "position_sizing",
+        "source",
+    }
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"portfolio_policy unsupported fields: {','.join(unknown)}")
+    schema_version = _positive_int(value.get("schema_version", 1), "portfolio_policy.schema_version")
+    if schema_version != 1:
+        raise ManifestValidationError("portfolio_policy.schema_version currently supports only 1")
+    starting_cash = _finite_positive_float(value.get("starting_cash_krw"), "portfolio_policy.starting_cash_krw")
+    quote_currency = str(value.get("quote_currency") or "KRW").strip().upper()
+    if quote_currency != "KRW":
+        raise ManifestValidationError("portfolio_policy.quote_currency currently supports only KRW")
+    initial_position_qty = _finite_non_negative_float(
+        value.get("initial_position_qty", 0.0),
+        "portfolio_policy.initial_position_qty",
+    )
+    cash_interest_policy = str(value.get("cash_interest_policy") or "zero").strip().lower()
+    if cash_interest_policy != "zero":
+        raise ManifestValidationError("portfolio_policy.cash_interest_policy must be zero")
+    source = str(value.get("source") or "manifest").strip().lower()
+    if source not in {"manifest", "legacy_research_default"}:
+        raise ManifestValidationError("portfolio_policy.source must be manifest or legacy_research_default")
+    if source == "legacy_research_default" and is_production_bound_target(deployment_tier):
+        raise ManifestValidationError("portfolio_policy.source legacy_research_default is not allowed for production-bound manifests")
+    sizing = _parse_position_sizing_policy(_required_dict(value, "position_sizing"))
+    return PortfolioPolicy(
+        schema_version=schema_version,
+        starting_cash_krw=starting_cash,
+        quote_currency=quote_currency,
+        initial_position_qty=initial_position_qty,
+        cash_interest_policy=cash_interest_policy,
+        position_sizing=sizing,
+        source=source,
+    )
+
+
+def _parse_position_sizing_policy(value: dict[str, Any]) -> PositionSizingPolicy:
+    allowed_fields = {
+        "type",
+        "buy_fraction",
+        "sell_policy",
+        "cash_buffer_policy",
+        "min_order_krw",
+        "max_order_krw",
+        "rounding_policy",
+    }
+    unknown = sorted(set(value) - allowed_fields)
+    if unknown:
+        raise ManifestValidationError(f"portfolio_policy.position_sizing unsupported fields: {','.join(unknown)}")
+    sizing_type = str(value.get("type") or "").strip().lower()
+    if sizing_type != "fractional_cash":
+        raise ManifestValidationError("portfolio_policy.position_sizing.type must be fractional_cash")
+    buy_fraction = _finite_positive_float(
+        value.get("buy_fraction"),
+        "portfolio_policy.position_sizing.buy_fraction",
+    )
+    if buy_fraction > 1.0:
+        raise ManifestValidationError("portfolio_policy.position_sizing.buy_fraction must be in (0, 1]")
+    sell_policy = str(value.get("sell_policy") or "").strip().lower()
+    if sell_policy != "sell_all_available_position":
+        raise ManifestValidationError(
+            "portfolio_policy.position_sizing.sell_policy must be sell_all_available_position"
+        )
+    cash_buffer_policy = str(value.get("cash_buffer_policy") or "").strip().lower()
+    if cash_buffer_policy != "retain_1_percent_before_fees":
+        raise ManifestValidationError(
+            "portfolio_policy.position_sizing.cash_buffer_policy must be retain_1_percent_before_fees"
+        )
+    rounding_policy = str(value.get("rounding_policy") or "engine_float_no_exchange_lot_rounding").strip().lower()
+    if rounding_policy != "engine_float_no_exchange_lot_rounding":
+        raise ManifestValidationError(
+            "portfolio_policy.position_sizing.rounding_policy must be engine_float_no_exchange_lot_rounding"
+        )
+    min_order = _optional_finite_non_negative_float(
+        value.get("min_order_krw"),
+        "portfolio_policy.position_sizing.min_order_krw",
+    )
+    max_order = _optional_finite_non_negative_float(
+        value.get("max_order_krw"),
+        "portfolio_policy.position_sizing.max_order_krw",
+    )
+    if min_order is not None and max_order is not None and min_order > max_order:
+        raise ManifestValidationError("portfolio_policy.position_sizing.min_order_krw must be <= max_order_krw")
+    return PositionSizingPolicy(
+        type=sizing_type,
+        buy_fraction=buy_fraction,
+        sell_policy=sell_policy,
+        cash_buffer_policy=cash_buffer_policy,
+        min_order_krw=min_order,
+        max_order_krw=max_order,
+        rounding_policy=rounding_policy,
     )
 
 
@@ -2199,6 +2399,13 @@ def _finite_non_negative_float(value: Any, field: str) -> float:
         raise ManifestValidationError(f"{field} must be a number") from exc
     if parsed < 0.0 or parsed != parsed or parsed in {float("inf"), float("-inf")}:
         raise ManifestValidationError(f"{field} must be a finite value >= 0")
+    return parsed
+
+
+def _finite_positive_float(value: Any, field: str) -> float:
+    parsed = _finite_non_negative_float(value, field)
+    if parsed <= 0.0:
+        raise ManifestValidationError(f"{field} must be > 0")
     return parsed
 
 

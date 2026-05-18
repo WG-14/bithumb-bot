@@ -31,7 +31,6 @@ from .backtest_engine import (
     BacktestResourceLimits,
     BacktestRun,
     BacktestRunContext,
-    START_CASH_KRW,
     execution_event_summary,
 )
 from .audit_trail import (
@@ -612,6 +611,9 @@ def _evaluate_candidates(
     manifest_hash = manifest.manifest_hash()
     dataset_hash = combined_dataset_fingerprint(tuple(snapshots.values()))
     dataset_quality_hash = combined_dataset_quality_hash(tuple(quality_reports.values()))
+    portfolio_policy = manifest.portfolio_policy.as_dict()
+    portfolio_policy_hash = manifest.portfolio_policy_hash()
+    simulation_policy_hash = manifest.simulation_policy_hash()
     dataset_quality_status, dataset_quality_reasons = _combined_dataset_quality_gate(quality_reports)
     dataset_warning_codes = _dataset_quality_warning_codes(quality_reports)
     top_of_book_quality_summary = _top_of_book_quality_summary(quality_reports)
@@ -845,11 +847,13 @@ def _evaluate_candidates(
                         scenario_id=scenario_id,
                         split_name="validation",
                         parameter_values=params,
+                        portfolio_policy_hash=portfolio_policy_hash,
+                        simulation_policy_hash=simulation_policy_hash,
                     ),
                     original_metrics=validation_metrics,
                     metrics_v2=validation_metrics_v2,
                     closed_trades=tuple(base.get("validation_closed_trades") or ()),
-                    starting_cash=START_CASH_KRW,
+                    starting_cash=manifest.portfolio_policy.starting_cash_krw,
                     parameter_perturbation_candidates=perturbation_candidates,
                 )
                 stress_fail_reasons.extend(str(reason) for reason in validation_stress_suite.get("fail_reasons") or [])
@@ -863,11 +867,13 @@ def _evaluate_candidates(
                             scenario_id=scenario_id,
                             split_name="final_holdout",
                             parameter_values=params,
+                            portfolio_policy_hash=portfolio_policy_hash,
+                            simulation_policy_hash=simulation_policy_hash,
                         ),
                         original_metrics=final_holdout_metrics,
                         metrics_v2=final_holdout_metrics_v2,
                         closed_trades=tuple(base.get("final_holdout_closed_trades") or ()),
-                        starting_cash=START_CASH_KRW,
+                        starting_cash=manifest.portfolio_policy.starting_cash_krw,
                         parameter_perturbation_candidates=perturbation_candidates,
                     )
                     stress_fail_reasons.extend(
@@ -949,6 +955,9 @@ def _evaluate_candidates(
                 "cost_assumption": cost_assumption,
                 "execution_calibration_gate": calibration_gate,
                 "execution_timing_policy": manifest.execution_timing.as_dict(),
+                "portfolio_policy": portfolio_policy,
+                "portfolio_policy_hash": portfolio_policy_hash,
+                "simulation_policy_hash": simulation_policy_hash,
                 "execution_reality_contract": execution_contract,
                 "execution_contract_hash": execution_contract["execution_contract_hash"],
                 "execution_capability_contract": capability_contract,
@@ -1027,6 +1036,9 @@ def _evaluate_candidates(
                     },
                     "top_of_book_quality_summary": top_of_book_quality_summary,
                     "execution_timing_policy": manifest.execution_timing.as_dict(),
+                    "portfolio_policy": portfolio_policy,
+                    "portfolio_policy_hash": portfolio_policy_hash,
+                    "simulation_policy_hash": simulation_policy_hash,
                     "execution_reality_contract": _execution_reality_contract(
                         manifest=manifest,
                         scenario=scenario,
@@ -1054,7 +1066,7 @@ def _evaluate_candidates(
                     "stress_suite_contract": stress_contract,
                     "stress_suite_contract_hash": stress_contract_hash,
                     "regime_classifier_version": MARKET_REGIME_VERSION,
-                    "warnings": [],
+                "warnings": [],
                     "repository_version": _repository_version(),
                 },
             )
@@ -1064,6 +1076,7 @@ def _evaluate_candidates(
                 | set(base.get("warnings") or ())
                 | set(dataset_warning_codes)
                 | set(probe_warnings)
+                | set(manifest.portfolio_policy.warning_codes())
             )
             if candidate_payload.get("_primary_scenario_result") is None:
                 candidate_payload["_primary_scenario_result"] = scenario_result
@@ -1079,6 +1092,9 @@ def _evaluate_candidates(
                 "cost_model": primary.get("cost_model"),
                 "base_cost_assumption": _primary_base_cost_assumption(candidate_payload),
                 "cost_assumption_contract": manifest.execution_model.as_dict(),
+                "portfolio_policy": portfolio_policy,
+                "portfolio_policy_hash": portfolio_policy_hash,
+                "simulation_policy_hash": simulation_policy_hash,
                 "execution_model": primary.get("execution_model"),
                 "execution_calibration_gate": _combined_calibration_gate(candidate_payload.get("scenario_results") or []),
                 "train_metrics": primary.get("train_metrics"),
@@ -1112,6 +1128,9 @@ def _evaluate_candidates(
                 "walk_forward_gate_result": primary.get("walk_forward_gate_result"),
                 "parameter_stability": primary.get("parameter_stability"),
                 "execution_timing_policy": manifest.execution_timing.as_dict(),
+                "portfolio_policy": portfolio_policy,
+                "portfolio_policy_hash": portfolio_policy_hash,
+                "simulation_policy_hash": simulation_policy_hash,
                 "execution_reality_contract": primary.get("execution_reality_contract"),
                 "execution_contract_hash": primary.get("execution_contract_hash"),
                 "execution_capability_contract": primary.get("execution_capability_contract"),
@@ -1220,7 +1239,8 @@ def _evaluate_candidate_base_result(
             progress_callback=progress_callback,
         )
         try:
-            return runner(
+            return _invoke_strategy_runner(
+                runner=runner,
                 dataset=snapshots[split_name],
                 parameter_values=params,
                 fee_rate=scenario.fee_rate,
@@ -1237,6 +1257,7 @@ def _evaluate_candidate_base_result(
                     ),
                 ),
                 execution_timing_policy=manifest.execution_timing,
+                portfolio_policy=manifest.portfolio_policy,
                 context=context,
             )
         except Exception as exc:
@@ -1316,6 +1337,57 @@ def _evaluate_candidate_base_result(
         "final_holdout_audit_trace_index": final_holdout.audit_trace_index if final_holdout else None,
         "retained_detail_summary": validation.retained_detail_summary,
     }
+
+
+def _invoke_strategy_runner(
+    *,
+    runner: Any,
+    dataset: DatasetSnapshot,
+    parameter_values: dict[str, Any],
+    fee_rate: float,
+    slippage_bps: float,
+    parameter_stability_score: float | None,
+    execution_model: Any,
+    execution_timing_policy: Any,
+    portfolio_policy: Any,
+    context: BacktestRunContext | None,
+) -> BacktestRun:
+    try:
+        return runner(
+            dataset=dataset,
+            parameter_values=parameter_values,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            parameter_stability_score=parameter_stability_score,
+            execution_model=execution_model,
+            execution_timing_policy=execution_timing_policy,
+            portfolio_policy=portfolio_policy,
+            context=context,
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "portfolio_policy" not in message and "unexpected keyword argument 'dataset'" not in message:
+            raise
+        if context is None:
+            return runner(
+                dataset,
+                parameter_values,
+                fee_rate,
+                slippage_bps,
+                parameter_stability_score,
+                execution_model,
+                execution_timing_policy,
+            )
+        return runner(
+            dataset=dataset,
+            parameter_values=parameter_values,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            parameter_stability_score=parameter_stability_score,
+            execution_model=execution_model,
+            execution_timing_policy=execution_timing_policy,
+            context=context,
+        )
 
 
 def _failed_candidate_base_result(
@@ -1969,16 +2041,20 @@ def _walk_forward_metrics(
             ),
         )
         if context is None:
-            return runner(
-                snapshot,
-                parameter_values,
-                active_scenario.fee_rate,
-                active_scenario.slippage_bps,
-                parameter_stability_score,
-                execution_model,
-                manifest.execution_timing,
+            return _invoke_strategy_runner(
+                runner=runner,
+                dataset=snapshot,
+                parameter_values=parameter_values,
+                fee_rate=active_scenario.fee_rate,
+                slippage_bps=active_scenario.slippage_bps,
+                parameter_stability_score=parameter_stability_score,
+                execution_model=execution_model,
+                execution_timing_policy=manifest.execution_timing,
+                portfolio_policy=manifest.portfolio_policy,
+                context=None,
             )
-        return runner(
+        return _invoke_strategy_runner(
+            runner=runner,
             dataset=snapshot,
             parameter_values=parameter_values,
             fee_rate=active_scenario.fee_rate,
@@ -1986,6 +2062,7 @@ def _walk_forward_metrics(
             parameter_stability_score=parameter_stability_score,
             execution_model=execution_model,
             execution_timing_policy=manifest.execution_timing,
+            portfolio_policy=manifest.portfolio_policy,
             context=context,
         )
 
@@ -2114,6 +2191,9 @@ def _report_payload(
 ) -> dict[str, Any]:
     dataset_hash = combined_dataset_fingerprint(snapshots)
     dataset_quality_hash = combined_dataset_quality_hash(quality_reports)
+    portfolio_policy = manifest.portfolio_policy.as_dict()
+    portfolio_policy_hash = manifest.portfolio_policy_hash()
+    simulation_policy_hash = manifest.simulation_policy_hash()
     split_hashes = {snapshot.split_name: snapshot.content_hash() for snapshot in snapshots}
     final_holdout_hashes = (
         final_holdout_hashes_from_manifest(
@@ -2246,6 +2326,8 @@ def _report_payload(
         command_name=command_name or f"research-{report_kind}",
         command_args=command_args or {},
         cost_execution_model_hash=sha256_prefixed(manifest.execution_model.as_dict()),
+        portfolio_policy_hash=portfolio_policy_hash,
+        simulation_policy_hash=simulation_policy_hash,
         execution_calibration_artifact_hash=calibration_hash,
         search_budget=parameter_grid_size,
         parameter_grid_size=parameter_grid_size,
@@ -2521,6 +2603,7 @@ def _report_payload(
     if stress_summary_candidate is None and stress_suite_required(manifest) and candidates:
         stress_summary_candidate = candidates[0]
     warnings = {warning for candidate in candidates for warning in candidate.get("warnings", [])}
+    warnings.update(manifest.portfolio_policy.warning_codes())
     if experiment_registry_fields.get("registry_gate_result") == "WARN":
         warnings.update(str(item) for item in experiment_registry_fields.get("registry_gate_fail_reasons") or [])
     if isinstance(statistical_evidence, dict) and not statistical_evidence.get(
@@ -2634,6 +2717,9 @@ def _report_payload(
         "execution_model_source": manifest.execution_model.source,
         "cost_assumption_contract": manifest.execution_model.as_dict(),
         "base_cost_assumption": _report_base_cost_assumption(candidates),
+        "portfolio_policy": portfolio_policy,
+        "portfolio_policy_hash": portfolio_policy_hash,
+        "simulation_policy_hash": simulation_policy_hash,
         "research_run": manifest.research_run.as_dict(),
         "audit_trail_policy": manifest.research_run.audit_trail.as_dict(),
         "audit_trail_status": "PASS" if manifest.research_run.audit_trail.complete_external and not audit_reasons else (

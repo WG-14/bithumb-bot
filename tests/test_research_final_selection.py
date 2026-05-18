@@ -131,6 +131,23 @@ def _manifest_payload() -> dict[str, object]:
         },
         "parameter_space": {"SMA_SHORT": [2], "SMA_LONG": [4], "SMA_FILTER_GAP_MIN_RATIO": [0.0]},
         "cost_model": {"fee_rate": 0.001, "slippage_bps": [0]},
+        "portfolio_policy": {
+            "schema_version": 1,
+            "starting_cash_krw": 1_000_000.0,
+            "quote_currency": "KRW",
+            "initial_position_qty": 0.0,
+            "cash_interest_policy": "zero",
+            "position_sizing": {
+                "type": "fractional_cash",
+                "buy_fraction": 0.99,
+                "sell_policy": "sell_all_available_position",
+                "cash_buffer_policy": "retain_1_percent_before_fees",
+                "min_order_krw": None,
+                "max_order_krw": None,
+                "rounding_policy": "engine_float_no_exchange_lot_rounding",
+            },
+            "source": "manifest",
+        },
         "execution_model": {
             "scenario_policy": "single_scenario",
             "scenarios": [

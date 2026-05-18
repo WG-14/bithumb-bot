@@ -31,6 +31,23 @@
     "fee_rate": 0.0004,
     "slippage_bps": [10]
   },
+  "portfolio_policy": {
+    "schema_version": 1,
+    "starting_cash_krw": 1000000,
+    "quote_currency": "KRW",
+    "initial_position_qty": 0.0,
+    "cash_interest_policy": "zero",
+    "position_sizing": {
+      "type": "fractional_cash",
+      "buy_fraction": 0.99,
+      "sell_policy": "sell_all_available_position",
+      "cash_buffer_policy": "retain_1_percent_before_fees",
+      "min_order_krw": null,
+      "max_order_krw": null,
+      "rounding_policy": "engine_float_no_exchange_lot_rounding"
+    },
+    "source": "manifest"
+  },
   "execution_model": {
     "scenario_policy": "must_pass_base_and_survive_stress",
     "scenarios": [

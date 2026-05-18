@@ -87,6 +87,8 @@ def build_research_lineage(
     command_args: dict[str, Any] | None = None,
     environment: dict[str, Any] | None = None,
     cost_execution_model_hash: str | None = None,
+    portfolio_policy_hash: str | None = None,
+    simulation_policy_hash: str | None = None,
     execution_calibration_artifact_hash: str | None = None,
     search_budget: int | None = None,
     parameter_grid_size: int | None = None,
@@ -143,6 +145,8 @@ def build_research_lineage(
         "command_args_hash": normalized_command_args_hash(command_args or {}),
         "environment_config_fingerprint": safe_environment_fingerprint(environment or {}),
         "cost_execution_model_hash": cost_execution_model_hash,
+        "portfolio_policy_hash": portfolio_policy_hash,
+        "simulation_policy_hash": simulation_policy_hash,
         "execution_calibration_artifact_hash": execution_calibration_artifact_hash,
         "search_budget": search_budget,
         "parameter_grid_size": parameter_grid_size,
@@ -194,6 +198,8 @@ def build_promotion_lineage(
     decision_equivalence_report_path: str | None = None,
     decision_equivalence_report_hash: str | None = None,
     execution_calibration_artifact_hash: str | None = None,
+    portfolio_policy_hash: str | None = None,
+    simulation_policy_hash: str | None = None,
     statistical_evidence_path: str | None = None,
     statistical_evidence_hash: str | None = None,
     return_panel_path: str | None = None,
@@ -248,6 +254,8 @@ def build_promotion_lineage(
             "decision_equivalence_report_path": decision_equivalence_report_path,
             "decision_equivalence_report_hash": decision_equivalence_report_hash,
             "execution_calibration_artifact_hash": candidate_calibration_hash or base_calibration_hash,
+            "portfolio_policy_hash": portfolio_policy_hash or lineage.get("portfolio_policy_hash"),
+            "simulation_policy_hash": simulation_policy_hash or lineage.get("simulation_policy_hash"),
             "statistical_evidence_path": statistical_evidence_path,
             "statistical_evidence_hash": statistical_evidence_hash,
             "return_panel_path": return_panel_path,
@@ -307,6 +315,8 @@ def reproduce_promotion(promotion_path: str | Path, *, manager: PathManager | No
         "walk_forward_report_hash": None,
         "candidate_profile_hash": None,
         "execution_calibration_artifact_hash": None,
+        "portfolio_policy_hash": None,
+        "simulation_policy_hash": None,
         "statistical_evidence_hash": None,
         "evidence_grade": None,
         "statistical_method": None,
@@ -393,6 +403,8 @@ def reproduce_promotion(promotion_path: str | Path, *, manager: PathManager | No
     summary["walk_forward_report_hash"] = lineage.get("walk_forward_report_hash")
     summary["candidate_profile_hash"] = lineage.get("candidate_profile_hash")
     summary["execution_calibration_artifact_hash"] = lineage.get("execution_calibration_artifact_hash")
+    summary["portfolio_policy_hash"] = lineage.get("portfolio_policy_hash")
+    summary["simulation_policy_hash"] = lineage.get("simulation_policy_hash")
     summary["statistical_evidence_hash"] = lineage.get("statistical_evidence_hash")
     summary["return_panel_hash"] = lineage.get("return_panel_hash")
     summary["evidence_grade"] = promotion.get("evidence_grade")
@@ -460,8 +472,9 @@ def reproduce_promotion(promotion_path: str | Path, *, manager: PathManager | No
         lineage.get("candidate_profile_hash"),
         "candidate_hash_mismatch",
     )
-
     _verify_artifact_hash(summary, lineage, "backtest_report", required=True)
+    production_bound = is_production_bound_target(promotion.get("deployment_tier"))
+    _verify_policy_hash_binding(summary, promotion, lineage, required=production_bound)
     _verify_backtest_audit_trail_binding(summary, lineage, active_manager)
     final_selection_required = bool(promotion.get("final_selection_required")) or is_production_bound_target(
         promotion.get("deployment_tier")
@@ -621,6 +634,53 @@ def _verify_backtest_audit_trail_binding(
         summary["mismatches"].append(
             _mismatch("backtest_report.audit_trail", "valid_binding", reason, reason)
         )
+
+
+def _verify_policy_hash_binding(
+    summary: dict[str, Any],
+    promotion: dict[str, Any],
+    lineage: dict[str, Any],
+    *,
+    required: bool,
+) -> None:
+    for field, reason in (
+        ("portfolio_policy_hash", "portfolio_policy_hash_mismatch"),
+        ("simulation_policy_hash", "simulation_policy_hash_mismatch"),
+    ):
+        promotion_value = promotion.get(field)
+        lineage_value = lineage.get(field)
+        if required and not str(promotion_value or "").startswith("sha256:"):
+            summary["mismatches"].append(_mismatch(field, "sha256:<required>", promotion_value, f"{field}_missing"))
+        if required and not str(lineage_value or "").startswith("sha256:"):
+            summary["mismatches"].append(
+                _mismatch(f"lineage.{field}", "sha256:<required>", lineage_value, f"{field}_missing")
+            )
+        if promotion_value or lineage_value:
+            _compare(summary, field, promotion_value, lineage_value, reason)
+    report = _load_optional_artifact(lineage.get("backtest_report_path"))
+    if not isinstance(report, dict):
+        return
+    for field, reason in (
+        ("portfolio_policy_hash", "portfolio_policy_hash_mismatch"),
+        ("simulation_policy_hash", "simulation_policy_hash_mismatch"),
+    ):
+        report_value = report.get(field)
+        if required and not str(report_value or "").startswith("sha256:"):
+            summary["mismatches"].append(
+                _mismatch(f"backtest_report.{field}", "sha256:<required>", report_value, f"{field}_missing")
+            )
+        if promotion.get(field) or report_value:
+            _compare(summary, f"backtest_report.{field}", promotion.get(field), report_value, reason)
+    candidates = report.get("candidates")
+    if isinstance(candidates, list):
+        candidate = next((item for item in candidates if item.get("parameter_candidate_id") == promotion.get("candidate_id")), None)
+        if isinstance(candidate, dict):
+            for field, reason in (
+                ("portfolio_policy_hash", "portfolio_policy_hash_mismatch"),
+                ("simulation_policy_hash", "simulation_policy_hash_mismatch"),
+            ):
+                if promotion.get(field) or candidate.get(field):
+                    _compare(summary, f"backtest_report.candidate.{field}", promotion.get(field), candidate.get(field), reason)
 
 
 def _verify_artifact_hash(

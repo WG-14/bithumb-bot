@@ -35,6 +35,26 @@ def _manifest() -> dict[str, object]:
     }
 
 
+def _portfolio_policy(*, starting_cash: float = 1_000_000.0, buy_fraction: float = 0.99) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "starting_cash_krw": starting_cash,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": buy_fraction,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
+
+
 def _statistical_validation() -> dict[str, object]:
     return {
         "required_for_promotion": True,
@@ -121,6 +141,7 @@ def _final_selection() -> dict[str, object]:
 def _production_manifest() -> dict[str, object]:
     payload = _manifest()
     payload["deployment_tier"] = "paper_candidate"
+    payload["portfolio_policy"] = _portfolio_policy()
     payload["execution_model"] = {
         "scenario_policy": "single_scenario",
         "scenarios": [
@@ -154,6 +175,71 @@ def test_manifest_parses_required_contract() -> None:
     assert manifest.execution_model.source == "legacy_cost_model"
     assert manifest.execution_model.scenarios[0].type == "fixed_bps"
     assert manifest.execution_model.scenarios[0].slippage_bps == 0.0
+    assert manifest.portfolio_policy.source == "legacy_research_default"
+    assert "legacy_portfolio_policy_default_used" in manifest.portfolio_policy.warning_codes()
+
+
+def test_portfolio_policy_binds_manifest_hash() -> None:
+    payload = _manifest()
+    payload["portfolio_policy"] = _portfolio_policy()
+    baseline = parse_manifest(payload)
+
+    changed_cash = _manifest()
+    changed_cash["portfolio_policy"] = _portfolio_policy(starting_cash=2_000_000.0)
+    changed_fraction = _manifest()
+    changed_fraction["portfolio_policy"] = _portfolio_policy(buy_fraction=0.5)
+
+    assert baseline.canonical_payload()["portfolio_policy"]["source"] == "manifest"
+    assert parse_manifest(changed_cash).manifest_hash() != baseline.manifest_hash()
+    assert parse_manifest(changed_fraction).manifest_hash() != baseline.manifest_hash()
+
+
+def test_production_bound_manifest_requires_portfolio_policy() -> None:
+    payload = _production_manifest()
+    payload.pop("portfolio_policy")
+
+    with pytest.raises(ManifestValidationError, match="portfolio_policy is required"):
+        parse_manifest(payload)
+
+
+@pytest.mark.parametrize(
+    ("mutator", "message"),
+    [
+        (lambda policy: policy.update({"starting_cash_krw": 0}), "starting_cash_krw"),
+        (
+            lambda policy: policy["position_sizing"].update({"buy_fraction": 0}),
+            "buy_fraction",
+        ),
+        (
+            lambda policy: policy["position_sizing"].update({"buy_fraction": 1.1}),
+            "buy_fraction",
+        ),
+        (
+            lambda policy: policy["position_sizing"].update({"type": "fixed_notional"}),
+            "type must be fractional_cash",
+        ),
+        (
+            lambda policy: policy["position_sizing"].update({"sell_policy": "sell_half"}),
+            "sell_policy must be sell_all_available_position",
+        ),
+        (
+            lambda policy: policy["position_sizing"].update({"cash_buffer_policy": "none"}),
+            "cash_buffer_policy must be retain_1_percent_before_fees",
+        ),
+        (
+            lambda policy: policy["position_sizing"].update({"rounding_policy": "exchange_lot"}),
+            "rounding_policy must be engine_float_no_exchange_lot_rounding",
+        ),
+    ],
+)
+def test_portfolio_policy_invalid_values_fail_clearly(mutator, message) -> None:
+    payload = _manifest()
+    policy = _portfolio_policy()
+    mutator(policy)
+    payload["portfolio_policy"] = policy
+
+    with pytest.raises(ManifestValidationError, match=message):
+        parse_manifest(payload)
 
 
 def test_manifest_parses_statistical_validation_and_binds_hash() -> None:

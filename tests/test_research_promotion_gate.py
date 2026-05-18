@@ -61,6 +61,26 @@ def _production_safe_execution_timing(**overrides):
     return payload
 
 
+def _portfolio_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "starting_cash_krw": 1_000_000.0,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": 0.99,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
+
+
 def _candidate(**overrides):
     execution_contract = build_execution_reality_contract(
         fill_reference_policy="next_candle_open",
@@ -79,6 +99,9 @@ def _candidate(**overrides):
     payload = {
         "experiment_id": "promo_exp",
         "manifest_hash": "sha256:manifest",
+        "portfolio_policy": _portfolio_policy(),
+        "portfolio_policy_hash": sha256_prefixed(_portfolio_policy()),
+        "simulation_policy_hash": "sha256:simulation",
         "dataset_snapshot_id": "snap",
         "dataset_content_hash": "sha256:dataset",
         "dataset_quality_hash": "sha256:quality",
@@ -439,6 +462,8 @@ def _lineage(*, execution_calibration_artifact_hash: str | None = None) -> dict[
         command_name="research-backtest",
         command_args={"manifest": "/external/manifest.json"},
         execution_calibration_artifact_hash=execution_calibration_artifact_hash,
+        portfolio_policy_hash=sha256_prefixed(_portfolio_policy()),
+        simulation_policy_hash="sha256:simulation",
         search_budget=4,
         parameter_grid_size=4,
         attempt_index=2,
@@ -461,6 +486,9 @@ def _write_report_without_lineage(manager: PathManager, candidate: dict[str, obj
         "dataset_snapshot_id": "snap",
         "dataset_content_hash": "sha256:dataset",
         "dataset_quality_hash": "sha256:quality",
+        "portfolio_policy": candidate.get("portfolio_policy"),
+        "portfolio_policy_hash": candidate.get("portfolio_policy_hash"),
+        "simulation_policy_hash": candidate.get("simulation_policy_hash"),
         "dataset_quality_gate_status": "PASS",
         "dataset_quality_gate_reasons": [],
         "dataset_quality_reports": {
@@ -520,6 +548,9 @@ def _write_report_with_lineage(
         "dataset_snapshot_id": "snap",
         "dataset_content_hash": "sha256:dataset",
         "dataset_quality_hash": "sha256:quality",
+        "portfolio_policy": candidate.get("portfolio_policy"),
+        "portfolio_policy_hash": candidate.get("portfolio_policy_hash"),
+        "simulation_policy_hash": candidate.get("simulation_policy_hash"),
         "dataset_quality_gate_status": "PASS",
         "dataset_quality_gate_reasons": [],
         "dataset_quality_reports": {
@@ -3853,6 +3884,27 @@ def test_reproduce_rejects_final_selection_lineage_hash_drift(tmp_path, monkeypa
 
     assert summary["ok"] is False
     assert summary["reason"] == "final_selection_score_hash_mismatch"
+
+
+def test_reproduce_rejects_portfolio_policy_hash_mismatch(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    candidate = _production_candidate()
+    _write_report_with_lineage(manager, candidate)
+    result = promote_candidate(experiment_id="promo_exp", candidate_id="candidate_001", manager=manager)
+    payload = dict(result.artifact)
+    payload["lineage"] = dict(payload["lineage"])
+    payload["lineage"]["portfolio_policy_hash"] = "sha256:" + "0" * 64
+    payload["lineage"].pop("lineage_hash", None)
+    payload["lineage"]["lineage_hash"] = compute_lineage_hash(payload["lineage"])
+    payload["lineage_hash"] = payload["lineage"]["lineage_hash"]
+    payload["content_hash"] = sha256_prefixed(content_hash_payload({k: v for k, v in payload.items() if k != "content_hash"}))
+    path = result.artifact_path
+    write_json_atomic(path, payload)
+
+    summary = reproduce_promotion(path).summary
+
+    assert summary["ok"] is False
+    assert summary["reason"] == "portfolio_policy_hash_mismatch"
 
 
 def test_production_bound_promotion_binds_calibration_hash_when_base_lineage_lacks_it(tmp_path, monkeypatch) -> None:

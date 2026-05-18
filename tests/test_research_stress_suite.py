@@ -140,6 +140,61 @@ def test_distributed_profits_stress_suite_is_deterministic_and_passes() -> None:
     json.dumps(first, allow_nan=False)
 
 
+def test_stress_suite_hash_binds_portfolio_policy_context_and_starting_cash() -> None:
+    manifest = parse_manifest(_contract_payload())
+    base_context = _context()
+    policy_context = StressSuiteContext(
+        manifest_hash=base_context.manifest_hash,
+        experiment_id=base_context.experiment_id,
+        candidate_id=base_context.candidate_id,
+        scenario_id=base_context.scenario_id,
+        split_name=base_context.split_name,
+        parameter_values=base_context.parameter_values,
+        portfolio_policy_hash="sha256:portfolio-a",
+        simulation_policy_hash="sha256:simulation-a",
+    )
+    changed_context = StressSuiteContext(
+        manifest_hash=base_context.manifest_hash,
+        experiment_id=base_context.experiment_id,
+        candidate_id=base_context.candidate_id,
+        scenario_id=base_context.scenario_id,
+        split_name=base_context.split_name,
+        parameter_values=base_context.parameter_values,
+        portfolio_policy_hash="sha256:portfolio-b",
+        simulation_policy_hash="sha256:simulation-b",
+    )
+
+    first = analyze_stress_suite(
+        contract=manifest.stress_suite,
+        context=policy_context,
+        original_metrics={"return_pct": 10.0},
+        metrics_v2=_metrics_v2(),
+        closed_trades=_trades([10_000.0, 9_000.0, 8_000.0, -2_000.0]),
+        starting_cash=1_000_000.0,
+    )
+    changed_policy = analyze_stress_suite(
+        contract=manifest.stress_suite,
+        context=changed_context,
+        original_metrics={"return_pct": 10.0},
+        metrics_v2=_metrics_v2(),
+        closed_trades=_trades([10_000.0, 9_000.0, 8_000.0, -2_000.0]),
+        starting_cash=1_000_000.0,
+    )
+    changed_cash = analyze_stress_suite(
+        contract=manifest.stress_suite,
+        context=policy_context,
+        original_metrics={"return_pct": 10.0},
+        metrics_v2=_metrics_v2(),
+        closed_trades=_trades([10_000.0, 9_000.0, 8_000.0, -2_000.0]),
+        starting_cash=2_000_000.0,
+    )
+
+    assert first["context"]["portfolio_policy_hash"] == "sha256:portfolio-a"
+    assert first["starting_cash"] == 1_000_000.0
+    assert changed_policy["stress_suite_hash"] != first["stress_suite_hash"]
+    assert changed_cash["stress_suite_hash"] != first["stress_suite_hash"]
+
+
 def test_no_closed_trades_fails_with_stable_reason() -> None:
     manifest = parse_manifest(_contract_payload())
 

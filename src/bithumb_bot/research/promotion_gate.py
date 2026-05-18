@@ -54,6 +54,9 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "cost_model": candidate.get("cost_model"),
         "base_cost_assumption": candidate.get("base_cost_assumption"),
         "cost_assumption_contract": candidate.get("cost_assumption_contract"),
+        "portfolio_policy": candidate.get("portfolio_policy"),
+        "portfolio_policy_hash": candidate.get("portfolio_policy_hash"),
+        "simulation_policy_hash": candidate.get("simulation_policy_hash"),
         "source_experiment": candidate.get("experiment_id"),
         "manifest_hash": candidate.get("manifest_hash"),
         "experiment_family_id": candidate.get("experiment_family_id"),
@@ -206,6 +209,7 @@ def evaluate_candidate_for_promotion(candidate: dict[str, Any]) -> tuple[bool, l
     _extend_production_calibration_policy_reasons(candidate, reasons)
     _extend_metrics_contract_reasons(candidate, reasons)
     _extend_stress_suite_reasons(candidate, reasons)
+    _extend_portfolio_policy_reasons(candidate, reasons)
     _extend_probe_grade_reasons(candidate, reasons)
     profile_hash = candidate.get("candidate_profile_hash")
     if not profile_hash:
@@ -247,8 +251,30 @@ def validate_backtest_candidate_for_promotion(candidate: dict[str, Any] | None) 
     _extend_production_calibration_policy_reasons(candidate, reasons, prefix="backtest_")
     _extend_metrics_contract_reasons(candidate, reasons, prefix="backtest_")
     _extend_stress_suite_reasons(candidate, reasons, prefix="backtest_")
+    _extend_portfolio_policy_reasons(candidate, reasons, prefix="backtest_")
     _extend_probe_grade_reasons(candidate, reasons, prefix="backtest_")
     return not reasons, reasons
+
+
+def _extend_portfolio_policy_reasons(
+    candidate: dict[str, Any],
+    reasons: list[str],
+    *,
+    prefix: str = "",
+) -> None:
+    if not is_production_bound_target(candidate.get("deployment_tier")):
+        return
+    policy = candidate.get("portfolio_policy")
+    policy_hash = candidate.get("portfolio_policy_hash")
+    simulation_hash = candidate.get("simulation_policy_hash")
+    if not isinstance(policy, dict):
+        reasons.extend([f"{prefix}portfolio_policy_missing", "portfolio_policy_missing"])
+    elif not isinstance(policy_hash, str) or not policy_hash.startswith("sha256:"):
+        reasons.extend([f"{prefix}portfolio_policy_hash_missing", "portfolio_policy_hash_missing"])
+    elif sha256_prefixed(policy) != policy_hash:
+        reasons.extend([f"{prefix}portfolio_policy_hash_mismatch", "portfolio_policy_hash_mismatch"])
+    if not isinstance(simulation_hash, str) or not simulation_hash.startswith("sha256:"):
+        reasons.extend([f"{prefix}simulation_policy_hash_missing", "simulation_policy_hash_missing"])
 
 
 def _extend_probe_grade_reasons(
@@ -807,6 +833,9 @@ def promote_candidate(
         "dataset_quality_hash": candidate.get("dataset_quality_hash"),
         "dataset_quality_gate_status": candidate.get("dataset_quality_gate_status"),
         "dataset_quality_gate_reasons": candidate.get("dataset_quality_gate_reasons"),
+        "portfolio_policy": candidate.get("portfolio_policy"),
+        "portfolio_policy_hash": candidate.get("portfolio_policy_hash"),
+        "simulation_policy_hash": candidate.get("simulation_policy_hash"),
         "market": report.get("market"),
         "interval": report.get("interval"),
         "repository_version": candidate.get("repository_version") or report.get("repository_version"),
@@ -986,6 +1015,8 @@ def promote_candidate(
                 walk_forward_report_hash=artifact["walk_forward_report_hash"],
                 candidate_id=candidate_id,
                 candidate_profile_hash=verified_profile_hash,
+                portfolio_policy_hash=artifact.get("portfolio_policy_hash"),
+                simulation_policy_hash=artifact.get("simulation_policy_hash"),
                 promotion_artifact_path=str(path.resolve()),
                 execution_calibration_artifact_hash=candidate_calibration_hash,
                 statistical_evidence_path=artifact.get("statistical_evidence_path"),

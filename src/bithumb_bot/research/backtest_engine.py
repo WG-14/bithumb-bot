@@ -24,7 +24,7 @@ from .execution_timing import (
     candle_close_ts,
     resolve_execution_reference,
 )
-from .experiment_manifest import ExecutionTimingPolicy
+from .experiment_manifest import ExecutionTimingPolicy, PortfolioPolicy, legacy_research_portfolio_policy
 from .metrics import ResearchMetrics
 from .metrics_contract import (
     ClosedTradeRecord,
@@ -36,8 +36,6 @@ from .metrics_contract import (
 )
 
 
-START_CASH_KRW = 1_000_000.0
-BUY_FRACTION = 0.99
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -318,6 +316,7 @@ def run_sma_backtest(
     parameter_stability_score: float | None = None,
     execution_model: ExecutionModel | None = None,
     execution_timing_policy: ExecutionTimingPolicy | None = None,
+    portfolio_policy: PortfolioPolicy | None = None,
     context: BacktestRunContext | None = None,
 ) -> BacktestRun:
     short_n = int(parameter_values.get("SMA_SHORT", parameter_values.get("short_n", 0)))
@@ -334,6 +333,10 @@ def run_sma_backtest(
 
     candles = dataset.candles
     run_context = context or BacktestRunContext(report_detail="full")
+    policy = portfolio_policy or legacy_research_portfolio_policy()
+    starting_cash = float(policy.starting_cash_krw)
+    initial_qty = float(policy.initial_position_qty)
+    buy_fraction = float(policy.position_sizing.buy_fraction)
     accumulator = _BacktestAccumulator(context=run_context, total_candles=len(candles))
     dataset_content_hash = dataset.content_hash()
     warnings: list[str] = []
@@ -341,7 +344,7 @@ def run_sma_backtest(
         audit_trace_index = _complete_audit_trace(run_context, status="completed")
         return BacktestRun(
             metrics=_empty_metrics(parameter_stability_score),
-            metrics_v2=_empty_metrics_v2(),
+            metrics_v2=_empty_metrics_v2(starting_cash=starting_cash, initial_position_qty=initial_qty),
             trades=(),
             candle_count=len(candles),
             warnings=("not_enough_candles",),
@@ -363,13 +366,13 @@ def run_sma_backtest(
         min_trend_strength_ratio=max(0.0, min_gap),
         low_volatility_ratio=max(0.0, min_range),
     )
-    cash = START_CASH_KRW
-    qty = 0.0
+    cash = starting_cash
+    qty = initial_qty
     entry_cost_basis = 0.0
     entry_regime_snapshot: dict[str, object] | None = None
     entry_fee = 0.0
     entry_slippage = 0.0
-    peak = START_CASH_KRW
+    peak = starting_cash
     max_drawdown = 0.0
     fee_total = 0.0
     slippage_total = 0.0
@@ -382,22 +385,22 @@ def run_sma_backtest(
         equity_curve.append(
             EquityPoint(
                 ts=candle_close_ts(candles[0], interval=dataset.interval),
-                equity=START_CASH_KRW,
-                cash=START_CASH_KRW,
-                asset_qty=0.0,
+                equity=starting_cash,
+                cash=starting_cash,
+                asset_qty=initial_qty,
             )
         )
     accumulator.update_equity(
         retained=retain_initial_equity,
         ts=candle_close_ts(candles[0], interval=dataset.interval),
-        asset_qty=0.0,
+        asset_qty=initial_qty,
     )
     _trace_equity_mark(
         run_context,
         ts=candle_close_ts(candles[0], interval=dataset.interval),
-        equity=START_CASH_KRW,
-        cash=START_CASH_KRW,
-        asset_qty=0.0,
+        equity=starting_cash,
+        cash=starting_cash,
+        asset_qty=initial_qty,
     )
     closed_pnls: list[float] = []
     prev_above: bool | None = None
@@ -497,6 +500,7 @@ def run_sma_backtest(
             fee_rate=fee_rate,
             slippage_bps=slippage_bps,
             timing_policy=timing_policy,
+            portfolio_policy=policy,
             candle_ts=int(candle.ts),
             decision_ts=int(decision_boundary_ts),
             raw_signal=raw_signal,
@@ -550,7 +554,7 @@ def run_sma_backtest(
                     timing_policy=timing_policy,
                     side="BUY",
                     fee_rate=fee_rate,
-                    requested_notional=cash * BUY_FRACTION,
+                    requested_notional=cash * buy_fraction,
                 )
                 warnings.extend(_execution_reference_warnings(fill))
                 trades.append(_trade_from_fill(fill, cash=cash, asset_qty=qty, pnl=None))
@@ -578,7 +582,7 @@ def run_sma_backtest(
                 accumulator.maybe_emit_heartbeat(index - long_n + 1)
                 accumulator.check_limits(candles_processed=index - long_n + 1, trades=trades)
                 continue
-            spend = cash * BUY_FRACTION
+            spend = cash * buy_fraction
             fill = model.simulate(
                 ExecutionRequest(
                     signal_ts=signal.signal_candle_start_ts,
@@ -862,7 +866,7 @@ def run_sma_backtest(
         cash=cash,
         asset_qty=qty,
     )
-    return_pct = ((final_equity / START_CASH_KRW) - 1.0) * 100.0
+    return_pct = ((final_equity / starting_cash) - 1.0) * 100.0 if starting_cash > 0.0 else 0.0
     metrics = _metrics(
         return_pct=return_pct,
         max_drawdown_pct=max_drawdown * 100.0,
@@ -879,10 +883,10 @@ def run_sma_backtest(
         if accumulator.retain_full_detail()
         else regime_coverage_accumulator.coverage(trades=trades)
     )
-    performance = aggregate_regime_performance(trades=trades, coverage=coverage, start_cash=START_CASH_KRW)
+    performance = aggregate_regime_performance(trades=trades, coverage=coverage, start_cash=starting_cash)
     execution_summary = execution_event_summary(trades)
     metrics_v2 = build_metrics_v2(
-        starting_cash=START_CASH_KRW,
+        starting_cash=starting_cash,
         final_cash=cash,
         final_asset_qty=qty,
         final_mark_price=last.close,
@@ -1207,6 +1211,7 @@ def _research_decision_payload(
     fee_rate: float,
     slippage_bps: float,
     timing_policy: ExecutionTimingPolicy,
+    portfolio_policy: PortfolioPolicy,
     candle_ts: int,
     decision_ts: int,
     raw_signal: str,
@@ -1230,7 +1235,12 @@ def _research_decision_payload(
         "source": "research_execution_model",
         "fee_rate": float(fee_rate),
         "slippage_bps": float(slippage_bps),
-        "sizing": "cash_fraction_0.99_or_full_sellable_qty",
+        "portfolio_policy_hash": portfolio_policy.policy_hash(),
+        "position_sizing": portfolio_policy.position_sizing.as_dict(),
+        "sizing": (
+            f"cash_fraction_{portfolio_policy.position_sizing.buy_fraction:g}"
+            "_or_full_sellable_qty"
+        ),
     }
     fee_authority_hash = canonical_payload_hash({"source": "research_manifest", "fee_rate": float(fee_rate)})
     order_rules_hash = canonical_payload_hash(order_rules)
@@ -1670,11 +1680,12 @@ def empty_execution_event_summary() -> dict[str, object]:
     return execution_event_summary(())
 
 
-def _empty_metrics_v2() -> MetricContractV2:
+def _empty_metrics_v2(*, starting_cash: float | None = None, initial_position_qty: float = 0.0) -> MetricContractV2:
+    cash = float(starting_cash if starting_cash is not None else legacy_research_portfolio_policy().starting_cash_krw)
     return build_metrics_v2(
-        starting_cash=START_CASH_KRW,
-        final_cash=START_CASH_KRW,
-        final_asset_qty=0.0,
+        starting_cash=cash,
+        final_cash=cash,
+        final_asset_qty=float(initial_position_qty),
         final_mark_price=0.0,
         equity_curve=(),
         position_intervals=(),

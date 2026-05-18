@@ -666,6 +666,26 @@ def _write_manifest(path: Path, *, calibration_required: bool = False, calibrati
     )
 
 
+def _portfolio_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "starting_cash_krw": 1_000_000.0,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": 0.99,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
+
+
 def _safe_production_execution_timing() -> dict[str, object]:
     return {
         "fill_reference_policy": "next_candle_open",
@@ -962,6 +982,7 @@ def test_required_top_of_book_zero_rows_fails_without_per_candle_quote_loader(
     _write_manifest(manifest_path, calibration_required=True)
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw["deployment_tier"] = "paper_candidate"
+    raw["portfolio_policy"] = _portfolio_policy()
     raw["execution_timing"] = _safe_production_execution_timing()
     raw["dataset"]["top_of_book"] = {
         "source": "sqlite_orderbook_top_snapshots",
@@ -1627,6 +1648,7 @@ def test_research_readiness_fail_closed_reports_separate_production_gate_reasons
     _write_manifest(manifest_path, calibration_required=True)
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw["deployment_tier"] = "paper_candidate"
+    raw["portfolio_policy"] = _portfolio_policy()
     raw["execution_timing"] = _safe_production_execution_timing()
     raw["dataset"]["top_of_book"] = {
         "source": "sqlite_orderbook_top_snapshots",
@@ -1677,6 +1699,7 @@ def test_diagnostic_only_policy_is_report_metadata_not_gate_relaxation(
     _write_manifest(manifest_path)
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw["deployment_tier"] = "paper_candidate"
+    raw["portfolio_policy"] = _portfolio_policy()
     raw["execution_timing"] = _safe_production_execution_timing()
     raw["dataset_quality_policy"] = {
         "dense_candles_required": False,

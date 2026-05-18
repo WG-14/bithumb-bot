@@ -108,9 +108,30 @@ def _manifest() -> dict[str, object]:
     }
 
 
+def _portfolio_policy(*, starting_cash: float = 1_000_000.0, buy_fraction: float = 0.99) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "starting_cash_krw": starting_cash,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": buy_fraction,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
+
+
 def _production_bound_statistical_manifest() -> dict[str, object]:
     payload = _manifest()
     payload["deployment_tier"] = "paper_candidate"
+    payload["portfolio_policy"] = _portfolio_policy()
     payload["execution_model"] = {
         "type": "fixed_bps",
         "fee_rate": 0.0,
@@ -376,6 +397,62 @@ def test_same_manifest_and_dataset_produce_same_content_hash(tmp_path, monkeypat
         "audit_trace_manifest": "derived/research/deterministic_sma/trace_manifest.json",
     }
     assert _verify_report_content_hash(persisted, label="backtest_report") == persisted["content_hash"]
+
+
+def test_research_report_candidate_and_lineage_bind_portfolio_policy(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["portfolio_policy"] = _portfolio_policy(starting_cash=2_000_000.0, buy_fraction=0.5)
+    manifest = parse_manifest(payload)
+
+    report = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    candidate = report["candidates"][0]
+
+    assert report["portfolio_policy"] == manifest.portfolio_policy.as_dict()
+    assert report["portfolio_policy_hash"] == manifest.portfolio_policy_hash()
+    assert report["simulation_policy_hash"] == manifest.simulation_policy_hash()
+    assert candidate["portfolio_policy"] == report["portfolio_policy"]
+    assert candidate["portfolio_policy_hash"] == report["portfolio_policy_hash"]
+    assert candidate["simulation_policy_hash"] == report["simulation_policy_hash"]
+    assert report["lineage"]["portfolio_policy_hash"] == report["portfolio_policy_hash"]
+    assert report["lineage"]["simulation_policy_hash"] == report["simulation_policy_hash"]
+    assert candidate["candidate_profile_hash"].startswith("sha256:")
+
+
+def test_sma_backtest_uses_manifest_portfolio_policy_for_cash_and_buy_fraction() -> None:
+    dataset = _snapshot_from_closes([100, 99, 98, 97, 99, 102, 105, 104, 103, 100, 98, 96])
+    manifest = parse_manifest({**_manifest(), "portfolio_policy": _portfolio_policy(starting_cash=2_000_000.0, buy_fraction=0.5)})
+
+    result = run_sma_backtest(
+        dataset=dataset,
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4, "SMA_FILTER_GAP_MIN_RATIO": 0.0},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        portfolio_policy=manifest.portfolio_policy,
+        context=BacktestRunContext(report_detail="full"),
+    )
+    buy = next(trade for trade in result.trades if trade["side"] == "BUY")
+
+    assert result.equity_curve[0].cash == pytest.approx(2_000_000.0)
+    assert buy["execution"]["requested_notional"] == pytest.approx(1_000_000.0)
+
+
+def test_research_engine_has_no_hidden_portfolio_policy_constants() -> None:
+    source = Path(backtest_engine.__file__).read_text(encoding="utf-8")
+
+    assert "START_CASH_KRW =" not in source
+    assert "BUY_FRACTION =" not in source
+    assert "cash_fraction_0.99" not in source
 
 
 def test_production_declared_mismatch_rejects_before_final_holdout_split_load(tmp_path, monkeypatch) -> None:
