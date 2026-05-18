@@ -467,7 +467,7 @@ def test_market_order_extra_cost_bps_does_not_satisfy_market_impact_required() -
         parse_manifest(payload)
 
 
-def test_depth_walk_manifest_type_is_explicitly_not_wired_to_research_backtest() -> None:
+def test_depth_walk_manifest_type_is_wired_to_research_backtest_scenarios() -> None:
     payload = _manifest_payload()
     payload["execution_model"] = {
         "type": "depth_walk",
@@ -475,8 +475,9 @@ def test_depth_walk_manifest_type_is_explicitly_not_wired_to_research_backtest()
         "slippage_bps": 0.0,
     }
 
-    with pytest.raises(ManifestValidationError, match="depth_walk is a standalone experimental primitive"):
-        parse_manifest(payload)
+    manifest = parse_manifest(payload)
+
+    assert manifest.execution_model.scenarios[0].type == "depth_walk"
 
 
 @pytest.mark.parametrize(

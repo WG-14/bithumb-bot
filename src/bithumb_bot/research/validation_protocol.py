@@ -10,6 +10,7 @@ from typing import Any, Callable
 from bithumb_bot.execution_reality_contract import (
     build_execution_reality_contract,
     build_execution_capability_contract,
+    unsupported_capability_reasons,
 )
 from bithumb_bot.execution_quality import ExecutionQualityThresholds
 from bithumb_bot.paths import PathManager
@@ -41,7 +42,7 @@ from .audit_trail import (
 )
 from .deployment_policy import validate_production_calibration_policy
 from .execution_calibration import compare_calibration_to_scenario
-from .execution_model import FixedBpsExecutionModel, StressExecutionModel, model_params_hash
+from .execution_model import DepthWalkExecutionModel, FixedBpsExecutionModel, StressExecutionModel, model_params_hash
 from .execution_timing import execution_reality_gate, signal_quote_coverage_summary
 from .experiment_manifest import DateRange, ExecutionScenario, ExperimentManifest
 from .final_selection import apply_final_selection_contract
@@ -931,6 +932,10 @@ def _evaluate_candidates(
                 depth_available=l2_depth_complete_snapshots_available,
             )
             capability_contract = _execution_capability_contract_from_reality(execution_contract)
+            capability_fail_reasons = unsupported_capability_reasons(execution_contract)
+            if capability_fail_reasons:
+                gate_result = "FAIL"
+                fail_reasons = sorted(set(fail_reasons) | set(capability_fail_reasons))
             scenario_result = {
                 "scenario_id": scenario_id,
                 "scenario_index": scenario_index,
@@ -2524,6 +2529,13 @@ def _report_payload(
     ):
         warnings.add(PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING)
     warnings = sorted(warnings)
+    signal_depth_summary = _report_signal_depth_summary(candidates)
+    depth_walk_used = bool(signal_depth_summary.get("depth_walk_execution_model_used"))
+    depth_available_semantics = (
+        "depth_walk_execution_model_used_with_signal_level_l2_depth"
+        if depth_walk_used
+        else "stored_l2_depth_complete_snapshots_exist_not_execution_model_used"
+    )
     payload = {
         "report_kind": report_kind,
         "experiment_id": manifest.experiment_id,
@@ -2559,7 +2571,7 @@ def _report_payload(
             "top_of_book_is_full_depth": False,
             "orderbook_depth_available": l2_depth_complete_snapshots_available,
             "depth_available": l2_depth_complete_snapshots_available,
-            "depth_available_semantics": "stored_l2_depth_complete_snapshots_exist_not_execution_model_used",
+            "depth_available_semantics": depth_available_semantics,
             "l2_depth_evidence_available": l2_depth_complete_snapshots_available,
             "depth_evidence_available": l2_depth_complete_snapshots_available,
             "l2_depth_rows_available": l2_depth_rows_available,
@@ -2570,12 +2582,17 @@ def _report_payload(
             "l2_depth_last_ts": top_of_book_quality_summary.get("l2_depth_last_ts"),
             "l2_depth_sources": top_of_book_quality_summary.get("l2_depth_sources"),
             "l2_depth_content_hashes": top_of_book_quality_summary.get("l2_depth_content_hashes"),
-            "signal_level_depth_coverage_pct": top_of_book_quality_summary.get("signal_level_depth_coverage_pct"),
-            "signal_level_depth_coverage_status": top_of_book_quality_summary.get("signal_level_depth_coverage_status"),
+            "signal_level_depth_coverage_pct": signal_depth_summary.get("signal_level_depth_coverage_pct"),
+            "signal_level_depth_coverage_status": signal_depth_summary.get("signal_level_depth_coverage_status"),
             "depth_snapshot_selection_policy": top_of_book_quality_summary.get("depth_snapshot_selection_policy"),
-            "depth_liquidity_sufficiency_status": top_of_book_quality_summary.get("depth_liquidity_sufficiency_status"),
+            "depth_liquidity_sufficiency_status": signal_depth_summary.get("depth_liquidity_sufficiency_status"),
             "depth_walk_execution_model_available": top_of_book_quality_summary.get("depth_walk_execution_model_available"),
-            "depth_walk_execution_model_used": top_of_book_quality_summary.get("depth_walk_execution_model_used"),
+            "depth_walk_execution_model_used": depth_walk_used,
+            "depth_full_fill_count": signal_depth_summary.get("depth_full_fill_count"),
+            "depth_partial_fill_count": signal_depth_summary.get("depth_partial_fill_count"),
+            "depth_unfilled_count": signal_depth_summary.get("depth_unfilled_count"),
+            "depth_missing_snapshot_count": signal_depth_summary.get("depth_missing_snapshot_count"),
+            "depth_evidence_refs": signal_depth_summary.get("depth_evidence_refs"),
             "full_orderbook_depth_available": False,
             "queue_position_available": False,
             "trade_ticks_available": False,
@@ -2608,6 +2625,7 @@ def _report_payload(
         "execution_reality_gate_status": _report_execution_reality_gate_status(candidates),
         "execution_reality_gate_reasons": _report_execution_reality_gate_reasons(candidates),
         "signal_quote_coverage_summary": _report_signal_quote_coverage_summary(candidates),
+        "signal_depth_coverage_summary": signal_depth_summary,
         "execution_event_summary": _report_execution_event_summary(candidates),
         "strategy_name": manifest.strategy_name,
         "regime_classifier_version": MARKET_REGIME_VERSION,
@@ -2953,6 +2971,8 @@ def _execution_model_from_scenario(scenario: ExecutionScenario, *, seed_context:
             seed=scenario.seed,
             seed_derivation_inputs=seed_context,
         )
+    if scenario.type == "depth_walk":
+        return DepthWalkExecutionModel(fee_rate=scenario.fee_rate)
     raise ResearchValidationError(f"unsupported execution model scenario: {scenario.type}")
 
 
@@ -3045,12 +3065,68 @@ def _execution_reality_summary(
         ],
     )
     event_summary = execution_event_summary or _execution_event_summary_from_metadata(execution_metadata)
+    depth_summary = _signal_depth_execution_summary(execution_metadata)
     return {
         **coverage,
+        **depth_summary,
         **event_summary,
         "execution_reality_gate_status": gate["status"],
         "execution_reality_gate_reasons": gate["reasons"],
         "execution_reality_gate": gate,
+    }
+
+
+def _signal_depth_execution_summary(execution_metadata: list[dict[str, Any]]) -> dict[str, Any]:
+    depth_walk = [
+        item
+        for item in execution_metadata
+        if item.get("model_name") == "depth_walk"
+        or item.get("execution_liquidity_evidence_type") == "l2_depth_walk_queue_unaware"
+    ]
+    if not depth_walk:
+        return {
+            "depth_walk_execution_model_used": False,
+            "signal_level_depth_coverage_pct": None,
+            "signal_level_depth_coverage_status": "not_requested",
+            "depth_liquidity_sufficiency_status": "not_requested",
+            "depth_full_fill_count": 0,
+            "depth_partial_fill_count": 0,
+            "depth_unfilled_count": 0,
+            "depth_missing_snapshot_count": 0,
+            "depth_evidence_refs": [],
+        }
+    available = [item for item in depth_walk if bool(item.get("depth_available")) and item.get("depth_snapshot_ts") is not None]
+    coverage_pct = (len(available) / len(depth_walk) * 100.0) if depth_walk else 0.0
+    partial = [item for item in depth_walk if item.get("fill_status") == "partial"]
+    unfilled = [item for item in depth_walk if item.get("fill_status") in {"unfilled", "failed"}]
+    missing = [
+        item
+        for item in depth_walk
+        if item.get("execution_reference_failure_reason") == "depth_snapshot_missing_for_depth_walk"
+    ]
+    insufficient = [item for item in depth_walk if item.get("depth_sufficient") is False]
+    if missing:
+        sufficiency_status = "missing_depth"
+    elif insufficient:
+        sufficiency_status = "insufficient_depth"
+    else:
+        sufficiency_status = "sufficient_depth"
+    return {
+        "depth_walk_execution_model_used": True,
+        "signal_level_depth_coverage_pct": round(coverage_pct, 8),
+        "signal_level_depth_coverage_status": "PASS" if coverage_pct == 100.0 else "FAIL",
+        "depth_liquidity_sufficiency_status": sufficiency_status,
+        "depth_full_fill_count": sum(1 for item in depth_walk if item.get("fill_status") == "filled"),
+        "depth_partial_fill_count": len(partial),
+        "depth_unfilled_count": len(unfilled),
+        "depth_missing_snapshot_count": len(missing),
+        "depth_evidence_refs": sorted(
+            {
+                str(item.get("orderbook_depth_ref"))
+                for item in available
+                if item.get("orderbook_depth_ref")
+            }
+        ),
     }
 
 
@@ -3142,6 +3218,15 @@ def _report_signal_quote_coverage_summary(candidates: list[dict[str, Any]]) -> d
                     "execution_reality_level",
                     "latency_applied_to_submit_ts_count",
                     "latency_applied_to_fill_reference_count",
+                    "depth_walk_execution_model_used",
+                    "signal_level_depth_coverage_pct",
+                    "signal_level_depth_coverage_status",
+                    "depth_liquidity_sufficiency_status",
+                    "depth_full_fill_count",
+                    "depth_partial_fill_count",
+                    "depth_unfilled_count",
+                    "depth_missing_snapshot_count",
+                    "depth_evidence_refs",
                     "execution_attempt_count",
                     "execution_filled_count",
                     "filled_execution_count",
@@ -3156,6 +3241,37 @@ def _report_signal_quote_coverage_summary(candidates: list[dict[str, Any]]) -> d
                 )
             }
     return None
+
+
+def _report_signal_depth_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    for candidate in candidates:
+        summary = candidate.get("execution_reality_summary")
+        if isinstance(summary, dict) and bool(summary.get("depth_walk_execution_model_used")):
+            return {
+                key: summary.get(key)
+                for key in (
+                    "depth_walk_execution_model_used",
+                    "signal_level_depth_coverage_pct",
+                    "signal_level_depth_coverage_status",
+                    "depth_liquidity_sufficiency_status",
+                    "depth_full_fill_count",
+                    "depth_partial_fill_count",
+                    "depth_unfilled_count",
+                    "depth_missing_snapshot_count",
+                    "depth_evidence_refs",
+                )
+            }
+    return {
+        "depth_walk_execution_model_used": False,
+        "signal_level_depth_coverage_pct": None,
+        "signal_level_depth_coverage_status": "not_requested",
+        "depth_liquidity_sufficiency_status": "not_requested",
+        "depth_full_fill_count": 0,
+        "depth_partial_fill_count": 0,
+        "depth_unfilled_count": 0,
+        "depth_missing_snapshot_count": 0,
+        "depth_evidence_refs": [],
+    }
 
 
 def _report_execution_event_summary(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -3213,14 +3329,17 @@ def _execution_reality_contract(
         "type": scenario.type,
         "order_failure_rate": float(scenario.order_failure_rate),
     }
+    depth_walk_used = scenario.type == "depth_walk"
+    evidence_tier = "l2_depth_walk_no_queue" if depth_walk_used else None
     limitations = [
         "top_of_book_is_quote_evidence_not_liquidity_depth",
-        "full_orderbook_depth_unavailable",
         "queue_position_unavailable",
         "trade_ticks_unavailable",
         "market_impact_model_unavailable",
         "intra_candle_path_reconstruction_unavailable",
     ]
+    if not depth_walk_used:
+        limitations.append("full_orderbook_depth_unavailable")
     if top is None:
         limitations.append("top_of_book_not_requested")
     return build_execution_reality_contract(
@@ -3234,7 +3353,7 @@ def _execution_reality_contract(
         quote_age_limit_ms=(top.join_tolerance_ms if top is not None else manifest.execution_timing.max_quote_wait_ms),
         top_of_book_required=bool(top.required) if top is not None else False,
         top_of_book_is_full_depth=False,
-        depth_required=manifest.execution_timing.depth_required,
+        depth_required=bool(manifest.execution_timing.depth_required or depth_walk_used),
         trade_tick_required=manifest.execution_timing.trade_tick_required,
         queue_position_required=manifest.execution_timing.queue_position_required,
         market_impact_required=manifest.execution_timing.market_impact_required,
@@ -3248,17 +3367,22 @@ def _execution_reality_contract(
         calibration_artifact_hash=(
             str(calibration_hash) if isinstance(calibration_hash, str) and calibration_hash.startswith("sha256:") else None
         ),
+        execution_reality_level=evidence_tier,
         limitations=limitations,
         extra={
             "quote_evidence_available": bool(top_of_book_available),
             "depth_available": bool(depth_available),
-            "depth_available_semantics": "stored_l2_depth_complete_snapshots_exist_not_execution_model_used",
+            "depth_available_semantics": (
+                "stored_l2_depth_complete_snapshots_available_for_depth_walk"
+                if depth_walk_used
+                else "stored_l2_depth_complete_snapshots_exist_not_execution_model_used"
+            ),
             "depth_evidence_available": bool(depth_available),
             "l2_depth_evidence_available": bool(depth_available),
             "l2_depth_complete_snapshots_available": bool(depth_available),
             "depth_walk_execution_model_available": True,
-            "depth_walk_execution_model_used": False,
-            "full_orderbook_depth_available": False,
+            "depth_walk_execution_model_used": bool(depth_walk_used),
+            "full_orderbook_depth_available": bool(depth_available and depth_walk_used),
             "trade_ticks_available": False,
             "queue_position_available": False,
             "market_impact_model_available": False,

@@ -588,6 +588,12 @@ def run_sma_backtest(
                     requested_notional=spend,
                     fee_rate=fee_rate,
                     **_timing_request_fields(signal, reference, timing_policy),
+                    **_depth_request_fields(
+                        dataset=dataset,
+                        reference=reference,
+                        model=model,
+                        timing_policy=timing_policy,
+                    ),
                 )
             )
             warnings.extend(_execution_reference_warnings(fill))
@@ -722,6 +728,12 @@ def run_sma_backtest(
                     requested_qty=sellable_qty,
                     fee_rate=fee_rate,
                     **_timing_request_fields(signal, reference, timing_policy),
+                    **_depth_request_fields(
+                        dataset=dataset,
+                        reference=reference,
+                        model=model,
+                        timing_policy=timing_policy,
+                    ),
                 )
             )
             warnings.extend(_execution_reference_warnings(fill))
@@ -1121,6 +1133,53 @@ def _timing_request_fields(
         }
     )
     return fields
+
+
+def _depth_request_fields(
+    *,
+    dataset: DatasetSnapshot,
+    reference: ExecutionReferenceEvent,
+    model: ExecutionModel,
+    timing_policy: ExecutionTimingPolicy,
+) -> dict[str, object]:
+    if getattr(model, "name", "") != "depth_walk":
+        return {}
+    target_ts = reference.fill_reference_ts
+    if target_ts is None:
+        target_ts = reference.submit_ts_assumption
+    snapshot = dataset.first_depth_snapshot_after_or_equal(
+        target_ts=int(target_ts),
+        max_wait_ms=int(timing_policy.max_quote_wait_ms),
+    )
+    if snapshot is None:
+        return {
+            "orderbook_depth_snapshot": None,
+            "orderbook_depth_ref": None,
+            "depth_available": False,
+            "depth_sufficient": False,
+            "execution_liquidity_evidence_type": "l2_depth_walk_queue_unaware",
+            "execution_realism_limitations": (
+                "depth_snapshot_missing_for_depth_walk",
+                "queue_position_unavailable",
+                "market_impact_model_unavailable",
+                "trade_ticks_unavailable",
+                "intra_candle_path_reconstruction_unavailable",
+            ),
+        }
+    return {
+        "orderbook_depth_snapshot": snapshot,
+        "orderbook_depth_ref": snapshot.depth_ref(),
+        "depth_snapshot_ts": int(snapshot.ts),
+        "depth_snapshot_age_ms": int(snapshot.ts) - int(target_ts),
+        "depth_available": True,
+        "execution_liquidity_evidence_type": "l2_depth_walk_queue_unaware",
+        "execution_realism_limitations": (
+            "queue_position_unavailable",
+            "market_impact_model_unavailable",
+            "trade_ticks_unavailable",
+            "intra_candle_path_reconstruction_unavailable",
+        ),
+    }
 
 
 def _feature_snapshot(

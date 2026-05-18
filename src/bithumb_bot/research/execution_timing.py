@@ -15,6 +15,7 @@ REALITY_ORDER = {
     "candle_next_open": 1,
     "top_of_book_after_decision": 2,
     "latency_adjusted_top_of_book": 3,
+    "l2_depth_walk_no_queue": 4,
 }
 
 

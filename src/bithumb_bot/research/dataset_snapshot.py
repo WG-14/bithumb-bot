@@ -8,6 +8,7 @@ from typing import Any
 
 from bithumb_bot.public_api_minute_candles import interval_to_minute_unit
 from bithumb_bot.orderbook_depth_store import summarize_orderbook_depth_evidence
+from bithumb_bot.orderbook_depth_store import build_orderbook_depth_snapshot, OrderbookDepthSnapshot
 
 from .experiment_manifest import DateRange, ExperimentManifest, ManifestValidationError
 from .hashing import sha256_prefixed
@@ -79,6 +80,7 @@ class DatasetSnapshot:
     top_of_book_source: str | None = None
     top_of_book_join_tolerance_ms: int | None = None
     top_of_book_min_coverage_pct: float = 100.0
+    orderbook_depth_snapshots: tuple[OrderbookDepthSnapshot, ...] = ()
 
     def fingerprint_payload(self) -> dict[str, object]:
         return {
@@ -102,6 +104,7 @@ class DatasetSnapshot:
                 "join_tolerance_ms": self.top_of_book_join_tolerance_ms,
                 "min_coverage_pct": self.top_of_book_min_coverage_pct,
             },
+            "orderbook_depth_snapshots": [_depth_snapshot_payload(snapshot) for snapshot in self.orderbook_depth_snapshots],
         }
 
     def content_hash(self) -> str:
@@ -148,6 +151,39 @@ class DatasetSnapshot:
         if index < len(quotes) and int(quotes[index].ts) <= max_ts:
             return quotes[index]
         return None
+
+    def first_depth_snapshot_after_or_equal(
+        self,
+        *,
+        target_ts: int,
+        max_wait_ms: int,
+    ) -> OrderbookDepthSnapshot | None:
+        snapshots = self.sorted_orderbook_depth_snapshots()
+        timestamps = getattr(self, "_sorted_orderbook_depth_timestamps", None)
+        if timestamps is None:
+            timestamps = tuple(int(snapshot.ts) for snapshot in snapshots)
+            object.__setattr__(self, "_sorted_orderbook_depth_timestamps", timestamps)
+        max_ts = int(target_ts) + int(max_wait_ms)
+        index = bisect_left(timestamps, int(target_ts))
+        if index < len(snapshots) and int(snapshots[index].ts) <= max_ts:
+            return snapshots[index]
+        return None
+
+    def sorted_orderbook_depth_snapshots(self) -> tuple[OrderbookDepthSnapshot, ...]:
+        cached = getattr(self, "_sorted_orderbook_depth_snapshots", None)
+        if cached is not None:
+            return cached
+        snapshots = self.orderbook_depth_snapshots
+        if all(
+            (int(prev.ts), str(prev.source)) <= (int(curr.ts), str(curr.source))
+            for prev, curr in zip(snapshots, snapshots[1:])
+        ):
+            sorted_snapshots = snapshots
+        else:
+            sorted_snapshots = tuple(sorted(snapshots, key=lambda snapshot: (int(snapshot.ts), str(snapshot.source))))
+        object.__setattr__(self, "_sorted_orderbook_depth_snapshots", sorted_snapshots)
+        object.__setattr__(self, "_sorted_orderbook_depth_timestamps", tuple(int(snapshot.ts) for snapshot in sorted_snapshots))
+        return sorted_snapshots
 
 
 @dataclass(frozen=True)
@@ -215,7 +251,9 @@ def load_dataset_range(
     )
     top_of_book_quotes: tuple[TopOfBookQuote | None, ...] = ()
     top_of_book_event_quotes: tuple[TopOfBookQuote, ...] = ()
+    orderbook_depth_snapshots: tuple[OrderbookDepthSnapshot, ...] = ()
     top_of_book_spec = manifest.dataset.top_of_book
+    depth_requested = any(scenario.type == "depth_walk" for scenario in manifest.execution_model.scenarios)
     if top_of_book_spec is not None:
         top_of_book_quotes = _load_top_of_book_quotes(
             db_path=db_path,
@@ -237,6 +275,28 @@ def load_dataset_range(
             quote_source=top_of_book_spec.quote_source,
             execution_quote_lookahead_ms=execution_quote_lookahead_ms,
         )
+        orderbook_depth_snapshots = _load_orderbook_depth_event_snapshots(
+            db_path=db_path,
+            market=manifest.market,
+            interval=manifest.interval,
+            candles=candles,
+            source=top_of_book_spec.quote_source,
+            execution_depth_lookahead_ms=execution_quote_lookahead_ms,
+        )
+    elif depth_requested:
+        execution_depth_lookahead_ms = (
+            int(manifest.execution_timing.decision_guard_ms)
+            + int(max((scenario.latency_ms for scenario in manifest.execution_model.scenarios), default=0))
+            + int(manifest.execution_timing.max_quote_wait_ms)
+        )
+        orderbook_depth_snapshots = _load_orderbook_depth_event_snapshots(
+            db_path=db_path,
+            market=manifest.market,
+            interval=manifest.interval,
+            candles=candles,
+            source=None,
+            execution_depth_lookahead_ms=execution_depth_lookahead_ms,
+        )
     return DatasetSnapshot(
         snapshot_id=manifest.dataset.snapshot_id,
         source=manifest.dataset.source,
@@ -253,6 +313,7 @@ def load_dataset_range(
         top_of_book_source=top_of_book_spec.source if top_of_book_spec is not None else None,
         top_of_book_join_tolerance_ms=top_of_book_spec.join_tolerance_ms if top_of_book_spec is not None else None,
         top_of_book_min_coverage_pct=top_of_book_spec.min_coverage_pct if top_of_book_spec is not None else 100.0,
+        orderbook_depth_snapshots=orderbook_depth_snapshots,
     )
 
 
@@ -669,6 +730,83 @@ def _load_top_of_book_event_quotes(
         )
         for row in rows
     )
+
+
+def _load_orderbook_depth_event_snapshots(
+    *,
+    db_path: str | Path,
+    market: str,
+    interval: str,
+    candles: tuple[Candle, ...],
+    source: str | None,
+    execution_depth_lookahead_ms: int,
+) -> tuple[OrderbookDepthSnapshot, ...]:
+    if not candles:
+        return ()
+    start_ts = int(candles[0].ts)
+    end_ts = int(candles[-1].ts) + _interval_ms(interval) + int(execution_depth_lookahead_ms)
+    conn = sqlite3.connect(f"file:{Path(db_path).expanduser().resolve()}?mode=ro", uri=True)
+    try:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='orderbook_depth_levels'"
+        ).fetchone()
+        if table is None:
+            return ()
+        params: list[object] = [market, start_ts, end_ts]
+        source_predicate = ""
+        if source is not None:
+            source_predicate = "AND source=?"
+            params.append(source)
+        rows = conn.execute(
+            f"""
+            SELECT ts, pair, source, observed_at_epoch_sec, side, level_index, price, size
+            FROM orderbook_depth_levels
+            WHERE pair=?
+              AND ts >= ?
+              AND ts <= ?
+              {source_predicate}
+            ORDER BY ts ASC, source ASC, side ASC, level_index ASC
+            """,
+            tuple(params),
+        ).fetchall()
+    finally:
+        conn.close()
+    grouped: dict[tuple[int, str, str, float | None], dict[str, list[tuple[float, float]]]] = {}
+    for row in rows:
+        key = (
+            int(row[0]),
+            str(row[1]),
+            str(row[2]),
+            None if row[3] is None else float(row[3]),
+        )
+        side = str(row[4])
+        grouped.setdefault(key, {"bid": [], "ask": []}).setdefault(side, []).append((float(row[6]), float(row[7])))
+    snapshots: list[OrderbookDepthSnapshot] = []
+    for (ts, pair, snapshot_source, observed), sides in sorted(grouped.items()):
+        if not sides.get("bid") or not sides.get("ask"):
+            continue
+        snapshots.append(
+            build_orderbook_depth_snapshot(
+                ts=ts,
+                pair=pair,
+                bid_levels=sides["bid"],
+                ask_levels=sides["ask"],
+                source=snapshot_source,
+                observed_at_epoch_sec=observed,
+            )
+        )
+    return tuple(snapshots)
+
+
+def _depth_snapshot_payload(snapshot: OrderbookDepthSnapshot) -> dict[str, object]:
+    return {
+        "ts": int(snapshot.ts),
+        "pair": snapshot.pair,
+        "source": snapshot.source,
+        "observed_at_epoch_sec": snapshot.observed_at_epoch_sec,
+        "bids": [(level.price, level.size) for level in snapshot.bids],
+        "asks": [(level.price, level.size) for level in snapshot.asks],
+    }
 
 
 def _add_top_of_book_quality_fields(*, payload: dict[str, Any], snapshot: DatasetSnapshot) -> None:

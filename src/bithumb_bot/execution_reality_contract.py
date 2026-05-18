@@ -43,6 +43,7 @@ REALITY_ORDER = {
     "latency_adjusted_top_of_book": 3,
     "paper_immediate_top_of_book": 3,
     "paper_stress_top_of_book": 3,
+    "l2_depth_walk_no_queue": 4,
 }
 
 SUPPORTED_EVIDENCE_TIERS = frozenset(
@@ -51,6 +52,7 @@ SUPPORTED_EVIDENCE_TIERS = frozenset(
         "candle_next_open",
         "top_of_book_after_decision",
         "latency_adjusted_top_of_book",
+        "l2_depth_walk_no_queue",
     }
 )
 
@@ -315,6 +317,8 @@ def build_execution_capability_contract(
         "market_impact_model": bool(market_impact_model_required),
         "intra_candle_path_reconstruction": bool(intra_candle_path_required),
     }
+    if tier == "l2_depth_walk_no_queue":
+        required["full_orderbook_depth"] = True
     available = {
         "candle_ohlcv": True,
         "top_of_book": bool(top_of_book_available),
@@ -348,6 +352,13 @@ def build_execution_capability_contract(
     )
     if tier in RESERVED_FUTURE_EVIDENCE_TIERS:
         capability_limitations.append(f"evidence_tier_reserved_not_implemented:{tier}")
+    if tier == "l2_depth_walk_no_queue":
+        capability_limitations = [
+            item
+            for item in capability_limitations
+            if item != "full_orderbook_depth_unavailable"
+            and item != "top_of_book_is_quote_evidence_not_liquidity_depth"
+        ]
     payload = {
         "schema_version": EXECUTION_CAPABILITY_CONTRACT_SCHEMA_VERSION,
         "strategy_required_capabilities": required,

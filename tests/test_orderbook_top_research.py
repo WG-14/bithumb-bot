@@ -25,7 +25,13 @@ def _ts(day: str, minute: int) -> int:
     return int(base.timestamp() * 1000) + minute * 60_000
 
 
-def _manifest(*, top_of_book: dict[str, object] | None = None, strategy_name: str = "sma_with_filter"):
+def _manifest(
+    *,
+    top_of_book: dict[str, object] | None = None,
+    strategy_name: str = "sma_with_filter",
+    execution_model: dict[str, object] | None = None,
+    execution_timing: dict[str, object] | None = None,
+):
     dataset: dict[str, object] = {
         "source": "sqlite_candles",
         "snapshot_id": "quotes_unit",
@@ -34,26 +40,29 @@ def _manifest(*, top_of_book: dict[str, object] | None = None, strategy_name: st
     }
     if top_of_book is not None:
         dataset["top_of_book"] = top_of_book
-    return parse_manifest(
-        {
-            "experiment_id": "quotes_unit",
-            "hypothesis": "Top-of-book quote joins are explicit research evidence.",
-            "strategy_name": strategy_name,
-            "market": "KRW-BTC",
-            "interval": "1m",
-            "dataset": dataset,
-            "parameter_space": {"SMA_SHORT": [1], "SMA_LONG": [2]},
-            "cost_model": {"fee_rate": 0.0, "slippage_bps": [0]},
-            "acceptance_gate": {
-                "min_trade_count": 1,
-                "max_mdd_pct": 99,
-                "min_profit_factor": 0.1,
-                "oos_return_must_be_positive": False,
-                "parameter_stability_required": False,
-                "final_holdout_required_for_promotion": False,
-            },
-        }
-    )
+    payload = {
+        "experiment_id": "quotes_unit",
+        "hypothesis": "Top-of-book quote joins are explicit research evidence.",
+        "strategy_name": strategy_name,
+        "market": "KRW-BTC",
+        "interval": "1m",
+        "dataset": dataset,
+        "parameter_space": {"SMA_SHORT": [1], "SMA_LONG": [2]},
+        "cost_model": {"fee_rate": 0.0, "slippage_bps": [0]},
+        "acceptance_gate": {
+            "min_trade_count": 1,
+            "max_mdd_pct": 99,
+            "min_profit_factor": 0.1,
+            "oos_return_must_be_positive": False,
+            "parameter_stability_required": False,
+            "final_holdout_required_for_promotion": False,
+        },
+    }
+    if execution_model is not None:
+        payload["execution_model"] = execution_model
+    if execution_timing is not None:
+        payload["execution_timing"] = execution_timing
+    return parse_manifest(payload)
 
 
 def _create_candle_db(path: Path) -> None:
@@ -70,6 +79,38 @@ def _create_candle_db(path: Path) -> None:
                     """,
                     (_ts(day, minute), close, close + 1.0, close - 1.0, close),
                 )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_execution_quotes_and_depth(path: Path, *, depth: bool = True) -> None:
+    conn = ensure_db(str(path))
+    try:
+        for day in ("2023-01-01", "2023-01-02"):
+            for minute in range(1, 24 * 60 + 2):
+                ts = _ts(day, minute)
+                upsert_orderbook_top_snapshot(
+                    conn,
+                    build_orderbook_top_snapshot(
+                        ts=ts,
+                        pair="KRW-BTC",
+                        bid_price=99.0,
+                        ask_price=101.0,
+                        source="bithumb_public_v1_orderbook",
+                    ),
+                )
+                if depth:
+                    upsert_orderbook_depth_snapshot(
+                        conn,
+                        build_orderbook_depth_snapshot(
+                            ts=ts,
+                            pair="KRW-BTC",
+                            bid_levels=[(99.0, 1.0), (98.0, 1.0)],
+                            ask_levels=[(101.0, 1.0), (102.0, 1.0)],
+                            source="bithumb_public_v1_orderbook",
+                        ),
+                    )
         conn.commit()
     finally:
         conn.close()
@@ -299,14 +340,89 @@ def test_stored_l2_depth_rows_are_reported_without_claiming_depth_execution(
     assert limitations["depth_evidence_available"] is True
     assert limitations["depth_walk_execution_model_available"] is True
     assert limitations["depth_walk_execution_model_used"] is False
-    assert limitations["signal_level_depth_coverage_status"] == "not_computed_depth_walk_not_wired_to_research_backtest"
-    assert limitations["depth_liquidity_sufficiency_status"] == "not_computed_depth_walk_not_wired_to_research_backtest"
+    assert limitations["signal_level_depth_coverage_status"] == "not_requested"
+    assert limitations["depth_liquidity_sufficiency_status"] == "not_requested"
     assert limitations["full_orderbook_depth_available"] is False
     assert capability["full_orderbook_depth"] is False
     assert capability["queue_position"] is False
     assert capability["trade_ticks"] is False
     assert capability["market_impact_model"] is False
     assert capability["intra_candle_path_reconstruction"] is False
+
+
+def test_depth_walk_research_backtest_uses_signal_level_l2_depth(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "depth_walk.sqlite"
+    _create_candle_db(db_path)
+    _insert_execution_quotes_and_depth(db_path, depth=True)
+    manifest = _manifest(
+        top_of_book={"source": "sqlite_orderbook_top_snapshots", "join_tolerance_ms": 3000},
+        execution_model={"type": "depth_walk", "fee_rate": 0.0, "slippage_bps": 0.0},
+        execution_timing={
+            "fill_reference_policy": "latency_adjusted_orderbook",
+            "missing_quote_policy": "fail",
+            "allow_same_candle_close_fill": False,
+            "min_execution_reality_level_for_promotion": "l2_depth_walk_no_queue",
+            "depth_required": True,
+        },
+    )
+
+    report = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=_manager(tmp_path, monkeypatch),
+        generated_at="2026-05-07T00:00:00+00:00",
+    )
+
+    candidate = report["candidates"][0]
+    summary = candidate["execution_reality_summary"]
+    limitations = report["data_limitations"]
+    contract = candidate["execution_capability_contract"]
+    assert candidate["scenario_results"][0]["scenario_type"] == "depth_walk"
+    assert candidate["evidence_tier"] == "l2_depth_walk_no_queue"
+    assert contract["available_capabilities"]["full_orderbook_depth"] is True
+    assert limitations["depth_walk_execution_model_used"] is True
+    assert limitations["signal_level_depth_coverage_pct"] == 100.0
+    assert summary["depth_walk_execution_model_used"] is True
+    assert summary["depth_partial_fill_count"] > 0
+    assert summary["depth_liquidity_sufficiency_status"] == "insufficient_depth"
+    assert report["signal_depth_coverage_summary"]["depth_evidence_refs"]
+    assert "queue_position_unavailable" in contract["limitations"]
+    assert "market_impact_model_unavailable" in contract["limitations"]
+
+
+def test_depth_walk_research_backtest_fails_closed_when_l2_depth_missing(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "depth_walk_missing.sqlite"
+    _create_candle_db(db_path)
+    _insert_execution_quotes_and_depth(db_path, depth=False)
+    manifest = _manifest(
+        top_of_book={"source": "sqlite_orderbook_top_snapshots", "join_tolerance_ms": 3000},
+        execution_model={"type": "depth_walk", "fee_rate": 0.0, "slippage_bps": 0.0},
+        execution_timing={
+            "fill_reference_policy": "latency_adjusted_orderbook",
+            "missing_quote_policy": "fail",
+            "allow_same_candle_close_fill": False,
+            "min_execution_reality_level_for_promotion": "l2_depth_walk_no_queue",
+            "depth_required": True,
+        },
+    )
+
+    report = run_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=_manager(tmp_path, monkeypatch),
+        generated_at="2026-05-07T00:00:00+00:00",
+    )
+
+    candidate = report["candidates"][0]
+    summary = candidate["execution_reality_summary"]
+    assert candidate["acceptance_gate_result"] == "FAIL"
+    assert "execution_depth_required_but_unavailable" in candidate["gate_fail_reasons"]
+    assert "execution_capability_required_unavailable" in candidate["gate_fail_reasons"]
+    assert candidate["unavailable_required_capabilities"] == ["full_orderbook_depth"]
+    assert summary["depth_walk_execution_model_used"] is True
+    assert summary["signal_level_depth_coverage_status"] == "FAIL"
+    assert summary["depth_missing_snapshot_count"] > 0
+    assert summary["depth_liquidity_sufficiency_status"] == "missing_depth"
 
 
 def test_depth_evidence_digest_changes_when_depth_level_changes(tmp_path: Path) -> None:

@@ -640,6 +640,10 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
     execution_model = _parse_execution_model(payload.get("execution_model"), cost_model)
     execution_timing_payload = payload.get("execution_timing")
     execution_timing = _parse_execution_timing(execution_timing_payload)
+    _validate_execution_model_capability_policy(
+        execution_model=execution_model,
+        execution_timing=execution_timing,
+    )
     _parse_dataset_quality_policy(payload.get("dataset_quality_policy"))
     deployment_tier = _parse_deployment_tier(payload.get("deployment_tier") or payload.get("promotion_target"))
     acceptance_gate = _parse_acceptance_gate(_required_dict(payload, "acceptance_gate"))
@@ -958,11 +962,8 @@ def _parse_execution_model(value: Any, cost_model: CostModel) -> ExecutionModelC
         ]
     else:
         model_type = _required_str(value, "type")
-        if model_type not in {"fixed_bps", "stress"}:
-            raise ManifestValidationError(
-                "execution_model.type must be fixed_bps or stress; depth_walk is a standalone "
-                "experimental primitive and is not wired to research-backtest"
-            )
+        if model_type not in {"fixed_bps", "stress", "depth_walk"}:
+            raise ManifestValidationError("execution_model.type must be fixed_bps, stress, or depth_walk")
         scenario_role = _optional_scenario_role(value.get("scenario_role"))
         scenario_role_source = "manifest" if scenario_role is not None else "derived"
         fees = _number_array(value, "fee_rate", default=(cost_model.fee_rate,))
@@ -1072,11 +1073,8 @@ def _parse_explicit_execution_scenario(
     if unknown:
         raise ManifestValidationError(f"execution_model.scenarios unsupported fields: {','.join(unknown)}")
     model_type = str(raw.get("type") or parent.get("type") or "fixed_bps").strip()
-    if model_type not in {"fixed_bps", "stress"}:
-        raise ManifestValidationError(
-            "execution_model.scenarios.type must be fixed_bps or stress; depth_walk is a standalone "
-            "experimental primitive and is not wired to research-backtest"
-        )
+    if model_type not in {"fixed_bps", "stress", "depth_walk"}:
+        raise ManifestValidationError("execution_model.scenarios.type must be fixed_bps, stress, or depth_walk")
     role = _optional_scenario_role(raw.get("scenario_role"))
     if role is None:
         raise ManifestValidationError("execution_model.scenarios.scenario_role must be base or stress")
@@ -1244,6 +1242,7 @@ def _parse_execution_timing(value: Any) -> ExecutionTimingPolicy:
         "candle_next_open",
         "top_of_book_after_decision",
         "latency_adjusted_top_of_book",
+        "l2_depth_walk_no_queue",
     }:
         raise ManifestValidationError("execution_timing.min_execution_reality_level_for_promotion is unsupported")
     depth_required = bool(value.get("depth_required", False))
@@ -1253,7 +1252,7 @@ def _parse_execution_timing(value: Any) -> ExecutionTimingPolicy:
     intra_candle_path_required = bool(value.get("intra_candle_path_required", False))
     unsupported = unsupported_capability_reasons(
         {
-            "depth_required": depth_required,
+            "depth_required": False,
             "trade_tick_required": trade_tick_required,
             "queue_position_required": queue_position_required,
             "market_impact_required": market_impact_required,
@@ -1305,6 +1304,16 @@ def _validate_execution_reality_manifest_policy(
     reasons = [str(reason) for reason in evaluation.get("reasons") or []]
     if reasons:
         raise ManifestValidationError(",".join(reasons))
+
+
+def _validate_execution_model_capability_policy(
+    *,
+    execution_model: ExecutionModelConfig,
+    execution_timing: ExecutionTimingPolicy,
+) -> None:
+    has_depth_walk = any(scenario.type == "depth_walk" for scenario in execution_model.scenarios)
+    if execution_timing.depth_required and not has_depth_walk:
+        raise ManifestValidationError("execution_depth_required_but_unavailable_without_depth_walk_scenario")
 
 
 def _optional_scenario_role(value: Any) -> str | None:

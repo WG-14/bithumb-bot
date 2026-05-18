@@ -11,7 +11,7 @@ from .base import ExecutionFill, ExecutionRequest, model_params_hash
 @dataclass
 class DepthWalkExecutionModel:
     fee_rate: float
-    depth_snapshot: OrderbookDepthSnapshot
+    depth_snapshot: OrderbookDepthSnapshot | None = None
 
     name: str = "depth_walk"
     version: str = "research_depth_walk_v1"
@@ -21,13 +21,16 @@ class DepthWalkExecutionModel:
             "type": self.name,
             "version": self.version,
             "fee_rate": float(self.fee_rate),
-            "depth_ref": self.depth_snapshot.depth_ref(),
+            "depth_ref": self.depth_snapshot.depth_ref() if self.depth_snapshot is not None else "per_request_depth_snapshot",
             "queue_position_mode": "unavailable",
             "market_impact_mode": "unavailable",
         }
 
     def simulate(self, request: ExecutionRequest) -> ExecutionFill:
         side = str(request.side).upper()
+        depth_snapshot = request.orderbook_depth_snapshot or self.depth_snapshot
+        if depth_snapshot is None:
+            return _missing_depth_fill(request=request, model=self, side=side)
         if side == "BUY":
             requested_notional = float(request.requested_notional or 0.0)
             requested_qty = (
@@ -40,14 +43,14 @@ class DepthWalkExecutionModel:
                 )
             )
             filled_qty, filled_notional, levels_consumed = _walk_buy(
-                self.depth_snapshot.asks,
+                depth_snapshot.asks,
                 requested_notional=requested_notional,
                 requested_qty=requested_qty,
             )
         elif side == "SELL":
             requested_qty = float(request.requested_qty or 0.0)
             filled_qty, filled_notional, levels_consumed = _walk_sell(
-                self.depth_snapshot.bids,
+                depth_snapshot.bids,
                 requested_qty=requested_qty,
             )
             requested_notional = requested_qty * float(request.reference_price)
@@ -76,10 +79,10 @@ class DepthWalkExecutionModel:
                 slippage_bps = ((float(request.reference_price) - avg_fill_price) / float(request.reference_price)) * 10_000.0
 
         depth_age_ms = (
-            int(self.depth_snapshot.ts) - int(request.fill_reference_ts)
+            int(depth_snapshot.ts) - int(request.fill_reference_ts)
             if request.fill_reference_ts is not None
             else (
-                int(self.depth_snapshot.ts) - int(request.decision_ts)
+                int(depth_snapshot.ts) - int(request.decision_ts)
             )
         )
         return ExecutionFill(
@@ -113,10 +116,10 @@ class DepthWalkExecutionModel:
             best_bid=request.best_bid,
             best_ask=request.best_ask,
             spread_bps=request.spread_bps,
-            orderbook_depth_ref=self.depth_snapshot.depth_ref(),
+            orderbook_depth_ref=depth_snapshot.depth_ref(),
             requested_notional=float(requested_notional),
             filled_notional=float(filled_notional),
-            depth_snapshot_ts=int(self.depth_snapshot.ts),
+            depth_snapshot_ts=int(depth_snapshot.ts),
             depth_snapshot_age_ms=int(depth_age_ms),
             depth_levels_consumed=int(levels_consumed),
             depth_available=True,
@@ -136,7 +139,7 @@ class DepthWalkExecutionModel:
                 "trade_ticks_unavailable",
                 "intra_candle_path_reconstruction_unavailable",
             ),
-            execution_reality_level="latency_adjusted_top_of_book",
+            execution_reality_level="l2_depth_walk_no_queue",
             allow_same_candle_close_fill=request.allow_same_candle_close_fill,
             quote_selection=request.quote_selection,
             fill_reference_policy=request.fill_reference_policy,
@@ -151,6 +154,84 @@ class DepthWalkExecutionModel:
             regime_snapshot=request.regime_snapshot,
             intra_candle_policy="depth_walk_l2_no_queue_no_impact",
         )
+
+
+def _missing_depth_fill(
+    *,
+    request: ExecutionRequest,
+    model: DepthWalkExecutionModel,
+    side: str,
+) -> ExecutionFill:
+    requested_qty = float(request.requested_qty or 0.0)
+    requested_notional = request.requested_notional
+    if side == "BUY" and requested_qty <= 0.0 and requested_notional is not None and float(request.reference_price) > 0.0:
+        requested_qty = float(requested_notional) / float(request.reference_price)
+    return ExecutionFill(
+        signal_ts=int(request.signal_ts),
+        decision_ts=int(request.decision_ts),
+        submit_ts_assumption=int(request.submit_ts_assumption if request.submit_ts_assumption is not None else request.decision_ts),
+        side=side,
+        order_type=request.order_type,
+        reference_price=float(request.reference_price),
+        fill_reference_ts=request.fill_reference_ts,
+        fill_reference_price=request.fill_reference_price,
+        fill_reference_source=request.fill_reference_source,
+        signal_candle_start_ts=request.signal_candle_start_ts,
+        signal_candle_close_ts=request.signal_candle_close_ts,
+        signal_reference_price=request.signal_reference_price,
+        signal_reference_source=request.signal_reference_source,
+        quote_ts=request.quote_ts,
+        quote_age_ms=request.quote_age_ms,
+        quote_source=request.quote_source,
+        requested_qty=float(requested_qty),
+        filled_qty=0.0,
+        remaining_qty=float(requested_qty),
+        avg_fill_price=None,
+        fee=0.0,
+        slippage_bps=0.0,
+        latency_ms=0,
+        fill_status="failed",
+        model_name=model.name,
+        model_version=model.version,
+        model_params_hash=model_params_hash(model.params_payload()),
+        best_bid=request.best_bid,
+        best_ask=request.best_ask,
+        spread_bps=request.spread_bps,
+        orderbook_depth_ref=request.orderbook_depth_ref,
+        requested_notional=None if requested_notional is None else float(requested_notional),
+        filled_notional=0.0,
+        depth_snapshot_ts=request.depth_snapshot_ts,
+        depth_snapshot_age_ms=request.depth_snapshot_age_ms,
+        depth_levels_consumed=0,
+        depth_available=False,
+        depth_sufficient=False,
+        queue_position_mode="unavailable",
+        market_impact_mode="unavailable",
+        execution_liquidity_evidence_type="l2_depth_walk_queue_unaware",
+        execution_realism_limitations=(
+            "depth_snapshot_missing_for_depth_walk",
+            "queue_position_unavailable",
+            "market_impact_model_unavailable",
+            "trade_ticks_unavailable",
+            "intra_candle_path_reconstruction_unavailable",
+        ),
+        execution_reality_level="l2_depth_walk_no_queue",
+        allow_same_candle_close_fill=request.allow_same_candle_close_fill,
+        quote_selection=request.quote_selection,
+        fill_reference_policy=request.fill_reference_policy,
+        top_of_book_source=request.top_of_book_source or request.quote_source,
+        top_of_book_is_full_depth=False,
+        execution_reference_failure_reason="depth_snapshot_missing_for_depth_walk",
+        latency_applied_to_reference=request.latency_applied_to_reference,
+        latency_applied_to_submit_ts=request.latency_applied_to_submit_ts,
+        latency_applied_to_fill_reference=request.latency_applied_to_fill_reference,
+        latency_reference_policy_warning=request.latency_reference_policy_warning,
+        feature_snapshot=request.feature_snapshot,
+        regime_snapshot=request.regime_snapshot,
+        intra_candle_policy="depth_walk_l2_no_queue_no_impact",
+    )
+
+
 def _walk_buy(
     levels: tuple[OrderbookDepthLevel, ...],
     *,

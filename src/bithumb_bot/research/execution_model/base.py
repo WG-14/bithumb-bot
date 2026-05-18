@@ -36,6 +36,8 @@ class ExecutionRequest:
     fill_reference_policy: str | None = None
     top_of_book_source: str | None = None
     top_of_book_is_full_depth: bool | None = None
+    orderbook_depth_snapshot: Any | None = None
+    orderbook_depth_ref: str | None = None
     depth_snapshot_ts: int | None = None
     depth_snapshot_age_ms: int | None = None
     depth_levels_consumed: int | None = None
