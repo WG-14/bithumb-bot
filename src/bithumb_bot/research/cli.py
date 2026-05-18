@@ -15,7 +15,7 @@ from .experiment_registry import (
     validate_experiment_registry_binding,
 )
 from .hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
-from .audit_trail import verify_audit_trail
+from .audit_trail import validate_audit_trail_binding, verify_audit_trail
 from .return_panel import validate_return_panel_binding
 from .execution_calibration import ExecutionCalibrationError, load_calibration_artifact
 from .promotion_gate import PromotionGateError, promote_candidate
@@ -195,6 +195,7 @@ def cmd_research_registry_validate(*, experiment_id: str) -> int:
         if evidence_loaded:
             artifact_reasons.extend(_content_hash_reasons(evidence, report_hash=False, label="statistical_evidence"))
             artifact_reasons.extend(validate_return_panel_binding(report=report, evidence=evidence, panel=panel))
+        artifact_reasons.extend(validate_audit_trail_binding(report=report, manager=PATH_MANAGER))
     else:
         artifact_reasons.append("artifact_binding_not_checked")
     if validation_scope == "registry_and_artifacts" and artifact_bound_row_hash and "experiment_registry_artifact_bound_row_missing" not in artifact_reasons:

@@ -15,6 +15,7 @@ from bithumb_bot.execution_reality_contract import (
 )
 
 from .hashing import content_hash_payload, report_content_hash_payload, sha256_prefixed
+from .audit_trail import validate_audit_trail_binding
 from .lineage import build_promotion_lineage, validate_lineage_artifact, LineageValidationError
 from .experiment_registry import append_promotion_registry_event, validate_experiment_registry_binding
 from .final_selection import validate_final_selection_report
@@ -634,6 +635,9 @@ def promote_candidate(
     backtest_report_hash = _verify_report_content_hash(report, label="backtest_report")
     if report.get("experiment_id") != experiment_id:
         raise PromotionGateError("candidate report experiment_id mismatch")
+    audit_reasons = validate_audit_trail_binding(report=report, manager=manager)
+    if audit_reasons:
+        raise PromotionGateError(f"promotion refused: {','.join(audit_reasons)}")
     dataset_quality_legacy_bypass_used = _verify_report_dataset_quality(
         report,
         allow_legacy_lineage=allow_legacy_lineage,

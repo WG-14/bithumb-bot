@@ -248,6 +248,22 @@
       "sortino_ratio": "fail_if_required"
     }
   },
+  "research_run": {
+    "report_detail": "summary",
+    "artifact_policy": {
+      "candidate_journal": true,
+      "failed_candidate_evidence": true,
+      "full_decisions_external_jsonl": true
+    },
+    "audit_trail": {
+      "mode": "complete_external",
+      "decisions_required": true,
+      "equity_required": true,
+      "executions_required": true,
+      "hash_chain_required": true,
+      "required_for_promotion": true
+    }
+  },
   "walk_forward": {
     "train_window_days": 180,
     "test_window_days": 30,

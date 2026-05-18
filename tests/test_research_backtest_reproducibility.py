@@ -23,8 +23,9 @@ from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot, TopOf
 from bithumb_bot.research.execution_calibration import build_calibration_artifact
 from bithumb_bot.research.execution_model import ExecutionFill, ExecutionRequest, FixedBpsExecutionModel, StressExecutionModel
 from bithumb_bot.research.experiment_manifest import ExecutionTimingPolicy, ManifestValidationError, parse_manifest
-from bithumb_bot.research.audit_trail import verify_audit_trail
+from bithumb_bot.research.audit_trail import AuditTraceScope, AuditTrailPolicy, verify_audit_trail, write_trace_manifest
 from bithumb_bot.research.return_panel import build_candidate_return_panel
+from bithumb_bot.research import cli as research_cli
 from bithumb_bot.research.cli import _print_report_summary
 from bithumb_bot.research.experiment_registry import (
     experiment_registry_path,
@@ -33,7 +34,7 @@ from bithumb_bot.research.experiment_registry import (
 )
 from bithumb_bot.research.parameter_space import candidate_id
 from bithumb_bot.research.promotion_gate import PromotionGateError, _verify_report_content_hash, promote_candidate
-from bithumb_bot.research.validation_protocol import _promotion_blocking_reasons, run_research_backtest
+from bithumb_bot.research.validation_protocol import _promotion_blocking_reasons, run_research_backtest, run_research_walk_forward
 from bithumb_bot.research import validation_protocol
 from bithumb_bot.strategy.sma import create_sma_with_filter_strategy
 
@@ -1041,6 +1042,149 @@ def test_audit_trace_verification_detects_tamper_and_missing_stream(tmp_path, mo
     assert "audit_trail_equity_stream_missing" in missing["reasons"]
 
 
+def test_audit_trace_verification_accepts_aborted_terminal_status(tmp_path, monkeypatch) -> None:
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    scope = AuditTraceScope(
+        manager=manager,
+        experiment_id="audit_aborted_terminal",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        candidate_id="candidate_001",
+        scenario_id="scenario_001",
+        scenario_index=0,
+        split="validation",
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4},
+    )
+    scope.write_decision({"decision_ts": 1, "raw_signal": "HOLD"})
+    index = scope.complete(status="aborted")
+    write_trace_manifest(
+        manager=manager,
+        experiment_id="audit_aborted_terminal",
+        manifest_hash="sha256:manifest",
+        dataset_content_hash="sha256:dataset",
+        trace_indexes=[index],
+        policy=AuditTrailPolicy(mode="complete_external", decisions_required=True, equity_required=True, executions_required=True),
+    )
+
+    result = verify_audit_trail(manager=manager, experiment_id="audit_aborted_terminal", expected_manifest_hash="sha256:manifest")
+
+    assert result["ok"] is True
+    assert result["reasons"] == []
+
+
+def test_resource_limit_failure_trace_is_report_and_manifest_bound(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["experiment_id"] = "audit_resource_failure"
+    payload["research_run"] = {"artifact_policy": {"full_decisions_external_jsonl": True}}
+
+    def runner(**kwargs):
+        context = kwargs.get("context")
+        if context.split_name == "validation":
+            raise BacktestResourceLimitExceeded(
+                "candidate_resource_limit_exceeded",
+                {"status": "TRIPPED", "reasons": ["max_runtime_exceeded"]},
+            )
+        return run_sma_backtest(**kwargs)
+
+    monkeypatch.setattr(validation_protocol, "resolve_research_strategy", lambda _name: runner)
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    scenario = report["candidates"][0]["scenario_results"][0]
+    failed_index = scenario["validation_audit_trace_index"]
+    assert failed_index["completion_status"] == "failed"
+    assert scenario["resource_guard"]["audit_trace_index"] == failed_index
+    manifest_payload = json.loads(Path(report["audit_trail_trace_manifest_path"]).read_text(encoding="utf-8"))
+    assert failed_index["trace_index_ref"] in {
+        item["trace_index_ref"] for item in manifest_payload["trace_indexes"]
+    }
+    assert verify_audit_trail(manager=manager, experiment_id="audit_resource_failure")["ok"] is True
+
+
+def test_generic_candidate_exception_trace_is_report_and_manifest_bound(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["experiment_id"] = "audit_generic_failure"
+    payload["research_run"] = {"artifact_policy": {"full_decisions_external_jsonl": True}}
+
+    def runner(**kwargs):
+        context = kwargs.get("context")
+        if context.split_name == "validation":
+            raise RuntimeError("synthetic validation failure")
+        return run_sma_backtest(**kwargs)
+
+    monkeypatch.setattr(validation_protocol, "resolve_research_strategy", lambda _name: runner)
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    scenario = report["candidates"][0]["scenario_results"][0]
+    failed_index = scenario["validation_audit_trace_index"]
+    assert failed_index["completion_status"] == "failed"
+    assert scenario["resource_guard"]["audit_trace_index"] == failed_index
+    assert scenario["resource_guard"]["split"] == "validation"
+    manifest_payload = json.loads(Path(report["audit_trail_trace_manifest_path"]).read_text(encoding="utf-8"))
+    assert failed_index["trace_index_ref"] in {
+        item["trace_index_ref"] for item in manifest_payload["trace_indexes"]
+    }
+    assert verify_audit_trail(manager=manager, experiment_id="audit_generic_failure")["ok"] is True
+
+
+def test_complete_external_audit_rerun_replaces_streams_without_append_contamination(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["experiment_id"] = "audit_rerun_clean"
+    payload["research_run"] = {"artifact_policy": {"full_decisions_external_jsonl": True}}
+
+    first = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    first_index = first["candidates"][0]["scenario_results"][0]["validation_audit_trace_index"]
+    second = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    second_index = second["candidates"][0]["scenario_results"][0]["validation_audit_trace_index"]
+
+    assert verify_audit_trail(manager=manager, experiment_id="audit_rerun_clean")["ok"] is True
+    decisions_path = manager.data_dir() / second_index["decisions"]["path"]
+    equity_path = manager.data_dir() / second_index["equity"]["path"]
+    assert sum(1 for _ in decisions_path.open("r", encoding="utf-8")) == second_index["decision_row_count"]
+    assert sum(1 for _ in equity_path.open("r", encoding="utf-8")) == second_index["equity_row_count"]
+    assert second_index["decision_row_count"] == first_index["decision_row_count"]
+
+
 def test_return_panel_uses_external_equity_trace_when_embedded_curve_is_zero_retained(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -1117,6 +1261,104 @@ def test_production_bound_statistical_validation_requires_audit_trace_when_missi
     assert report["audit_trail_status"] == "DISABLED"
     assert "audit_trail_required_for_promotion" in report["statistical_gate_fail_reasons"]
     assert report["statistical_gate_result"] == "FAIL"
+
+
+def test_promotion_revalidates_audit_trace_and_refuses_tampered_stream(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _production_bound_statistical_manifest()
+    payload["experiment_id"] = "audit_promotion_tamper"
+    payload["research_run"] = {"artifact_policy": {"full_decisions_external_jsonl": True}}
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    candidate_id_value = report["candidates"][0]["parameter_candidate_id"]
+    index = report["candidates"][0]["scenario_results"][0]["validation_audit_trace_index"]
+    decisions_path = manager.data_dir() / index["decisions"]["path"]
+    lines = decisions_path.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[0])
+    row["payload"]["raw_signal"] = "TAMPERED"
+    lines[0] = json.dumps(row, sort_keys=True, separators=(",", ":"))
+    decisions_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(PromotionGateError, match="audit_trail_hash_chain_mismatch"):
+        promote_candidate(
+            experiment_id="audit_promotion_tamper",
+            candidate_id=candidate_id_value,
+            manager=manager,
+        )
+
+
+def test_registry_validate_revalidates_audit_trace_and_refuses_missing_stream(tmp_path, monkeypatch, capsys) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    monkeypatch.setattr(research_cli, "PATH_MANAGER", manager)
+    payload = _production_bound_statistical_manifest()
+    payload["experiment_id"] = "audit_registry_missing"
+    payload["research_run"] = {"artifact_policy": {"full_decisions_external_jsonl": True}}
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    index = report["candidates"][0]["scenario_results"][0]["validation_audit_trace_index"]
+    (manager.data_dir() / index["equity"]["path"]).unlink()
+
+    exit_code = research_cli.cmd_research_registry_validate(experiment_id="audit_registry_missing")
+    output = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "audit_trail_equity_stream_missing" in output
+
+
+def test_walk_forward_complete_external_audit_traces_all_windows(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["experiment_id"] = "audit_walk_forward"
+    payload["acceptance_gate"]["walk_forward_required"] = True
+    payload["walk_forward"] = {
+        "train_window_days": 1,
+        "test_window_days": 1,
+        "step_days": 1,
+        "min_windows": 1,
+    }
+    payload["research_run"] = {"artifact_policy": {"full_decisions_external_jsonl": True}}
+
+    report = run_research_walk_forward(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    windows = report["candidates"][0]["scenario_results"][0]["walk_forward_metrics"]["windows"]
+    assert windows
+    for window in windows:
+        assert window["train_audit_trace_index"]["split"].endswith("_train")
+        assert window["test_audit_trace_index"]["split"].endswith("_test")
+    manifest_payload = json.loads(Path(report["audit_trail_trace_manifest_path"]).read_text(encoding="utf-8"))
+    manifest_splits = {item["split"] for item in manifest_payload["trace_indexes"]}
+    for window in windows:
+        assert window["train_audit_trace_index"]["split"] in manifest_splits
+        assert window["test_audit_trace_index"]["split"] in manifest_splits
+    assert verify_audit_trail(manager=manager, experiment_id="audit_walk_forward")["ok"] is True
 
 
 def test_retention_caps_do_not_fail_candidate_but_max_trades_guard_does() -> None:

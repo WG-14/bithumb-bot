@@ -96,6 +96,7 @@ uv run bithumb-bot decision-attribution --limit 500
 uv run bithumb-bot strategy-report
 uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
 uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter_manifest.example.json
+uv run bithumb-bot research-verify-audit --experiment-id <id>
 uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id>
 uv run bithumb-bot research-promote-candidate --experiment-id <id> --candidate-id <id> --allow-legacy-lineage
 uv run bithumb-bot research-reproduce --promotion <promotion.json>

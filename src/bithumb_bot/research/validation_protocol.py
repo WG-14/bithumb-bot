@@ -742,7 +742,17 @@ def _evaluate_candidates(
                     scenario_index=scenario_index,
                     scenario_id=scenario_id,
                     reason="candidate_exception",
-                    resource_guard={"status": "ERROR", "exception_type": type(exc).__name__, "message": str(exc)},
+                    resource_guard={
+                        "status": "ERROR",
+                        "exception_type": type(exc).__name__,
+                        "message": str(exc),
+                        "split": str(getattr(exc, "failed_split", "unknown")),
+                        **(
+                            {"audit_trace_index": getattr(exc, "audit_trace_index")}
+                            if isinstance(getattr(exc, "audit_trace_index", None), dict)
+                            else {}
+                        ),
+                    },
                 )
                 _write_failed_candidate_evidence(
                     manager=manager,
@@ -1224,9 +1234,15 @@ def _evaluate_candidate_base_result(
                 execution_timing_policy=manifest.execution_timing,
                 context=context,
             )
-        except Exception:
+        except Exception as exc:
             if context.audit_trace is not None:
-                context.audit_trace.complete(status="failed")
+                audit_index = context.audit_trace.complete(status="failed")
+                if isinstance(exc, BacktestResourceLimitExceeded):
+                    exc.evidence.setdefault("audit_trace_index", audit_index)
+                    exc.evidence.setdefault("split", split_name)
+                else:
+                    setattr(exc, "audit_trace_index", audit_index)
+                    setattr(exc, "failed_split", split_name)
             raise
 
     train = _run("train")
@@ -1239,8 +1255,12 @@ def _evaluate_candidate_base_result(
             parameter_values=params,
             fee_rate=scenario.fee_rate,
             scenario=scenario,
+            scenario_id=scenario_id,
+            scenario_index=scenario_index,
+            manager=manager,
             parameter_candidate_id=param_candidate_id,
             parameter_stability_score=None,
+            progress_callback=progress_callback,
         )
         if include_walk_forward
         else None
@@ -1360,6 +1380,16 @@ def _collect_audit_trace_indexes(candidates: list[dict[str, Any]]) -> list[dict[
                 value = scenario.get(key)
                 if isinstance(value, dict):
                     indexes.append(value)
+            walk_forward = scenario.get("walk_forward_metrics")
+            windows = walk_forward.get("windows") if isinstance(walk_forward, dict) else None
+            if isinstance(windows, list):
+                for window in windows:
+                    if not isinstance(window, dict):
+                        continue
+                    for key in ("train_audit_trace_index", "test_audit_trace_index"):
+                        value = window.get(key)
+                        if isinstance(value, dict):
+                            indexes.append(value)
     return indexes
 
 
@@ -1894,9 +1924,13 @@ def _walk_forward_metrics(
     parameter_values: dict[str, Any],
     fee_rate: float,
     scenario: ExecutionScenario | None = None,
+    scenario_id: str | None = None,
+    scenario_index: int = 0,
+    manager: PathManager | None = None,
     slippage_bps: float | None = None,
     parameter_candidate_id: str | None = None,
     parameter_stability_score: float | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     config = manifest.walk_forward
     if config is None:
@@ -1916,45 +1950,75 @@ def _walk_forward_metrics(
         source="legacy_test_call",
     )
     windows: list[dict[str, Any]] = []
+    active_scenario_id = scenario_id or _scenario_id(active_scenario, scenario_index)
+
+    def _run_window(snapshot: DatasetSnapshot, split_name: str, context: BacktestRunContext | None) -> BacktestRun:
+        execution_model = _execution_model_from_scenario(
+            active_scenario,
+            seed_context=_seed_context(
+                manifest_hash=manifest.manifest_hash(),
+                scenario=active_scenario,
+                scenario_id=active_scenario_id,
+                parameter_candidate_id=parameter_candidate_id or "unknown_candidate",
+                split_name=split_name,
+            ),
+        )
+        if context is None:
+            return runner(
+                snapshot,
+                parameter_values,
+                active_scenario.fee_rate,
+                active_scenario.slippage_bps,
+                parameter_stability_score,
+                execution_model,
+                manifest.execution_timing,
+            )
+        return runner(
+            dataset=snapshot,
+            parameter_values=parameter_values,
+            fee_rate=active_scenario.fee_rate,
+            slippage_bps=active_scenario.slippage_bps,
+            parameter_stability_score=parameter_stability_score,
+            execution_model=execution_model,
+            execution_timing_policy=manifest.execution_timing,
+            context=context,
+        )
+
     for window_id in sorted({key.rsplit("_", 1)[0] for key in snapshots if key.startswith("window_")}):
         train_snapshot = snapshots[f"{window_id}_train"]
         test_snapshot = snapshots[f"{window_id}_test"]
-        train = runner(
-            train_snapshot,
-            parameter_values,
-            active_scenario.fee_rate,
-            active_scenario.slippage_bps,
-            parameter_stability_score,
-            _execution_model_from_scenario(
-                active_scenario,
-                seed_context=_seed_context(
-                    manifest_hash=manifest.manifest_hash(),
-                    scenario=active_scenario,
-                    scenario_id=_scenario_id(active_scenario, 0),
-                    parameter_candidate_id=parameter_candidate_id or "unknown_candidate",
-                    split_name=f"{window_id}_train",
-                ),
-            ),
-            manifest.execution_timing,
+        train_context = (
+            _backtest_context(
+                manifest=manifest,
+                manager=manager,
+                candidate_id=parameter_candidate_id or "unknown_candidate",
+                scenario_id=active_scenario_id,
+                scenario_index=scenario_index,
+                split_name=f"{window_id}_train",
+                dataset_content_hash=train_snapshot.content_hash(),
+                parameter_values=parameter_values,
+                progress_callback=progress_callback,
+            )
+            if manager is not None
+            else None
         )
-        test = runner(
-            test_snapshot,
-            parameter_values,
-            active_scenario.fee_rate,
-            active_scenario.slippage_bps,
-            parameter_stability_score,
-            _execution_model_from_scenario(
-                active_scenario,
-                seed_context=_seed_context(
-                    manifest_hash=manifest.manifest_hash(),
-                    scenario=active_scenario,
-                    scenario_id=_scenario_id(active_scenario, 0),
-                    parameter_candidate_id=parameter_candidate_id or "unknown_candidate",
-                    split_name=f"{window_id}_test",
-                ),
-            ),
-            manifest.execution_timing,
+        train = _run_window(train_snapshot, f"{window_id}_train", train_context)
+        test_context = (
+            _backtest_context(
+                manifest=manifest,
+                manager=manager,
+                candidate_id=parameter_candidate_id or "unknown_candidate",
+                scenario_id=active_scenario_id,
+                scenario_index=scenario_index,
+                split_name=f"{window_id}_test",
+                dataset_content_hash=test_snapshot.content_hash(),
+                parameter_values=parameter_values,
+                progress_callback=progress_callback,
+            )
+            if manager is not None
+            else None
         )
+        test = _run_window(test_snapshot, f"{window_id}_test", test_context)
         test_metrics = test.metrics.as_dict()
         pass_reasons: list[str] = []
         if not _validation_metrics_gate_compatible(manifest, test_metrics):
@@ -1972,6 +2036,8 @@ def _walk_forward_metrics(
                 "test_metrics": test_metrics,
                 "train_metrics_v2": _metrics_v2_payload(train),
                 "test_metrics_v2": _metrics_v2_payload(test),
+                "train_audit_trace_index": train.audit_trace_index,
+                "test_audit_trace_index": test.audit_trace_index,
                 "train_market_regime_coverage": [row.as_dict() for row in train.regime_coverage],
                 "test_market_regime_coverage": [row.as_dict() for row in test.regime_coverage],
                 "test_market_regime_bucket_performance": [row.as_dict() for row in test.regime_performance],

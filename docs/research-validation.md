@@ -51,6 +51,21 @@ uv run bithumb-bot research-verify-audit --experiment-id <experiment_id>
 Verification fails closed for missing manifests, missing indexes, missing stream
 files, row-count mismatches, stream hash mismatches, hash-chain mismatches,
 report/reference hash mismatches, and non-terminal trace statuses.
+`completed`, `failed`, and `aborted` are terminal audit statuses. A failed or
+aborted candidate can therefore have valid forensic evidence even though it is
+not promotion-eligible.
+
+Re-running the same experiment id rewrites the exact candidate/scenario/split
+trace streams and `trace_manifest.json` for that managed scope before appending
+new rows. Operators should treat the report-bound `audit_trail_trace_manifest_ref`
+and `audit_trail_trace_manifest_hash` as the custody binding for the current run.
+Do not merge old trace rows into a new report by copying JSONL files.
+
+Walk-forward runs in complete external mode trace each rolling
+`window_NNN_train` and `window_NNN_test` split. Each window row carries
+`train_audit_trace_index` and `test_audit_trace_index`, and the top-level
+`trace_manifest.json` includes those indexes alongside train, validation, and
+final-holdout indexes.
 
 Production/promotion-bound evidence requires complete trace evidence when the
 audit policy marks it required for promotion. Missing or corrupt trace evidence
@@ -60,6 +75,13 @@ adds machine-readable audit fail reasons such as
 `audit_trail_execution_stream_missing`, `audit_trail_hash_chain_mismatch`,
 `audit_trail_row_count_mismatch`, `audit_trail_non_terminal_status`, and
 `audit_trail_required_for_promotion`.
+Promotion and `research-registry-validate` re-open the report-bound trace
+manifest, recompute its content hash, and rerun JSONL/index verification against
+the current files. If a trace file is deleted or tampered with after report
+generation, promotion fails before writing an artifact. Recovery is to rerun the
+research command from the manifest and dataset so fresh traces, report hashes,
+statistical evidence, and registry bindings are generated together; do not patch
+hashes or edit trace files by hand.
 
 Candidate subprocess isolation remains explicitly pending unless a report shows
 real worker-process evidence. The current in-process evaluator reports
@@ -597,7 +619,7 @@ When `acceptance_gate.walk_forward_required=true`, the `walk_forward` section is
 
 Researcher-freedom metadata such as `search_budget`, `parameter_grid_size`, declared `attempt_index`, declared `holdout_reuse_count`, `dataset_reuse_policy`, hypothesis ids, and lineage hashes is observability, not a statistical defense by itself. Production-bound promotion now requires a `StatisticalSelectionContract`, a `statistical_selection_evidence` artifact, and registry-backed final-holdout/attempt evidence so the selected candidate is judged as a winner selected from a candidate universe, not as an isolated backtest.
 
-The current official `research-backtest` report-generation path accepts and emits `bootstrap.method=metric_centered_max_bootstrap` only. It computes a deterministic, seeded max-statistic bootstrap over candidate primary metric summaries and emits `summary_metric_max_bootstrap_p_value`. It is `SCREENING_SUMMARY_BOOTSTRAP`; it does not populate `white_reality_check_p_value`, and it is not promotion-grade. Official reports and candidate profiles expose `official_promotion_grade_wrc_generation_available=false` and warning `promotion_grade_statistical_generation_unavailable` so operators do not mistake screening evidence for promotion-grade WRC. That warning is operator visibility only; it does not satisfy any statistical gate. A manifest that declares `white_reality_check_block_bootstrap` is rejected because official WRC generation is unavailable; it must not silently fall back to summary metric bootstrap. Evidence cannot claim WRC if the manifest/statistical contract only declared summary bootstrap. Promotion-grade WRC evidence must use a manifest contract, evidence `bootstrap_method`, evidence `statistical_method`, evidence `white_reality_check_method`, and `bootstrap_sampling_contract.method` that all identify the same supported method. The sampling contract's canonical method field is `method`; `method_name` is compatibility-only and is not sufficient for promotion-grade evidence. Promotion-grade WRC evidence must be recomputable from the bound return panel and a supported bootstrap sampling contract with method provenance. Full WRC requires aligned `bar_excess_return` or `portfolio_bar_return` panel evidence; `trade_return` panels are screening/diagnostic and reproducibility inputs and cannot satisfy full promotion-grade WRC. SPA, Deflated Sharpe, and family-wide statistical aggregation are not implemented; if `max_spa_p_value` or `min_deflated_sharpe_probability` is configured before those methods are implemented, promotion fails closed with `spa_method_unavailable` or `deflated_sharpe_missing`, and experiment-family promotion-grade statistical aggregation fails closed rather than silently falling back.
+The current official `research-backtest` report-generation path accepts and emits `bootstrap.method=metric_centered_max_bootstrap` for screening evidence and supports `white_reality_check_block_bootstrap` only when an aligned promotion-grade return panel exists. Summary bootstrap computes a deterministic, seeded max-statistic bootstrap over candidate primary metric summaries and emits `summary_metric_max_bootstrap_p_value`. It is `SCREENING_SUMMARY_BOOTSTRAP`; it does not populate `white_reality_check_p_value`, and it is not promotion-grade. Official reports and candidate profiles expose `official_promotion_grade_wrc_generation_available=false` and warning `promotion_grade_statistical_generation_unavailable` when only screening evidence is available. That warning is operator visibility only; it does not satisfy any statistical gate. Evidence cannot claim WRC if the manifest/statistical contract only declared summary bootstrap. Promotion-grade WRC evidence must use a manifest contract, evidence `bootstrap_method`, evidence `statistical_method`, evidence `white_reality_check_method`, and `bootstrap_sampling_contract.method` that all identify the same supported method. The sampling contract's canonical method field is `method`; `method_name` is compatibility-only and is not sufficient for promotion-grade evidence. Promotion-grade WRC evidence must be recomputable from the bound return panel and a supported bootstrap sampling contract with method provenance. Full WRC requires aligned `bar_excess_return` or `portfolio_bar_return` panel evidence; `trade_return` panels are screening/diagnostic and reproducibility inputs and cannot satisfy full promotion-grade WRC. SPA, Deflated Sharpe, and family-wide statistical aggregation are not implemented; if `max_spa_p_value` or `min_deflated_sharpe_probability` is configured before those methods are implemented, promotion fails closed with `spa_method_unavailable` or `deflated_sharpe_missing`, and experiment-family promotion-grade statistical aggregation fails closed rather than silently falling back.
 
 Lineage metadata records researcher freedom: manifest, dataset, experiment-family, attempt, holdout-reuse, and search-budget context. For production-bound tiers, `attempt_index` and `holdout_reuse_count` mean registry-computed values; declared manifest counters are preserved separately as `declared_attempt_index` and `declared_holdout_reuse_count`. Statistical evidence is the enforcement artifact. The `selection_universe_hash` binds the manifest hash, dataset content hash, dataset quality hash when present, experiment-family and hypothesis metadata, candidate ids and parameter values, required scenario ids, primary metric source, benchmark policy, and the statistical validation contract. The separate `candidate_metric_values_hash` binds the exact candidate metric universe used for the statistical test, including candidate ids, parameter values, scenario policy, required scenario ids, primary metric/source, validation metric values, missing-metric markers, and candidate acceptance-gate results. The `research_freedom_hash` binds experiment-family and hypothesis identity, dataset snapshot, train/validation/final-holdout split hashes, final-holdout fingerprint, parameter-space hash, registry-computed counters, registry path, registry prior hash, and registry row hash.
 

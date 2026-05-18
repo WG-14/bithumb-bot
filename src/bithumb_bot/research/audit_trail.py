@@ -16,6 +16,7 @@ TRACE_MANIFEST_SCHEMA_VERSION = 1
 TRACE_STATUS_COMPLETED = "completed"
 TRACE_STATUS_FAILED = "failed"
 TRACE_STATUS_ABORTED = "aborted"
+TERMINAL_TRACE_STATUSES = {TRACE_STATUS_COMPLETED, TRACE_STATUS_FAILED, TRACE_STATUS_ABORTED}
 
 AUDIT_FAIL_REASONS = {
     "manifest_missing": "audit_trail_trace_manifest_missing",
@@ -127,6 +128,10 @@ class AuditTraceScope:
         )
         _ensure_allowed(manager, self.root)
         self.root.mkdir(parents=True, exist_ok=True)
+        for name in ("decisions.jsonl", "equity.jsonl", "executions.jsonl", "trace_index.json"):
+            path = self.root / name
+            if path.exists():
+                path.unlink()
         self._sequence = 0
         self._streams = {
             "decision": _StreamState("decision", self.root / "decisions.jsonl", _data_ref(manager, self.root / "decisions.jsonl")),
@@ -146,7 +151,7 @@ class AuditTraceScope:
         self._write("execution", _event_ts(payload), payload)
 
     def complete(self, status: str = TRACE_STATUS_COMPLETED) -> dict[str, Any]:
-        if status not in {TRACE_STATUS_COMPLETED, TRACE_STATUS_FAILED, TRACE_STATUS_ABORTED}:
+        if status not in TERMINAL_TRACE_STATUSES:
             status = TRACE_STATUS_FAILED
         for stream in self._streams.values():
             stream.path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,9 +336,7 @@ def _verify_index(*, index: dict[str, Any], data_dir: Path) -> dict[str, Any]:
             actual = sha256_prefixed(content_hash_payload({k: v for k, v in persisted.items() if k != "content_hash"}))
             if persisted.get("content_hash") != actual or persisted.get("content_hash") != index.get("content_hash"):
                 reasons.append(AUDIT_FAIL_REASONS["report_reference_hash_mismatch"])
-    if str(index.get("completion_status") or "") not in {TRACE_STATUS_COMPLETED, TRACE_STATUS_FAILED, TRACE_STATUS_ABORTED}:
-        reasons.append(AUDIT_FAIL_REASONS["non_terminal_status"])
-    elif index.get("completion_status") != TRACE_STATUS_COMPLETED:
+    if str(index.get("completion_status") or "") not in TERMINAL_TRACE_STATUSES:
         reasons.append(AUDIT_FAIL_REASONS["non_terminal_status"])
     for stream_name, missing_reason in (
         ("decisions", AUDIT_FAIL_REASONS["decision_stream_missing"]),
@@ -396,6 +399,52 @@ def _verify_stream(*, stream: dict[str, Any], data_dir: Path, missing_reason: st
             reasons.append(AUDIT_FAIL_REASONS["hash_chain_mismatch"])
     if stream.get("first_ts") != first_ts or stream.get("last_ts") != last_ts:
         reasons.append(AUDIT_FAIL_REASONS["stream_hash_mismatch"])
+    return sorted(set(reasons))
+
+
+def validate_audit_trail_binding(*, report: dict[str, Any], manager: PathManager) -> list[str]:
+    reasons: list[str] = []
+    policy = report.get("audit_trail_policy")
+    policy_required = bool(isinstance(policy, dict) and policy.get("required_for_promotion"))
+    complete_external = bool(isinstance(policy, dict) and policy.get("mode") == "complete_external")
+    production_bound = str(report.get("deployment_tier") or "") in {
+        "paper_candidate",
+        "live_dry_run_candidate",
+        "small_live_candidate",
+    }
+    required = policy_required and (production_bound or bool(report.get("statistical_validation_required")))
+    if not required:
+        return []
+    if not complete_external:
+        return ["audit_trail_required_for_promotion"]
+
+    manifest_hash = str(report.get("audit_trail_trace_manifest_hash") or "").strip()
+    manifest_ref = str(report.get("audit_trail_trace_manifest_ref") or "").strip()
+    manifest_path_value = str(report.get("audit_trail_trace_manifest_path") or "").strip()
+    manifest_path = manager.data_dir() / manifest_ref if manifest_ref else Path(manifest_path_value).expanduser()
+    if not manifest_ref and not manifest_path_value:
+        return ["audit_trail_trace_manifest_missing"]
+    try:
+        _ensure_allowed(manager, manifest_path)
+    except PathPolicyError:
+        return ["audit_trail_trace_manifest_missing"]
+    if not manifest_path.exists():
+        return ["audit_trail_trace_manifest_missing"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return ["audit_trail_trace_manifest_missing"]
+    actual_manifest_hash = sha256_prefixed(content_hash_payload({k: v for k, v in manifest.items() if k != "content_hash"}))
+    if manifest.get("content_hash") != actual_manifest_hash:
+        reasons.append("audit_trail_report_reference_hash_mismatch")
+    if manifest_hash and manifest_hash != str(manifest.get("content_hash") or ""):
+        reasons.append("audit_trail_trace_manifest_hash_mismatch")
+    verification = verify_audit_trail(
+        manager=manager,
+        trace_manifest_path_value=manifest_path,
+        expected_manifest_hash=str(report.get("manifest_hash") or ""),
+    )
+    reasons.extend(str(item) for item in verification.get("reasons") or [])
     return sorted(set(reasons))
 
 
