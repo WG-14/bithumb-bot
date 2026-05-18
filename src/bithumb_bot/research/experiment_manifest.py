@@ -1314,6 +1314,11 @@ def _validate_execution_model_capability_policy(
     has_depth_walk = any(scenario.type == "depth_walk" for scenario in execution_model.scenarios)
     if execution_timing.depth_required and not has_depth_walk:
         raise ManifestValidationError("execution_depth_required_but_unavailable_without_depth_walk_scenario")
+    if (
+        execution_timing.min_execution_reality_level_for_promotion == "l2_depth_walk_no_queue"
+        and not has_depth_walk
+    ):
+        raise ManifestValidationError("execution_l2_depth_walk_required_but_depth_walk_scenario_missing")
 
 
 def _optional_scenario_role(value: Any) -> str | None:

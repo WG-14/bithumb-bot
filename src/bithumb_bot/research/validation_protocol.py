@@ -3333,13 +3333,19 @@ def _execution_reality_contract(
     evidence_tier = "l2_depth_walk_no_queue" if depth_walk_used else None
     limitations = [
         "top_of_book_is_quote_evidence_not_liquidity_depth",
+        "full_orderbook_depth_unavailable",
         "queue_position_unavailable",
         "trade_ticks_unavailable",
         "market_impact_model_unavailable",
         "intra_candle_path_reconstruction_unavailable",
     ]
-    if not depth_walk_used:
-        limitations.append("full_orderbook_depth_unavailable")
+    if depth_walk_used:
+        limitations.extend(
+            [
+                "l2_depth_snapshot_available_for_depth_walk" if depth_available else "l2_depth_snapshot_unavailable_for_depth_walk",
+                "l2_depth_walk_queue_unaware",
+            ]
+        )
     if top is None:
         limitations.append("top_of_book_not_requested")
     return build_execution_reality_contract(
@@ -3379,10 +3385,11 @@ def _execution_reality_contract(
             ),
             "depth_evidence_available": bool(depth_available),
             "l2_depth_evidence_available": bool(depth_available),
+            "l2_depth_snapshot_available": bool(depth_available and depth_walk_used),
             "l2_depth_complete_snapshots_available": bool(depth_available),
             "depth_walk_execution_model_available": True,
             "depth_walk_execution_model_used": bool(depth_walk_used),
-            "full_orderbook_depth_available": bool(depth_available and depth_walk_used),
+            "full_orderbook_depth_available": False,
             "trade_ticks_available": False,
             "queue_position_available": False,
             "market_impact_model_available": False,
@@ -3403,11 +3410,13 @@ def _execution_capability_contract_from_reality(contract: dict[str, Any]) -> dic
         top_of_book_required=bool(contract.get("top_of_book_required")),
         top_of_book_available=bool(contract.get("quote_evidence_available")),
         top_of_book_is_full_depth=bool(contract.get("top_of_book_is_full_depth")),
-        full_orderbook_depth_required=bool(contract.get("depth_required")),
+        l2_depth_snapshot_required=bool(contract.get("depth_required")),
+        full_orderbook_depth_required=False,
         trade_ticks_required=bool(contract.get("trade_tick_required")),
         queue_position_required=bool(contract.get("queue_position_required")),
         market_impact_model_required=bool(contract.get("market_impact_required")),
         intra_candle_path_required=bool(contract.get("intra_candle_path_required")),
+        l2_depth_snapshot_available=bool(contract.get("l2_depth_snapshot_available", contract.get("depth_available"))),
         full_orderbook_depth_available=bool(contract.get("full_orderbook_depth_available")),
         trade_ticks_available=bool(contract.get("trade_ticks_available")),
         queue_position_available=bool(contract.get("queue_position_available")),

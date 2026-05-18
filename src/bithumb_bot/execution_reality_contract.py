@@ -24,6 +24,7 @@ EXECUTION_OBSERVED_EVIDENCE_FIELDS = frozenset(
     }
 )
 CAPABILITY_OBSERVED_AVAILABILITY_FIELDS = frozenset({"top_of_book"})
+L2_DEPTH_SNAPSHOT_MISSING_REASON = "execution_l2_depth_snapshot_required_but_unavailable"
 
 _TIMESTAMP_FIELDS = frozenset(
     {
@@ -265,11 +266,13 @@ def build_execution_reality_contract(
         top_of_book_required=bool(top_of_book_required),
         top_of_book_available=capability_top_of_book_available,
         top_of_book_is_full_depth=bool(top_of_book_is_full_depth),
-        full_orderbook_depth_required=bool(depth_required),
+        l2_depth_snapshot_required=bool(depth_required),
+        full_orderbook_depth_required=False,
         trade_ticks_required=bool(trade_tick_required),
         queue_position_required=bool(queue_position_required),
         market_impact_model_required=bool(market_impact_required),
         intra_candle_path_required=bool(payload.get("intra_candle_path_required", False)),
+        l2_depth_snapshot_available=bool(payload.get("l2_depth_snapshot_available", payload.get("depth_available", False))),
         full_orderbook_depth_available=bool(payload.get("full_orderbook_depth_available", False)),
         trade_ticks_available=bool(payload.get("trade_ticks_available", False)),
         queue_position_available=bool(payload.get("queue_position_available", False)),
@@ -289,11 +292,13 @@ def build_execution_capability_contract(
     top_of_book_required: bool = False,
     top_of_book_available: bool = False,
     top_of_book_is_full_depth: bool = False,
+    l2_depth_snapshot_required: bool = False,
     full_orderbook_depth_required: bool = False,
     trade_ticks_required: bool = False,
     queue_position_required: bool = False,
     market_impact_model_required: bool = False,
     intra_candle_path_required: bool = False,
+    l2_depth_snapshot_available: bool = False,
     full_orderbook_depth_available: bool = False,
     trade_ticks_available: bool = False,
     queue_position_available: bool = False,
@@ -311,6 +316,7 @@ def build_execution_capability_contract(
     required = {
         "candle_ohlcv": True,
         "top_of_book": top_required,
+        "l2_depth_snapshot": bool(l2_depth_snapshot_required),
         "full_orderbook_depth": bool(full_orderbook_depth_required),
         "trade_ticks": bool(trade_ticks_required),
         "queue_position": bool(queue_position_required),
@@ -318,11 +324,12 @@ def build_execution_capability_contract(
         "intra_candle_path_reconstruction": bool(intra_candle_path_required),
     }
     if tier == "l2_depth_walk_no_queue":
-        required["full_orderbook_depth"] = True
+        required["l2_depth_snapshot"] = True
     available = {
         "candle_ohlcv": True,
         "top_of_book": bool(top_of_book_available),
         "top_of_book_is_full_depth": bool(top_of_book_is_full_depth),
+        "l2_depth_snapshot": bool(l2_depth_snapshot_available),
         "full_orderbook_depth": bool(full_orderbook_depth_available),
         "trade_ticks": bool(trade_ticks_available),
         "queue_position": bool(queue_position_available),
@@ -352,13 +359,6 @@ def build_execution_capability_contract(
     )
     if tier in RESERVED_FUTURE_EVIDENCE_TIERS:
         capability_limitations.append(f"evidence_tier_reserved_not_implemented:{tier}")
-    if tier == "l2_depth_walk_no_queue":
-        capability_limitations = [
-            item
-            for item in capability_limitations
-            if item != "full_orderbook_depth_unavailable"
-            and item != "top_of_book_is_quote_evidence_not_liquidity_depth"
-        ]
     payload = {
         "schema_version": EXECUTION_CAPABILITY_CONTRACT_SCHEMA_VERSION,
         "strategy_required_capabilities": required,
@@ -389,7 +389,7 @@ def unsupported_capability_reasons(contract: dict[str, Any]) -> list[str]:
     if contract.get("top_of_book_is_full_depth") is True:
         reasons.append("top_of_book_cannot_satisfy_full_depth")
     if contract.get("depth_required") and not contract.get("depth_available", False):
-        reasons.append("execution_depth_required_but_unavailable")
+        reasons.append(L2_DEPTH_SNAPSHOT_MISSING_REASON)
     if contract.get("trade_tick_required") and not contract.get("trade_ticks_available", False):
         reasons.append("execution_trade_ticks_required_but_unavailable")
     if contract.get("queue_position_required") and not contract.get("queue_position_available", False):
@@ -404,6 +404,8 @@ def unsupported_capability_reasons(contract: dict[str, Any]) -> list[str]:
         for name in capability.get("unavailable_required_capabilities") or []:
             if name == "top_of_book":
                 reasons.append("execution_top_of_book_required_but_unavailable")
+            elif name == "l2_depth_snapshot":
+                reasons.append(L2_DEPTH_SNAPSHOT_MISSING_REASON)
             elif name == "full_orderbook_depth":
                 reasons.append("execution_depth_required_but_unavailable")
             elif name == "trade_ticks":

@@ -153,6 +153,8 @@ def test_execution_capability_contract_hash_is_stable_and_ignores_generated_time
 @pytest.mark.parametrize(
     "overrides",
     [
+        {"l2_depth_snapshot_required": True},
+        {"l2_depth_snapshot_available": True},
         {"full_orderbook_depth_required": True},
         {"trade_ticks_required": True},
         {"queue_position_required": True},
@@ -232,9 +234,56 @@ def test_l2_depth_rows_do_not_imply_full_orderbook_depth_capability() -> None:
     capability = contract["execution_capability_contract"]
     assert contract["depth_available"] is True
     assert contract["l2_depth_complete_snapshots_available"] is True
+    assert capability["available_capabilities"]["l2_depth_snapshot"] is True
+    assert capability["strategy_required_capabilities"]["l2_depth_snapshot"] is True
     assert capability["available_capabilities"]["full_orderbook_depth"] is False
+    assert capability["strategy_required_capabilities"]["full_orderbook_depth"] is False
     assert capability["available_capabilities"]["top_of_book_is_full_depth"] is False
-    assert "execution_depth_required_but_unavailable" in unsupported_capability_reasons(contract)
+    assert "execution_depth_required_but_unavailable" not in unsupported_capability_reasons(contract)
+
+
+def test_l2_depth_walk_requires_l2_snapshot_not_full_orderbook_depth() -> None:
+    capability = build_execution_capability_contract(
+        fill_reference_policy="latency_adjusted_orderbook",
+        top_of_book_required=True,
+        top_of_book_available=True,
+        evidence_tier="l2_depth_walk_no_queue",
+        l2_depth_snapshot_available=True,
+        full_orderbook_depth_available=False,
+    )
+
+    assert capability["strategy_required_capabilities"]["l2_depth_snapshot"] is True
+    assert capability["strategy_required_capabilities"]["full_orderbook_depth"] is False
+    assert capability["available_capabilities"]["l2_depth_snapshot"] is True
+    assert capability["available_capabilities"]["full_orderbook_depth"] is False
+    assert capability["unavailable_required_capabilities"] == []
+    assert "full_orderbook_depth_unavailable" in capability["limitations"]
+    assert "queue_position_unavailable" in capability["limitations"]
+    assert "trade_ticks_unavailable" in capability["limitations"]
+    assert "market_impact_model_unavailable" in capability["limitations"]
+    assert "intra_candle_path_reconstruction_unavailable" in capability["limitations"]
+
+
+def test_l2_depth_walk_missing_snapshot_is_specific_unavailable_capability() -> None:
+    capability = build_execution_capability_contract(
+        fill_reference_policy="latency_adjusted_orderbook",
+        top_of_book_required=True,
+        top_of_book_available=True,
+        evidence_tier="l2_depth_walk_no_queue",
+        l2_depth_snapshot_available=False,
+        full_orderbook_depth_available=False,
+    )
+    contract = _contract(
+        depth_required=True,
+        depth_available=False,
+        execution_reality_level="l2_depth_walk_no_queue",
+        execution_capability_contract=capability,
+    )
+
+    assert capability["unavailable_required_capabilities"] == ["l2_depth_snapshot"]
+    reasons = unsupported_capability_reasons(contract)
+    assert "execution_l2_depth_snapshot_required_but_unavailable" in reasons
+    assert "execution_depth_required_but_unavailable" not in reasons
 
 
 def test_capability_validation_recomputes_required_availability_consistency() -> None:
@@ -284,6 +333,30 @@ def test_capability_mismatch_ignores_only_top_of_book_unavailable_difference() -
     assert any(
         item.get("field") == "execution_capability_contract.unavailable_required_capabilities"
         for item in execution_capability_contract_mismatch_reasons(expected=expected, observed=bad)
+    )
+
+
+def test_capability_mismatch_detects_l2_depth_snapshot_availability() -> None:
+    expected = build_execution_capability_contract(
+        fill_reference_policy="latency_adjusted_orderbook",
+        evidence_tier="l2_depth_walk_no_queue",
+        l2_depth_snapshot_available=True,
+    )
+    observed = build_execution_capability_contract(
+        fill_reference_policy="latency_adjusted_orderbook",
+        evidence_tier="l2_depth_walk_no_queue",
+        l2_depth_snapshot_available=False,
+    )
+
+    mismatches = execution_capability_contract_mismatch_reasons(expected=expected, observed=observed)
+
+    assert any(
+        item.get("field") == "execution_capability_contract.available_capabilities.l2_depth_snapshot"
+        for item in mismatches
+    )
+    assert any(
+        item.get("field") == "execution_capability_contract.unavailable_required_capabilities"
+        for item in mismatches
     )
 
 
@@ -478,6 +551,20 @@ def test_depth_walk_manifest_type_is_wired_to_research_backtest_scenarios() -> N
     manifest = parse_manifest(payload)
 
     assert manifest.execution_model.scenarios[0].type == "depth_walk"
+
+
+def test_l2_depth_walk_promotion_level_requires_depth_walk_scenario() -> None:
+    payload = _manifest_payload()
+    payload["execution_timing"] = _production_safe_execution_timing(
+        fill_reference_policy="latency_adjusted_orderbook",
+        min_execution_reality_level_for_promotion="l2_depth_walk_no_queue",
+    )
+
+    with pytest.raises(
+        ManifestValidationError,
+        match="execution_l2_depth_walk_required_but_depth_walk_scenario_missing",
+    ):
+        parse_manifest(payload)
 
 
 @pytest.mark.parametrize(
@@ -788,7 +875,7 @@ def test_top_of_book_only_contract_cannot_satisfy_depth_trade_tick_or_queue_requ
 
     reasons = unsupported_capability_reasons(contract)
 
-    assert "execution_depth_required_but_unavailable" in reasons
+    assert "execution_l2_depth_snapshot_required_but_unavailable" in reasons
     assert "execution_trade_ticks_required_but_unavailable" in reasons
     assert "execution_queue_position_required_but_unavailable" in reasons
 
@@ -820,7 +907,7 @@ def test_depth_availability_does_not_satisfy_queue_ticks_impact_or_intracandle()
 
     reasons = unsupported_capability_reasons(contract)
 
-    assert "execution_depth_required_but_unavailable" in reasons
+    assert "execution_l2_depth_snapshot_required_but_unavailable" not in reasons
     assert "execution_trade_ticks_required_but_unavailable" in reasons
     assert "execution_queue_position_required_but_unavailable" in reasons
     assert "execution_market_impact_required_but_unavailable" in reasons

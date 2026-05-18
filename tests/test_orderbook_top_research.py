@@ -343,6 +343,7 @@ def test_stored_l2_depth_rows_are_reported_without_claiming_depth_execution(
     assert limitations["signal_level_depth_coverage_status"] == "not_requested"
     assert limitations["depth_liquidity_sufficiency_status"] == "not_requested"
     assert limitations["full_orderbook_depth_available"] is False
+    assert capability["l2_depth_snapshot"] is False
     assert capability["full_orderbook_depth"] is False
     assert capability["queue_position"] is False
     assert capability["trade_ticks"] is False
@@ -379,15 +380,25 @@ def test_depth_walk_research_backtest_uses_signal_level_l2_depth(tmp_path: Path,
     contract = candidate["execution_capability_contract"]
     assert candidate["scenario_results"][0]["scenario_type"] == "depth_walk"
     assert candidate["evidence_tier"] == "l2_depth_walk_no_queue"
-    assert contract["available_capabilities"]["full_orderbook_depth"] is True
+    assert contract["strategy_required_capabilities"]["l2_depth_snapshot"] is True
+    assert contract["strategy_required_capabilities"]["full_orderbook_depth"] is False
+    assert contract["available_capabilities"]["l2_depth_snapshot"] is True
+    assert contract["available_capabilities"]["full_orderbook_depth"] is False
+    assert report["execution_capability_contract"]["available_capabilities"]["full_orderbook_depth"] is False
     assert limitations["depth_walk_execution_model_used"] is True
+    assert limitations["full_orderbook_depth_available"] is False
     assert limitations["signal_level_depth_coverage_pct"] == 100.0
     assert summary["depth_walk_execution_model_used"] is True
     assert summary["depth_partial_fill_count"] > 0
     assert summary["depth_liquidity_sufficiency_status"] == "insufficient_depth"
     assert report["signal_depth_coverage_summary"]["depth_evidence_refs"]
+    assert "full_orderbook_depth_unavailable" in contract["limitations"]
     assert "queue_position_unavailable" in contract["limitations"]
+    assert "trade_ticks_unavailable" in contract["limitations"]
     assert "market_impact_model_unavailable" in contract["limitations"]
+    assert "intra_candle_path_reconstruction_unavailable" in contract["limitations"]
+    assert "l2_depth_snapshot_available_for_depth_walk" in contract["limitations"]
+    assert "l2_depth_walk_queue_unaware" in contract["limitations"]
 
 
 def test_depth_walk_research_backtest_fails_closed_when_l2_depth_missing(tmp_path: Path, monkeypatch) -> None:
@@ -416,9 +427,12 @@ def test_depth_walk_research_backtest_fails_closed_when_l2_depth_missing(tmp_pat
     candidate = report["candidates"][0]
     summary = candidate["execution_reality_summary"]
     assert candidate["acceptance_gate_result"] == "FAIL"
-    assert "execution_depth_required_but_unavailable" in candidate["gate_fail_reasons"]
+    assert "execution_l2_depth_snapshot_required_but_unavailable" in candidate["gate_fail_reasons"]
+    assert "execution_depth_required_but_unavailable" not in candidate["gate_fail_reasons"]
     assert "execution_capability_required_unavailable" in candidate["gate_fail_reasons"]
-    assert candidate["unavailable_required_capabilities"] == ["full_orderbook_depth"]
+    assert candidate["unavailable_required_capabilities"] == ["l2_depth_snapshot"]
+    assert candidate["execution_capability_contract"]["available_capabilities"]["full_orderbook_depth"] is False
+    assert candidate["execution_capability_contract"]["available_capabilities"]["l2_depth_snapshot"] is False
     assert summary["depth_walk_execution_model_used"] is True
     assert summary["signal_level_depth_coverage_status"] == "FAIL"
     assert summary["depth_missing_snapshot_count"] > 0
@@ -528,6 +542,7 @@ def test_research_readiness_reports_split_level_depth_without_full_depth_claim(
     assert report["top_of_book"]["depth_liquidity_sufficiency_status"] == "not_computed_depth_walk_not_wired_to_research_backtest"
     assert report["execution_capability"]["l2_depth_rows_available"] is True
     assert report["execution_capability"]["l2_depth_complete_snapshots_available"] is True
+    assert report["execution_capability_contract"]["available_capabilities"]["l2_depth_snapshot"] is False
     assert report["execution_capability"]["full_orderbook_depth_available"] is False
     assert report["execution_capability_contract"]["available_capabilities"]["full_orderbook_depth"] is False
 
@@ -568,6 +583,7 @@ def test_research_readiness_aggregates_depth_when_top_of_book_not_requested(
     assert report["top_of_book"]["full_orderbook_depth_available"] is False
     assert report["execution_capability"]["l2_depth_rows_available"] is True
     assert report["execution_capability"]["l2_depth_complete_snapshots_available"] is True
+    assert report["execution_capability_contract"]["available_capabilities"]["l2_depth_snapshot"] is False
     assert report["execution_capability"]["full_orderbook_depth_available"] is False
     assert report["execution_capability_contract"]["available_capabilities"]["full_orderbook_depth"] is False
 
