@@ -256,6 +256,84 @@ def validate_backtest_candidate_for_promotion(candidate: dict[str, Any] | None) 
     return not reasons, reasons
 
 
+def _effective_policy_requirements(
+    *,
+    candidate: dict[str, Any],
+    report: dict[str, Any],
+    validation_run_payload: dict[str, Any] | None = None,
+    validation_policy_source: str | None = None,
+    validation_policy_required_stage_names: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
+    supplied_names = [str(item) for item in validation_policy_required_stage_names or [] if str(item)]
+    run_policy_names = (validation_run_payload or {}).get("validation_policy_required_stage_names")
+    run_names = [str(item) for item in run_policy_names or [] if str(item)]
+    required_names = set(supplied_names or run_names)
+    source = (
+        validation_policy_source
+        or str((validation_run_payload or {}).get("validation_policy_source") or "")
+        or None
+    )
+    production_bound = is_production_bound_target(candidate.get("deployment_tier") or report.get("deployment_tier"))
+    if not required_names:
+        required_names.update({"readiness", "dataset_quality", "backtest", "promotion_eligibility", "promotion", "reproduce"})
+        if candidate.get("walk_forward_required") or report.get("walk_forward_required"):
+            required_names.add("walk_forward")
+        if candidate.get("final_holdout_required_for_promotion") is not False:
+            required_names.add("final_holdout")
+        if stress_suite_required_for_candidate(candidate, report):
+            required_names.add("stress_suite")
+        if candidate.get("statistical_validation_required") or report.get("statistical_validation_required"):
+            required_names.add("statistical_validation")
+        if report.get("final_selection_required"):
+            required_names.add("final_selection")
+        source = source or ("legacy_manifest_with_production_fallbacks" if production_bound else "manifest_acceptance_gate")
+    ordered_names = [
+        name
+        for name in (
+            "readiness",
+            "dataset_quality",
+            "backtest",
+            "final_holdout",
+            "stress_suite",
+            "statistical_validation",
+            "final_selection",
+            "walk_forward",
+            "promotion_eligibility",
+            "promotion",
+            "reproduce",
+        )
+        if name in required_names
+    ]
+    return {
+        "validation_policy_source": source,
+        "validation_policy_required_stage_names": ordered_names,
+        "effective_walk_forward_required": "walk_forward" in required_names,
+        "effective_final_holdout_required": "final_holdout" in required_names,
+        "effective_stress_suite_required": "stress_suite" in required_names,
+        "effective_statistical_validation_required": "statistical_validation" in required_names,
+        "effective_final_selection_required": "final_selection" in required_names,
+    }
+
+
+def _manifest_policy_flags(candidate: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "manifest_walk_forward_required": bool(candidate.get("walk_forward_required") or report.get("walk_forward_required")),
+        "manifest_final_holdout_required_for_promotion": candidate.get("final_holdout_required_for_promotion") is not False,
+        "manifest_stress_suite_required": stress_suite_required_for_candidate(candidate, report),
+        "manifest_statistical_validation_required": bool(candidate.get("statistical_validation_required") or report.get("statistical_validation_required")),
+        "manifest_final_selection_required": bool(report.get("final_selection_required")),
+    }
+
+
+def _with_effective_requirement_fields(candidate: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    effective = dict(candidate)
+    effective["walk_forward_required"] = bool(policy.get("effective_walk_forward_required"))
+    effective["final_holdout_required_for_promotion"] = bool(policy.get("effective_final_holdout_required"))
+    effective["stress_suite_required"] = bool(policy.get("effective_stress_suite_required"))
+    effective["statistical_validation_required"] = bool(policy.get("effective_statistical_validation_required"))
+    return effective
+
+
 def _extend_portfolio_policy_reasons(
     candidate: dict[str, Any],
     reasons: list[str],
@@ -675,6 +753,8 @@ def promote_candidate(
     validation_run_path: str | Path | None = None,
     validation_run_binding_hash: str | None = None,
     allow_pending_validation_run: bool = False,
+    validation_policy_source: str | None = None,
+    validation_policy_required_stage_names: tuple[str, ...] | list[str] | None = None,
 ) -> PromotionResult:
     research_report_dir = manager.data_dir() / "reports" / "research" / experiment_id
     candidate_report_path = research_report_dir / "backtest_report.json"
@@ -701,12 +781,32 @@ def promote_candidate(
         (item for item in candidates if item.get("parameter_candidate_id") == candidate_id),
         None,
     )
+    if isinstance(candidate, dict):
+        policy = _effective_policy_requirements(
+            candidate=candidate,
+            report=report,
+            validation_policy_source=validation_policy_source,
+            validation_policy_required_stage_names=validation_policy_required_stage_names,
+        )
+    else:
+        policy = _effective_policy_requirements(
+            candidate={},
+            report=report,
+            validation_policy_source=validation_policy_source,
+            validation_policy_required_stage_names=validation_policy_required_stage_names,
+        )
     backtest = _validated_backtest_candidate(candidate)
-    stress_reasons = validate_stress_suite_evidence_for_candidate(candidate=backtest.candidate, report=report)
+    effective_backtest_candidate = _with_effective_requirement_fields(backtest.candidate, policy)
+    final_holdout_reasons: list[str] = []
+    if policy["effective_final_holdout_required"]:
+        _extend_final_holdout_reasons(effective_backtest_candidate, final_holdout_reasons)
+    if final_holdout_reasons:
+        raise PromotionGateError(f"promotion refused: {','.join(sorted(set(final_holdout_reasons)))}")
+    stress_reasons = validate_stress_suite_evidence_for_candidate(candidate=effective_backtest_candidate, report=report)
     if stress_reasons:
         raise PromotionGateError(f"promotion refused: {','.join(stress_reasons)}")
     walk_forward: ValidatedCandidate | None = None
-    if backtest.candidate.get("walk_forward_required"):
+    if policy["effective_walk_forward_required"]:
         walk_forward = validate_walk_forward_candidate_for_promotion(
             report_dir=research_report_dir,
             experiment_id=experiment_id,
@@ -715,7 +815,7 @@ def promote_candidate(
         )
     statistical_evidence = _load_statistical_evidence(report=report, report_dir=research_report_dir)
     statistical_reasons = validate_statistical_evidence_for_candidate(
-        candidate=backtest.candidate,
+        candidate=effective_backtest_candidate,
         report=report,
         evidence=statistical_evidence,
     )
@@ -736,7 +836,7 @@ def promote_candidate(
         backtest.candidate.get("deployment_tier") or report.get("deployment_tier")
     )
     final_selection_reasons = validate_final_selection_report(report)
-    if production_bound_report or report.get("final_selection_required"):
+    if production_bound_report or policy["effective_final_selection_required"]:
         if final_selection_reasons:
             raise PromotionGateError(f"promotion refused: {','.join(final_selection_reasons)}")
         if report.get("final_selection_gate_result") != "PASS":
@@ -764,7 +864,7 @@ def promote_candidate(
             raise PromotionGateError(f"promotion refused: {','.join(sorted(set(policy_binding_reasons)))}")
     profile = backtest.profile
     verified_profile_hash = backtest.profile_hash
-    walk_forward_required = bool(candidate.get("walk_forward_required"))
+    walk_forward_required = bool(policy["effective_walk_forward_required"])
     production_calibration_policy_result = validate_production_calibration_policy(candidate)
     candidate_calibration_hash = _candidate_calibration_hash(candidate)
     candidate_calibration_hashes = _candidate_calibration_hashes(candidate)
@@ -854,6 +954,22 @@ def promote_candidate(
                     "operator_next_step="
                     "use_existing_validation_run_bound_promotion_artifact_or_rerun_research_validate_from_fixed_manifest"
                 )
+    if validation_run_payload is not None:
+        policy = _effective_policy_requirements(
+            candidate=candidate,
+            report=report,
+            validation_run_payload=validation_run_payload,
+            validation_policy_source=validation_policy_source,
+            validation_policy_required_stage_names=validation_policy_required_stage_names,
+        )
+        if policy["effective_walk_forward_required"] and walk_forward is None:
+            walk_forward = validate_walk_forward_candidate_for_promotion(
+                report_dir=research_report_dir,
+                experiment_id=experiment_id,
+                candidate_id=candidate_id,
+                backtest_candidate=backtest.candidate,
+            )
+        walk_forward_required = bool(policy["effective_walk_forward_required"])
     artifact = {
         "promotion_schema_version": 1,
         "strategy_name": candidate["strategy_name"],
@@ -888,6 +1004,8 @@ def promote_candidate(
         "backtest_report_hash": backtest_report_hash,
         "walk_forward_report_path": str((research_report_dir / "walk_forward_report.json").resolve()) if walk_forward_required else None,
         "walk_forward_report_hash": None,
+        **policy,
+        **_manifest_policy_flags(candidate, report),
         "deployment_tier": candidate.get("deployment_tier") or "research_only",
         "base_cost_assumption": candidate.get("base_cost_assumption"),
         "cost_assumption_contract": candidate.get("cost_assumption_contract"),
@@ -924,7 +1042,7 @@ def promote_candidate(
         "walk_forward_evidence_source": "walk_forward_report.json" if walk_forward_required else None,
         "walk_forward_candidate_profile_hash": walk_forward.profile_hash if walk_forward else None,
         "walk_forward_candidate_profile_verified": bool(walk_forward),
-        "final_holdout_required_for_promotion": candidate.get("final_holdout_required_for_promotion") is not False,
+        "final_holdout_required_for_promotion": bool(policy["effective_final_holdout_required"]),
         "final_holdout_present": candidate.get("final_holdout_present") is True,
         "final_holdout_metrics": candidate.get("final_holdout_metrics"),
         "metrics_schema_version": candidate.get("metrics_schema_version"),
@@ -933,14 +1051,14 @@ def promote_candidate(
         "metrics_gate_policy": candidate.get("metrics_gate_policy"),
         "metrics_gate_policy_hash": candidate.get("metrics_gate_policy_hash"),
         "metrics_contract_required": bool(candidate.get("metrics_contract_required")),
-        "stress_suite_required": stress_suite_required_for_candidate(candidate, report),
+        "stress_suite_required": bool(policy["effective_stress_suite_required"]),
         "stress_suite_contract": candidate.get("stress_suite_contract"),
         "stress_suite_contract_hash": candidate.get("stress_suite_contract_hash"),
         "validation_stress_suite": candidate.get("validation_stress_suite"),
         "final_holdout_stress_suite": candidate.get("final_holdout_stress_suite"),
         "stress_suite_gate_result": candidate.get("stress_suite_gate_result"),
         "stress_suite_fail_reasons": candidate.get("stress_suite_fail_reasons") or [],
-        "final_selection_required": bool(report.get("final_selection_required")),
+        "final_selection_required": bool(policy["effective_final_selection_required"]),
         "final_selection_contract": report.get("final_selection_contract"),
         "final_selection_contract_hash": report.get("final_selection_contract_hash"),
         "final_selection_gate_result": report.get("final_selection_gate_result"),
@@ -948,7 +1066,7 @@ def promote_candidate(
         "selected_candidate_id": report.get("selected_candidate_id"),
         "selected_candidate_score_hash": report.get("selected_candidate_score_hash"),
         "candidate_final_scores_hash": report.get("candidate_final_scores_hash"),
-        "statistical_validation_required": bool(candidate.get("statistical_validation_required")),
+        "statistical_validation_required": bool(policy["effective_statistical_validation_required"]),
         "statistical_validation_contract": candidate.get("statistical_validation_contract"),
         "evidence_grade": candidate.get("evidence_grade"),
         "statistical_method": candidate.get("statistical_method"),

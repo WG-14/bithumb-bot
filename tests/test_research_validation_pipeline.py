@@ -27,7 +27,14 @@ def _manifest(*, walk_forward_required: bool = True):
     )
 
 
-def _report(manager: PathManager, *, kind: str, candidate_id: str = "candidate_001", hash_suffix: str = ""):
+def _report(
+    manager: PathManager,
+    *,
+    kind: str,
+    candidate_id: str = "candidate_001",
+    hash_suffix: str = "",
+    standalone_backtest_marker: bool = False,
+):
     path = manager.data_dir() / "reports" / "research" / "validation_exp" / f"{kind}_report.json"
     payload = {
         "experiment_id": "validation_exp",
@@ -98,6 +105,16 @@ def _report(manager: PathManager, *, kind: str, candidate_id: str = "candidate_0
             }
         ],
     }
+    if standalone_backtest_marker:
+        payload.update(
+            {
+                "promotion_eligibility_gate_result": "FAIL",
+                "promotion_blocking_reasons": ["walk_forward_required_but_not_executed_in_this_run"],
+                "validation_run_complete": False,
+                "diagnostic_only": True,
+                "standalone_backtest_not_full_validation": True,
+            }
+        )
     payload["content_hash"] = sha256_prefixed({"kind": kind, "candidate_id": candidate_id, "hash_suffix": hash_suffix})
     return payload
 
@@ -235,7 +252,17 @@ def test_research_validate_success_binds_promotion_to_validation_run(tmp_path, m
         lambda **kwargs: _report(manager, kind="walk_forward"),
     )
 
-    def fake_promotion(*, stage, experiment_id, candidate_id, manager, validation_run_path, validation_run_binding_hash):
+    def fake_promotion(
+        *,
+        stage,
+        experiment_id,
+        candidate_id,
+        manager,
+        validation_run_path,
+        validation_run_binding_hash,
+        validation_policy_source,
+        validation_policy_required_stage_names,
+    ):
         path = manager.data_dir() / "reports" / "research" / experiment_id / f"promotion_{candidate_id}.json"
         artifact = {
             "validation_run_required": True,
@@ -243,6 +270,8 @@ def test_research_validate_success_binds_promotion_to_validation_run(tmp_path, m
             "validation_run_path": validation_run_path,
             "validation_run_hash": None,
             "validation_run_binding_hash": validation_run_binding_hash,
+            "validation_policy_source": validation_policy_source,
+            "validation_policy_required_stage_names": list(validation_policy_required_stage_names),
             "gate_result": "PASS",
         }
         artifact["content_hash"] = sha256_prefixed(artifact)
@@ -294,9 +323,13 @@ def test_validation_run_emits_expanded_policy_stage_records(tmp_path, monkeypatc
     monkeypatch.setattr(
         pipeline,
         "_stage_promotion",
-        lambda *, stage, experiment_id, candidate_id, manager, validation_run_path, validation_run_binding_hash: SimpleNamespace(
+        lambda **kwargs: SimpleNamespace(
             artifact={"gate_result": "PASS"},
-            artifact_path=manager.data_dir() / "reports" / "research" / experiment_id / f"promotion_{candidate_id}.json",
+            artifact_path=manager.data_dir()
+            / "reports"
+            / "research"
+            / kwargs["experiment_id"]
+            / f"promotion_{kwargs['candidate_id']}.json",
             content_hash="sha256:promotion",
         ),
     )
@@ -339,6 +372,8 @@ def test_validation_run_emits_expanded_policy_stage_records(tmp_path, monkeypatc
         }
     assert stages["statistical_validation"]["artifact_hashes"]["statistical_evidence_hash"] == "sha256:statistical-evidence"
     assert stages["final_selection"]["output_hashes"]["candidate_final_scores_hash"] == "sha256:final-scores"
+    assert payload["validation_policy_source"] == "repo_research_validation_policy_v1"
+    assert payload["effective_walk_forward_required"] is True
 
 
 def test_production_policy_requires_walk_forward_even_if_manifest_flag_is_weaker(tmp_path, monkeypatch):
@@ -372,6 +407,57 @@ def test_production_policy_requires_walk_forward_even_if_manifest_flag_is_weaker
     stages = {stage["name"]: stage for stage in payload["stages"]}
     assert stages["walk_forward"]["status"] == "ERROR"
     assert payload["end_to_end_validation_result"] == "FAIL_CLOSED"
+
+
+def test_research_validate_does_not_fail_before_walk_forward_for_standalone_backtest_marker(tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch)
+    manifest = _manifest(walk_forward_required=True)
+    calls = {"walk_forward": 0}
+
+    monkeypatch.setattr(
+        pipeline,
+        "build_research_readiness_report",
+        lambda **kwargs: {"status": "PASS", "next_actions": []},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_research_backtest",
+        lambda **kwargs: _report(manager, kind="backtest", standalone_backtest_marker=True),
+    )
+
+    def fake_walk_forward(**kwargs):
+        calls["walk_forward"] += 1
+        return _report(manager, kind="walk_forward")
+
+    monkeypatch.setattr(pipeline, "run_research_walk_forward", fake_walk_forward)
+    monkeypatch.setattr(
+        pipeline,
+        "_stage_promotion",
+        lambda **kwargs: SimpleNamespace(
+            artifact={"gate_result": "PASS"},
+            artifact_path=manager.data_dir()
+            / "reports"
+            / "research"
+            / kwargs["experiment_id"]
+            / f"promotion_{kwargs['candidate_id']}.json",
+            content_hash="sha256:promotion",
+        ),
+    )
+    monkeypatch.setattr(pipeline, "_stage_reproduce", lambda *, stage, promotion_path: {"ok": True})
+
+    payload = pipeline.run_research_validation(
+        manifest=manifest,
+        db_path=tmp_path / "paper.sqlite",
+        manager=manager,
+        manifest_path=str(tmp_path / "manifest.json"),
+    )
+
+    stages = {stage["name"]: stage for stage in payload["stages"]}
+    assert calls["walk_forward"] == 1
+    assert stages["backtest"]["status"] == "PASS"
+    assert stages["walk_forward"]["status"] == "PASS"
+    assert stages["promotion_eligibility"]["status"] == "PASS"
+    assert payload["end_to_end_validation_result"] == "PASS"
 
 
 def test_statistical_screening_only_fails_production_validation_stage(tmp_path, monkeypatch):

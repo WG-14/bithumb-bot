@@ -366,6 +366,18 @@ def cmd_research_promote_candidate(
     print(f"  artifact_path={result.artifact_path}")
     print(f"  content_hash={result.content_hash}")
     print(f"  statistical_validation_required={1 if result.artifact.get('statistical_validation_required') else 0}")
+    print(f"  validation_policy_source={result.artifact.get('validation_policy_source') or 'none'}")
+    print(
+        "  validation_policy_required_stage_names="
+        f"{_format_items(tuple(str(item) for item in result.artifact.get('validation_policy_required_stage_names') or []))}"
+    )
+    print(f"  effective_walk_forward_required={1 if result.artifact.get('effective_walk_forward_required') else 0}")
+    print(f"  effective_final_holdout_required={1 if result.artifact.get('effective_final_holdout_required') else 0}")
+    print(f"  effective_stress_suite_required={1 if result.artifact.get('effective_stress_suite_required') else 0}")
+    print(
+        "  effective_statistical_validation_required="
+        f"{1 if result.artifact.get('effective_statistical_validation_required') else 0}"
+    )
     print(f"  selection_universe_hash={result.artifact.get('selection_universe_hash') or 'none'}")
     print(f"  statistical_evidence_hash={result.artifact.get('statistical_evidence_hash') or 'none'}")
     print(f"  evidence_grade={result.artifact.get('evidence_grade') or 'none'}")
@@ -435,6 +447,11 @@ def _print_validation_run_summary(payload: dict[str, object]) -> None:
     print(f"  validation_run_path={payload.get('validation_run_path')}")
     print(f"  validation_run_hash={payload.get('content_hash')}")
     print(f"  validation_run_binding_hash={payload.get('validation_run_binding_hash')}")
+    print(f"  validation_policy_source={payload.get('validation_policy_source') or 'none'}")
+    print(
+        "  validation_policy_required_stage_names="
+        f"{_format_items(tuple(str(item) for item in payload.get('validation_policy_required_stage_names') or []))}"
+    )
     print(f"  end_to_end_validation_result={payload.get('end_to_end_validation_result')}")
     print(f"  selected_candidate_id={payload.get('selected_candidate_id') or 'none'}")
     print(f"  backtest_report_hash={payload.get('backtest_report_hash') or 'none'}")

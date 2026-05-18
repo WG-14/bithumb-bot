@@ -124,6 +124,13 @@ class ValidationRun:
     deployment_tier: str
     mode: str
     command_args_hash: str
+    validation_policy_source: str
+    validation_policy_required_stage_names: list[str]
+    effective_walk_forward_required: bool
+    effective_final_holdout_required: bool
+    effective_stress_suite_required: bool
+    effective_statistical_validation_required: bool
+    effective_final_selection_required: bool
     stages: list[ValidationStage]
     required_stage_names: list[str]
     selected_candidate_id: str | None = None
@@ -152,6 +159,13 @@ class ValidationRun:
             "deployment_tier": self.deployment_tier,
             "mode": self.mode,
             "command_args_hash": self.command_args_hash,
+            "validation_policy_source": self.validation_policy_source,
+            "validation_policy_required_stage_names": list(self.validation_policy_required_stage_names),
+            "effective_walk_forward_required": self.effective_walk_forward_required,
+            "effective_final_holdout_required": self.effective_final_holdout_required,
+            "effective_stress_suite_required": self.effective_stress_suite_required,
+            "effective_statistical_validation_required": self.effective_statistical_validation_required,
+            "effective_final_selection_required": self.effective_final_selection_required,
             "required_stage_names": list(self.required_stage_names),
             "stages": [stage.as_dict() for stage in self.stages],
             "selected_candidate_id": self.selected_candidate_id,
@@ -218,6 +232,17 @@ def validation_run_binding_hash_payload(payload: dict[str, Any]) -> dict[str, An
             for item in payload.get("required_stage_names") or []
             if str(item) not in {"promotion", "reproduce"}
         ],
+        "validation_policy_source": payload.get("validation_policy_source"),
+        "validation_policy_required_stage_names": [
+            str(item)
+            for item in payload.get("validation_policy_required_stage_names") or []
+            if str(item) not in {"promotion", "reproduce"}
+        ],
+        "effective_walk_forward_required": bool(payload.get("effective_walk_forward_required")),
+        "effective_final_holdout_required": bool(payload.get("effective_final_holdout_required")),
+        "effective_stress_suite_required": bool(payload.get("effective_stress_suite_required")),
+        "effective_statistical_validation_required": bool(payload.get("effective_statistical_validation_required")),
+        "effective_final_selection_required": bool(payload.get("effective_final_selection_required")),
         "pre_promotion_stages": pre_promotion_stages,
         "selected_candidate_id": payload.get("selected_candidate_id"),
         "backtest_report_hash": payload.get("backtest_report_hash"),
@@ -386,6 +411,13 @@ def run_research_validation(
         deployment_tier=manifest.deployment_tier,
         mode=mode,
         command_args_hash=sha256_prefixed(command_args),
+        validation_policy_source=policy.policy_source,
+        validation_policy_required_stage_names=list(policy.required_stage_names),
+        effective_walk_forward_required=policy.stage_required("walk_forward"),
+        effective_final_holdout_required=policy.stage_required("final_holdout"),
+        effective_stress_suite_required=policy.stage_required("stress_suite"),
+        effective_statistical_validation_required=policy.stage_required("statistical_validation"),
+        effective_final_selection_required=policy.stage_required("final_selection"),
         stages=[
             ValidationStage(
                 name,
@@ -438,6 +470,7 @@ def run_research_validation(
         if _has_failures(run):
             return _finalize_validation_run(run, manager=manager, out_path=out_path)
 
+        walk_report: dict[str, Any] | None = None
         if walk_forward_required:
             walk_report = _run_stage(run, "walk_forward", lambda stage: _stage_walk_forward(
                 stage=stage,
@@ -463,6 +496,14 @@ def run_research_validation(
                 stage.reasons.extend(mismatch_reasons)
                 return _finalize_validation_run(run, manager=manager, out_path=out_path)
 
+        _project_promotion_eligibility_stage(
+            run=run,
+            backtest_report=backtest_report,
+            walk_forward_report=walk_report,
+        )
+        if _has_failures(run):
+            return _finalize_validation_run(run, manager=manager, out_path=out_path)
+
         validation_run_path = _resolved_validation_run_path(
             manager=manager,
             experiment_id=manifest.experiment_id,
@@ -478,6 +519,8 @@ def run_research_validation(
             manager=manager,
             validation_run_path=str(validation_run_path.resolve()),
             validation_run_binding_hash=run.validation_run_binding_hash,
+            validation_policy_source=policy.policy_source,
+            validation_policy_required_stage_names=policy.required_stage_names,
         ))
         run.promotion_artifact_path = str(promotion.artifact_path.resolve())
         run.promotion_artifact_hash = promotion.content_hash
@@ -592,7 +635,6 @@ def _project_backtest_report_stages(
         policy=policy,
     )
     _project_final_selection_stage(run, report=report, report_path=report_path, report_hash=report_hash)
-    _project_promotion_eligibility_stage(run, report=report, report_path=report_path, report_hash=report_hash)
 
 
 def _project_dataset_quality_stage(
@@ -743,17 +785,37 @@ def _project_final_selection_stage(
 
 
 def _project_promotion_eligibility_stage(
-    run: ValidationRun,
     *,
-    report: dict[str, Any],
-    report_path: str | None,
-    report_hash: str,
+    run: ValidationRun,
+    backtest_report: dict[str, Any],
+    walk_forward_report: dict[str, Any] | None,
 ) -> None:
     stage = _stage(run, "promotion_eligibility")
-    _bind_report_evidence(stage, report_path=report_path, report_hash=report_hash)
-    gate = report.get("promotion_eligibility_gate_result")
-    reasons = [str(item) for item in report.get("promotion_blocking_reasons") or []]
-    if gate == PASS:
+    backtest_path = _report_path(backtest_report)
+    backtest_hash = str(backtest_report.get("content_hash") or "")
+    _bind_report_evidence(stage, report_path=backtest_path, report_hash=backtest_hash)
+    final_report = walk_forward_report if walk_forward_report is not None else backtest_report
+    final_path = _report_path(final_report)
+    final_hash = str(final_report.get("content_hash") or "")
+    if walk_forward_report is not None:
+        if final_path:
+            stage.artifact_paths["walk_forward_report_path"] = final_path
+        if final_hash:
+            stage.artifact_hashes["walk_forward_report_hash"] = final_hash
+    gate = final_report.get("promotion_eligibility_gate_result")
+    reasons = [str(item) for item in final_report.get("promotion_blocking_reasons") or []]
+    backtest_reasons = [str(item) for item in backtest_report.get("promotion_blocking_reasons") or []]
+    for reason in backtest_reasons:
+        if reason == "walk_forward_required_but_not_executed_in_this_run" and walk_forward_report is not None:
+            continue
+        if reason not in reasons:
+            reasons.append(reason)
+    for prior_stage in run.stages:
+        if prior_stage.name == "promotion_eligibility":
+            break
+        if prior_stage.required and prior_stage.status != PASS:
+            reasons.append(f"{prior_stage.name}_stage_not_passed")
+    if gate == PASS and not reasons:
         stage.status = PASS
     elif stage.required:
         stage.status = FAIL_CLOSED
@@ -800,6 +862,8 @@ def _stage_promotion(
     manager: PathManager,
     validation_run_path: str | None,
     validation_run_binding_hash: str | None,
+    validation_policy_source: str | None,
+    validation_policy_required_stage_names: tuple[str, ...] | list[str],
 ) -> Any:
     from .promotion_gate import PromotionGateError, promote_candidate
 
@@ -811,6 +875,8 @@ def _stage_promotion(
             validation_run_path=validation_run_path,
             validation_run_binding_hash=validation_run_binding_hash,
             allow_pending_validation_run=True,
+            validation_policy_source=validation_policy_source,
+            validation_policy_required_stage_names=validation_policy_required_stage_names,
         )
     except PromotionGateError as exc:
         stage.status = FAIL_CLOSED

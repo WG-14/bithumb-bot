@@ -1908,6 +1908,48 @@ def test_promotion_artifact_records_backtest_and_walk_forward_evidence_hashes(tm
     assert result.artifact["walk_forward_candidate_profile_verified"] is True
 
 
+def test_policy_required_walk_forward_is_bound_into_promotion_even_when_manifest_flag_false(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    backtest_candidate = _production_candidate(walk_forward_required=False, walk_forward_gate_result=None)
+    walk_forward_candidate = _walk_forward_candidate(backtest_candidate)
+    _write_report(manager, backtest_candidate)
+    _write_walk_forward_report(manager, walk_forward_candidate)
+
+    required = (
+        "readiness",
+        "dataset_quality",
+        "backtest",
+        "final_holdout",
+        "stress_suite",
+        "statistical_validation",
+        "final_selection",
+        "walk_forward",
+        "promotion_eligibility",
+        "promotion",
+        "reproduce",
+    )
+    result = promote_candidate(
+        experiment_id="promo_exp",
+        candidate_id="candidate_001",
+        manager=manager,
+        validation_run_path=manager.data_dir() / "reports" / "research" / "promo_exp" / "validation_run.json",
+        validation_run_binding_hash="sha256:pending-validation-binding",
+        allow_pending_validation_run=True,
+        validation_policy_source="repo_research_validation_policy_v1",
+        validation_policy_required_stage_names=required,
+    )
+
+    assert "walk_forward" in result.artifact["validation_policy_required_stage_names"]
+    assert result.artifact["validation_policy_source"] == "repo_research_validation_policy_v1"
+    assert result.artifact["manifest_walk_forward_required"] is False
+    assert result.artifact["effective_walk_forward_required"] is True
+    assert result.artifact["walk_forward_required"] is True
+    assert result.artifact["walk_forward_report_hash"] is not None
+    assert result.artifact["effective_final_holdout_required"] is True
+    assert result.artifact["effective_stress_suite_required"] is True
+    assert result.artifact["effective_statistical_validation_required"] is True
+
+
 def test_promotion_artifact_uses_verified_report_hashes_in_artifact_and_lineage(tmp_path, monkeypatch) -> None:
     manager = _manager(tmp_path, monkeypatch)
     backtest_candidate = _candidate(walk_forward_required=True)
