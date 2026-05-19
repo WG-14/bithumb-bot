@@ -107,23 +107,81 @@ set -euo pipefail
 if [[ "$#" -ge 2 && "$1" == "run" && "$2" == "pytest" ]]; then
   original_args=("$@")
   shift 2
-  focused_selector_seen=0
-  for arg in "$@"; do
-    case "${arg}" in
-      -k|-m|--keyword|--keyword=*|--markexpr|--markexpr=*)
-        focused_selector_seen=1
+  focused_expression_seen=0
+  narrow_path_selector_count=0
+  expect_focused_expression_value=0
+
+  is_broad_tests_selector() {
+    local arg="$1"
+    local path_part="${arg%%::*}"
+
+    case "${path_part}" in
+      tests|./tests|tests/|./tests/|tests/*|./tests/*)
+        if [[ "${path_part}" == "tests" || "${path_part}" == "./tests" || "${path_part}" == "tests/" || "${path_part}" == "./tests/" ]]; then
+          return 0
+        fi
+        if [[ -d "${path_part}" ]]; then
+          return 0
+        fi
         ;;
-      tests|tests/*|*/*.py|*.py|*::*)
-        focused_selector_seen=1
+    esac
+
+    return 1
+  }
+
+  is_narrow_pytest_selector() {
+    local arg="$1"
+    local path_part="${arg%%::*}"
+
+    case "${arg}" in
+      tests/*.py|./tests/*.py|tests/**/*.py|./tests/**/*.py|*.py|*/*.py|*::*)
+        if [[ -n "${path_part}" && ! -d "${path_part}" ]]; then
+          return 0
+        fi
+        ;;
+    esac
+
+    return 1
+  }
+
+  for arg in "$@"; do
+    if [[ "${expect_focused_expression_value}" -eq 1 ]]; then
+      focused_expression_seen=1
+      expect_focused_expression_value=0
+      continue
+    fi
+
+    case "${arg}" in
+      -k|-m|--keyword|--markexpr)
+        expect_focused_expression_value=1
+        ;;
+      --keyword=*|--markexpr=*)
+        focused_expression_seen=1
+        ;;
+      -*)
         ;;
       *)
+        if is_broad_tests_selector "${arg}"; then
+          echo "[CODEX-PYTEST-GUARD] Default Patch Mode blocks broad pytest target: ${arg}" >&2
+          echo "[CODEX-PYTEST-GUARD] Use scripts/run_codex_pytest_pipeline.sh for full pytest validation." >&2
+          exit 126
+        fi
+        if is_narrow_pytest_selector "${arg}"; then
+          narrow_path_selector_count=$((narrow_path_selector_count + 1))
+        fi
         ;;
     esac
   done
 
-  if [[ "${focused_selector_seen}" -eq 0 ]]; then
+  if [[ "${focused_expression_seen}" -eq 0 && "${narrow_path_selector_count}" -eq 0 ]]; then
     echo "[CODEX-PYTEST-GUARD] Default Patch Mode blocks selector-less full pytest." >&2
     echo "[CODEX-PYTEST-GUARD] Use scripts/run_codex_pytest_pipeline.sh for uv run pytest -q." >&2
+    exit 126
+  fi
+
+  if [[ "${focused_expression_seen}" -eq 0 && "${narrow_path_selector_count}" -gt 1 ]]; then
+    echo "[CODEX-PYTEST-GUARD] Default Patch Mode blocks multiple pytest path selectors." >&2
+    echo "[CODEX-PYTEST-GUARD] Use one focused test file/function, -k, or -m; use scripts/run_codex_pytest_pipeline.sh for full pytest validation." >&2
     exit 126
   fi
 
