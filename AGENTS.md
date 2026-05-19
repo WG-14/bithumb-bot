@@ -377,82 +377,102 @@ They should resolve managed paths through the canonical path interface wherever 
 
 Do not patch only Python while leaving scripts inconsistent with the path policy.
 
-## Testing Expectations
+## Codex Execution Modes
 
-After a patch, run targeted tests for changed areas and enough broader tests to catch contract regressions.
+### Default Patch Mode
 
-### Standard test command
+Default Patch Mode is the default mode for all Codex patch tasks.
+
+This includes Codex runs started by:
+
+```bash
+./scripts/run_codex_pipeline.sh
+```
+
+and requests read from:
+
+```text
+scripts/codex_request.txt
+```
+
+In Default Patch Mode, Codex must not run the full test suite.
+
+The following command is prohibited:
 
 ```bash
 uv run pytest -q
 ```
 
-This is the project’s intended full-suite validation command.
+Codex must not run an equivalent selector-less full pytest command either, including:
 
-### Test execution discipline
+```bash
+uv run pytest
+uv run pytest -q
+uv run pytest --quiet
+```
 
-- `uv run pytest -q` must be treated as the final validation command.
-- Run `uv run pytest -q` only after all requested patches are complete.
-- The first full baseline command for a task that requires full validation must be `uv run pytest -q`.
-- The final validation command for a task that requires full validation must be `uv run pytest -q`.
-- During debugging, do not use full-suite reruns as the default loop.
-- Use only narrower pytest invocations derived from actual failures from the most recent full run.
-- Prefer the narrowest verification scope in this order:
-  1. failing test function
-  2. failing test file
-  3. failure-specific `-k` expression
-  4. closely related failure cluster
-- Stay inside the current failure cluster until it is resolved or clearly blocked.
-- Do not broaden scope without a concrete reason.
-- Do not repeat the same command without a new hypothesis or a code change.
-- Do not repeat the same full test command only by extending timeout.
-- If the same verification runs longer than 90 seconds, stop repeating it and report the likely bottleneck, alternative validation commands, and residual risk.
-- Minimize unnecessary time use, token use, and test reruns throughout the task.
-- Preserve the system’s intended operational meaning when fixing failing tests.
-- Do not change behavior just to satisfy tests if that would weaken safety, fail-close behavior, recovery correctness, exposure authority, reconciliation, or operator-facing reporting.
-- If full completion remains possible, continue iterating with targeted tests and narrow fixes until the full suite reaches a clean pass under `uv run pytest -q`.
-- Codex should continue the test-fix loop until `uv run pytest -q` passes cleanly, or until an external blocker makes further safe progress impossible.
-- After resolving any of the following, rerun `uv run pytest -q`:
-  - a full failing file
-  - a shared helper used by multiple failing tests
-  - an import, configuration, or path issue
-  - a cross-cutting failure cluster
-- Run the full suite only when it is actually needed, and only at the baseline and final validation points unless a shared failure cluster resolution justifies another full rerun.
-- Localized changes such as small interface adjustments, logging improvements, report or output improvements, helper CLI additions or changes, and healthcheck-only changes may be validated with focused tests only if there is no broader regression risk. In those cases, the full suite may be skipped unless the task explicitly requires a clean pass under `uv run pytest -q`.
+This prohibition still applies even if `scripts/codex_request.txt` explicitly asks Codex to run `uv run pytest -q`.
 
-### Relevant focused tests
+If a task request asks for full-suite pytest validation in Default Patch Mode, Codex must treat that part as deferred to the dedicated pytest pipeline and report that full pytest was not run.
 
-When touching these areas, run the relevant focused tests first:
+Focused tests are allowed only when directly relevant to the changed area.
 
-- paths and storage contract
-  - `tests/test_paths.py`
-  - `tests/test_path_config_integration.py`
-  - `tests/test_paths_cli.py`
-  - `tests/test_db_path_resolution.py`
-  - `tests/test_storage_io.py`
-- live mode, preflight, and live broker guards
-  - `tests/test_live_preflight.py`
-  - `tests/test_live_broker.py`
-  - `tests/test_config_live_db_path_guard.py`
-  - `tests/test_mode_validation.py`
-  - `tests/test_order_rules_sync.py`
-- recovery, restart, and accounting integrity
-  - `tests/test_fill_dedupe.py`
-  - `tests/test_ledger_atomicity.py`
-  - `tests/test_accounting_safety.py`
-  - `tests/test_recovery_restart_regression.py`
-  - `tests/test_recovery_recent_activity_interpretation.py`
-  - `tests/test_trade_lifecycle.py`
-- run lock, ops, and observability
-  - `tests/test_run_lock.py`
-  - `tests/test_health_persistence.py`
-  - `tests/test_operator_commands.py`
-  - `tests/test_ops_report.py`
-  - `tests/test_backup_sqlite_script.py`
-  - `tests/test_sqlite_restore_verify_tool.py`
+Allowed focused examples:
 
-If you change behavior, update or add tests.
-Do not ship behavior changes without test coverage when the area is safety-critical.
+```bash
+uv run pytest tests/test_paths.py -q
+uv run pytest tests/test_live_preflight.py -q
+uv run pytest tests/test_paths.py::test_specific_case -q
+uv run pytest -k "specific_failure_name" -q
+```
+
+Default Patch Mode may produce content-complete patches, but it must not claim full-suite validation.
+
+A patch is not full-test complete until the dedicated pytest pipeline passes.
+
+### Full Pytest Repair Mode
+
+Full Pytest Repair Mode is allowed only when Codex is started by:
+
+```bash
+./scripts/run_codex_pytest_pipeline.sh
+```
+
+using the dedicated prompt file:
+
+```text
+scripts/codex_pytest_repair_prompt.md
+```
+
+Only in Full Pytest Repair Mode may Codex run:
+
+```bash
+uv run pytest -q
+```
+
+In Full Pytest Repair Mode, Codex must follow the pytest repair instructions in:
+
+```text
+scripts/codex_pytest_repair_prompt.md
+```
+
+Codex must run `uv run pytest -q`, repair failures if any, preserve the original patch intent, use focused tests only while debugging failure clusters, and rerun `uv run pytest -q` until it passes or a clear external blocker is reported.
+
+Full Pytest Repair Mode must not be used for unrelated feature work, broad cleanup, refactoring, or new task scope.
+
+### Conflict Rule
+
+Repository-level mode rules override task prompts.
+
+If `scripts/codex_request.txt` conflicts with this file by asking for `uv run pytest -q`, the Default Patch Mode prohibition wins.
+
+To run full-suite pytest, use only:
+
+```bash
+./scripts/run_codex_pytest_pipeline.sh
+```
+
+
 
 ## Patch Output Requirements
 
