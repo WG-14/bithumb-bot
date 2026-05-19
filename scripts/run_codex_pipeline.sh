@@ -104,9 +104,33 @@ run_codex_default_patch_mode() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -ge 2 && "$1" == "run" && "$2" == "pytest" ]]; then
+pytest_args=()
+
+is_guarded_pytest_invocation() {
+  if [[ "$#" -lt 2 || "$1" != "run" ]]; then
+    return 1
+  fi
+
+  shift
+  if [[ "$#" -gt 0 && "$1" == "--" ]]; then
+    shift
+  fi
+
+  if [[ "$#" -ge 1 && "$1" == "pytest" ]]; then
+    pytest_args=("${@:2}")
+    return 0
+  fi
+
+  if [[ "$#" -ge 3 && "$1" == "python" && "$2" == "-m" && "$3" == "pytest" ]]; then
+    pytest_args=("${@:4}")
+    return 0
+  fi
+
+  return 1
+}
+
+if is_guarded_pytest_invocation "$@"; then
   original_args=("$@")
-  shift 2
   focused_expression_seen=0
   narrow_path_selector_count=0
   expect_focused_expression_value=0
@@ -144,7 +168,7 @@ if [[ "$#" -ge 2 && "$1" == "run" && "$2" == "pytest" ]]; then
     return 1
   }
 
-  for arg in "$@"; do
+  for arg in "${pytest_args[@]}"; do
     if [[ "${expect_focused_expression_value}" -eq 1 ]]; then
       focused_expression_seen=1
       expect_focused_expression_value=0
