@@ -980,10 +980,21 @@ def _evaluate_candidates(
                 "final_holdout_execution_event_summary": base.get("final_holdout_execution_event_summary"),
                 "execution_event_summary": base.get("validation_execution_event_summary") or {},
                 "behavior_hash": (base.get("validation_resource_usage") or {}).get("behavior_hash"),
+                "decision_behavior_hash": (base.get("validation_resource_usage") or {}).get("decision_behavior_hash"),
+                "trade_ledger_hash": (base.get("validation_resource_usage") or {}).get("trade_ledger_hash"),
+                "equity_curve_hash": (base.get("validation_resource_usage") or {}).get("equity_curve_hash"),
+                "composite_behavior_hash": (base.get("validation_resource_usage") or {}).get("composite_behavior_hash"),
                 "train_behavior_hash": (base.get("train_resource_usage") or {}).get("behavior_hash"),
+                "train_composite_behavior_hash": (base.get("train_resource_usage") or {}).get("composite_behavior_hash"),
                 "validation_behavior_hash": (base.get("validation_resource_usage") or {}).get("behavior_hash"),
+                "validation_composite_behavior_hash": (base.get("validation_resource_usage") or {}).get("composite_behavior_hash"),
                 "final_holdout_behavior_hash": (
                     (base.get("final_holdout_resource_usage") or {}).get("behavior_hash")
+                    if base.get("final_holdout_resource_usage")
+                    else None
+                ),
+                "final_holdout_composite_behavior_hash": (
+                    (base.get("final_holdout_resource_usage") or {}).get("composite_behavior_hash")
                     if base.get("final_holdout_resource_usage")
                     else None
                 ),
@@ -1166,9 +1177,16 @@ def _evaluate_candidates(
                 "execution_reality_summary": primary.get("execution_reality_summary"),
                 "execution_event_summary": primary.get("execution_event_summary"),
                 "behavior_hash": primary.get("behavior_hash"),
+                "decision_behavior_hash": primary.get("decision_behavior_hash"),
+                "trade_ledger_hash": primary.get("trade_ledger_hash"),
+                "equity_curve_hash": primary.get("equity_curve_hash"),
+                "composite_behavior_hash": primary.get("composite_behavior_hash"),
                 "train_behavior_hash": primary.get("train_behavior_hash"),
+                "train_composite_behavior_hash": primary.get("train_composite_behavior_hash"),
                 "validation_behavior_hash": primary.get("validation_behavior_hash"),
+                "validation_composite_behavior_hash": primary.get("validation_composite_behavior_hash"),
                 "final_holdout_behavior_hash": primary.get("final_holdout_behavior_hash"),
+                "final_holdout_composite_behavior_hash": primary.get("final_holdout_composite_behavior_hash"),
                 "strategy_spec": primary.get("strategy_spec") or strategy_spec.as_dict(),
                 "strategy_spec_hash": primary.get("strategy_spec_hash") or strategy_spec.spec_hash(),
                 "exit_policy": primary.get("exit_policy"),
@@ -1213,6 +1231,13 @@ def _evaluate_candidates(
             candidate_payload["gate_fail_reasons"] = sorted(
                 set(candidate_payload.get("gate_fail_reasons") or ()) | set(policy_result.reasons)
             )
+        rows.append(candidate_payload)
+    _mark_noop_behavior_hash_groups(
+        rows=rows,
+        behavior_parameter_names=set(strategy_spec.behavior_affecting_parameter_names),
+        production_bound=manifest.deployment_tier != "research_only",
+    )
+    for candidate_payload in rows:
         candidate_payload["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate_payload))
         write_json_atomic(
             _candidate_result_path(manager, manifest.experiment_id, str(candidate_payload["parameter_candidate_id"])),
@@ -1228,12 +1253,6 @@ def _evaluate_candidates(
                 "gate_fail_reasons": candidate_payload.get("gate_fail_reasons") or [],
             },
         )
-        rows.append(candidate_payload)
-    _mark_noop_behavior_hash_groups(
-        rows=rows,
-        behavior_parameter_names=set(strategy_spec.behavior_affecting_parameter_names),
-        production_bound=manifest.deployment_tier != "research_only",
-    )
     return sorted(rows, key=_candidate_rank_key)
 
 
@@ -2691,6 +2710,7 @@ def _report_payload(
         warnings.add(PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING)
     warnings = sorted(warnings)
     signal_depth_summary = _report_signal_depth_summary(candidates)
+    strategy_spec = strategy_spec_for_name(manifest.strategy_name)
     depth_walk_used = bool(signal_depth_summary.get("depth_walk_execution_model_used"))
     depth_available_semantics = (
         "depth_walk_execution_model_used_with_signal_level_l2_depth"
@@ -2920,6 +2940,7 @@ def _report_payload(
         "exit_policy_hash": best.get("exit_policy_hash") if best else None,
         "best_validation_metrics_v2": best.get("validation_metrics_v2") if best else None,
         "best_final_holdout_metrics_v2": best.get("final_holdout_metrics_v2") if best else None,
+        "closed_trade_diagnostics_summary": _closed_trade_diagnostics_summary(best or {}),
         "stress_suite_gate_result": (
             stress_summary_candidate.get("stress_suite_gate_result") if stress_summary_candidate else None
         ),
@@ -3124,6 +3145,72 @@ def _report_base_cost_assumption(candidates: list[dict[str, Any]]) -> dict[str, 
         if isinstance(assumption, dict):
             return dict(assumption)
     return None
+
+
+def _closed_trade_diagnostics_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    trades = [
+        trade
+        for trade in candidate.get("validation_closed_trades") or ()
+        if isinstance(trade, dict)
+    ]
+    exit_rule_distribution: dict[str, int] = {}
+    holding_by_rule: dict[str, list[float]] = {}
+    loss_by_regime: dict[str, float] = {}
+    mae_values: list[float] = []
+    mfe_values: list[float] = []
+    max_loss_trade: dict[str, Any] | None = None
+    for trade in trades:
+        rule = str(trade.get("exit_rule") or "unknown")
+        exit_rule_distribution[rule] = exit_rule_distribution.get(rule, 0) + 1
+        holding = _optional_float(trade.get("holding_minutes"))
+        if holding is not None:
+            holding_by_rule.setdefault(rule, []).append(holding)
+        net_pnl = _optional_float(trade.get("net_pnl"))
+        if net_pnl is not None and net_pnl < 0.0:
+            key = f"{trade.get('entry_regime') or 'unknown'}->{trade.get('exit_regime') or 'unknown'}"
+            loss_by_regime[key] = loss_by_regime.get(key, 0.0) + net_pnl
+            if max_loss_trade is None or net_pnl < float(max_loss_trade.get("net_pnl") or 0.0):
+                max_loss_trade = dict(trade)
+        mae = _optional_float(trade.get("mae"))
+        mfe = _optional_float(trade.get("mfe"))
+        if mae is not None:
+            mae_values.append(mae)
+        if mfe is not None:
+            mfe_values.append(mfe)
+    top_losing = sorted(
+        (dict(trade) for trade in trades if _optional_float(trade.get("net_pnl")) is not None),
+        key=lambda item: float(item.get("net_pnl") or 0.0),
+    )[:5]
+    return {
+        "closed_trade_count": len(trades),
+        "top_losing_trades": top_losing,
+        "exit_rule_distribution": exit_rule_distribution,
+        "avg_holding_minutes_by_exit_rule": {
+            rule: sum(values) / len(values) for rule, values in sorted(holding_by_rule.items()) if values
+        },
+        "max_holding_minutes_by_exit_rule": {
+            rule: max(values) for rule, values in sorted(holding_by_rule.items()) if values
+        },
+        "mae_mfe_summary": {
+            "mae_min": min(mae_values) if mae_values else None,
+            "mae_avg": sum(mae_values) / len(mae_values) if mae_values else None,
+            "mfe_max": max(mfe_values) if mfe_values else None,
+            "mfe_avg": sum(mfe_values) / len(mfe_values) if mfe_values else None,
+        },
+        "loss_by_entry_exit_regime": loss_by_regime,
+        "max_loss_trade_dependency": max_loss_trade,
+        "max_holding_exit_count": exit_rule_distribution.get("max_holding_time", 0),
+        "opposite_cross_exit_count": exit_rule_distribution.get("opposite_cross", 0),
+    }
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _execution_model_from_scenario(scenario: ExecutionScenario, *, seed_context: dict[str, Any] | None = None):

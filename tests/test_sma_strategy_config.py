@@ -11,6 +11,11 @@ from bithumb_bot.config import settings
 from bithumb_bot.execution_reality_contract import build_execution_reality_contract
 from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
 from bithumb_bot.research.promotion_gate import build_candidate_profile
+from bithumb_bot.research.strategy_spec import (
+    StrategySpecError,
+    strategy_spec_for_name,
+    validate_parameter_space_against_strategy_spec,
+)
 from bithumb_bot.strategy.sma import SmaCrossStrategy, create_sma_strategy
 from bithumb_bot.strategy_config import (
     normalize_exit_rule_names,
@@ -41,6 +46,46 @@ def _build_candle_db(closes: list[float]) -> sqlite3.Connection:
     return conn
 
 
+def test_strategy_spec_includes_sma_market_regime_enabled() -> None:
+    spec = strategy_spec_for_name("sma_with_filter")
+
+    assert "SMA_MARKET_REGIME_ENABLED" in spec.accepted_parameter_names
+    assert "SMA_MARKET_REGIME_ENABLED" in spec.behavior_affecting_parameter_names
+    assert spec.default_parameters["SMA_MARKET_REGIME_ENABLED"] is True
+
+
+def test_research_only_strategy_params_rejected_for_production_bound() -> None:
+    with pytest.raises(StrategySpecError, match="SMA_FILTER_LIQUIDITY_WINDOW,SMA_FILTER_VOLUME_WINDOW"):
+        validate_parameter_space_against_strategy_spec(
+            strategy_name="sma_with_filter",
+            deployment_tier="small_live_candidate",
+            parameter_space={
+                "SMA_SHORT": (2,),
+                "SMA_LONG": (4,),
+                "SMA_FILTER_VOLUME_WINDOW": (5,),
+                "SMA_FILTER_LIQUIDITY_WINDOW": (5,),
+            },
+        )
+
+
+def test_research_only_strategy_params_allowed_for_research_only_if_documented() -> None:
+    spec = validate_parameter_space_against_strategy_spec(
+        strategy_name="sma_with_filter",
+        deployment_tier="research_only",
+        parameter_space={
+            "SMA_SHORT": (2,),
+            "SMA_LONG": (4,),
+            "SMA_FILTER_VOLUME_WINDOW": (5,),
+            "SMA_FILTER_LIQUIDITY_WINDOW": (5,),
+        },
+    )
+
+    assert set(spec.research_only_parameter_names) == {
+        "SMA_FILTER_VOLUME_WINDOW",
+        "SMA_FILTER_LIQUIDITY_WINDOW",
+    }
+
+
 @pytest.fixture
 def settings_guard():
     names = (
@@ -59,6 +104,7 @@ def settings_guard():
         "LIVE_FEE_RATE_ESTIMATE",
         "ENTRY_EDGE_BUFFER_RATIO",
         "STRATEGY_MIN_EXPECTED_EDGE_RATIO",
+        "SMA_MARKET_REGIME_ENABLED",
         "BUY_FRACTION",
         "MAX_ORDER_KRW",
         "APPROVED_STRATEGY_PROFILE_PATH",
@@ -125,6 +171,7 @@ def _write_paper_profile(tmp_path: Path, *, sma_short: int) -> Path:
         "SMA_FILTER_VOL_MIN_RANGE_RATIO": float(settings.SMA_FILTER_VOL_MIN_RANGE_RATIO),
         "SMA_FILTER_OVEREXT_LOOKBACK": int(settings.SMA_FILTER_OVEREXT_LOOKBACK),
         "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": float(settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO),
+        "SMA_MARKET_REGIME_ENABLED": bool(settings.SMA_MARKET_REGIME_ENABLED),
         "SMA_COST_EDGE_ENABLED": bool(settings.SMA_COST_EDGE_ENABLED),
         "SMA_COST_EDGE_MIN_RATIO": float(settings.SMA_COST_EDGE_MIN_RATIO),
         "ENTRY_EDGE_BUFFER_RATIO": float(settings.ENTRY_EDGE_BUFFER_RATIO),

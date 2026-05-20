@@ -14,6 +14,7 @@ from bithumb_bot.market_regime import (
 from bithumb_bot.market_regime.thresholds import MarketRegimeThresholds
 from bithumb_bot.canonical_decision import canonical_payload_hash
 from bithumb_bot.position_authority import research_position_authority_snapshot
+from bithumb_bot.sma_decision import evaluate_sma_entry_decision
 
 from .dataset_snapshot import DatasetSnapshot
 from .execution_model import ExecutionFill, ExecutionModel, ExecutionRequest, FixedBpsExecutionModel, model_params_hash
@@ -99,6 +100,8 @@ class _BacktestAccumulator:
     last_heartbeat_bar: int = 0
     decision_hash_material: list[str] = field(default_factory=list)
     behavior_hash_material: list[dict[str, object]] = field(default_factory=list)
+    trade_ledger_hash_material: list[dict[str, object]] = field(default_factory=list)
+    equity_curve_hash_material: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def report_detail(self) -> str:
@@ -134,8 +137,12 @@ class _BacktestAccumulator:
                 "candle_ts": payload.get("candle_ts"),
                 "raw_signal": payload.get("raw_signal"),
                 "final_signal": payload.get("final_signal"),
+                "entry_reason": payload.get("entry_reason"),
                 "exit_rule": payload.get("exit_rule"),
+                "exit_reason": payload.get("exit_reason"),
                 "blocked_filters": payload.get("blocked_filters"),
+                "regime_decision": payload.get("regime_decision"),
+                "regime_block_reason": payload.get("regime_block_reason"),
             }
         )
         if retained:
@@ -149,6 +156,19 @@ class _BacktestAccumulator:
             self.active_bar_count += 1
         if retained:
             self.retained_equity_point_count += 1
+
+    def record_equity_point(self, *, ts: int, equity: float, cash: float, asset_qty: float) -> None:
+        self.equity_curve_hash_material.append(
+            {
+                "ts": int(ts),
+                "equity": round(float(equity), 12),
+                "cash": round(float(cash), 12),
+                "asset_qty": round(float(asset_qty), 12),
+            }
+        )
+
+    def record_trade_ledger(self, trade: dict[str, object]) -> None:
+        self.trade_ledger_hash_material.append(_trade_hash_payload(trade))
 
     def update_trades(self, trades: list[dict[str, object]]) -> None:
         self.trade_count = len(trades)
@@ -215,7 +235,11 @@ class _BacktestAccumulator:
         payload.pop("elapsed_s", None)
         payload.pop("rss_mb", None)
         payload["decision_hash"] = canonical_payload_hash(self.decision_hash_material)
-        payload["behavior_hash"] = canonical_payload_hash(self.behavior_hash_material)
+        payload.update(_behavior_hashes(
+            decision_material=self.behavior_hash_material,
+            trade_material=self.trade_ledger_hash_material,
+            equity_material=self.equity_curve_hash_material,
+        ))
         return payload
 
     def metrics_summary_inputs(self, *, max_drawdown_pct: float) -> dict[str, Any]:
@@ -354,6 +378,12 @@ def run_sma_backtest(
         fee_rate=fee_rate,
         slippage_bps=slippage_bps,
     )
+    if "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO" not in parameter_values:
+        effective_parameters["SMA_FILTER_OVEREXT_MAX_RETURN_RATIO"] = 0.0
+    if "SMA_COST_EDGE_ENABLED" not in parameter_values:
+        effective_parameters["SMA_COST_EDGE_ENABLED"] = False
+    if "SMA_MARKET_REGIME_ENABLED" not in parameter_values:
+        effective_parameters["SMA_MARKET_REGIME_ENABLED"] = False
     active_exit_policy = exit_policy_from_parameters("sma_with_filter", effective_parameters)
     active_exit_policy_hash = exit_policy_hash(active_exit_policy)
     short_n = int(effective_parameters.get("SMA_SHORT", effective_parameters.get("short_n", 0)))
@@ -495,8 +525,6 @@ def run_sma_backtest(
         curr_short = _sma(closes, short_n, index + 1)
         curr_long = _sma(closes, long_n, index + 1)
         above = curr_short > curr_long
-        gap_ratio = abs(curr_short - curr_long) / curr_long if curr_long > 0.0 else 0.0
-        range_ratio = (candle.high - candle.low) / candle.close if candle.close > 0.0 else 0.0
         regime_snapshot = classify_market_regime_from_arrays(
             closes=closes,
             highs=highs,
@@ -517,16 +545,33 @@ def run_sma_backtest(
             regime_snapshots.append(regime_snapshot)
 
         action = "HOLD"
-        raw_signal = "HOLD"
-        raw_reason = "sma no crossover"
         exit_rule = ""
         exit_reason = ""
         exit_evaluations: list[dict[str, object]] = []
         pending_buy_qty = sum(item.qty for item in pending_fills if item.side == "BUY")
         pending_sell_qty = sum(item.qty for item in pending_fills if item.side == "SELL")
         sellable_qty = max(0.0, qty - pending_sell_qty)
-        filter_blocked = False
-        blocked_filters: list[str] = []
+        entry_decision = evaluate_sma_entry_decision(
+            closes=closes[: index + 1],
+            prev_s=prev_short,
+            prev_l=prev_long,
+            curr_s=curr_short,
+            curr_l=curr_long,
+            min_gap_ratio=min_gap,
+            volatility_window=max(1, int(effective_parameters.get("SMA_FILTER_VOL_WINDOW", 10))),
+            min_volatility_ratio=min_range,
+            overextended_lookback=max(1, int(effective_parameters.get("SMA_FILTER_OVEREXT_LOOKBACK", 3))),
+            overextended_max_return_ratio=float(effective_parameters.get("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", 0.0)),
+            slippage_bps=float(effective_parameters.get("STRATEGY_ENTRY_SLIPPAGE_BPS", slippage_bps) or 0.0),
+            live_fee_rate_estimate=float(effective_parameters.get("LIVE_FEE_RATE_ESTIMATE") or fee_rate),
+            entry_edge_buffer_ratio=float(effective_parameters.get("ENTRY_EDGE_BUFFER_RATIO") or 0.0),
+            cost_edge_enabled=bool(effective_parameters.get("SMA_COST_EDGE_ENABLED", True)),
+            cost_edge_min_ratio=float(effective_parameters.get("SMA_COST_EDGE_MIN_RATIO") or 0.0),
+            market_regime_enabled=bool(effective_parameters.get("SMA_MARKET_REGIME_ENABLED", True)),
+            candidate_regime_policy=None,
+        )
+        raw_signal = "HOLD"
+        raw_reason = "sma no crossover"
         if prev_above is not None:
             if not prev_above and above:
                 raw_signal = "BUY"
@@ -534,12 +579,15 @@ def run_sma_backtest(
             elif prev_above and not above:
                 raw_signal = "SELL"
                 raw_reason = "sma dead cross"
-        if raw_signal in {"BUY", "SELL"} and gap_ratio < min_gap:
-            filter_blocked = True
-            blocked_filters.append("gap")
-        if raw_signal in {"BUY", "SELL"} and range_ratio < min_range:
-            filter_blocked = True
-            blocked_filters.append("volatility")
+        blocked_filters = list(entry_decision.blocked_filters) if raw_signal in {"BUY", "SELL"} else []
+        filter_blocked = bool(
+            raw_signal in {"BUY", "SELL"}
+            and (blocked_filters or entry_decision.market_regime_triggered or entry_decision.candidate_regime_triggered)
+        )
+        entry_signal = "HOLD" if filter_blocked else raw_signal
+        entry_reason = entry_decision.entry_reason if filter_blocked else raw_reason
+        gap_ratio = entry_decision.gap_ratio
+        range_ratio = entry_decision.volatility_ratio
         if qty > 1e-12 and entry_price is not None:
             pnl_ratio = ((float(candle.close) - float(entry_price)) / float(entry_price)) if float(entry_price) > 0 else 0.0
             open_trade_path.append(
@@ -551,11 +599,9 @@ def run_sma_backtest(
                 }
             )
         if not filter_blocked and prev_above is not None:
-            if raw_signal == "BUY" and qty <= 0.0 and pending_buy_qty <= 0.0:
+            if entry_signal == "BUY" and qty <= 0.0 and pending_buy_qty <= 0.0:
                 action = "BUY"
         if sellable_qty > 0.0:
-            from bithumb_bot.strategy.exit_rules import create_exit_rules
-
             position = _ResearchPositionContext(
                 in_position=True,
                 entry_ts=entry_ts,
@@ -577,7 +623,7 @@ def run_sma_backtest(
                     else 0.0
                 ),
             )
-            for rule in create_exit_rules(
+            for rule in _create_exit_rules(
                 rule_names=list(active_exit_policy["rules"]),
                 max_holding_sec=float(active_exit_policy["max_holding_time"]["max_holding_min"]) * 60.0,
                 min_take_profit_ratio=float(active_exit_policy["opposite_cross"]["min_take_profit_ratio"]),
@@ -634,6 +680,10 @@ def run_sma_backtest(
             gap_ratio=gap_ratio,
             range_ratio=range_ratio,
             regime_snapshot=regime_snapshot,
+            entry_reason=entry_reason,
+            market_regime_decision=entry_decision.candidate_regime_decision,
+            market_regime_blocked=entry_decision.market_regime_triggered,
+            candidate_regime_blocked=entry_decision.candidate_regime_triggered,
             qty=qty,
             sellable_qty=sellable_qty,
             exit_rule=exit_rule,
@@ -1059,6 +1109,16 @@ def run_sma_backtest(
             ),
         )
     audit_trace_index = _complete_audit_trace(run_context, status="completed")
+    accumulator.trade_ledger_hash_material = [_trade_hash_payload(trade) for trade in trades]
+    accumulator.equity_curve_hash_material = [
+        {
+            "ts": int(point.ts),
+            "equity": round(float(point.equity), 12),
+            "cash": round(float(point.cash), 12),
+            "asset_qty": round(float(point.asset_qty), 12),
+        }
+        for point in equity_curve
+    ]
     return BacktestRun(
         metrics=metrics,
         metrics_v2=metrics_v2,
@@ -1083,6 +1143,12 @@ def run_sma_backtest(
 
 def _sma(values: list[float], n: int, end: int) -> float:
     return sum(values[end - n : end]) / n
+
+
+def _create_exit_rules(**kwargs: Any):
+    from bithumb_bot.strategy.exit_rules import create_exit_rules
+
+    return create_exit_rules(**kwargs)
 
 
 def _rss_mb() -> float | None:
@@ -1110,7 +1176,57 @@ def _retained_detail_summary(
         "retained_equity_point_count": accumulator.retained_equity_point_count,
         "retained_regime_snapshot_count": int(retained_regime_snapshot_count),
         "decision_hash": canonical_payload_hash(accumulator.decision_hash_material),
-        "behavior_hash": canonical_payload_hash(accumulator.behavior_hash_material),
+        **_behavior_hashes(
+            decision_material=accumulator.behavior_hash_material,
+            trade_material=accumulator.trade_ledger_hash_material,
+            equity_material=accumulator.equity_curve_hash_material,
+        ),
+    }
+
+
+def _trade_hash_payload(trade: dict[str, object]) -> dict[str, object]:
+    execution = trade.get("execution") if isinstance(trade.get("execution"), dict) else {}
+    return {
+        "ts": trade.get("ts"),
+        "side": trade.get("side"),
+        "price": trade.get("price"),
+        "qty": trade.get("qty"),
+        "notional": trade.get("notional"),
+        "fee": trade.get("fee"),
+        "slippage": trade.get("slippage"),
+        "pnl": trade.get("pnl"),
+        "net_pnl": trade.get("net_pnl"),
+        "exit_rule": trade.get("exit_rule"),
+        "exit_reason": trade.get("exit_reason"),
+        "model_name": execution.get("model_name"),
+        "fill_price": execution.get("fill_price"),
+        "filled_qty": execution.get("filled_qty"),
+        "status": execution.get("status"),
+    }
+
+
+def _behavior_hashes(
+    *,
+    decision_material: list[dict[str, object]],
+    trade_material: list[dict[str, object]],
+    equity_material: list[dict[str, object]],
+) -> dict[str, str]:
+    decision_hash = canonical_payload_hash(decision_material)
+    trade_hash = canonical_payload_hash(trade_material)
+    equity_hash = canonical_payload_hash(equity_material)
+    composite_hash = canonical_payload_hash(
+        {
+            "decision_behavior_hash": decision_hash,
+            "trade_ledger_hash": trade_hash,
+            "equity_curve_hash": equity_hash,
+        }
+    )
+    return {
+        "decision_behavior_hash": decision_hash,
+        "trade_ledger_hash": trade_hash,
+        "equity_curve_hash": equity_hash,
+        "composite_behavior_hash": composite_hash,
+        "behavior_hash": composite_hash,
     }
 
 
@@ -1419,6 +1535,10 @@ def _research_decision_payload(
     gap_ratio: float,
     range_ratio: float,
     regime_snapshot: dict[str, object],
+    entry_reason: str,
+    market_regime_decision: dict[str, object],
+    market_regime_blocked: bool,
+    candidate_regime_blocked: bool,
     qty: float,
     sellable_qty: float,
     exit_rule: str = "",
@@ -1500,8 +1620,9 @@ def _research_decision_payload(
         "raw_signal": raw_signal,
         "final_signal": final_signal,
         "side": final_signal,
+        "entry_reason": str(entry_reason),
         "blocked": bool(blocked),
-        "block_reason": f"filtered entry: {', '.join(blocked_filters)}" if blocked_filters else (raw_reason if blocked else ""),
+        "block_reason": str(entry_reason) if blocked else "",
         "blocked_filters": tuple(blocked_filters),
         "prev_s": float(prev_s),
         "prev_l": float(prev_l),
@@ -1531,8 +1652,12 @@ def _research_decision_payload(
         "slippage_model_hash": slippage_model_hash,
         "order_rules_hash": order_rules_hash,
         "market_regime": str(regime_snapshot.get("composite_regime") or ""),
-        "regime_decision": "allowed",
-        "regime_block_reason": "",
+        "current_market_regime_snapshot": regime_snapshot,
+        "current_regime": str(market_regime_decision.get("current_regime") or regime_snapshot.get("composite_regime") or ""),
+        "regime_decision": market_regime_decision.get("regime_decision") or "not_configured",
+        "regime_block_reason": market_regime_decision.get("regime_block_reason") or "",
+        "market_regime_blocked": bool(market_regime_blocked),
+        "candidate_regime_blocked": bool(candidate_regime_blocked),
         "position_state_hash": position_state_hash,
         "entry_allowed": bool(lot_native_authority.entry_allowed),
         "exit_allowed": bool(lot_native_authority.exit_allowed),

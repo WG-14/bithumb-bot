@@ -37,8 +37,8 @@ from ..strategy_config import (
 )
 from ..utils_time import parse_interval_sec
 from .base import PositionContext, StrategyDecision
+from ..sma_decision import evaluate_entry_edge_filter, evaluate_sma_entry_decision
 from .exit_rules import ExitRule, create_exit_rules
-from .market_regime import classify_sma_market_regime
 
 
 def _load_signal_rows(
@@ -268,29 +268,15 @@ def _evaluate_entry_edge_filter(
     strategy_min_expected_edge_ratio: float,
     filter_enabled: bool = True,
 ) -> tuple[bool, dict[str, float | bool]]:
-    cost_floor_ratio, required_edge_ratio = _compute_required_entry_edge_ratio(
+    return evaluate_entry_edge_filter(
+        base_signal=base_signal,
+        gap_ratio=gap_ratio,
         slippage_bps=slippage_bps,
         live_fee_rate_estimate=live_fee_rate_estimate,
         edge_buffer_ratio=edge_buffer_ratio,
         strategy_min_expected_edge_ratio=strategy_min_expected_edge_ratio,
+        filter_enabled=filter_enabled,
     )
-    expected_edge_ratio = max(0.0, float(gap_ratio))
-    signal_eligible = base_signal in ("BUY", "SELL")
-    enabled = bool(filter_enabled) and signal_eligible
-    blocked = enabled and expected_edge_ratio < required_edge_ratio
-    return blocked, {
-        "enabled": enabled,
-        "configured_enabled": bool(filter_enabled),
-        "signal_eligible": signal_eligible,
-        "blocked": blocked,
-        "expected_edge_ratio": expected_edge_ratio,
-        "required_edge_ratio": required_edge_ratio,
-        "cost_floor_ratio": cost_floor_ratio,
-        "roundtrip_fee_ratio": 2.0 * max(0.0, float(live_fee_rate_estimate)),
-        "slippage_ratio": max(0.0, float(slippage_bps)) / 10_000.0,
-        "buffer_ratio": max(0.0, float(edge_buffer_ratio)),
-        "min_expected_edge_ratio": max(0.0, float(strategy_min_expected_edge_ratio)),
-    }
 
 
 def _live_armed_entry_fee_authority_blocks(fee_authority: FeeAuthoritySnapshot) -> bool:
@@ -953,94 +939,48 @@ class SmaWithFilterStrategy:
         curr_s = _sma(closes, self.short_n, end_curr)
         curr_l = _sma(closes, self.long_n, end_curr)
 
-        base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
-
-        gap_ratio = _compute_gap_ratio(curr_s=curr_s, curr_l=curr_l)
         fee_authority = _resolve_strategy_fee_authority(
             pair=self.pair,
             config_fallback_fee_rate=float(self.live_fee_rate_estimate),
         )
         fee_rate_for_decision = float(fee_authority.taker_roundtrip_fee_rate / 2)
-
-        vol_window = max(1, int(self.volatility_window))
-        vol_closes = closes[-vol_window:]
-        vol_mean = fmean(vol_closes)
-        volatility_ratio = _safe_ratio((max(vol_closes) - min(vol_closes)), vol_mean)
-
-        overext_lookback = max(1, int(self.overextended_lookback))
-        base_close = closes[-1 - overext_lookback]
-        overextended_ratio = abs(_safe_ratio(closes[-1] - base_close, base_close))
-        market_regime = classify_sma_market_regime(
+        entry_decision = evaluate_sma_entry_decision(
             closes=closes,
-            short_sma=curr_s,
-            long_sma=curr_l,
-            volatility_window=vol_window,
+            prev_s=prev_s,
+            prev_l=prev_l,
+            curr_s=curr_s,
+            curr_l=curr_l,
+            min_gap_ratio=float(self.min_gap_ratio),
+            volatility_window=int(self.volatility_window),
             min_volatility_ratio=float(self.min_volatility_ratio),
-            overextended_lookback=overext_lookback,
+            overextended_lookback=int(self.overextended_lookback),
             overextended_max_return_ratio=float(self.overextended_max_return_ratio),
-            min_trend_strength_ratio=float(self.min_gap_ratio),
-        )
-
-        gap_filter_enabled = float(self.min_gap_ratio) > 0
-        volatility_filter_enabled = float(self.min_volatility_ratio) > 0
-        overextended_filter_enabled = float(self.overextended_max_return_ratio) > 0
-
-        gap_triggered = gap_filter_enabled and gap_ratio < float(self.min_gap_ratio)
-        volatility_triggered = (
-            volatility_filter_enabled and volatility_ratio < float(self.min_volatility_ratio)
-        )
-        overextended_triggered = (
-            overextended_filter_enabled
-            and overextended_ratio > float(self.overextended_max_return_ratio)
-        )
-        edge_filter_triggered, edge_filter_details = _evaluate_entry_edge_filter(
-            base_signal=base_signal,
-            gap_ratio=gap_ratio,
             slippage_bps=float(self.slippage_bps),
             live_fee_rate_estimate=fee_rate_for_decision,
-            edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
-            strategy_min_expected_edge_ratio=float(self.cost_edge_min_ratio),
-            filter_enabled=bool(self.cost_edge_enabled),
+            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
+            cost_edge_enabled=bool(self.cost_edge_enabled),
+            cost_edge_min_ratio=float(self.cost_edge_min_ratio),
+            market_regime_enabled=bool(self.market_regime_enabled),
+            candidate_regime_policy=self.candidate_regime_policy,
+            fee_authority_degraded_blocks_entry=_live_armed_entry_fee_authority_blocks(fee_authority),
         )
-
-        blocked_filters = []
-        if gap_triggered:
-            blocked_filters.append("gap")
-        if volatility_triggered:
-            blocked_filters.append("volatility")
-        if overextended_triggered:
-            blocked_filters.append("overextended")
-        if edge_filter_triggered:
-            blocked_filters.append("cost_edge")
-        if base_signal == "BUY" and _live_armed_entry_fee_authority_blocks(fee_authority):
-            blocked_filters.append("fee_authority_degraded")
-        market_regime_triggered = bool(
-            self.market_regime_enabled
-            and base_signal == "BUY"
-            and not market_regime.allows_entry
-        )
-        candidate_regime_decision = evaluate_live_regime_policy(
-            current_snapshot=market_regime.as_dict(),
-            candidate_policy=self.candidate_regime_policy,
-        )
-        candidate_regime_triggered = bool(
-            base_signal == "BUY"
-            and not bool(candidate_regime_decision.get("allowed"))
-        )
-
+        base_signal = entry_decision.base_signal
+        base_reason = entry_decision.base_reason
+        entry_signal = entry_decision.entry_signal
+        entry_reason = entry_decision.entry_reason
+        gap_ratio = entry_decision.gap_ratio
+        volatility_ratio = entry_decision.volatility_ratio
+        overextended_ratio = entry_decision.overextended_ratio
+        edge_filter_details = entry_decision.edge_filter_details
+        edge_filter_triggered = entry_decision.edge_filter_triggered
+        blocked_filters = list(entry_decision.blocked_filters)
+        market_regime_triggered = entry_decision.market_regime_triggered
+        candidate_regime_triggered = entry_decision.candidate_regime_triggered
+        candidate_regime_decision = entry_decision.candidate_regime_decision
+        market_regime = entry_decision.market_regime
+        vol_window = max(1, int(self.volatility_window))
+        overext_lookback = max(1, int(self.overextended_lookback))
         should_filter_entry = base_signal in ("BUY", "SELL")
-        entry_signal = base_signal
-        entry_reason = base_reason
-        if should_filter_entry and (blocked_filters or market_regime_triggered or candidate_regime_triggered):
-            entry_signal = "HOLD"
-            if "fee_authority_degraded" in blocked_filters:
-                entry_reason = FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON
-            elif blocked_filters:
-                entry_reason = f"filtered entry: {', '.join(blocked_filters)}"
-            elif market_regime_triggered:
-                entry_reason = f"market regime blocked: {market_regime.block_reason}"
-            else:
-                entry_reason = f"candidate regime blocked: {candidate_regime_decision.get('regime_block_reason')}"
 
         signal_context = {
             "strategy": self.name,
@@ -1220,8 +1160,8 @@ class SmaWithFilterStrategy:
                 "base_signal": base_signal,
                 "base_reason": base_reason,
             },
-            "market_regime": market_regime.as_dict(),
-            "current_market_regime_snapshot": market_regime.as_dict(),
+            "market_regime": market_regime,
+            "current_market_regime_snapshot": market_regime,
             "current_regime": candidate_regime_decision.get("current_regime"),
             "current_regime_classifier_version": candidate_regime_decision.get("current_regime_classifier_version"),
             "candidate_regime_classifier_version": candidate_regime_decision.get("candidate_regime_classifier_version"),
@@ -1241,21 +1181,21 @@ class SmaWithFilterStrategy:
             "fee_authority": _fee_authority_context(fee_authority),
             "filters": {
                 "gap": {
-                    "enabled": gap_filter_enabled,
-                    "passed": not gap_triggered,
+                    "enabled": entry_decision.gap_filter_enabled,
+                    "passed": not entry_decision.gap_triggered,
                     "threshold": float(self.min_gap_ratio),
                     "value": gap_ratio,
                 },
                 "volatility": {
-                    "enabled": volatility_filter_enabled,
-                    "passed": not volatility_triggered,
+                    "enabled": entry_decision.volatility_filter_enabled,
+                    "passed": not entry_decision.volatility_triggered,
                     "window": vol_window,
                     "threshold": float(self.min_volatility_ratio),
                     "value": volatility_ratio,
                 },
                 "overextended": {
-                    "enabled": overextended_filter_enabled,
-                    "passed": not overextended_triggered,
+                    "enabled": entry_decision.overextended_filter_enabled,
+                    "passed": not entry_decision.overextended_triggered,
                     "lookback": overext_lookback,
                     "threshold": float(self.overextended_max_return_ratio),
                     "value": overextended_ratio,
@@ -1329,7 +1269,7 @@ class SmaWithFilterStrategy:
             thresholds=thresholds,
             fee_authority=_fee_authority_context(fee_authority),
             slippage_bps=float(self.slippage_bps),
-            regime_version=market_regime.version,
+            regime_version=str(market_regime.get("version") or ""),
         )
 
         return _apply_entry_exit_policy(

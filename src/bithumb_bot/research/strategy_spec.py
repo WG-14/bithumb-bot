@@ -19,6 +19,7 @@ class StrategySpec:
     required_parameter_names: tuple[str, ...]
     behavior_affecting_parameter_names: tuple[str, ...]
     metadata_only_parameter_names: tuple[str, ...]
+    research_only_parameter_names: tuple[str, ...]
     default_parameters: dict[str, Any]
     decision_contract_version: str
     required_data: tuple[str, ...]
@@ -33,6 +34,7 @@ class StrategySpec:
             "required_parameter_names": list(self.required_parameter_names),
             "behavior_affecting_parameter_names": list(self.behavior_affecting_parameter_names),
             "metadata_only_parameter_names": list(self.metadata_only_parameter_names),
+            "research_only_parameter_names": list(self.research_only_parameter_names),
             "default_parameters": dict(self.default_parameters),
             "decision_contract_version": self.decision_contract_version,
             "required_data": list(self.required_data),
@@ -55,6 +57,7 @@ SMA_WITH_FILTER_SPEC = StrategySpec(
         "SMA_FILTER_VOL_MIN_RANGE_RATIO",
         "SMA_FILTER_VOLUME_WINDOW",
         "SMA_FILTER_LIQUIDITY_WINDOW",
+        "SMA_MARKET_REGIME_ENABLED",
         "SMA_FILTER_OVEREXT_LOOKBACK",
         "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO",
         "SMA_COST_EDGE_ENABLED",
@@ -75,10 +78,9 @@ SMA_WITH_FILTER_SPEC = StrategySpec(
         "SMA_FILTER_GAP_MIN_RATIO",
         "SMA_FILTER_VOL_WINDOW",
         "SMA_FILTER_VOL_MIN_RANGE_RATIO",
-        "SMA_FILTER_VOLUME_WINDOW",
-        "SMA_FILTER_LIQUIDITY_WINDOW",
         "SMA_FILTER_OVEREXT_LOOKBACK",
         "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO",
+        "SMA_MARKET_REGIME_ENABLED",
         "SMA_COST_EDGE_ENABLED",
         "SMA_COST_EDGE_MIN_RATIO",
         "ENTRY_EDGE_BUFFER_RATIO",
@@ -91,6 +93,10 @@ SMA_WITH_FILTER_SPEC = StrategySpec(
         "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO",
     ),
     metadata_only_parameter_names=(),
+    research_only_parameter_names=(
+        "SMA_FILTER_VOLUME_WINDOW",
+        "SMA_FILTER_LIQUIDITY_WINDOW",
+    ),
     default_parameters={
         "SMA_FILTER_GAP_MIN_RATIO": 0.0012,
         "SMA_FILTER_VOL_WINDOW": 10,
@@ -99,6 +105,7 @@ SMA_WITH_FILTER_SPEC = StrategySpec(
         "SMA_FILTER_LIQUIDITY_WINDOW": 10,
         "SMA_FILTER_OVEREXT_LOOKBACK": 3,
         "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.02,
+        "SMA_MARKET_REGIME_ENABLED": True,
         "SMA_COST_EDGE_ENABLED": True,
         "SMA_COST_EDGE_MIN_RATIO": 0.0,
         "ENTRY_EDGE_BUFFER_RATIO": 0.0005,
@@ -150,6 +157,12 @@ def validate_parameter_space_against_strategy_spec(
         raise StrategySpecError(
             "metadata-only strategy parameter(s) cannot be optimized for production-bound manifests: "
             + ",".join(metadata)
+        )
+    research_only = sorted(key for key in parameter_space if key in set(spec.research_only_parameter_names))
+    if research_only and is_production_bound_target(deployment_tier):
+        raise StrategySpecError(
+            "research-only strategy parameter(s) cannot be optimized for production-bound manifests: "
+            + ",".join(research_only)
         )
     return spec
 

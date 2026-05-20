@@ -69,6 +69,7 @@ def _candidate() -> dict[str, object]:
             "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.003,
             "SMA_FILTER_OVEREXT_LOOKBACK": 3,
             "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.02,
+            "SMA_MARKET_REGIME_ENABLED": True,
             "SMA_COST_EDGE_ENABLED": True,
             "SMA_COST_EDGE_MIN_RATIO": 0.001,
             "ENTRY_EDGE_BUFFER_RATIO": 0.0005,
@@ -401,7 +402,13 @@ def _profile_with_mutated_evidence_tier(source_promotion_path: str, tier: str) -
     return profile
 
 
-def _write_env(path: Path, *, sma_short: int = 2, profile_path: str = "") -> None:
+def _write_env(
+    path: Path,
+    *,
+    sma_short: int = 2,
+    profile_path: str = "",
+    sma_market_regime_enabled: str = "true",
+) -> None:
     path.write_text(
         "\n".join(
             [
@@ -417,6 +424,7 @@ def _write_env(path: Path, *, sma_short: int = 2, profile_path: str = "") -> Non
                 "SMA_FILTER_VOL_MIN_RANGE_RATIO=0.003",
                 "SMA_FILTER_OVEREXT_LOOKBACK=3",
                 "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO=0.02",
+                f"SMA_MARKET_REGIME_ENABLED={sma_market_regime_enabled}",
                 "SMA_COST_EDGE_ENABLED=true",
                 "SMA_COST_EDGE_MIN_RATIO=0.001",
                 "ENTRY_EDGE_BUFFER_RATIO=0.0005",
@@ -1126,6 +1134,31 @@ def test_profile_diff_detects_env_drift(tmp_path: Path) -> None:
 
     assert {"field": "strategy_parameters.SMA_SHORT", "expected": 2, "actual": "99"} in mismatches
     assert cmd_profile_diff(profile_path=str(profile_path), target_env=str(env_path), as_json=True) == 1
+
+
+def test_runtime_contract_includes_sma_market_regime_enabled(tmp_path: Path) -> None:
+    env_path = tmp_path / "paper.env"
+    _write_env(env_path, sma_market_regime_enabled="false")
+
+    runtime = runtime_contract_from_env_values(parse_env_file(env_path))
+
+    assert runtime["strategy_parameters"]["SMA_MARKET_REGIME_ENABLED"] == "false"
+
+
+def test_profile_runtime_mismatch_detects_sma_market_regime_enabled_change(tmp_path: Path) -> None:
+    profile_path = _write_profile_with_source(tmp_path)
+    env_path = tmp_path / "paper.env"
+    _write_env(env_path, sma_market_regime_enabled="false")
+
+    profile = load_approved_profile(profile_path)
+    runtime = runtime_contract_from_env_values(parse_env_file(env_path))
+    mismatches = diff_profile_to_runtime(profile, runtime)
+
+    assert {
+        "field": "strategy_parameters.SMA_MARKET_REGIME_ENABLED",
+        "expected": True,
+        "actual": "false",
+    } in mismatches
 
 
 def test_profile_diff_json_clarifies_artifact_chain_is_not_verified(
@@ -2589,6 +2622,7 @@ def test_runtime_contract_settings_supports_approved_profile_alias_with_canonica
         SMA_FILTER_VOL_MIN_RANGE_RATIO = 0.003
         SMA_FILTER_OVEREXT_LOOKBACK = 3
         SMA_FILTER_OVEREXT_MAX_RETURN_RATIO = 0.02
+        SMA_MARKET_REGIME_ENABLED = True
         SMA_COST_EDGE_ENABLED = True
         SMA_COST_EDGE_MIN_RATIO = 0.001
         ENTRY_EDGE_BUFFER_RATIO = 0.0005
