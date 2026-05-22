@@ -620,7 +620,7 @@ def test_research_runtime_raw_buy_open_position_stop_loss_equivalence(relaxed_te
             runtime_conn,
             qty_open=0.0002,
             dust_metadata={},
-            entry_price=9.0,
+            entry_price=10.0,
             executable_lot_count=2,
         )
         runtime_decision = create_sma_with_filter_strategy(
@@ -628,7 +628,7 @@ def test_research_runtime_raw_buy_open_position_stop_loss_equivalence(relaxed_te
             long_n=3,
             pair="BTC_KRW",
             interval="1m",
-            min_gap_ratio=0.0,
+            min_gap_ratio=0.02,
             volatility_window=3,
             min_volatility_ratio=0.0,
             overextended_lookback=1,
@@ -640,7 +640,7 @@ def test_research_runtime_raw_buy_open_position_stop_loss_equivalence(relaxed_te
             market_regime_enabled=False,
             candidate_regime_policy=_allowing_policy(),
             exit_rule_names=["stop_loss"],
-            exit_stop_loss_ratio=0.05,
+            exit_stop_loss_ratio=0.15,
         ).decide(runtime_conn)
     finally:
         runtime_conn.close()
@@ -650,13 +650,13 @@ def test_research_runtime_raw_buy_open_position_stop_loss_equivalence(relaxed_te
         parameter_values={
             "SMA_SHORT": 2,
             "SMA_LONG": 3,
-            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.02,
             "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
             "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
             "SMA_COST_EDGE_ENABLED": False,
             "SMA_MARKET_REGIME_ENABLED": False,
             "STRATEGY_EXIT_RULES": "stop_loss",
-            "STRATEGY_EXIT_STOP_LOSS_RATIO": 0.05,
+            "STRATEGY_EXIT_STOP_LOSS_RATIO": 0.15,
             "STRATEGY_EXIT_MAX_HOLDING_MIN": 0,
             "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": 0.0,
             "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": 0.0,
@@ -687,12 +687,17 @@ def test_research_runtime_raw_buy_open_position_stop_loss_equivalence(relaxed_te
     assert runtime_decision is not None
     assert runtime_decision.signal == research_decision["final_signal"] == "SELL"
     assert runtime_decision.context["raw_signal"] == research_decision["raw_signal"] == "BUY"
+    assert runtime_decision.context["raw_filter_would_block"] is True
+    assert runtime_decision.context["entry_filter_blocked"] is True
     assert runtime_decision.context["entry_allowed"] is False
     assert runtime_decision.context["entry_blocked"] is False
     assert runtime_decision.context["protective_exit_overrode_entry"] is True
     assert runtime_decision.context["entry_block_reason"] is None
+    assert research_decision["raw_filter_would_block"] is True
+    assert research_decision["entry_filter_blocked"] is True
     assert research_decision["entry_blocked"] is False
     assert research_decision["protective_exit_overrode_entry"] is True
+    assert "gap" in research_decision["entry_blocked_filters"]
     assert runtime_decision.context["exit"]["rule"] == research_decision["exit_rule"] == "stop_loss"
 
 
@@ -712,7 +717,7 @@ def test_research_runtime_raw_buy_open_position_max_holding_equivalence(relaxed_
             long_n=3,
             pair="BTC_KRW",
             interval="1m",
-            min_gap_ratio=0.0,
+            min_gap_ratio=0.02,
             volatility_window=3,
             min_volatility_ratio=0.0,
             overextended_lookback=1,
@@ -724,7 +729,7 @@ def test_research_runtime_raw_buy_open_position_max_holding_equivalence(relaxed_
             market_regime_enabled=False,
             candidate_regime_policy=_allowing_policy(),
             exit_rule_names=["max_holding_time"],
-            exit_max_holding_min=2,
+            exit_max_holding_min=5,
         ).decide(runtime_conn)
     finally:
         runtime_conn.close()
@@ -734,14 +739,14 @@ def test_research_runtime_raw_buy_open_position_max_holding_equivalence(relaxed_
         parameter_values={
             "SMA_SHORT": 2,
             "SMA_LONG": 3,
-            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.02,
             "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
             "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
             "SMA_COST_EDGE_ENABLED": False,
             "SMA_MARKET_REGIME_ENABLED": False,
             "STRATEGY_EXIT_RULES": "max_holding_time",
             "STRATEGY_EXIT_STOP_LOSS_RATIO": 0.0,
-            "STRATEGY_EXIT_MAX_HOLDING_MIN": 2,
+            "STRATEGY_EXIT_MAX_HOLDING_MIN": 5,
             "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": 0.0,
             "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": 0.0,
         },
@@ -771,11 +776,16 @@ def test_research_runtime_raw_buy_open_position_max_holding_equivalence(relaxed_
     assert runtime_decision is not None
     assert runtime_decision.signal == research_decision["final_signal"] == "SELL"
     assert runtime_decision.context["raw_signal"] == research_decision["raw_signal"] == "BUY"
+    assert runtime_decision.context["raw_filter_would_block"] is True
+    assert runtime_decision.context["entry_filter_blocked"] is True
     assert runtime_decision.context["entry_blocked"] is False
     assert runtime_decision.context["protective_exit_overrode_entry"] is True
     assert runtime_decision.context["entry_block_reason"] is None
+    assert research_decision["raw_filter_would_block"] is True
+    assert research_decision["entry_filter_blocked"] is True
     assert research_decision["entry_blocked"] is False
     assert research_decision["protective_exit_overrode_entry"] is True
+    assert "gap" in research_decision["entry_blocked_filters"]
     assert runtime_decision.context["exit"]["rule"] == research_decision["exit_rule"] == "max_holding_time"
 
 

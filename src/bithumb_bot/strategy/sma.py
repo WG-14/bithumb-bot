@@ -41,6 +41,9 @@ from ..sma_decision import evaluate_entry_edge_filter, evaluate_sma_entry_decisi
 from .exit_rules import ExitRule, create_exit_rules
 
 
+# Currently implemented protective exits that can override raw BUY entry intent.
+# Add future active risk exits here, such as take_profit, trailing_stop, or
+# momentum_timeout, when they become implemented exit rules.
 PROTECTIVE_EXIT_RULE_NAMES = frozenset({"stop_loss", "max_holding_time"})
 
 

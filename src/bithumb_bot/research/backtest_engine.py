@@ -661,9 +661,9 @@ def run_sma_backtest(
             raw_signal in {"BUY", "SELL"}
             and (blocked_filters or entry_decision.market_regime_triggered or entry_decision.candidate_regime_triggered)
         )
-        entry_blocked = bool(raw_signal == "BUY" and raw_filter_would_block)
-        entry_signal = "HOLD" if entry_blocked else raw_signal
-        entry_reason = entry_decision.entry_reason if entry_blocked else raw_reason
+        entry_filter_blocked = bool(raw_signal == "BUY" and raw_filter_would_block)
+        entry_signal = "HOLD" if entry_filter_blocked else raw_signal
+        entry_reason = entry_decision.entry_reason if entry_filter_blocked else raw_reason
         gap_ratio = entry_decision.gap_ratio
         range_ratio = entry_decision.volatility_ratio
         if qty > 1e-12 and entry_price is not None:
@@ -676,7 +676,7 @@ def run_sma_backtest(
                     "unrealized_pnl_pct": pnl_ratio * 100.0,
                 }
             )
-        if not entry_blocked and prev_above is not None:
+        if not entry_filter_blocked and prev_above is not None:
             if entry_signal == "BUY" and qty <= 0.0 and pending_buy_qty <= 0.0:
                 action = "BUY"
         if sellable_qty > 0.0:
@@ -740,6 +740,7 @@ def run_sma_backtest(
             and action == "SELL"
             and exit_rule in {"stop_loss", "max_holding_time"}
         )
+        entry_blocked = bool(raw_signal == "BUY" and action == "HOLD" and raw_filter_would_block)
         decision_payload = _research_decision_payload(
             dataset=dataset,
             dataset_content_hash=dataset_content_hash,
