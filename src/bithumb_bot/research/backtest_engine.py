@@ -103,6 +103,12 @@ class _BacktestAccumulator:
     behavior_hash_material: list[dict[str, object]] = field(default_factory=list)
     trade_ledger_hash_material: list[dict[str, object]] = field(default_factory=list)
     equity_curve_hash_material: list[dict[str, object]] = field(default_factory=list)
+    raw_sell_filter_blocked_while_in_position_count: int = 0
+    raw_buy_filter_blocked_count: int = 0
+    opposite_cross_triggered_count: int = 0
+    opposite_cross_deferred_small_loss_count: int = 0
+    opposite_cross_deferred_small_gain_count: int = 0
+    max_holding_exit_count: int = 0
 
     @property
     def report_detail(self) -> str:
@@ -130,13 +136,38 @@ class _BacktestAccumulator:
 
     def update_decision(self, payload: dict[str, object], retained: bool) -> None:
         self.decision_count += 1
-        if str(payload.get("raw_signal") or "").upper() in {"BUY", "SELL"}:
+        raw_signal = str(payload.get("raw_signal") or "").upper()
+        if raw_signal in {"BUY", "SELL"}:
             self.signal_count += 1
+        entry_filter_blocked = bool(payload.get("entry_filter_blocked"))
+        sellable_qty = float(payload.get("sellable_qty") or 0.0)
+        if raw_signal == "BUY" and entry_filter_blocked:
+            self.raw_buy_filter_blocked_count += 1
+        if raw_signal == "SELL" and entry_filter_blocked and sellable_qty > 1e-12:
+            self.raw_sell_filter_blocked_while_in_position_count += 1
+        for evaluation in payload.get("exit_evaluations") or []:
+            if not isinstance(evaluation, dict):
+                continue
+            context = evaluation.get("context") if isinstance(evaluation.get("context"), dict) else {}
+            rule = str(evaluation.get("rule") or context.get("rule") or "")
+            if rule == "opposite_cross":
+                if bool(context.get("opposite_cross_triggered")):
+                    self.opposite_cross_triggered_count += 1
+                if bool(context.get("filter_applied")):
+                    zone = str(context.get("filter_zone") or "")
+                    if zone == "small_loss":
+                        self.opposite_cross_deferred_small_loss_count += 1
+                    elif zone == "small_gain":
+                        self.opposite_cross_deferred_small_gain_count += 1
+            elif rule == "max_holding_time" and bool(evaluation.get("triggered")):
+                self.max_holding_exit_count += 1
         self.decision_hash_material.append(str(payload.get("replay_fingerprint_hash") or ""))
         self.behavior_hash_material.append(
             {
                 "candle_ts": payload.get("candle_ts"),
                 "raw_signal": payload.get("raw_signal"),
+                "entry_signal": payload.get("entry_signal"),
+                "exit_signal": payload.get("exit_signal"),
                 "final_signal": payload.get("final_signal"),
                 "entry_reason": payload.get("entry_reason"),
                 "exit_rule": payload.get("exit_rule"),
@@ -241,6 +272,7 @@ class _BacktestAccumulator:
             trade_material=self.trade_ledger_hash_material,
             equity_material=self.equity_curve_hash_material,
         ))
+        payload["strategy_diagnostics"] = self.strategy_diagnostics(trades=[])
         return payload
 
     def metrics_summary_inputs(self, *, max_drawdown_pct: float) -> dict[str, Any]:
@@ -256,6 +288,17 @@ class _BacktestAccumulator:
             "summary_max_drawdown_pct": float(max_drawdown_pct),
             "summary_active_bar_count": int(self.active_bar_count),
         }
+
+    def strategy_diagnostics(self, *, trades: list[dict[str, object]]) -> dict[str, object]:
+        return _strategy_diagnostics_from_trades(
+            trades=trades,
+            raw_sell_filter_blocked_while_in_position_count=self.raw_sell_filter_blocked_while_in_position_count,
+            raw_buy_filter_blocked_count=self.raw_buy_filter_blocked_count,
+            opposite_cross_triggered_count=self.opposite_cross_triggered_count,
+            opposite_cross_deferred_small_loss_count=self.opposite_cross_deferred_small_loss_count,
+            opposite_cross_deferred_small_gain_count=self.opposite_cross_deferred_small_gain_count,
+            max_holding_exit_count=self.max_holding_exit_count,
+        )
 
 
 @dataclass
@@ -331,6 +374,7 @@ class BacktestRun:
     closed_trades: tuple[ClosedTradeRecord, ...] = ()
     metrics_v2: MetricContractV2 | None = None
     resource_usage: dict[str, object] | None = None
+    strategy_diagnostics: dict[str, object] | None = None
     retained_detail_summary: dict[str, object] | None = None
     audit_trace_index: dict[str, object] | None = None
 
@@ -428,6 +472,7 @@ def run_sma_backtest(
             regime_coverage=(),
             execution_event_summary=empty_execution_event_summary(),
             resource_usage=accumulator.resource_usage(candles_processed=len(candles)),
+            strategy_diagnostics=accumulator.strategy_diagnostics(trades=[]),
             retained_detail_summary=_retained_detail_summary(accumulator, retained_regime_snapshot_count=0),
             audit_trace_index=audit_trace_index,
         )
@@ -601,12 +646,12 @@ def run_sma_backtest(
                 raw_signal = "SELL"
                 raw_reason = "sma dead cross"
         blocked_filters = list(entry_decision.blocked_filters) if raw_signal in {"BUY", "SELL"} else []
-        filter_blocked = bool(
+        entry_filter_blocked = bool(
             raw_signal in {"BUY", "SELL"}
             and (blocked_filters or entry_decision.market_regime_triggered or entry_decision.candidate_regime_triggered)
         )
-        entry_signal = "HOLD" if filter_blocked else raw_signal
-        entry_reason = entry_decision.entry_reason if filter_blocked else raw_reason
+        entry_signal = "HOLD" if raw_signal == "BUY" and entry_filter_blocked else raw_signal
+        entry_reason = entry_decision.entry_reason if raw_signal == "BUY" and entry_filter_blocked else raw_reason
         gap_ratio = entry_decision.gap_ratio
         range_ratio = entry_decision.volatility_ratio
         if qty > 1e-12 and entry_price is not None:
@@ -619,7 +664,7 @@ def run_sma_backtest(
                     "unrealized_pnl_pct": pnl_ratio * 100.0,
                 }
             )
-        if not filter_blocked and prev_above is not None:
+        if not entry_filter_blocked and prev_above is not None:
             if entry_signal == "BUY" and qty <= 0.0 and pending_buy_qty <= 0.0:
                 action = "BUY"
         if sellable_qty > 0.0:
@@ -656,8 +701,10 @@ def run_sma_backtest(
                     candle_ts=int(candle.ts),
                     market_price=float(candle.close),
                     signal_context={
-                        "base_signal": "HOLD" if filter_blocked else raw_signal,
+                        "base_signal": raw_signal,
                         "base_reason": raw_reason,
+                        "entry_signal": entry_signal,
+                        "exit_signal": raw_signal,
                         "curr_s": curr_short,
                         "curr_l": curr_long,
                     },
@@ -690,9 +737,12 @@ def run_sma_backtest(
             candle_ts=int(candle.ts),
             decision_ts=int(decision_boundary_ts),
             raw_signal=raw_signal,
+            entry_signal=entry_signal,
+            exit_signal=raw_signal,
             final_signal=action,
             raw_reason=raw_reason,
             blocked=bool(raw_signal in {"BUY", "SELL"} and action == "HOLD"),
+            entry_filter_blocked=entry_filter_blocked,
             blocked_filters=blocked_filters,
             prev_s=prev_short,
             prev_l=prev_long,
@@ -1140,6 +1190,9 @@ def run_sma_backtest(
         }
         for point in equity_curve
     ]
+    strategy_diagnostics = accumulator.strategy_diagnostics(trades=trades)
+    resource_usage = accumulator.resource_usage(candles_processed=max(0, len(candles) - long_n))
+    resource_usage["strategy_diagnostics"] = strategy_diagnostics
     return BacktestRun(
         metrics=metrics,
         metrics_v2=metrics_v2,
@@ -1153,7 +1206,8 @@ def run_sma_backtest(
         equity_curve=tuple(equity_curve),
         position_intervals=position_intervals,
         closed_trades=closed_trade_records,
-        resource_usage=accumulator.resource_usage(candles_processed=max(0, len(candles) - long_n)),
+        resource_usage=resource_usage,
+        strategy_diagnostics=strategy_diagnostics,
         retained_detail_summary=_retained_detail_summary(
             accumulator,
             retained_regime_snapshot_count=len(regime_snapshots),
@@ -1617,9 +1671,12 @@ def _research_decision_payload(
     candle_ts: int,
     decision_ts: int,
     raw_signal: str,
+    entry_signal: str,
+    exit_signal: str,
     final_signal: str,
     raw_reason: str,
     blocked: bool,
+    entry_filter_blocked: bool,
     blocked_filters: list[str],
     prev_s: float,
     prev_l: float,
@@ -1711,12 +1768,18 @@ def _research_decision_payload(
         "candle_basis": "research_closed_candle",
         "decision_ts": int(decision_ts),
         "raw_signal": raw_signal,
+        "entry_signal": entry_signal,
+        "exit_signal": exit_signal,
         "final_signal": final_signal,
         "side": final_signal,
         "entry_reason": str(entry_reason),
         "blocked": bool(blocked),
+        "entry_filter_blocked": bool(entry_filter_blocked),
+        "entry_blocked": bool(raw_signal == "BUY" and entry_filter_blocked),
+        "entry_blocked_filters": tuple(blocked_filters),
         "block_reason": str(entry_reason) if blocked else "",
         "blocked_filters": tuple(blocked_filters),
+        "sellable_qty": float(sellable_qty),
         "prev_s": float(prev_s),
         "prev_l": float(prev_l),
         "curr_s": float(curr_s),
@@ -2114,6 +2177,66 @@ def execution_event_summary(trades: Any) -> dict[str, object]:
         "pending_execution_after_dataset_end_count": len(pending_after_end),
         "execution_event_timeline_incomplete": bool(pending_after_end),
     }
+
+
+def _strategy_diagnostics_from_trades(
+    *,
+    trades: list[dict[str, object]],
+    raw_sell_filter_blocked_while_in_position_count: int,
+    raw_buy_filter_blocked_count: int,
+    opposite_cross_triggered_count: int,
+    opposite_cross_deferred_small_loss_count: int,
+    opposite_cross_deferred_small_gain_count: int,
+    max_holding_exit_count: int,
+) -> dict[str, object]:
+    closed = [
+        trade
+        for trade in trades
+        if isinstance(trade, dict)
+        and bool(trade.get("is_portfolio_applied_trade"))
+        and str(trade.get("side") or "").upper() == "SELL"
+    ]
+    exit_reason_distribution: dict[str, int] = {}
+    mae_pct_by_trade: list[float] = []
+    mfe_pct_by_trade: list[float] = []
+    loss_holding_minutes: list[float] = []
+    for trade in closed:
+        reason = str(trade.get("exit_rule") or trade.get("exit_reason") or "unknown")
+        exit_reason_distribution[reason] = exit_reason_distribution.get(reason, 0) + 1
+        if trade.get("mae_pct") is not None:
+            mae_pct_by_trade.append(float(trade.get("mae_pct") or 0.0))
+        if trade.get("mfe_pct") is not None:
+            mfe_pct_by_trade.append(float(trade.get("mfe_pct") or 0.0))
+        pnl = trade.get("net_pnl") if trade.get("net_pnl") is not None else trade.get("closed_trade_pnl")
+        if pnl is not None and float(pnl) < 0.0 and trade.get("holding_minutes") is not None:
+            loss_holding_minutes.append(float(trade.get("holding_minutes") or 0.0))
+    return {
+        "schema_version": 1,
+        "raw_sell_filter_blocked_while_in_position_count": int(raw_sell_filter_blocked_while_in_position_count),
+        "raw_buy_filter_blocked_count": int(raw_buy_filter_blocked_count),
+        "opposite_cross_triggered_count": int(opposite_cross_triggered_count),
+        "opposite_cross_deferred_small_loss_count": int(opposite_cross_deferred_small_loss_count),
+        "opposite_cross_deferred_small_gain_count": int(opposite_cross_deferred_small_gain_count),
+        "max_holding_exit_count": int(max_holding_exit_count),
+        "exit_reason_distribution": dict(sorted(exit_reason_distribution.items())),
+        "mae_pct_by_trade": mae_pct_by_trade,
+        "mfe_pct_by_trade": mfe_pct_by_trade,
+        "p95_mae_pct": _percentile(mae_pct_by_trade, 0.95),
+        "worst_trade_mae_pct": min(mae_pct_by_trade) if mae_pct_by_trade else None,
+        "avg_loss_holding_minutes": (
+            sum(loss_holding_minutes) / len(loss_holding_minutes)
+            if loss_holding_minutes
+            else None
+        ),
+    }
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * float(percentile)))))
+    return ordered[index]
 
 
 def empty_execution_event_summary() -> dict[str, object]:

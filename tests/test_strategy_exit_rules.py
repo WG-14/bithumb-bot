@@ -186,6 +186,21 @@ def test_opposite_cross_exits_on_large_loss_for_risk_defense() -> None:
     assert decision.context["small_gain_zone"] is False
 
 
+def test_adverse_move_without_opposite_cross_or_max_holding_does_not_exit() -> None:
+    rule = OppositeCrossExitRule(min_take_profit_ratio=0.0, live_fee_rate_estimate=0.0)
+    position = PositionContext(in_position=True, entry_price=100.0, qty_open=1.0, unrealized_pnl_ratio=-0.10)
+
+    decision = rule.evaluate(
+        position=position,
+        candle_ts=1_700_000_000_000,
+        market_price=90.0,
+        signal_context={"base_signal": "HOLD"},
+    )
+
+    assert decision.should_exit is False
+    assert decision.context["opposite_cross_triggered"] is False
+
+
 def test_opposite_cross_reason_context_include_expected_fields() -> None:
     rule = OppositeCrossExitRule(
         min_take_profit_ratio=0.002,

@@ -499,7 +499,17 @@ def _apply_entry_exit_policy(
     exposure: NormalizedExposure,
     position_state: PositionStateModel,
     exit_rules: list[ExitRule],
+    raw_signal: str | None = None,
+    raw_reason: str | None = None,
+    exit_signal: str | None = None,
+    exit_reason: str | None = None,
 ) -> StrategyDecision:
+    resolved_raw_signal = str(raw_signal or base_context.get("base_signal") or base_signal).upper()
+    resolved_raw_reason = str(raw_reason or base_context.get("base_reason") or base_reason)
+    resolved_entry_signal = str(base_signal).upper()
+    resolved_entry_reason = str(base_reason)
+    resolved_exit_signal = str(exit_signal or resolved_raw_signal).upper()
+    resolved_exit_reason = str(exit_reason or resolved_raw_reason)
     allow_harmless_dust_exit_evaluation = bool(
         exposure.dust_classification == "harmless_dust"
         and not exposure.harmless_dust_effective_flat
@@ -515,8 +525,8 @@ def _apply_entry_exit_policy(
     ) -> dict[str, Any]:
         entry = context.get("entry") if isinstance(context.get("entry"), dict) else {}
         entry_signal = str(entry.get("entry_signal", raw_signal)).strip().upper() or raw_signal
-        filtered_entry = raw_signal in {"BUY", "SELL"} and raw_signal != entry_signal
-        entry_blocked = raw_signal in {"BUY", "SELL"} and final_signal != raw_signal
+        filtered_entry = raw_signal == "BUY" and raw_signal != entry_signal
+        entry_blocked = raw_signal == "BUY" and final_signal != raw_signal
         entry_block_reason: str | None = None
         if entry_blocked:
             if filtered_entry:
@@ -533,6 +543,8 @@ def _apply_entry_exit_policy(
         state_interpretation = context["position_state"]["state_interpretation"]
         context["raw_signal"] = raw_signal
         context["final_signal"] = final_signal
+        context["exit_signal"] = resolved_exit_signal
+        context["exit_reason_raw"] = resolved_exit_reason
         context["entry_blocked"] = entry_blocked
         context["entry_block_reason"] = entry_block_reason
         context["dust_classification"] = str(normalized_state["dust_classification"])
@@ -552,10 +564,10 @@ def _apply_entry_exit_policy(
         context["exit_submit_expected"] = bool(state_interpretation["exit_submit_expected"])
         return apply_decision_contract(context)
 
-    if base_signal == "BUY" and not exposure.entry_allowed:
+    if resolved_entry_signal == "BUY" and not exposure.entry_allowed:
         context = _annotate_decision_context(
             dict(base_context),
-            raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+            raw_signal=resolved_raw_signal,
             final_signal="HOLD",
             final_reason=str(exposure.entry_block_reason or "entry_blocked_by_position_state"),
         )
@@ -565,10 +577,10 @@ def _apply_entry_exit_policy(
             context=context,
         )
 
-    if base_signal == "SELL" and not exposure.exit_allowed and not allow_harmless_dust_exit_evaluation:
+    if resolved_exit_signal == "SELL" and not exposure.exit_allowed and not allow_harmless_dust_exit_evaluation:
         context = _annotate_decision_context(
             dict(base_context),
-            raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+            raw_signal=resolved_raw_signal,
             final_signal="HOLD",
             final_reason=str(exposure.exit_block_reason or "exit_blocked_by_position_state"),
         )
@@ -588,7 +600,7 @@ def _apply_entry_exit_policy(
     if position.in_position and not exposure.exit_allowed and not allow_harmless_dust_exit_evaluation:
         context = _annotate_decision_context(
             dict(base_context),
-            raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+            raw_signal=resolved_raw_signal,
             final_signal="HOLD",
             final_reason=str(exposure.exit_block_reason or "exit_blocked_by_position_state"),
         )
@@ -608,11 +620,11 @@ def _apply_entry_exit_policy(
     if not position.in_position:
         context = _annotate_decision_context(
             dict(base_context),
-            raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
-            final_signal=base_signal,
-            final_reason=base_reason,
+            raw_signal=resolved_raw_signal,
+            final_signal=resolved_entry_signal,
+            final_reason=resolved_entry_reason,
         )
-        return StrategyDecision(signal=base_signal, reason=base_reason, context=context)
+        return StrategyDecision(signal=resolved_entry_signal, reason=resolved_entry_reason, context=context)
 
     exit_results: list[dict[str, Any]] = []
     for rule in exit_rules:
@@ -621,8 +633,11 @@ def _apply_entry_exit_policy(
             candle_ts=int(base_context["ts"]),
             market_price=float(base_context["last_close"]),
             signal_context={
-                "base_signal": base_signal,
-                "base_reason": base_reason,
+                "base_signal": resolved_exit_signal,
+                "base_reason": resolved_exit_reason,
+                "raw_signal": resolved_raw_signal,
+                "entry_signal": resolved_entry_signal,
+                "exit_signal": resolved_exit_signal,
                 "curr_s": base_context["curr_s"],
                 "curr_l": base_context["curr_l"],
             },
@@ -647,7 +662,7 @@ def _apply_entry_exit_policy(
             )
             context = _annotate_decision_context(
                 context,
-                raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+                raw_signal=resolved_raw_signal,
                 final_signal="SELL",
                 final_reason=rule_result.reason,
             )
@@ -664,7 +679,7 @@ def _apply_entry_exit_policy(
     )
     context = _annotate_decision_context(
         context,
-        raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+        raw_signal=resolved_raw_signal,
         final_signal="HOLD",
         final_reason="position held: no exit rule triggered",
     )
@@ -763,7 +778,7 @@ class SmaCrossStrategy:
         )
         entry_signal = base_signal
         entry_reason = base_reason
-        if edge_filter_triggered:
+        if base_signal == "BUY" and edge_filter_triggered:
             entry_signal = "HOLD"
             entry_reason = "filtered entry: cost_edge"
         if base_signal == "BUY" and _live_armed_entry_fee_authority_blocks(fee_authority):
@@ -866,6 +881,10 @@ class SmaCrossStrategy:
             exposure=exposure,
             position_state=position_state,
             exit_rules=exit_rules,
+            raw_signal=base_signal,
+            raw_reason=base_reason,
+            exit_signal=base_signal,
+            exit_reason=base_reason,
         )
 
 
@@ -981,7 +1000,11 @@ class SmaWithFilterStrategy:
         market_regime = entry_decision.market_regime
         vol_window = max(1, int(self.volatility_window))
         overext_lookback = max(1, int(self.overextended_lookback))
-        should_filter_entry = base_signal in ("BUY", "SELL")
+        raw_entry_filter_blocked = bool(
+            base_signal in ("BUY", "SELL")
+            and (blocked_filters or market_regime_triggered or candidate_regime_triggered)
+        )
+        should_filter_entry = base_signal == "BUY"
 
         signal_context = {
             "strategy": self.name,
@@ -1258,6 +1281,7 @@ class SmaWithFilterStrategy:
                 },
             },
             "filter_blocked": bool(should_filter_entry and blocked_filters),
+            "entry_filter_blocked": bool(raw_entry_filter_blocked),
             "market_regime_blocked": bool(market_regime_triggered),
             "candidate_regime_blocked": bool(candidate_regime_triggered),
             "decision_type": (
@@ -1285,6 +1309,9 @@ class SmaWithFilterStrategy:
                     max_order_krw=float(self.max_order_krw),
                 ),
                 "cost_edge_blocked": bool(should_filter_entry and edge_filter_triggered),
+                "blocked_filters": blocked_filters,
+                "filter_blocked": bool(should_filter_entry and blocked_filters),
+                "raw_filter_blocked": bool(raw_entry_filter_blocked),
             },
         }
         thresholds = {
@@ -1321,6 +1348,10 @@ class SmaWithFilterStrategy:
             exposure=exposure,
             position_state=position_state,
             exit_rules=exit_rules,
+            raw_signal=base_signal,
+            raw_reason=base_reason,
+            exit_signal=base_signal,
+            exit_reason=base_reason,
         )
 
 

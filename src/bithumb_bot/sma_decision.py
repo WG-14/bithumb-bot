@@ -254,7 +254,7 @@ def evaluate_sma_entry_decision_from_features(
         and not bool(candidate_regime_decision.get("allowed"))
     )
 
-    should_filter_entry = raw_signal in ("BUY", "SELL")
+    should_filter_entry = raw_signal == "BUY"
     entry_signal = raw_signal
     entry_reason = raw_reason
     if should_filter_entry and (blocked_filters or market_regime_triggered or candidate_regime_triggered):

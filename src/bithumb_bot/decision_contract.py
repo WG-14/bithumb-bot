@@ -93,12 +93,13 @@ def build_signal_flow(
 
     reasons: list[tuple[str, str]] = []
     blocked_filters = context.get("blocked_filters") if isinstance(context.get("blocked_filters"), list) else []
-    for raw_filter in blocked_filters:
-        filter_name = _text(raw_filter)
-        if filter_name == "fee_authority_degraded":
-            _candidate(reasons, "fee_authority", "degraded")
-        elif filter_name:
-            _candidate(reasons, "strategy_filters", filter_name)
+    if base_signal == "BUY":
+        for raw_filter in blocked_filters:
+            filter_name = _text(raw_filter)
+            if filter_name == "fee_authority_degraded":
+                _candidate(reasons, "fee_authority", "degraded")
+            elif filter_name:
+                _candidate(reasons, "strategy_filters", filter_name)
 
     market_regime = _dict(context.get("market_regime"))
     if base_signal == "BUY" and market_regime and not bool(market_regime.get("allows_entry", True)):

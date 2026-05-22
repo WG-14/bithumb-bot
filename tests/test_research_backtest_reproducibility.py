@@ -29,6 +29,8 @@ from bithumb_bot.research.experiment_manifest import (
     DateRange,
     ExecutionTimingPolicy,
     ManifestValidationError,
+    PortfolioPolicy,
+    PositionSizingPolicy,
     legacy_research_portfolio_policy,
     parse_manifest,
 )
@@ -207,6 +209,73 @@ def _max_holding_dataset() -> DatasetSnapshot:
         date_range=DateRange("2026-01-01", "2026-01-02"),
         candles=candles,
     )
+
+
+def _sell_filter_block_dataset() -> DatasetSnapshot:
+    prices = [10.0, 11.0, 12.0, 13.0, 10.0, 10.0]
+    candles = tuple(
+        Candle(index * 60_000, price, price, price, price, 1.0)
+        for index, price in enumerate(prices)
+    )
+    return DatasetSnapshot(
+        snapshot_id="sell_filter_block_fixture",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=candles,
+    )
+
+
+def _initial_position_policy() -> PortfolioPolicy:
+    return PortfolioPolicy(
+        schema_version=1,
+        starting_cash_krw=1_000_000.0,
+        quote_currency="KRW",
+        initial_position_qty=1.0,
+        cash_interest_policy="zero",
+        position_sizing=PositionSizingPolicy(
+            type="fractional_cash",
+            buy_fraction=0.99,
+            sell_policy="sell_all_available_position",
+            cash_buffer_policy="retain_1_percent_before_fees",
+        ),
+        source="unit_test",
+    )
+
+
+def test_research_raw_sell_exit_survives_entry_filter_block() -> None:
+    result = run_sma_backtest(
+        dataset=_sell_filter_block_dataset(),
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.02,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+            "STRATEGY_EXIT_RULES": "opposite_cross,max_holding_time",
+            "STRATEGY_EXIT_MAX_HOLDING_MIN": 0,
+            "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": 0.0,
+            "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": 0.0,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        portfolio_policy=_initial_position_policy(),
+    )
+
+    sell_decisions = [item for item in result.decisions if item["raw_signal"] == "SELL"]
+    assert sell_decisions
+    decision = sell_decisions[0]
+    assert decision["entry_filter_blocked"] is True
+    assert "gap" in decision["entry_blocked_filters"]
+    assert decision["exit_signal"] == "SELL"
+    assert decision["final_signal"] == "SELL"
+    assert decision["exit_rule"] == "opposite_cross"
+    assert result.strategy_diagnostics["raw_sell_filter_blocked_while_in_position_count"] == 1
+    assert result.strategy_diagnostics["opposite_cross_triggered_count"] == 1
 
 
 def test_backtest_max_holding_changes_decision_hash() -> None:
