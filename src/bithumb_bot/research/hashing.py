@@ -17,10 +17,13 @@ REPORT_TOP_LEVEL_HASH_EXCLUDED_FIELDS = frozenset(
         "audit_trail_trace_manifest_path",
         "trace_manifest_path",
         "execution_observability",
+        "run_environment",
     }
 )
 REPORT_RUNTIME_ONLY_FIELDS = frozenset(
     {
+        "run_environment",
+        "run_environment_hash",
         "failure_artifact_path",
         "statistical_evidence_path",
         "return_panel_path",

@@ -78,6 +78,12 @@ def build_research_execution_plan(
         strategy_run_count = len(candidates) * len(manifest.execution_model.scenarios) * (
             max(0, split_count - walk_forward_split_count) + walk_forward_split_count
         )
+    dataset_candles = sum(len(snapshot.candles) for snapshot in snapshots.values())
+    run_environment = build_run_environment(
+        manifest=manifest,
+        db_path=db_path,
+        repository_version=repository_version,
+    )
     plan = {
         "schema_version": 1,
         "manifest_hash": manifest.manifest_hash(),
@@ -89,20 +95,24 @@ def build_research_execution_plan(
         "split_count": split_count,
         "split_names": split_names,
         "estimated_strategy_runs": strategy_run_count,
-        "estimated_candles": sum(len(snapshot.candles) for snapshot in snapshots.values()),
+        "dataset_candles": dataset_candles,
+        "estimated_candles": dataset_candles,
+        "estimated_candle_evaluations": (
+            dataset_candles
+            * len(candidates)
+            * len(manifest.execution_model.scenarios)
+        ),
         "execution_mode": manifest.research_run.execution.mode,
         "max_workers": manifest.research_run.execution.max_workers,
         "work_unit_type": manifest.research_run.execution.work_unit,
         "deterministic_merge_order": manifest.research_run.execution.deterministic_merge_order,
         "resume_enabled": manifest.research_run.execution.resume,
         "created_at": created_at,
-        "run_environment": build_run_environment(
-            manifest=manifest,
-            db_path=db_path,
-            repository_version=repository_version,
-        ),
+        "run_environment": run_environment,
+        "run_environment_hash": sha256_prefixed(run_environment),
     }
-    plan["plan_hash"] = sha256_prefixed(plan)
+    plan["execution_plan_hash"] = sha256_prefixed(_logical_plan_payload(plan))
+    plan["plan_hash"] = plan["execution_plan_hash"]
     return ResearchExecutionPlan(plan)
 
 
@@ -179,7 +189,35 @@ def build_run_environment(
     }
 
 
+def _logical_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in plan.items()
+        if key
+        not in {
+            "created_at",
+            "run_environment",
+            "run_environment_hash",
+            "execution_plan_hash",
+            "plan_hash",
+        }
+    }
+
+
 def _ordered_split_names(snapshots: dict[str, DatasetSnapshot]) -> list[str]:
     preferred = [name for name in ("train", "validation", "final_holdout") if name in snapshots]
-    remaining = sorted(name for name in snapshots if name not in preferred)
-    return preferred + remaining
+    window_names: list[str] = []
+    window_ids = sorted(
+        {
+            name.rsplit("_", 1)[0]
+            for name in snapshots
+            if name.startswith("window_") and (name.endswith("_train") or name.endswith("_test"))
+        }
+    )
+    for window_id in window_ids:
+        for suffix in ("train", "test"):
+            split_name = f"{window_id}_{suffix}"
+            if split_name in snapshots:
+                window_names.append(split_name)
+    remaining = sorted(name for name in snapshots if name not in set(preferred) | set(window_names))
+    return preferred + window_names + remaining

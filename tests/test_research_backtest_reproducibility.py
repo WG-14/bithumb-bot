@@ -32,6 +32,7 @@ from bithumb_bot.research.experiment_manifest import (
     parse_manifest,
 )
 from bithumb_bot.research.execution_plan import build_research_execution_plan
+from bithumb_bot.research.hashing import report_content_hash_payload, sha256_prefixed
 from bithumb_bot.research.strategy_spec import strategy_spec_for_name
 from bithumb_bot.research.audit_trail import AuditTraceScope, AuditTrailPolicy, verify_audit_trail, write_trace_manifest
 from bithumb_bot.research.return_panel import build_candidate_return_panel
@@ -653,6 +654,31 @@ def test_research_execution_policy_rejects_unknown_fields() -> None:
         parse_manifest(payload)
 
 
+def test_research_execution_policy_rejects_serial_max_workers_above_one() -> None:
+    payload = _manifest()
+    payload["research_run"] = {"execution": {"mode": "serial", "max_workers": 2}}
+
+    with pytest.raises(ManifestValidationError, match="serial execution currently supports only max_workers=1"):
+        parse_manifest(payload)
+
+
+def test_research_execution_policy_rejects_resume_true() -> None:
+    payload = _manifest()
+    payload["research_run"] = {"execution": {"mode": "serial", "max_workers": 1, "resume": True}}
+
+    with pytest.raises(ManifestValidationError, match="research_run.execution.resume is not supported yet"):
+        parse_manifest(payload)
+
+
+def test_research_execution_policy_accepts_resume_false() -> None:
+    payload = _manifest()
+    payload["research_run"] = {"execution": {"mode": "serial", "max_workers": 1, "resume": False}}
+
+    manifest = parse_manifest(payload)
+
+    assert manifest.research_run.execution.resume is False
+
+
 def test_research_backtest_report_includes_execution_plan_and_observability(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -674,7 +700,11 @@ def test_research_backtest_report_includes_execution_plan_and_observability(tmp_
     assert report["execution_plan"]["scenario_count"] == 1
     assert report["execution_plan"]["split_count"] == 3
     assert report["execution_plan"]["estimated_strategy_runs"] == 3
+    assert report["execution_plan"]["dataset_candles"] == 4320
     assert report["execution_plan"]["estimated_candles"] == 4320
+    assert report["execution_plan"]["estimated_candle_evaluations"] == 4320
+    assert report["execution_plan"]["plan_hash"] == report["execution_plan"]["execution_plan_hash"]
+    assert report["execution_plan"]["run_environment_hash"].startswith("sha256:")
     assert report["run_environment"]["effective_max_workers"] == 1
     stages = [item["stage"] for item in report["execution_observability"]["stage_timings"]]
     assert "load_split" in stages
@@ -720,12 +750,24 @@ def test_research_execution_plan_counts_multiple_candidates_and_scenarios(tmp_pa
         repository_version="unit",
         created_at="2026-05-03T00:00:00+00:00",
     ).as_dict()
+    later_plan = build_research_execution_plan(
+        manifest=manifest,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        db_path=db_path,
+        repository_version="unit",
+        created_at="2026-05-04T00:00:00+00:00",
+    ).as_dict()
 
     assert plan["candidate_count"] == 2
     assert plan["scenario_count"] == 2
     assert plan["split_count"] == 3
     assert plan["estimated_strategy_runs"] == 12
+    assert plan["dataset_candles"] == 4320
+    assert plan["estimated_candles"] == 4320
+    assert plan["estimated_candle_evaluations"] == 17280
     assert plan["deterministic_merge_order"] == "scenario_index,candidate_index,split_name"
+    assert plan["plan_hash"] == later_plan["plan_hash"]
 
 
 def test_serial_work_unit_order_is_deterministic(tmp_path, monkeypatch) -> None:
@@ -807,6 +849,7 @@ def test_explicit_default_execution_policy_preserves_serial_metrics(tmp_path, mo
     assert default_manifest.manifest_hash() == explicit_manifest.manifest_hash()
     assert default_report["candidates"][0]["validation_metrics"] == explicit_report["candidates"][0]["validation_metrics"]
     assert default_report["candidates"][0]["behavior_hash"] == explicit_report["candidates"][0]["behavior_hash"]
+    assert default_report["content_hash"] == explicit_report["content_hash"]
 
 
 def test_research_report_candidate_and_lineage_bind_portfolio_policy(tmp_path, monkeypatch) -> None:
@@ -1067,6 +1110,95 @@ def test_report_content_hash_is_independent_of_data_root(tmp_path, monkeypatch) 
     assert first["content_hash"] == second["content_hash"]
     assert first["artifact_refs"] == second["artifact_refs"]
     assert first["artifact_paths"]["report_path"] != second["artifact_paths"]["report_path"]
+
+
+def test_report_content_hash_is_independent_of_db_path_and_runtime_environment(tmp_path, monkeypatch) -> None:
+    first_db = tmp_path / "first.sqlite"
+    second_db = tmp_path / "second.sqlite"
+    _create_db(first_db)
+    _create_db(second_db)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    manifest = parse_manifest(_manifest())
+
+    first = run_research_backtest(
+        manifest=manifest,
+        db_path=first_db,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+    second = run_research_backtest(
+        manifest=manifest,
+        db_path=second_db,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert first["run_environment"]["db_path_fingerprint"] != second["run_environment"]["db_path_fingerprint"]
+    assert first["execution_plan"]["run_environment_hash"] != second["execution_plan"]["run_environment_hash"]
+    assert first["execution_plan"]["plan_hash"] == second["execution_plan"]["plan_hash"]
+    assert first["content_hash"] == second["content_hash"]
+
+    changed = json.loads(json.dumps(first))
+    changed["run_environment"]["cpu_count"] = 999
+    changed["run_environment"]["python_version"] = "0.0.0"
+    changed["execution_plan"]["run_environment"]["cpu_count"] = 999
+    changed["execution_plan"]["run_environment_hash"] = sha256_prefixed(changed["execution_plan"]["run_environment"])
+
+    assert sha256_prefixed(report_content_hash_payload(changed)) == first["content_hash"]
+    assert changed["execution_plan"]["run_environment_hash"] != first["execution_plan"]["run_environment_hash"]
+
+
+def test_walk_forward_report_includes_execution_plan_and_observability(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["experiment_id"] = "walk_forward_observability"
+    payload["acceptance_gate"]["walk_forward_required"] = True
+    payload["walk_forward"] = {
+        "train_window_days": 1,
+        "test_window_days": 1,
+        "step_days": 1,
+        "min_windows": 1,
+    }
+    manifest = parse_manifest(payload)
+
+    report = run_research_walk_forward(
+        manifest=manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert report["execution_policy"]["mode"] == "serial"
+    assert report["execution_plan"]["split_names"] == [
+        "train",
+        "validation",
+        "final_holdout",
+        "window_001_train",
+        "window_001_test",
+        "window_002_train",
+        "window_002_test",
+    ]
+    assert report["execution_plan"]["dataset_candles"] == 10080
+    assert report["execution_plan"]["estimated_candle_evaluations"] == 10080
+    assert report["run_environment"]["effective_max_workers"] == 1
+    stages = [item["stage"] for item in report["execution_observability"]["stage_timings"]]
+    assert "load_split" in stages
+    assert "quality_report" in stages
+    assert "candidate_evaluation" in stages
+    assert "report_write" in stages
+    assert report["execution_observability"]["work_units"]
+    persisted = json.loads(Path(report["artifact_paths"]["report_path"]).read_text(encoding="utf-8"))
+    assert persisted["execution_plan"] == report["execution_plan"]
+    assert persisted["execution_observability"]["work_units"]
+    assert _verify_report_content_hash(persisted, label="walk_forward_report") == persisted["content_hash"]
 
 
 def test_sma_backtest_attaches_entry_and_exit_regime_snapshots() -> None:

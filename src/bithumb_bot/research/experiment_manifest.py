@@ -2423,6 +2423,11 @@ def _parse_research_execution(value: Any) -> ResearchExecutionPolicy:
     if mode != "serial":
         raise ManifestValidationError("research_run.execution.mode must be serial")
     max_workers = _positive_int(value.get("max_workers", 1), "research_run.execution.max_workers")
+    if max_workers != 1:
+        raise ManifestValidationError("serial execution currently supports only max_workers=1")
+    resume = bool(value.get("resume", False))
+    if resume:
+        raise ManifestValidationError("research_run.execution.resume is not supported yet")
     work_unit = str(value.get("work_unit") or "candidate_scenario").strip().lower()
     if work_unit != "candidate_scenario":
         raise ManifestValidationError("research_run.execution.work_unit must be candidate_scenario")
@@ -2438,7 +2443,7 @@ def _parse_research_execution(value: Any) -> ResearchExecutionPolicy:
         max_workers=max_workers,
         work_unit=work_unit,
         deterministic_merge_order=deterministic_merge_order,
-        resume=bool(value.get("resume", False)),
+        resume=resume,
     )
 
 

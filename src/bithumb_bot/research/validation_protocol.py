@@ -561,6 +561,8 @@ def run_research_walk_forward(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    stage_timings: list[dict[str, Any]] = []
+    work_unit_observability: list[dict[str, Any]] = []
     _emit_progress(
         progress_callback,
         stage="start",
@@ -576,10 +578,21 @@ def run_research_walk_forward(
         raise ResearchValidationError(
             f"walk_forward_insufficient_windows: available={len(windows)} min_windows={manifest.walk_forward.min_windows}"
         )
+    stage_started = time.perf_counter()
     snapshots = _load_walk_forward_snapshots(db_path=db_path, manifest=manifest, windows=windows)
+    stage_timings.append(
+        _stage_timing(
+            "load_split",
+            stage_started,
+            split="walk_forward",
+            candles=sum(len(snapshot.candles) for snapshot in snapshots.values()),
+        )
+    )
     for split_name, snapshot in sorted(snapshots.items()):
         _emit_progress(progress_callback, stage="load_split", split=split_name, candles=len(snapshot.candles))
+    stage_started = time.perf_counter()
     quality_reports = _quality_reports(db_path=db_path, snapshots=snapshots)
+    stage_timings.append(_stage_timing("quality_report", stage_started, split="walk_forward"))
     for split_name, report in sorted(quality_reports.items()):
         _emit_progress(
             progress_callback,
@@ -600,16 +613,32 @@ def run_research_walk_forward(
         created_at=generated_at,
     )
     if manifest.dataset.split.final_holdout is not None:
+        stage_started = time.perf_counter()
         snapshots["final_holdout"] = load_dataset_split(
             db_path=db_path,
             manifest=manifest,
             split_name="final_holdout",
         )
-        _emit_progress(progress_callback, stage="load_split", split="final_holdout", candles=len(snapshots["final_holdout"].candles))
+        stage_timings.append(
+            _stage_timing(
+                "load_split",
+                stage_started,
+                split="final_holdout",
+                candles=len(snapshots["final_holdout"].candles),
+            )
+        )
+        _emit_progress(
+            progress_callback,
+            stage="load_split",
+            split="final_holdout",
+            candles=len(snapshots["final_holdout"].candles),
+        )
+        stage_started = time.perf_counter()
         quality_reports["final_holdout"] = _quality_reports(
             db_path=db_path,
             snapshots={"final_holdout": snapshots["final_holdout"]},
         )["final_holdout"]
+        stage_timings.append(_stage_timing("quality_report", stage_started, split="final_holdout"))
         report = quality_reports["final_holdout"]
         _emit_progress(
             progress_callback,
@@ -619,6 +648,24 @@ def run_research_walk_forward(
             reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
         )
     _require_enough_candles(snapshots.values())
+    execution_plan = build_research_execution_plan(
+        manifest=manifest,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        db_path=db_path,
+        repository_version=_repository_version(),
+        created_at=generated_at,
+        include_walk_forward=True,
+    )
+    _emit_progress(
+        progress_callback,
+        stage="execution_plan",
+        execution_mode=execution_plan.payload["execution_mode"],
+        max_workers=execution_plan.payload["max_workers"],
+        work_unit_type=execution_plan.payload["work_unit_type"],
+        estimated_strategy_runs=execution_plan.payload["estimated_strategy_runs"],
+    )
+    stage_started = time.perf_counter()
     candidates = _evaluate_candidates(
         manifest=manifest,
         manager=manager,
@@ -626,8 +673,15 @@ def run_research_walk_forward(
         quality_reports=quality_reports,
         include_walk_forward=True,
         execution_calibration=execution_calibration,
+        execution_plan=execution_plan,
+        work_unit_observability=work_unit_observability,
         progress_callback=progress_callback,
     )
+    stage_timings.append(_stage_timing("candidate_evaluation", stage_started, candidate_count=len(candidates)))
+    execution_observability = {
+        "stage_timings": stage_timings,
+        "work_units": work_unit_observability,
+    }
     report = _report_payload(
         manifest=manifest,
         snapshots=tuple(snapshots.values()),
@@ -641,6 +695,8 @@ def run_research_walk_forward(
         execution_calibration=execution_calibration,
         manager=manager,
         experiment_registry_reservation=experiment_registry_reservation,
+        execution_plan=execution_plan,
+        execution_observability=execution_observability,
     )
     _emit_progress(
         progress_callback,
@@ -648,15 +704,19 @@ def run_research_walk_forward(
         experiment_id=manifest.experiment_id,
         candidate_count=len(candidates),
     )
+    stage_started = time.perf_counter()
     paths, content_hash = write_research_report(
         manager=manager,
         experiment_id=manifest.experiment_id,
         report_name="walk_forward",
         payload=report,
     )
+    stage_timings.append(_stage_timing("report_write", stage_started, candidate_count=len(candidates)))
     report["content_hash"] = content_hash
     report["artifact_refs"] = research_artifact_refs(paths, manager=manager)
     report["artifact_paths"] = research_artifact_paths(paths)
+    report["execution_observability"] = execution_observability
+    write_json_atomic(paths.report_path, report)
     _emit_progress(
         progress_callback,
         stage="complete",
