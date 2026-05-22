@@ -7,11 +7,19 @@ import sys
 
 
 def _apply_root_env(env: dict[str, str], tmp_path: Path) -> None:
+    for key in (
+        "RUN_LOCK_PATH",
+        "BACKUP_DIR",
+        "SNAPSHOT_ROOT",
+        "ARCHIVE_ROOT",
+    ):
+        env.pop(key, None)
     env["ENV_ROOT"] = str((tmp_path / "env").resolve())
     env["RUN_ROOT"] = str((tmp_path / "run").resolve())
     env["DATA_ROOT"] = str((tmp_path / "data").resolve())
     env["LOG_ROOT"] = str((tmp_path / "logs").resolve())
     env["BACKUP_ROOT"] = str((tmp_path / "backup").resolve())
+    env["ARCHIVE_ROOT"] = str((tmp_path / "archive").resolve())
 
 
 def test_config_fail_fast_when_live_mode_missing_db_path(tmp_path: Path) -> None:

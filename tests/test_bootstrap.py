@@ -3,7 +3,14 @@ from __future__ import annotations
 from bithumb_bot.bootstrap import bootstrap_argv
 
 
+def _clear_explicit_env_selectors(monkeypatch) -> None:
+    monkeypatch.delenv("BITHUMB_ENV_FILE", raising=False)
+    monkeypatch.delenv("BITHUMB_ENV_FILE_LIVE", raising=False)
+    monkeypatch.delenv("BITHUMB_ENV_FILE_PAPER", raising=False)
+
+
 def test_bootstrap_preserves_subcommand_interval_flag(monkeypatch) -> None:
+    _clear_explicit_env_selectors(monkeypatch)
     monkeypatch.delenv("INTERVAL", raising=False)
 
     argv = bootstrap_argv(
@@ -37,6 +44,7 @@ def test_bootstrap_preserves_subcommand_interval_flag(monkeypatch) -> None:
 
 
 def test_bootstrap_consumes_legacy_global_interval_before_subcommand(monkeypatch) -> None:
+    _clear_explicit_env_selectors(monkeypatch)
     monkeypatch.delenv("INTERVAL", raising=False)
 
     argv = bootstrap_argv(["bithumb-bot", "--interval", "1m", "run"])
@@ -46,6 +54,7 @@ def test_bootstrap_consumes_legacy_global_interval_before_subcommand(monkeypatch
 
 
 def test_bootstrap_preserves_subcommand_interval_equals_flag(monkeypatch) -> None:
+    _clear_explicit_env_selectors(monkeypatch)
     monkeypatch.delenv("INTERVAL", raising=False)
 
     argv = bootstrap_argv(
@@ -68,6 +77,7 @@ def test_bootstrap_preserves_subcommand_interval_equals_flag(monkeypatch) -> Non
 
 
 def test_bootstrap_consumes_legacy_mode_and_entry_before_subcommand(monkeypatch) -> None:
+    _clear_explicit_env_selectors(monkeypatch)
     monkeypatch.delenv("MODE", raising=False)
     monkeypatch.delenv("ENTRY_MODE", raising=False)
 
@@ -79,6 +89,7 @@ def test_bootstrap_consumes_legacy_mode_and_entry_before_subcommand(monkeypatch)
 
 
 def test_bootstrap_preserves_subcommand_mode_flag(monkeypatch) -> None:
+    _clear_explicit_env_selectors(monkeypatch)
     monkeypatch.delenv("MODE", raising=False)
 
     argv = bootstrap_argv(["bithumb-bot", "profile-generate", "--mode", "paper"])

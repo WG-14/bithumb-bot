@@ -165,7 +165,7 @@ def _load_dotenv(dotenv_path: str) -> None:
     if importlib.util.find_spec("dotenv") is None:
         return
     dotenv_module = importlib.import_module("dotenv")
-    dotenv_module.load_dotenv(dotenv_path=dotenv_path)
+    dotenv_module.load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
 def load_explicit_env_file(mode: str | None) -> None:
@@ -180,7 +180,7 @@ def load_explicit_env_file(mode: str | None) -> None:
             source_key=summary.source_key,
             loaded=True,
             exists=summary.exists,
-            override=False,
+            override=True,
         )
         return
     _LAST_ENV_LOAD_SUMMARY = summary
