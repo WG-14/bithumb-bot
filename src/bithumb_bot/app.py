@@ -3063,6 +3063,7 @@ def cmd_broker_diagnose() -> None:
     }
     has_notifier_target = any(
         [
+            os.getenv("NTFY_TOPIC", "").strip(),
             os.getenv("NOTIFIER_WEBHOOK_URL", "").strip(),
             os.getenv("SLACK_WEBHOOK_URL", "").strip(),
             os.getenv("TELEGRAM_BOT_TOKEN", "").strip()

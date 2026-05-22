@@ -40,6 +40,7 @@ def is_configured() -> bool:
         return False
     return any(
         [
+            os.getenv("NTFY_TOPIC", "").strip(),
             os.getenv("NOTIFIER_WEBHOOK_URL", "").strip(),
             os.getenv("SLACK_WEBHOOK_URL", "").strip(),
             os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -61,6 +62,35 @@ def _post_json(url: str, payload: dict[str, Any]) -> None:
 
     timeout = _timeout_sec()
     httpx.post(url, json=payload, timeout=timeout)
+
+
+def _post_ntfy(msg: str, *, severity: AlertSeverity) -> bool:
+    topic = os.getenv("NTFY_TOPIC", "").strip()
+    if not topic:
+        return False
+
+    import httpx
+
+    server = (os.getenv("NTFY_SERVER", "https://ntfy.sh").strip() or "https://ntfy.sh").rstrip("/")
+    priority_key = (
+        "NTFY_PRIORITY_FAILURE"
+        if severity in {AlertSeverity.WARN, AlertSeverity.CRITICAL}
+        else "NTFY_PRIORITY_SUCCESS"
+    )
+    default_priority = "5" if priority_key == "NTFY_PRIORITY_FAILURE" else "3"
+    priority = os.getenv(priority_key, default_priority).strip() or default_priority
+    headers = {
+        "Title": os.getenv("NTFY_TITLE_PREFIX", "bithumb-bot").strip() or "bithumb-bot",
+        "Priority": priority,
+        "Tags": "warning" if severity in {AlertSeverity.WARN, AlertSeverity.CRITICAL} else "bar_chart",
+    }
+    httpx.post(
+        f"{server}/{topic.lstrip('/')}",
+        content=msg.encode("utf-8"),
+        headers=headers,
+        timeout=_timeout_sec(),
+    )
+    return True
 
 
 def _dedupe_window_sec() -> float:
@@ -111,6 +141,11 @@ def notify(msg: str, *, severity: str | AlertSeverity | None = None) -> None:
         return
 
     delivered = False
+
+    try:
+        delivered = _post_ntfy(msg, severity=effective_severity) or delivered
+    except Exception as exc:
+        print(f"[NOTIFY] ntfy delivery failed: {exc.__class__.__name__}")
 
     generic_webhook = os.getenv("NOTIFIER_WEBHOOK_URL", "").strip()
     if generic_webhook:

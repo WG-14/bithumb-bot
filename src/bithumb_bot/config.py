@@ -1103,7 +1103,7 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
     if not notifier_is_configured():
         issues.append(
             "notifier must be enabled and configured with at least one delivery target "
-            "(NOTIFIER_WEBHOOK_URL, SLACK_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID) when MODE=live"
+            "(NTFY_TOPIC, NOTIFIER_WEBHOOK_URL, SLACK_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID) when MODE=live"
         )
     if not cfg.SMA_COST_EDGE_ENABLED:
         LOG.warning(

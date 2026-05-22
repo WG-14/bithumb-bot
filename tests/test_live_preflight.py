@@ -853,6 +853,7 @@ def test_live_preflight_accepts_expected_submit_contract_profile(
 
 def test_live_preflight_requires_notifier_delivery_target(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)
     monkeypatch.delenv("NOTIFIER_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)

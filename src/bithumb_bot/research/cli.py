@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import monotonic
 
 from bithumb_bot.config import PATH_MANAGER, settings
+from bithumb_bot.notifier import AlertSeverity, format_event, notify
 
 from .experiment_manifest import ManifestValidationError, load_manifest
 from .experiment_registry import (
@@ -26,54 +28,97 @@ from .validation_pipeline import ValidationRunError, run_research_validation
 from .validation_protocol import ResearchValidationError, run_research_backtest, run_research_walk_forward
 
 
+def _notify_research_command_finished(command: str, started_at: float, rc: int, **fields: object) -> None:
+    status = "success" if rc == 0 else "failure"
+    notify(
+        format_event(
+            "research_command_finished",
+            command=command,
+            status=status,
+            exit_code=rc,
+            elapsed_sec=f"{monotonic() - started_at:.1f}",
+            **fields,
+        ),
+        severity=AlertSeverity.INFO if rc == 0 else AlertSeverity.WARN,
+    )
+
+
 def cmd_research_backtest(*, manifest_path: str, execution_calibration_path: str | None = None) -> int:
+    started_at = monotonic()
+    rc = 1
     try:
-        manifest = load_manifest(manifest_path)
-        calibration = load_calibration_artifact(execution_calibration_path) if execution_calibration_path else None
-        report = run_research_backtest(
-            manifest=manifest,
-            db_path=settings.DB_PATH,
-            manager=PATH_MANAGER,
-            execution_calibration=calibration,
-            manifest_path=manifest_path,
-            command_args={
-                "manifest": manifest_path,
-                "execution_calibration": execution_calibration_path,
-            },
-            progress_callback=_print_research_backtest_progress,
+        try:
+            manifest = load_manifest(manifest_path)
+            calibration = load_calibration_artifact(execution_calibration_path) if execution_calibration_path else None
+            report = run_research_backtest(
+                manifest=manifest,
+                db_path=settings.DB_PATH,
+                manager=PATH_MANAGER,
+                execution_calibration=calibration,
+                manifest_path=manifest_path,
+                command_args={
+                    "manifest": manifest_path,
+                    "execution_calibration": execution_calibration_path,
+                },
+                progress_callback=_print_research_backtest_progress,
+            )
+        except (ManifestValidationError, ExecutionCalibrationError, ResearchValidationError, OSError, ValueError) as exc:
+            print(f"[RESEARCH-BACKTEST] error={exc}")
+            rc = 1
+            return rc
+        _print_report_summary("RESEARCH-BACKTEST", report)
+        if _standalone_report_is_non_promotable_production_diagnostic(report):
+            rc = 1
+            return rc
+        rc = 0
+        return rc
+    finally:
+        _notify_research_command_finished(
+            "research-backtest",
+            started_at,
+            rc,
+            manifest=manifest_path,
+            execution_calibration=execution_calibration_path,
         )
-    except (ManifestValidationError, ExecutionCalibrationError, ResearchValidationError, OSError, ValueError) as exc:
-        print(f"[RESEARCH-BACKTEST] error={exc}")
-        return 1
-    _print_report_summary("RESEARCH-BACKTEST", report)
-    if _standalone_report_is_non_promotable_production_diagnostic(report):
-        return 1
-    return 0
 
 
 def cmd_research_walk_forward(*, manifest_path: str, execution_calibration_path: str | None = None) -> int:
+    started_at = monotonic()
+    rc = 1
     try:
-        manifest = load_manifest(manifest_path)
-        calibration = load_calibration_artifact(execution_calibration_path) if execution_calibration_path else None
-        report = run_research_walk_forward(
-            manifest=manifest,
-            db_path=settings.DB_PATH,
-            manager=PATH_MANAGER,
-            execution_calibration=calibration,
-            manifest_path=manifest_path,
-            command_args={
-                "manifest": manifest_path,
-                "execution_calibration": execution_calibration_path,
-            },
-            progress_callback=_print_research_walk_forward_progress,
+        try:
+            manifest = load_manifest(manifest_path)
+            calibration = load_calibration_artifact(execution_calibration_path) if execution_calibration_path else None
+            report = run_research_walk_forward(
+                manifest=manifest,
+                db_path=settings.DB_PATH,
+                manager=PATH_MANAGER,
+                execution_calibration=calibration,
+                manifest_path=manifest_path,
+                command_args={
+                    "manifest": manifest_path,
+                    "execution_calibration": execution_calibration_path,
+                },
+                progress_callback=_print_research_walk_forward_progress,
+            )
+        except (ManifestValidationError, ExecutionCalibrationError, ResearchValidationError, OSError, ValueError) as exc:
+            print(f"[RESEARCH-WALK-FORWARD] error={exc}")
+            rc = 1
+            return rc
+        _print_report_summary("RESEARCH-WALK-FORWARD", report)
+        if _standalone_report_is_non_promotable_production_diagnostic(report):
+            rc = 1
+            return rc
+        rc = 0
+        return rc
+    finally:
+        _notify_research_command_finished(
+            "research-walk-forward",
+            started_at,
+            rc,
+            manifest=manifest_path,
+            execution_calibration=execution_calibration_path,
         )
-    except (ManifestValidationError, ExecutionCalibrationError, ResearchValidationError, OSError, ValueError) as exc:
-        print(f"[RESEARCH-WALK-FORWARD] error={exc}")
-        return 1
-    _print_report_summary("RESEARCH-WALK-FORWARD", report)
-    if _standalone_report_is_non_promotable_production_diagnostic(report):
-        return 1
-    return 0
 
 
 def cmd_research_validate(
@@ -84,33 +129,49 @@ def cmd_research_validate(
     out_path: str | None = None,
     mode: str = "strict",
 ) -> int:
+    started_at = monotonic()
+    rc = 1
     try:
-        manifest = load_manifest(manifest_path)
-        calibration = load_calibration_artifact(execution_calibration_path) if execution_calibration_path else None
-        validation_run = run_research_validation(
-            manifest=manifest,
-            db_path=settings.DB_PATH,
-            manager=PATH_MANAGER,
-            manifest_path=manifest_path,
-            mode=mode,
-            execution_calibration=calibration,
-            execution_calibration_path=execution_calibration_path,
+        try:
+            manifest = load_manifest(manifest_path)
+            calibration = load_calibration_artifact(execution_calibration_path) if execution_calibration_path else None
+            validation_run = run_research_validation(
+                manifest=manifest,
+                db_path=settings.DB_PATH,
+                manager=PATH_MANAGER,
+                manifest_path=manifest_path,
+                mode=mode,
+                execution_calibration=calibration,
+                execution_calibration_path=execution_calibration_path,
+                candidate_id=candidate_id,
+                out_path=out_path,
+                progress_callback=_print_research_backtest_progress,
+            )
+        except (
+            ManifestValidationError,
+            ExecutionCalibrationError,
+            ResearchValidationError,
+            ValidationRunError,
+            OSError,
+            ValueError,
+        ) as exc:
+            print(f"[RESEARCH-VALIDATE] error={exc}")
+            rc = 1
+            return rc
+        _print_validation_run_summary(validation_run)
+        rc = 0 if validation_run.get("end_to_end_validation_result") == "PASS" else 1
+        return rc
+    finally:
+        _notify_research_command_finished(
+            "research-validate",
+            started_at,
+            rc,
+            manifest=manifest_path,
+            execution_calibration=execution_calibration_path,
             candidate_id=candidate_id,
-            out_path=out_path,
-            progress_callback=_print_research_backtest_progress,
+            out=out_path,
+            mode=mode,
         )
-    except (
-        ManifestValidationError,
-        ExecutionCalibrationError,
-        ResearchValidationError,
-        ValidationRunError,
-        OSError,
-        ValueError,
-    ) as exc:
-        print(f"[RESEARCH-VALIDATE] error={exc}")
-        return 1
-    _print_validation_run_summary(validation_run)
-    return 0 if validation_run.get("end_to_end_validation_result") == "PASS" else 1
 
 
 def cmd_research_reproduce(*, promotion_path: str) -> int:

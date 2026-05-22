@@ -4,6 +4,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from time import monotonic
 
 from dotenv import load_dotenv
 
@@ -13,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from bithumb_bot.paths import PathManager
+from bithumb_bot.notifier import AlertSeverity, format_event, notify
 
 SMOKE_BACKTEST_WARNING = (
     "This is a smoke backtest only. It must not be used as evidence for strategy promotion, "
@@ -192,6 +194,8 @@ def backtest(short_n: int, long_n: int, entry: str):
 
 
 def main():
+    started_at = monotonic()
+    rc = 1
     ap = argparse.ArgumentParser()
     ap.add_argument("--short", type=int, required=True)
     ap.add_argument("--long", type=int, required=True)
@@ -199,22 +203,42 @@ def main():
     ap.add_argument("--show-trades", type=int, default=10)
     args = ap.parse_args()
 
-    print(f"[SMOKE-BACKTEST WARNING] {SMOKE_BACKTEST_WARNING}", file=sys.stderr)
-    r = backtest(args.short, args.long, args.entry)
+    try:
+        print(f"[SMOKE-BACKTEST WARNING] {SMOKE_BACKTEST_WARNING}", file=sys.stderr)
+        r = backtest(args.short, args.long, args.entry)
 
-    print(f"[BACKTEST] PAIR={PAIR} INTERVAL={INTERVAL} entry={args.entry} short={args.short} long={args.long}")
-    print("  diagnostic_only=true  non_promotable=true  evidence_scope=smoke_only_not_manifest_backed")
-    print(f"  candles={r['count_candles']}  range={kst_str(r['start_ts'])} ~ {kst_str(r['end_ts'])}")
-    print(f"  trades={r['trade_count']}  total_fee={r['total_fee']:,.0f} KRW")
-    print(f"  final_equity={r['final_equity']:,.0f} KRW  return={r['return_pct']:.3f}%  maxDD={r['max_dd_pct']:.3f}%")
-    print(f"  end: cash={r['end_cash']:,.0f} qty={r['end_qty']:.8f} last_price={r['last_price']:,.0f}")
+        print(f"[BACKTEST] PAIR={PAIR} INTERVAL={INTERVAL} entry={args.entry} short={args.short} long={args.long}")
+        print("  diagnostic_only=true  non_promotable=true  evidence_scope=smoke_only_not_manifest_backed")
+        print(f"  candles={r['count_candles']}  range={kst_str(r['start_ts'])} ~ {kst_str(r['end_ts'])}")
+        print(f"  trades={r['trade_count']}  total_fee={r['total_fee']:,.0f} KRW")
+        print(f"  final_equity={r['final_equity']:,.0f} KRW  return={r['return_pct']:.3f}%  maxDD={r['max_dd_pct']:.3f}%")
+        print(f"  end: cash={r['end_cash']:,.0f} qty={r['end_qty']:.8f} last_price={r['last_price']:,.0f}")
 
-    n = max(0, args.show_trades)
-    if n:
-        print(f"\n[TRADES] last {n}")
-        for ts, side, price, qty, fee, cash, asset in r["trades"][-n:]:
-            print(f"  {kst_str(ts)} {side:4s} price={price:,.0f} qty={qty:.8f} fee={fee:,.0f} cash={cash:,.0f} asset={asset:.8f}")
+        n = max(0, args.show_trades)
+        if n:
+            print(f"\n[TRADES] last {n}")
+            for ts, side, price, qty, fee, cash, asset in r["trades"][-n:]:
+                print(f"  {kst_str(ts)} {side:4s} price={price:,.0f} qty={qty:.8f} fee={fee:,.0f} cash={cash:,.0f} asset={asset:.8f}")
+        rc = 0
+        return rc
+    finally:
+        status = "success" if rc == 0 else "failure"
+        notify(
+            format_event(
+                "smoke_backtest_finished",
+                command="backtest.py",
+                status=status,
+                exit_code=rc,
+                elapsed_sec=f"{monotonic() - started_at:.1f}",
+                pair=PAIR,
+                interval=INTERVAL,
+                entry=args.entry,
+                short=args.short,
+                long=args.long,
+            ),
+            severity=AlertSeverity.INFO if rc == 0 else AlertSeverity.WARN,
+        )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

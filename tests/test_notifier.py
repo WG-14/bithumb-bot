@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,11 @@ def clear_env(monkeypatch: pytest.MonkeyPatch):
     for key in [
         "NOTIFIER_ENABLED",
         "NOTIFIER_WEBHOOK_URL",
+        "NTFY_TOPIC",
+        "NTFY_SERVER",
+        "NTFY_TITLE_PREFIX",
+        "NTFY_PRIORITY_SUCCESS",
+        "NTFY_PRIORITY_FAILURE",
         "SLACK_WEBHOOK_URL",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
@@ -36,6 +43,68 @@ def test_notify_uses_generic_webhook(monkeypatch: pytest.MonkeyPatch):
     assert len(calls) == 1
     assert calls[0][0] == "https://example.com/webhook"
     assert calls[0][1] == {"text": "hello"}
+
+
+def test_ntfy_posts_plain_text_to_configured_topic(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_post(url: str, *, content: bytes, headers: dict[str, str], timeout: float):
+        calls.append((url, content, headers, timeout))
+
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setenv("NTFY_SERVER", "https://ntfy.example/")
+    monkeypatch.setenv("NTFY_TITLE_PREFIX", "research-bot")
+    monkeypatch.setenv("NTFY_PRIORITY_SUCCESS", "2")
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=fake_post))
+
+    assert notifier._post_ntfy("done", severity=AlertSeverity.INFO) is True
+
+    assert calls == [
+        (
+            "https://ntfy.example/topic-123",
+            b"done",
+            {"Title": "research-bot", "Priority": "2", "Tags": "bar_chart"},
+            5.0,
+        )
+    ]
+
+
+def test_ntfy_uses_failure_priority_for_warn(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_post(url: str, *, content: bytes, headers: dict[str, str], timeout: float):
+        calls.append((url, content, headers, timeout))
+
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setenv("NTFY_PRIORITY_FAILURE", "4")
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=fake_post))
+
+    assert notifier._post_ntfy("failed", severity=AlertSeverity.WARN) is True
+
+    assert calls[0][2]["Priority"] == "4"
+    assert calls[0][2]["Tags"] == "warning"
+
+
+def test_ntfy_skips_without_topic(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=lambda **kwargs: calls.append(kwargs)))
+
+    assert notifier._post_ntfy("done", severity=AlertSeverity.INFO) is False
+
+    assert calls == []
+
+
+def test_notify_tolerates_ntfy_delivery_exception(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    def fail_ntfy(msg: str, *, severity: AlertSeverity) -> bool:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(notifier, "_post_ntfy", fail_ntfy)
+
+    notifier.notify("done")
+
+    out = capsys.readouterr().out
+    assert "[NOTIFY] ntfy delivery failed: RuntimeError" in out
+    assert "[NOTIFY] done" in out
 
 
 def test_notify_uses_telegram_without_logging_secret(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):

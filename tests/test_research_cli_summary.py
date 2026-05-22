@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from bithumb_bot.notifier import AlertSeverity
 from bithumb_bot.paths import PathManager
 from bithumb_bot.research import cli as research_cli
 from bithumb_bot.research.cli import _print_report_summary, _print_research_backtest_progress
@@ -203,6 +204,57 @@ def test_fail_report_summary_includes_top_fail_reasons() -> None:
         "min_trade_count_failed": 1,
         "walk_forward_failed": 1,
     }
+
+
+def test_research_command_finished_helper_emits_success_notification(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr(research_cli, "monotonic", lambda: 12.5)
+    monkeypatch.setattr(research_cli, "notify", lambda msg, *, severity: calls.append((msg, severity)))
+
+    research_cli._notify_research_command_finished(
+        "research-backtest",
+        10.0,
+        0,
+        manifest="manifest.json",
+    )
+
+    assert calls == [
+        (
+            "event=research_command_finished command=research-backtest status=success "
+            "exit_code=0 elapsed_sec=2.5 manifest=manifest.json",
+            AlertSeverity.INFO,
+        )
+    ]
+
+
+def test_research_backtest_notifies_on_success_and_failure(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr(research_cli, "load_manifest", lambda path: SimpleNamespace(deployment_tier="research_only"))
+    monkeypatch.setattr(research_cli, "notify", lambda msg, *, severity: calls.append((msg, severity)))
+    monkeypatch.setattr(research_cli, "_print_report_summary", lambda label, report: None)
+    monkeypatch.setattr(research_cli, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        research_cli,
+        "run_research_backtest",
+        lambda **kwargs: {
+            "deployment_tier": "research_only",
+            "promotion_eligibility_gate_result": "FAIL",
+            "promotion_blocking_reasons": ["diagnostic_failure"],
+            "diagnostic_only": True,
+        },
+    )
+
+    assert research_cli.cmd_research_backtest(manifest_path="manifest.json") == 0
+
+    monkeypatch.setattr(research_cli, "load_manifest", lambda path: (_ for _ in ()).throw(ValueError("bad manifest")))
+
+    assert research_cli.cmd_research_backtest(manifest_path="bad.json") == 1
+    assert calls[0][1] == AlertSeverity.INFO
+    assert "command=research-backtest status=success exit_code=0" in calls[0][0]
+    assert calls[1][1] == AlertSeverity.WARN
+    assert "command=research-backtest status=failure exit_code=1" in calls[1][0]
 
 
 def test_pass_report_summary_sets_promotion_allowed() -> None:
