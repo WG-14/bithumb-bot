@@ -427,6 +427,9 @@ def run_sma_backtest(
     portfolio_policy: PortfolioPolicy | None = None,
     context: BacktestRunContext | None = None,
 ) -> BacktestRun:
+    from .strategy_registry import resolve_research_strategy_plugin
+
+    strategy_plugin = resolve_research_strategy_plugin("sma_with_filter")
     strategy_spec = strategy_spec_for_name("sma_with_filter")
     effective_parameters = materialize_strategy_parameters(
         "sma_with_filter",
@@ -745,8 +748,11 @@ def run_sma_backtest(
             dataset=dataset,
             dataset_content_hash=dataset_content_hash,
             parameter_values=effective_parameters,
+            strategy_name=strategy_plugin.name,
             strategy_spec=strategy_spec.as_dict(),
             strategy_spec_hash=strategy_spec.spec_hash(),
+            strategy_plugin_contract=strategy_plugin.contract_payload(),
+            strategy_plugin_contract_hash=strategy_plugin.contract_hash(),
             exit_policy=active_exit_policy,
             exit_policy_hash=active_exit_policy_hash,
             fee_rate=fee_rate,
@@ -1687,8 +1693,11 @@ def _research_decision_payload(
     dataset: DatasetSnapshot,
     dataset_content_hash: str,
     parameter_values: dict[str, Any],
+    strategy_name: str,
     strategy_spec: dict[str, Any],
     strategy_spec_hash: str,
+    strategy_plugin_contract: dict[str, Any],
+    strategy_plugin_contract_hash: str,
     exit_policy: dict[str, Any],
     exit_policy_hash: str,
     fee_rate: float,
@@ -1785,9 +1794,11 @@ def _research_decision_payload(
     else:
         legacy_authority = None
     payload = {
-        "strategy_name": "sma_with_filter",
+        "strategy_name": strategy_name,
         "strategy_spec": strategy_spec,
         "strategy_spec_hash": strategy_spec_hash,
+        "strategy_plugin_contract": strategy_plugin_contract,
+        "strategy_plugin_contract_hash": strategy_plugin_contract_hash,
         "exit_policy": exit_policy,
         "exit_policy_hash": exit_policy_hash,
         "market": dataset.market,
@@ -2247,7 +2258,7 @@ def _strategy_diagnostics_from_trades(
         pnl = trade.get("net_pnl") if trade.get("net_pnl") is not None else trade.get("closed_trade_pnl")
         if pnl is not None and float(pnl) < 0.0 and trade.get("holding_minutes") is not None:
             loss_holding_minutes.append(float(trade.get("holding_minutes") or 0.0))
-    return {
+    payload = {
         "schema_version": 1,
         "raw_sell_filter_blocked_while_in_position_count": int(raw_sell_filter_blocked_while_in_position_count),
         "raw_buy_filter_blocked_count": int(raw_buy_filter_blocked_count),
@@ -2273,6 +2284,10 @@ def _strategy_diagnostics_from_trades(
             else None
         ),
     }
+    strategy_specific = dict(payload)
+    payload["strategy_diagnostics_namespace"] = "sma_with_filter"
+    payload["strategy_specific_diagnostics"] = {"sma_with_filter": strategy_specific}
+    return payload
 
 
 def _percentile(values: list[float], percentile: float) -> float | None:

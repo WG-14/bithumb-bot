@@ -577,6 +577,8 @@ def build_approved_profile(
         "strategy_name": verified_promotion.get("strategy_name"),
         "strategy_spec": promotion_source.get("strategy_spec"),
         "strategy_spec_hash": promotion_source.get("strategy_spec_hash"),
+        "strategy_plugin_contract": promotion_source.get("strategy_plugin_contract"),
+        "strategy_plugin_contract_hash": promotion_source.get("strategy_plugin_contract_hash"),
         "exit_policy": promotion_source.get("exit_policy"),
         "exit_policy_hash": promotion_source.get("exit_policy_hash"),
         "behavior_hash": promotion_source.get("behavior_hash"),

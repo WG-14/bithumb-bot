@@ -312,9 +312,18 @@ def test_research_raw_sell_exit_survives_entry_filter_block() -> None:
     assert decision["exit_signal"] == "SELL"
     assert decision["final_signal"] == "SELL"
     assert decision["exit_rule"] == "opposite_cross"
+    assert decision["strategy_plugin_contract"]["name"] == "sma_with_filter"
+    assert str(decision["strategy_plugin_contract_hash"]).startswith("sha256:")
     assert result.strategy_diagnostics["raw_sell_filter_blocked_while_in_position_count"] == 1
     assert result.strategy_diagnostics["exit_filter_suppression_prevented_count"] == 1
     assert result.strategy_diagnostics["opposite_cross_triggered_count"] == 1
+    assert result.strategy_diagnostics["strategy_diagnostics_namespace"] == "sma_with_filter"
+    assert (
+        result.strategy_diagnostics["strategy_specific_diagnostics"]["sma_with_filter"][
+            "raw_sell_filter_blocked_while_in_position_count"
+        ]
+        == 1
+    )
 
 
 def test_research_raw_buy_stop_loss_override_is_not_entry_blocked() -> None:
@@ -1035,6 +1044,10 @@ def test_research_backtest_report_includes_execution_plan_and_observability(tmp_
     assert "candidate_events_path" not in json.dumps(work_units[0], sort_keys=True)
     assert "report_path" not in json.dumps(work_units[0], sort_keys=True)
     assert "experiment_registry_path" not in json.dumps(work_units[0], sort_keys=True)
+    assert report["strategy_plugin_contract"]["name"] == "sma_with_filter"
+    assert str(report["strategy_plugin_contract_hash"]).startswith("sha256:")
+    assert report["candidates"][0]["strategy_plugin_contract"] == report["strategy_plugin_contract"]
+    assert report["candidates"][0]["strategy_plugin_contract_hash"] == report["strategy_plugin_contract_hash"]
     persisted = json.loads(Path(report["artifact_paths"]["report_path"]).read_text(encoding="utf-8"))
     assert persisted["execution_plan"] == report["execution_plan"]
     assert persisted["execution_observability"]["work_units"][0]["work_unit"]["work_unit_hash"]

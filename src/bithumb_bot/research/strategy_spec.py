@@ -147,9 +147,14 @@ SMA_WITH_FILTER_SPEC = StrategySpec(
 
 
 def strategy_spec_for_name(strategy_name: str) -> StrategySpec:
-    if strategy_name in {SMA_WITH_FILTER_SPEC.strategy_name, "__test_top_of_book_required__"}:
+    if strategy_name == "__test_top_of_book_required__":
         return SMA_WITH_FILTER_SPEC
-    raise StrategySpecError(f"unsupported research strategy: {strategy_name}")
+    try:
+        from .strategy_registry import ResearchStrategyRegistryError, resolve_research_strategy_plugin
+
+        return resolve_research_strategy_plugin(strategy_name).spec
+    except ResearchStrategyRegistryError as exc:
+        raise StrategySpecError(f"unsupported research strategy: {strategy_name}") from exc
 
 
 def validate_parameter_space_against_strategy_spec(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,41 @@ from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
 from bithumb_bot.research.parameter_space import candidate_id
 from bithumb_bot.research.promotion_gate import build_candidate_profile
 from tests.test_decision_equivalence_canonical import _decision
+
+
+def test_runtime_replay_fails_closed_when_plugin_lacks_runtime_adapter(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        profile_cli,
+        "load_approved_profile",
+        lambda _path: {"strategy_name": "noop_baseline"},
+    )
+    monkeypatch.setattr(profile_cli, "_load_through_ts_list", lambda _path: [1])
+    monkeypatch.setattr(
+        profile_cli,
+        "resolve_research_strategy_plugin",
+        lambda _name: SimpleNamespace(
+            name="noop_baseline",
+            runtime_replay_builder=None,
+            contract_payload=lambda: {"name": "noop_baseline"},
+            contract_hash=lambda: "sha256:noop",
+        ),
+    )
+
+    rc = profile_cli.cmd_runtime_replay_decisions(
+        profile_path="profile.json",
+        db_path=str(tmp_path / "missing.sqlite"),
+        through_ts_list_path="through.json",
+        out_path=str(tmp_path / "runtime.json"),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["ok"] is False
+    assert "runtime replay unsupported for research strategy: noop_baseline" in payload["error"]
 
 
 def test_runtime_replay_policy_uses_approved_profile_regime_and_audit_fields() -> None:

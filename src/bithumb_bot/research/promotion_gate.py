@@ -126,6 +126,8 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "strategy_name": candidate.get("strategy_name"),
         "strategy_spec": candidate.get("strategy_spec"),
         "strategy_spec_hash": candidate.get("strategy_spec_hash"),
+        "strategy_plugin_contract": candidate.get("strategy_plugin_contract"),
+        "strategy_plugin_contract_hash": candidate.get("strategy_plugin_contract_hash"),
         "exit_policy": exit_policy,
         "exit_policy_hash": resolved_exit_policy_hash,
         "behavior_hash": candidate.get("behavior_hash"),

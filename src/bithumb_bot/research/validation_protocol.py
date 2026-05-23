@@ -96,7 +96,11 @@ from .strategy_spec import (
     materialized_strategy_parameters_hash,
     strategy_parameter_source_map,
 )
-from .strategy_registry import research_strategy_data_requirements, resolve_research_strategy
+from .strategy_registry import (
+    research_strategy_data_requirements,
+    resolve_research_strategy,
+    resolve_research_strategy_plugin,
+)
 from .strategy_spec import exit_policy_from_parameters, exit_policy_hash, materialize_strategy_parameters, strategy_spec_for_name
 
 
@@ -951,7 +955,8 @@ def _evaluate_candidates(
     dataset_quality_status, dataset_quality_reasons = _combined_dataset_quality_gate(quality_reports)
     dataset_warning_codes = _dataset_quality_warning_codes(quality_reports)
     top_of_book_quality_summary = _top_of_book_quality_summary(quality_reports)
-    strategy_spec = strategy_spec_for_name(manifest.strategy_name)
+    strategy_plugin = resolve_research_strategy_plugin(manifest.strategy_name)
+    strategy_spec = strategy_plugin.spec
     metrics_gate_policy = metrics_gate_policy_from_acceptance_gate(manifest.acceptance_gate)
     metrics_gate_policy_digest = metrics_gate_policy_hash(metrics_gate_policy)
     probe_warnings = _probe_grade_gate_warnings(manifest)
@@ -1382,6 +1387,8 @@ def _evaluate_candidates(
                 ),
                 "strategy_spec": strategy_spec.as_dict(),
                 "strategy_spec_hash": strategy_spec.spec_hash(),
+                "strategy_plugin_contract": strategy_plugin.contract_payload(),
+                "strategy_plugin_contract_hash": strategy_plugin.contract_hash(),
                 "exit_policy": active_exit_policy,
                 "exit_policy_hash": active_exit_policy_hash,
                 "parameter_values_raw": params,
@@ -1475,6 +1482,8 @@ def _evaluate_candidates(
                     "strategy_name": manifest.strategy_name,
                     "strategy_spec": strategy_spec.as_dict(),
                     "strategy_spec_hash": strategy_spec.spec_hash(),
+                    "strategy_plugin_contract": strategy_plugin.contract_payload(),
+                    "strategy_plugin_contract_hash": strategy_plugin.contract_hash(),
                     "exit_policy": active_exit_policy,
                     "exit_policy_hash": active_exit_policy_hash,
                     "parameter_candidate_id": base["candidate_id"],
@@ -3291,7 +3300,8 @@ def _report_payload(
         warnings.add(PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING)
     warnings = sorted(warnings)
     signal_depth_summary = _report_signal_depth_summary(candidates)
-    strategy_spec = strategy_spec_for_name(manifest.strategy_name)
+    strategy_plugin = resolve_research_strategy_plugin(manifest.strategy_name)
+    strategy_spec = strategy_plugin.spec
     depth_walk_used = bool(signal_depth_summary.get("depth_walk_execution_model_used"))
     depth_available_semantics = (
         "depth_walk_execution_model_used_with_signal_level_l2_depth"
@@ -3531,6 +3541,12 @@ def _report_payload(
         "best_behavior_hash": best.get("behavior_hash") if best else None,
         "strategy_spec": best.get("strategy_spec") if best else strategy_spec.as_dict(),
         "strategy_spec_hash": best.get("strategy_spec_hash") if best else strategy_spec.spec_hash(),
+        "strategy_plugin_contract": (
+            best.get("strategy_plugin_contract") if best else strategy_plugin.contract_payload()
+        ),
+        "strategy_plugin_contract_hash": (
+            best.get("strategy_plugin_contract_hash") if best else strategy_plugin.contract_hash()
+        ),
         "exit_policy": best.get("exit_policy") if best else None,
         "exit_policy_hash": best.get("exit_policy_hash") if best else None,
         "best_validation_metrics_v2": best.get("validation_metrics_v2") if best else None,
