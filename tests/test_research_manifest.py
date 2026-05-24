@@ -97,6 +97,41 @@ def test_noop_baseline_manifest_rejects_sma_parameters() -> None:
         parse_manifest(payload)
 
 
+def test_buy_and_hold_baseline_manifest_uses_its_own_parameter_contract() -> None:
+    payload = _manifest()
+    payload["strategy_name"] = "buy_and_hold_baseline"
+    payload["parameter_space"] = {
+        "BUY_HOLD_BUY_INDEX": [1],
+        "BUY_HOLD_DECISION_REASON": ["architecture_canary_buy"],
+    }
+
+    manifest = parse_manifest(payload)
+
+    assert manifest.strategy_name == "buy_and_hold_baseline"
+    assert manifest.parameter_space == {
+        "BUY_HOLD_BUY_INDEX": (1,),
+        "BUY_HOLD_DECISION_REASON": ("architecture_canary_buy",),
+    }
+
+
+def test_buy_and_hold_baseline_manifest_rejects_sma_parameters() -> None:
+    payload = _manifest()
+    payload["strategy_name"] = "buy_and_hold_baseline"
+    payload["parameter_space"] = {"SMA_SHORT": [2], "SMA_LONG": [4]}
+
+    with pytest.raises(ManifestValidationError, match="unknown strategy parameter"):
+        parse_manifest(payload)
+
+
+def test_production_bound_buy_and_hold_manifest_requires_behavior_parameters() -> None:
+    payload = _production_manifest()
+    payload["strategy_name"] = "buy_and_hold_baseline"
+    payload["parameter_space"] = {"BUY_HOLD_BUY_INDEX": [1]}
+
+    with pytest.raises(ManifestValidationError, match="BUY_HOLD_DECISION_REASON"):
+        parse_manifest(payload)
+
+
 def test_production_bound_noop_manifest_requires_noop_behavior_parameters() -> None:
     payload = _production_manifest()
     payload["strategy_name"] = "noop_baseline"

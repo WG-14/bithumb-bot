@@ -1371,10 +1371,23 @@ def _evaluate_candidates(
                 "trade_ledger_hash": (base.get("validation_resource_usage") or {}).get("trade_ledger_hash"),
                 "equity_curve_hash": (base.get("validation_resource_usage") or {}).get("equity_curve_hash"),
                 "composite_behavior_hash": (base.get("validation_resource_usage") or {}).get("composite_behavior_hash"),
+                "common_decision_behavior_hash": (
+                    (base.get("validation_resource_usage") or {}).get("common_decision_behavior_hash")
+                ),
+                "strategy_behavior_hash": (base.get("validation_resource_usage") or {}).get("strategy_behavior_hash"),
+                "composite_behavior_hash_v2": (
+                    (base.get("validation_resource_usage") or {}).get("composite_behavior_hash_v2")
+                ),
                 "train_behavior_hash": (base.get("train_resource_usage") or {}).get("behavior_hash"),
                 "train_composite_behavior_hash": (base.get("train_resource_usage") or {}).get("composite_behavior_hash"),
+                "train_composite_behavior_hash_v2": (
+                    (base.get("train_resource_usage") or {}).get("composite_behavior_hash_v2")
+                ),
                 "validation_behavior_hash": (base.get("validation_resource_usage") or {}).get("behavior_hash"),
                 "validation_composite_behavior_hash": (base.get("validation_resource_usage") or {}).get("composite_behavior_hash"),
+                "validation_composite_behavior_hash_v2": (
+                    (base.get("validation_resource_usage") or {}).get("composite_behavior_hash_v2")
+                ),
                 "final_holdout_behavior_hash": (
                     (base.get("final_holdout_resource_usage") or {}).get("behavior_hash")
                     if base.get("final_holdout_resource_usage")
@@ -1382,6 +1395,11 @@ def _evaluate_candidates(
                 ),
                 "final_holdout_composite_behavior_hash": (
                     (base.get("final_holdout_resource_usage") or {}).get("composite_behavior_hash")
+                    if base.get("final_holdout_resource_usage")
+                    else None
+                ),
+                "final_holdout_composite_behavior_hash_v2": (
+                    (base.get("final_holdout_resource_usage") or {}).get("composite_behavior_hash_v2")
                     if base.get("final_holdout_resource_usage")
                     else None
                 ),
@@ -1594,12 +1612,18 @@ def _evaluate_candidates(
                 "trade_ledger_hash": primary.get("trade_ledger_hash"),
                 "equity_curve_hash": primary.get("equity_curve_hash"),
                 "composite_behavior_hash": primary.get("composite_behavior_hash"),
+                "common_decision_behavior_hash": primary.get("common_decision_behavior_hash"),
+                "strategy_behavior_hash": primary.get("strategy_behavior_hash"),
+                "composite_behavior_hash_v2": primary.get("composite_behavior_hash_v2"),
                 "train_behavior_hash": primary.get("train_behavior_hash"),
                 "train_composite_behavior_hash": primary.get("train_composite_behavior_hash"),
+                "train_composite_behavior_hash_v2": primary.get("train_composite_behavior_hash_v2"),
                 "validation_behavior_hash": primary.get("validation_behavior_hash"),
                 "validation_composite_behavior_hash": primary.get("validation_composite_behavior_hash"),
+                "validation_composite_behavior_hash_v2": primary.get("validation_composite_behavior_hash_v2"),
                 "final_holdout_behavior_hash": primary.get("final_holdout_behavior_hash"),
                 "final_holdout_composite_behavior_hash": primary.get("final_holdout_composite_behavior_hash"),
+                "final_holdout_composite_behavior_hash_v2": primary.get("final_holdout_composite_behavior_hash_v2"),
                 "strategy_spec": primary.get("strategy_spec") or strategy_spec.as_dict(),
                 "strategy_spec_hash": primary.get("strategy_spec_hash") or strategy_spec.spec_hash(),
                 "exit_policy": primary.get("exit_policy"),

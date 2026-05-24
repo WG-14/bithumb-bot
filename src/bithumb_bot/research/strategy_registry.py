@@ -3,12 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .backtest_engine import BacktestRun, BacktestRunContext, run_noop_baseline_backtest, run_sma_backtest
+from .backtest_engine import (
+    BacktestRun,
+    BacktestRunContext,
+    run_buy_and_hold_baseline_backtest,
+    run_noop_baseline_backtest,
+    run_sma_backtest,
+)
 from .dataset_snapshot import DatasetSnapshot
 from .execution_model import ExecutionModel
 from .experiment_manifest import ExecutionTimingPolicy, PortfolioPolicy
 from .hashing import sha256_prefixed
-from .strategy_spec import NOOP_BASELINE_SPEC, SMA_WITH_FILTER_SPEC, StrategySpec
+from .strategy_spec import BUY_AND_HOLD_BASELINE_SPEC, NOOP_BASELINE_SPEC, SMA_WITH_FILTER_SPEC, StrategySpec
 
 
 ResearchStrategyRunner = Callable[
@@ -208,6 +214,30 @@ def _run_noop_baseline(
     )
 
 
+def _run_buy_and_hold_baseline(
+    dataset: DatasetSnapshot,
+    parameter_values: dict[str, Any],
+    fee_rate: float,
+    slippage_bps: float,
+    parameter_stability_score: float | None = None,
+    execution_model: ExecutionModel | None = None,
+    execution_timing_policy: ExecutionTimingPolicy | None = None,
+    portfolio_policy: PortfolioPolicy | None = None,
+    context: BacktestRunContext | None = None,
+) -> BacktestRun:
+    return run_buy_and_hold_baseline_backtest(
+        dataset=dataset,
+        parameter_values=parameter_values,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+        parameter_stability_score=parameter_stability_score,
+        execution_model=execution_model,
+        execution_timing_policy=execution_timing_policy,
+        portfolio_policy=portfolio_policy,
+        context=context,
+    )
+
+
 def _require_parameter(parameter_values: dict[str, Any], key: str) -> None:
     if key not in parameter_values:
         raise ResearchStrategyRegistryError(f"sma_with_filter missing required parameter: {key}")
@@ -237,8 +267,21 @@ _NOOP_BASELINE_PLUGIN = ResearchStrategyPlugin(
     diagnostics_namespace="noop_baseline",
 )
 
+_BUY_AND_HOLD_BASELINE_PLUGIN = ResearchStrategyPlugin(
+    name=BUY_AND_HOLD_BASELINE_SPEC.strategy_name,
+    version=BUY_AND_HOLD_BASELINE_SPEC.strategy_version,
+    spec=BUY_AND_HOLD_BASELINE_SPEC,
+    required_data=BUY_AND_HOLD_BASELINE_SPEC.required_data,
+    optional_data=BUY_AND_HOLD_BASELINE_SPEC.optional_data,
+    runner=_run_buy_and_hold_baseline,
+    runtime_replay_builder=None,
+    decision_contract_version=BUY_AND_HOLD_BASELINE_SPEC.decision_contract_version,
+    diagnostics_namespace="buy_and_hold_baseline",
+)
+
 
 _RESEARCH_STRATEGY_PLUGINS: dict[str, ResearchStrategyPlugin] = {
     _SMA_WITH_FILTER_PLUGIN.name: _SMA_WITH_FILTER_PLUGIN,
     _NOOP_BASELINE_PLUGIN.name: _NOOP_BASELINE_PLUGIN,
+    _BUY_AND_HOLD_BASELINE_PLUGIN.name: _BUY_AND_HOLD_BASELINE_PLUGIN,
 }

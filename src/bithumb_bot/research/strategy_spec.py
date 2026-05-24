@@ -166,6 +166,26 @@ NOOP_BASELINE_SPEC = StrategySpec(
 )
 
 
+BUY_AND_HOLD_BASELINE_SPEC = StrategySpec(
+    strategy_name="buy_and_hold_baseline",
+    strategy_version="buy_and_hold_baseline.research_contract.v1",
+    accepted_parameter_names=("BUY_HOLD_BUY_INDEX", "BUY_HOLD_DECISION_REASON"),
+    required_parameter_names=("BUY_HOLD_BUY_INDEX",),
+    behavior_affecting_parameter_names=("BUY_HOLD_BUY_INDEX", "BUY_HOLD_DECISION_REASON"),
+    metadata_only_parameter_names=(),
+    research_only_parameter_names=(),
+    default_parameters={"BUY_HOLD_DECISION_REASON": "buy_and_hold_architecture_canary"},
+    decision_contract_version="research_buy_and_hold_baseline_decision_contract.v1",
+    required_data=("candles",),
+    optional_data=(),
+    exit_policy_schema={
+        "schema_version": 1,
+        "rules": (),
+        "description": "Executable canary emits one BUY intent, then HOLD decisions.",
+    },
+)
+
+
 def strategy_spec_for_name(strategy_name: str) -> StrategySpec:
     if strategy_name == "__test_top_of_book_required__":
         return SMA_WITH_FILTER_SPEC
@@ -229,9 +249,17 @@ def strategy_parameter_source_map(
     sources = {key: "strategy_spec_default" for key in spec.default_parameters}
     for key in raw:
         sources[key] = "raw_parameter_values"
-    if fee_rate is not None and "LIVE_FEE_RATE_ESTIMATE" not in raw:
+    if (
+        fee_rate is not None
+        and "LIVE_FEE_RATE_ESTIMATE" in spec.accepted_parameter_names
+        and "LIVE_FEE_RATE_ESTIMATE" not in raw
+    ):
         sources["LIVE_FEE_RATE_ESTIMATE"] = "cost_model_fee_rate"
-    if slippage_bps is not None and "STRATEGY_ENTRY_SLIPPAGE_BPS" not in raw:
+    if (
+        slippage_bps is not None
+        and "STRATEGY_ENTRY_SLIPPAGE_BPS" in spec.accepted_parameter_names
+        and "STRATEGY_ENTRY_SLIPPAGE_BPS" not in raw
+    ):
         sources["STRATEGY_ENTRY_SLIPPAGE_BPS"] = "cost_model_slippage_bps"
     return sources
 
@@ -245,9 +273,17 @@ def materialize_strategy_parameters(
 ) -> dict[str, Any]:
     spec = strategy_spec_for_name(strategy_name)
     values = {**spec.default_parameters, **dict(parameter_values)}
-    if fee_rate is not None and "LIVE_FEE_RATE_ESTIMATE" not in parameter_values:
+    if (
+        fee_rate is not None
+        and "LIVE_FEE_RATE_ESTIMATE" in spec.accepted_parameter_names
+        and "LIVE_FEE_RATE_ESTIMATE" not in parameter_values
+    ):
         values["LIVE_FEE_RATE_ESTIMATE"] = float(fee_rate)
-    if slippage_bps is not None and "STRATEGY_ENTRY_SLIPPAGE_BPS" not in parameter_values:
+    if (
+        slippage_bps is not None
+        and "STRATEGY_ENTRY_SLIPPAGE_BPS" in spec.accepted_parameter_names
+        and "STRATEGY_ENTRY_SLIPPAGE_BPS" not in parameter_values
+    ):
         values["STRATEGY_ENTRY_SLIPPAGE_BPS"] = float(slippage_bps)
     _validate_exit_policy_materialized_values(values)
     return values

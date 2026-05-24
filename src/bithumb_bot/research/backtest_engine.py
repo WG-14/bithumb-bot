@@ -1535,6 +1535,620 @@ def run_noop_baseline_backtest(
     )
 
 
+def run_buy_and_hold_baseline_backtest(
+    *,
+    dataset: DatasetSnapshot,
+    parameter_values: dict[str, Any],
+    fee_rate: float,
+    slippage_bps: float,
+    parameter_stability_score: float | None = None,
+    execution_model: ExecutionModel | None = None,
+    execution_timing_policy: ExecutionTimingPolicy | None = None,
+    portfolio_policy: PortfolioPolicy | None = None,
+    context: BacktestRunContext | None = None,
+) -> BacktestRun:
+    from .strategy_registry import resolve_research_strategy_plugin
+
+    strategy_plugin = resolve_research_strategy_plugin("buy_and_hold_baseline")
+    effective_parameters = materialize_strategy_parameters(
+        "buy_and_hold_baseline",
+        parameter_values,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+    )
+    buy_index = max(0, int(effective_parameters.get("BUY_HOLD_BUY_INDEX", 0)))
+    decision_reason = str(effective_parameters.get("BUY_HOLD_DECISION_REASON") or "buy_and_hold_architecture_canary")
+    timing_policy = execution_timing_policy or ExecutionTimingPolicy()
+    events: list[ResearchDecisionEvent] = []
+    for index, candle in enumerate(dataset.candles):
+        action = "BUY" if index == buy_index else "HOLD"
+        decision_ts = candle_close_ts(candle, interval=dataset.interval) + int(timing_policy.decision_guard_ms)
+        feature_snapshot = {
+            "candle_index": int(index),
+            "buy_index": int(buy_index),
+            "close": float(candle.close),
+        }
+        events.append(
+            ResearchDecisionEvent(
+                candle_ts=int(candle.ts),
+                decision_ts=int(decision_ts),
+                strategy_name=strategy_plugin.name,
+                strategy_version=strategy_plugin.version,
+                raw_signal=action,
+                final_signal=action,
+                reason=decision_reason if action == "BUY" else "buy_and_hold_after_entry_hold",
+                feature_snapshot=feature_snapshot,
+                strategy_diagnostics={
+                    "schema_version": 1,
+                    "buy_index": int(buy_index),
+                    "candle_index": int(index),
+                    "emitted_buy_intent": action == "BUY",
+                },
+                entry_signal=action if action == "BUY" else "HOLD",
+                exit_signal="HOLD",
+                order_intent=(
+                    {
+                        "side": "BUY",
+                        "sizing": "portfolio_policy_fractional_cash",
+                        "buy_fraction": float(
+                            (portfolio_policy or legacy_research_portfolio_policy()).position_sizing.buy_fraction
+                        ),
+                    }
+                    if action == "BUY"
+                    else None
+                ),
+            )
+        )
+    return run_decision_event_backtest(
+        dataset=dataset,
+        strategy_name=strategy_plugin.name,
+        parameter_values=effective_parameters,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+        decision_events=tuple(events),
+        parameter_stability_score=parameter_stability_score,
+        execution_model=execution_model,
+        execution_timing_policy=timing_policy,
+        portfolio_policy=portfolio_policy,
+        context=context,
+    )
+
+
+def run_decision_event_backtest(
+    *,
+    dataset: DatasetSnapshot,
+    strategy_name: str,
+    parameter_values: dict[str, Any],
+    fee_rate: float,
+    slippage_bps: float,
+    decision_events: tuple[ResearchDecisionEvent, ...],
+    parameter_stability_score: float | None = None,
+    execution_model: ExecutionModel | None = None,
+    execution_timing_policy: ExecutionTimingPolicy | None = None,
+    portfolio_policy: PortfolioPolicy | None = None,
+    context: BacktestRunContext | None = None,
+) -> BacktestRun:
+    from .strategy_registry import resolve_research_strategy_plugin
+
+    strategy_plugin = resolve_research_strategy_plugin(strategy_name)
+    strategy_spec = strategy_spec_for_name(strategy_name)
+    active_exit_policy = exit_policy_from_parameters(strategy_name, parameter_values)
+    active_exit_policy_hash = exit_policy_hash(active_exit_policy)
+    candles = dataset.candles
+    run_context = context or BacktestRunContext(report_detail="full")
+    timing_policy = execution_timing_policy or ExecutionTimingPolicy()
+    policy = portfolio_policy or legacy_research_portfolio_policy()
+    model = execution_model or FixedBpsExecutionModel(fee_rate=fee_rate, slippage_bps=slippage_bps)
+    starting_cash = float(policy.starting_cash_krw)
+    cash = starting_cash
+    qty = float(policy.initial_position_qty)
+    buy_fraction = float(policy.position_sizing.buy_fraction)
+    accumulator = _BacktestAccumulator(
+        context=run_context,
+        total_candles=len(candles),
+        diagnostics_namespace=strategy_plugin.diagnostics_namespace,
+    )
+    if not candles:
+        audit_trace_index = _complete_audit_trace(run_context, status="completed")
+        return BacktestRun(
+            metrics=_empty_metrics(parameter_stability_score),
+            metrics_v2=_empty_metrics_v2(starting_cash=starting_cash, initial_position_qty=qty),
+            trades=(),
+            candle_count=0,
+            warnings=("not_enough_candles",),
+            execution_event_summary=empty_execution_event_summary(),
+            resource_usage=accumulator.resource_usage(candles_processed=0),
+            strategy_diagnostics=accumulator.strategy_diagnostics(trades=[]),
+            retained_detail_summary=_retained_detail_summary(accumulator, retained_regime_snapshot_count=0),
+            audit_trace_index=audit_trace_index,
+        )
+
+    dataset_content_hash = dataset.content_hash()
+    candle_index_by_ts = {int(candle.ts): index for index, candle in enumerate(candles)}
+    trades: list[dict[str, object]] = []
+    decisions: list[dict[str, object]] = []
+    equity_curve: list[EquityPoint] = []
+    pending_fills: list[_PendingFill] = []
+    warnings: list[str] = []
+    closed_pnls: list[float] = []
+    entry_cost_basis = 0.0
+    entry_regime_snapshot: dict[str, object] | None = None
+    entry_ts: int | None = None
+    entry_price: float | None = None
+    entry_decision_hash: str | None = None
+    open_trade_path: list[dict[str, float | int]] = []
+    entry_fee = 0.0
+    entry_slippage = 0.0
+    fee_total = 0.0
+    slippage_total = 0.0
+    peak = starting_cash
+    max_drawdown = 0.0
+
+    first = candles[0]
+    first_ts = candle_close_ts(first, interval=dataset.interval)
+    retain_initial_equity = accumulator.retain_equity_point()
+    if retain_initial_equity:
+        equity_curve.append(EquityPoint(ts=first_ts, equity=starting_cash, cash=cash, asset_qty=qty))
+    accumulator.update_equity(retained=retain_initial_equity, ts=first_ts, asset_qty=qty)
+    _trace_equity_mark(run_context, ts=first_ts, equity=starting_cash, cash=cash, asset_qty=qty)
+
+    for event_number, event in enumerate(decision_events, start=1):
+        if event.strategy_name != strategy_plugin.name:
+            raise ValueError(f"decision_event_strategy_mismatch:{event.strategy_name}")
+        index = candle_index_by_ts.get(int(event.candle_ts))
+        if index is None:
+            raise ValueError(f"decision_event_candle_missing:{event.candle_ts}")
+        candle = candles[index]
+        mark_boundary_ts = candle_close_ts(candle, interval=dataset.interval)
+        decision_boundary_ts = int(event.decision_ts)
+        (
+            cash,
+            qty,
+            entry_cost_basis,
+            entry_regime_snapshot,
+            entry_ts,
+            entry_price,
+            entry_decision_hash,
+            open_trade_path,
+            entry_fee,
+            entry_slippage,
+            fee_total,
+            slippage_total,
+        ) = _apply_pending_fills(
+            pending_fills=pending_fills,
+            trades=trades,
+            boundary_ts=mark_boundary_ts,
+            cash=cash,
+            qty=qty,
+            entry_cost_basis=entry_cost_basis,
+            entry_regime_snapshot=entry_regime_snapshot,
+            entry_ts=entry_ts,
+            entry_price=entry_price,
+            entry_decision_hash=entry_decision_hash,
+            open_trade_path=open_trade_path,
+            entry_fee=entry_fee,
+            entry_slippage=entry_slippage,
+            fee_total=fee_total,
+            slippage_total=slippage_total,
+            closed_pnls=closed_pnls,
+        )
+        mark_cash = cash
+        mark_qty = qty
+        (
+            cash,
+            qty,
+            entry_cost_basis,
+            entry_regime_snapshot,
+            entry_ts,
+            entry_price,
+            entry_decision_hash,
+            open_trade_path,
+            entry_fee,
+            entry_slippage,
+            fee_total,
+            slippage_total,
+        ) = _apply_pending_fills(
+            pending_fills=pending_fills,
+            trades=trades,
+            boundary_ts=decision_boundary_ts,
+            cash=cash,
+            qty=qty,
+            entry_cost_basis=entry_cost_basis,
+            entry_regime_snapshot=entry_regime_snapshot,
+            entry_ts=entry_ts,
+            entry_price=entry_price,
+            entry_decision_hash=entry_decision_hash,
+            open_trade_path=open_trade_path,
+            entry_fee=entry_fee,
+            entry_slippage=entry_slippage,
+            fee_total=fee_total,
+            slippage_total=slippage_total,
+            closed_pnls=closed_pnls,
+        )
+        if qty > 1e-12 and entry_price is not None:
+            pnl_ratio = (
+                ((float(candle.close) - float(entry_price)) / float(entry_price))
+                if float(entry_price) > 0
+                else 0.0
+            )
+            open_trade_path.append(
+                {
+                    "ts": int(candle.ts),
+                    "close": float(candle.close),
+                    "unrealized_pnl": (float(candle.close) - float(entry_price)) * float(qty),
+                    "unrealized_pnl_pct": pnl_ratio * 100.0,
+                }
+            )
+        pending_buy_qty = sum(item.qty for item in pending_fills if item.side == "BUY")
+        pending_sell_qty = sum(item.qty for item in pending_fills if item.side == "SELL")
+        sellable_qty = max(0.0, qty - pending_sell_qty)
+        requested_action = str(event.final_signal or "HOLD").upper()
+        action = requested_action
+        blocked = False
+        block_reason = event.reason
+        if action == "BUY" and (qty > 1e-12 or pending_buy_qty > 1e-12):
+            action = "HOLD"
+            blocked = True
+            block_reason = "buy_blocked_existing_position_or_pending_buy"
+        elif action == "SELL" and sellable_qty <= 1e-12:
+            action = "HOLD"
+            blocked = True
+            block_reason = "sell_blocked_no_sellable_qty"
+        elif action not in {"BUY", "SELL", "HOLD"}:
+            raise ValueError(f"unsupported_decision_event_final_signal:{event.final_signal}")
+        regime_snapshot = {"composite_regime": "strategy_neutral_not_evaluated"}
+        decision_payload = _research_decision_payload(
+            dataset=dataset,
+            dataset_content_hash=dataset_content_hash,
+            parameter_values=parameter_values,
+            strategy_name=strategy_plugin.name,
+            strategy_spec=strategy_spec.as_dict(),
+            strategy_spec_hash=strategy_spec.spec_hash(),
+            strategy_plugin_contract=strategy_plugin.contract_payload(),
+            strategy_plugin_contract_hash=strategy_plugin.contract_hash(),
+            exit_policy=active_exit_policy,
+            exit_policy_hash=active_exit_policy_hash,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            timing_policy=timing_policy,
+            portfolio_policy=policy,
+            candle_ts=event.candle_ts,
+            decision_ts=decision_boundary_ts,
+            raw_signal=str(event.raw_signal or "HOLD").upper(),
+            entry_signal=event.entry_signal or event.raw_signal,
+            exit_signal=event.exit_signal or event.raw_signal,
+            final_signal=action,
+            raw_reason=event.reason,
+            blocked=blocked,
+            raw_filter_would_block=blocked,
+            entry_blocked=blocked and requested_action == "BUY",
+            protective_exit_overrode_entry=False,
+            exit_filter_suppression_prevented=False,
+            blocked_filters=list(event.blocked_filters),
+            prev_s=0.0,
+            prev_l=0.0,
+            curr_s=0.0,
+            curr_l=0.0,
+            gap_ratio=0.0,
+            range_ratio=0.0,
+            regime_snapshot=regime_snapshot,
+            entry_reason=block_reason,
+            market_regime_decision={"regime_decision": "not_configured"},
+            market_regime_blocked=False,
+            candidate_regime_blocked=False,
+            qty=qty,
+            sellable_qty=sellable_qty,
+            exit_rule=str((event.exit_intent or {}).get("exit_rule") if event.exit_intent else ""),
+            exit_reason=str((event.exit_intent or {}).get("exit_reason") if event.exit_intent else ""),
+            exit_evaluations=[],
+        )
+        decision_payload.update(
+            {
+                "decision_event_schema_version": 1,
+                "strategy_decision_contract_version": strategy_plugin.decision_contract_version,
+                "raw_reason": event.reason,
+                "feature_snapshot": dict(event.feature_snapshot),
+                "strategy_diagnostics_namespace": strategy_plugin.diagnostics_namespace,
+                "strategy_diagnostics": dict(event.strategy_diagnostics),
+                "strategy_behavior_payload": {
+                    "strategy_name": event.strategy_name,
+                    "strategy_version": event.strategy_version,
+                    "raw_signal": event.raw_signal,
+                    "final_signal": action,
+                    "reason": event.reason,
+                    "feature_snapshot": dict(event.feature_snapshot),
+                    "strategy_diagnostics": dict(event.strategy_diagnostics),
+                },
+                "execution_intent": action.lower() if action in {"BUY", "SELL"} else "none",
+                "order_intent": dict(event.order_intent) if event.order_intent is not None else None,
+                "exit_intent": dict(event.exit_intent) if event.exit_intent is not None else None,
+            }
+        )
+        retain_decision = accumulator.retain_decision()
+        if retain_decision:
+            decisions.append(decision_payload)
+        accumulator.update_decision(decision_payload, retained=retain_decision)
+        _trace_decision(run_context, decision_payload)
+
+        if action in {"BUY", "SELL"}:
+            side = action
+            signal = build_signal_event(
+                candle=candle,
+                interval=dataset.interval,
+                side=side,
+                policy=timing_policy,
+                feature_snapshot=dict(event.feature_snapshot),
+                regime_snapshot=regime_snapshot,
+            )
+            reference = resolve_execution_reference(
+                dataset=dataset,
+                signal=signal,
+                signal_index=index,
+                policy=timing_policy,
+                model_latency_ms=_model_latency_ms(model),
+            )
+            requested_notional = cash * buy_fraction if side == "BUY" else None
+            requested_qty = sellable_qty if side == "SELL" else None
+            if reference.fill_reference_price is None:
+                fill = _failed_fill(
+                    model=model,
+                    signal=signal,
+                    reference=reference,
+                    timing_policy=timing_policy,
+                    side=side,
+                    fee_rate=fee_rate,
+                    requested_qty=requested_qty,
+                    requested_notional=requested_notional,
+                )
+            else:
+                fill = model.simulate(
+                    ExecutionRequest(
+                        signal_ts=signal.signal_candle_start_ts,
+                        decision_ts=signal.decision_ts,
+                        side=side,
+                        reference_price=float(reference.fill_reference_price),
+                        requested_qty=requested_qty,
+                        requested_notional=requested_notional,
+                        fee_rate=fee_rate,
+                        **_timing_request_fields(signal, reference, timing_policy),
+                        **_depth_request_fields(
+                            dataset=dataset,
+                            reference=reference,
+                            model=model,
+                            timing_policy=timing_policy,
+                        ),
+                    )
+                )
+            warnings.extend(_execution_reference_warnings(fill))
+            if fill.fill_status == "failed" or fill.avg_fill_price is None or fill.filled_qty <= 0.0:
+                trades.append(_trade_from_fill(fill, cash=cash, asset_qty=qty, pnl=None))
+                _trace_execution(run_context, trades[-1])
+            elif side == "BUY":
+                exec_price = float(fill.avg_fill_price)
+                fee = float(fill.fee)
+                received_qty = float(fill.filled_qty)
+                actual_spend = (exec_price * received_qty) + fee
+                buy_slippage = max(0.0, (exec_price - float(fill.reference_price)) * received_qty)
+                pending = _PendingFill(
+                    fill=fill,
+                    trade_index=len(trades),
+                    side="BUY",
+                    effective_ts=_fill_effective_ts(fill),
+                    qty=received_qty,
+                    fee=fee,
+                    slippage=buy_slippage,
+                    cash_delta=-actual_spend,
+                    entry_regime_snapshot=regime_snapshot,
+                )
+                trades.append(_pending_trade_from_fill(fill, cash=cash, asset_qty=qty))
+                trades[-1]["entry_decision_hash"] = decision_payload.get("replay_fingerprint_hash")
+                _trace_execution(run_context, trades[-1])
+                if _fill_applies_to_mark(fill=pending.fill, effective_ts=pending.effective_ts, mark_boundary_ts=mark_boundary_ts):
+                    mark_cash += pending.cash_delta
+                    mark_qty += pending.qty
+                pending_fills.append(pending)
+            else:
+                exec_price = float(fill.avg_fill_price)
+                sell_qty = float(fill.filled_qty)
+                gross = sell_qty * exec_price
+                fee = float(fill.fee)
+                sell_slippage = max(0.0, (float(fill.reference_price) - exec_price) * sell_qty)
+                pending = _PendingFill(
+                    fill=fill,
+                    trade_index=len(trades),
+                    side="SELL",
+                    effective_ts=_fill_effective_ts(fill),
+                    qty=sell_qty,
+                    fee=fee,
+                    slippage=sell_slippage,
+                    cash_delta=gross - fee,
+                    entry_regime_snapshot=entry_regime_snapshot,
+                    exit_regime_snapshot=regime_snapshot,
+                )
+                trades.append(_pending_trade_from_fill(fill, cash=cash, asset_qty=qty))
+                trades[-1].update(
+                    _closed_trade_diagnostics(
+                        entry_ts=entry_ts,
+                        exit_ts=int(candle.ts),
+                        entry_price=entry_price,
+                        exit_price=exec_price,
+                        entry_regime_snapshot=entry_regime_snapshot,
+                        exit_regime_snapshot=regime_snapshot,
+                        exit_rule=str((event.exit_intent or {}).get("exit_rule") if event.exit_intent else ""),
+                        exit_reason=str((event.exit_intent or {}).get("exit_reason") if event.exit_intent else ""),
+                        path=open_trade_path,
+                        entry_decision_hash=entry_decision_hash,
+                        exit_decision_hash=str(decision_payload.get("replay_fingerprint_hash") or ""),
+                    )
+                )
+                _trace_execution(run_context, trades[-1])
+                if _fill_applies_to_mark(fill=pending.fill, effective_ts=pending.effective_ts, mark_boundary_ts=mark_boundary_ts):
+                    mark_cash += pending.cash_delta
+                    mark_qty = max(0.0, mark_qty - pending.qty)
+                pending_fills.append(pending)
+            (
+                cash,
+                qty,
+                entry_cost_basis,
+                entry_regime_snapshot,
+                entry_ts,
+                entry_price,
+                entry_decision_hash,
+                open_trade_path,
+                entry_fee,
+                entry_slippage,
+                fee_total,
+                slippage_total,
+            ) = _apply_pending_fills(
+                pending_fills=pending_fills,
+                trades=trades,
+                boundary_ts=decision_boundary_ts,
+                cash=cash,
+                qty=qty,
+                entry_cost_basis=entry_cost_basis,
+                entry_regime_snapshot=entry_regime_snapshot,
+                entry_ts=entry_ts,
+                entry_price=entry_price,
+                entry_decision_hash=entry_decision_hash,
+                open_trade_path=open_trade_path,
+                entry_fee=entry_fee,
+                entry_slippage=entry_slippage,
+                fee_total=fee_total,
+                slippage_total=slippage_total,
+                closed_pnls=closed_pnls,
+            )
+
+        retain_equity = accumulator.retain_equity_point()
+        peak, max_drawdown = _record_equity_mark(
+            equity_curve=equity_curve,
+            ts=mark_boundary_ts,
+            cash=mark_cash,
+            qty=mark_qty,
+            mark_price=candle.close,
+            peak=peak,
+            max_drawdown=max_drawdown,
+            retain=retain_equity,
+        )
+        accumulator.update_equity(retained=retain_equity, ts=mark_boundary_ts, asset_qty=mark_qty)
+        _trace_equity_mark(
+            run_context,
+            ts=mark_boundary_ts,
+            equity=mark_cash + mark_qty * float(candle.close),
+            cash=mark_cash,
+            asset_qty=mark_qty,
+        )
+        accumulator.maybe_emit_heartbeat(event_number)
+        accumulator.check_limits(candles_processed=event_number, trades=trades)
+
+    last = candles[-1]
+    last_mark_ts = candle_close_ts(last, interval=dataset.interval)
+    (
+        cash,
+        qty,
+        entry_cost_basis,
+        entry_regime_snapshot,
+        entry_ts,
+        entry_price,
+        entry_decision_hash,
+        open_trade_path,
+        entry_fee,
+        entry_slippage,
+        fee_total,
+        slippage_total,
+    ) = _apply_pending_fills(
+        pending_fills=pending_fills,
+        trades=trades,
+        boundary_ts=last_mark_ts,
+        cash=cash,
+        qty=qty,
+        entry_cost_basis=entry_cost_basis,
+        entry_regime_snapshot=entry_regime_snapshot,
+        entry_ts=entry_ts,
+        entry_price=entry_price,
+        entry_decision_hash=entry_decision_hash,
+        open_trade_path=open_trade_path,
+        entry_fee=entry_fee,
+        entry_slippage=entry_slippage,
+        fee_total=fee_total,
+        slippage_total=slippage_total,
+        closed_pnls=closed_pnls,
+    )
+    _mark_pending_fills_at_end(pending_fills=pending_fills, trades=trades, final_mark_ts=last_mark_ts)
+    final_equity = cash + qty * float(last.close)
+    retain_final_equity = accumulator.retain_equity_point()
+    if retain_final_equity:
+        equity_curve.append(EquityPoint(ts=last_mark_ts, equity=final_equity, cash=cash, asset_qty=qty))
+    accumulator.update_equity(retained=retain_final_equity, ts=last_mark_ts, asset_qty=qty)
+    _trace_equity_mark(run_context, ts=last_mark_ts, equity=final_equity, cash=cash, asset_qty=qty)
+    return_pct = ((final_equity / starting_cash) - 1.0) * 100.0 if starting_cash > 0.0 else 0.0
+    metrics = _metrics(
+        return_pct=return_pct,
+        max_drawdown_pct=max_drawdown * 100.0,
+        closed_pnls=closed_pnls,
+        fee_total=fee_total,
+        slippage_total=slippage_total,
+        parameter_stability_score=parameter_stability_score,
+    )
+    position_intervals, closed_trade_records, execution_records, derived_open_cost_basis = _metrics_v2_ledgers_from_trades(
+        trades=trades,
+    )
+    metrics_v2 = build_metrics_v2(
+        starting_cash=starting_cash,
+        final_cash=cash,
+        final_asset_qty=qty,
+        final_mark_price=last.close,
+        final_open_cost_basis=entry_cost_basis if qty > 0.0 else derived_open_cost_basis,
+        equity_curve=tuple(equity_curve),
+        position_intervals=position_intervals,
+        closed_trades=closed_trade_records,
+        execution_records=execution_records,
+        **(
+            {}
+            if accumulator.retain_full_detail()
+            else accumulator.metrics_summary_inputs(max_drawdown_pct=max_drawdown * 100.0)
+        ),
+    )
+    if not accumulator.retain_full_detail():
+        metrics_v2 = replace(
+            metrics_v2,
+            limitation_reasons=tuple(
+                sorted(set(metrics_v2.limitation_reasons) | {"bounded_detail_equity_curve_not_retained"})
+            ),
+        )
+    audit_trace_index = _complete_audit_trace(run_context, status="completed")
+    accumulator.trade_ledger_hash_material = [_trade_hash_payload(trade) for trade in trades]
+    accumulator.equity_curve_hash_material = [
+        {
+            "ts": int(point.ts),
+            "equity": round(float(point.equity), 12),
+            "cash": round(float(point.cash), 12),
+            "asset_qty": round(float(point.asset_qty), 12),
+        }
+        for point in equity_curve
+    ]
+    strategy_diagnostics = accumulator.strategy_diagnostics(trades=trades)
+    resource_usage = accumulator.resource_usage(candles_processed=len(decision_events))
+    resource_usage["strategy_diagnostics"] = strategy_diagnostics
+    return BacktestRun(
+        metrics=metrics,
+        metrics_v2=metrics_v2,
+        trades=tuple(trades),
+        candle_count=len(candles),
+        warnings=tuple(warnings),
+        regime_performance=(),
+        regime_coverage=(),
+        execution_event_summary=execution_event_summary(trades),
+        decisions=tuple(decisions),
+        equity_curve=tuple(equity_curve),
+        position_intervals=position_intervals,
+        closed_trades=closed_trade_records,
+        resource_usage=resource_usage,
+        strategy_diagnostics=strategy_diagnostics,
+        retained_detail_summary=_retained_detail_summary(accumulator, retained_regime_snapshot_count=0),
+        audit_trace_index=audit_trace_index,
+    )
+
+
 def _noop_strategy_diagnostics(*, decision_count: int, start_index: int = 0) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -1704,6 +2318,14 @@ def _behavior_hashes(
             "equity_curve_hash": equity_hash,
         }
     )
+    composite_hash_v2 = canonical_payload_hash(
+        {
+            "common_decision_behavior_hash": common_decision_hash,
+            "strategy_behavior_hash": strategy_decision_hash,
+            "trade_ledger_hash": trade_hash,
+            "equity_curve_hash": equity_hash,
+        }
+    )
     return {
         "decision_behavior_hash": decision_hash,
         "common_decision_behavior_hash": common_decision_hash,
@@ -1711,6 +2333,7 @@ def _behavior_hashes(
         "trade_ledger_hash": trade_hash,
         "equity_curve_hash": equity_hash,
         "composite_behavior_hash": composite_hash,
+        "composite_behavior_hash_v2": composite_hash_v2,
         "behavior_hash": composite_hash,
     }
 
