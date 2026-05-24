@@ -674,16 +674,12 @@ def run_sma_backtest_via_kernel(
     if short_n <= 0 or long_n <= 0 or short_n >= long_n:
         raise ValueError("SMA_SHORT must be smaller than SMA_LONG")
     if len(dataset.candles) < long_n + 2:
-        return _run_sma_backtest_legacy(
+        return _empty_kernel_compatible_backtest_result(
             dataset=dataset,
-            parameter_values=parameter_values,
-            fee_rate=fee_rate,
-            slippage_bps=slippage_bps,
             parameter_stability_score=parameter_stability_score,
-            execution_model=execution_model,
-            execution_timing_policy=execution_timing_policy,
             portfolio_policy=portfolio_policy,
             context=context,
+            diagnostics_namespace="sma_with_filter",
         )
 
     timing_policy = execution_timing_policy or ExecutionTimingPolicy()
@@ -737,6 +733,40 @@ def _materialize_sma_backtest_parameters(
     return effective_parameters
 
 
+def _empty_kernel_compatible_backtest_result(
+    *,
+    dataset: DatasetSnapshot,
+    parameter_stability_score: float | None,
+    portfolio_policy: PortfolioPolicy | None,
+    context: BacktestRunContext | None,
+    diagnostics_namespace: str,
+) -> BacktestRun:
+    run_context = context or BacktestRunContext(report_detail="full")
+    policy = portfolio_policy or legacy_research_portfolio_policy()
+    starting_cash = float(policy.starting_cash_krw)
+    initial_qty = float(policy.initial_position_qty)
+    accumulator = _BacktestAccumulator(
+        context=run_context,
+        total_candles=len(dataset.candles),
+        diagnostics_namespace=diagnostics_namespace,
+    )
+    audit_trace_index = _complete_audit_trace(run_context, status="completed")
+    return BacktestRun(
+        metrics=_empty_metrics(parameter_stability_score),
+        metrics_v2=_empty_metrics_v2(starting_cash=starting_cash, initial_position_qty=initial_qty),
+        trades=(),
+        candle_count=len(dataset.candles),
+        warnings=("not_enough_candles",),
+        regime_performance=(),
+        regime_coverage=(),
+        execution_event_summary=empty_execution_event_summary(),
+        resource_usage=accumulator.resource_usage(candles_processed=len(dataset.candles)),
+        strategy_diagnostics=accumulator.strategy_diagnostics(trades=[]),
+        retained_detail_summary=_retained_detail_summary(accumulator, retained_regime_snapshot_count=0),
+        audit_trace_index=audit_trace_index,
+    )
+
+
 def _run_sma_backtest_legacy(
     *,
     dataset: DatasetSnapshot,
@@ -775,20 +805,12 @@ def _run_sma_backtest_legacy(
     dataset_content_hash = dataset.content_hash()
     warnings: list[str] = []
     if len(candles) < long_n + 2:
-        audit_trace_index = _complete_audit_trace(run_context, status="completed")
-        return BacktestRun(
-            metrics=_empty_metrics(parameter_stability_score),
-            metrics_v2=_empty_metrics_v2(starting_cash=starting_cash, initial_position_qty=initial_qty),
-            trades=(),
-            candle_count=len(candles),
-            warnings=("not_enough_candles",),
-            regime_performance=(),
-            regime_coverage=(),
-            execution_event_summary=empty_execution_event_summary(),
-            resource_usage=accumulator.resource_usage(candles_processed=len(candles)),
-            strategy_diagnostics=accumulator.strategy_diagnostics(trades=[]),
-            retained_detail_summary=_retained_detail_summary(accumulator, retained_regime_snapshot_count=0),
-            audit_trace_index=audit_trace_index,
+        return _empty_kernel_compatible_backtest_result(
+            dataset=dataset,
+            parameter_stability_score=parameter_stability_score,
+            portfolio_policy=portfolio_policy,
+            context=context,
+            diagnostics_namespace=strategy_plugin.diagnostics_namespace,
         )
 
     timing_policy = execution_timing_policy or ExecutionTimingPolicy()
@@ -1829,6 +1851,12 @@ def run_decision_event_backtest(
     portfolio_policy: PortfolioPolicy | None = None,
     context: BacktestRunContext | None = None,
 ) -> BacktestRun:
+    """Execute strategy decision events through the shared research backtest kernel.
+
+    Import new call sites from ``bithumb_bot.research.backtest_kernel``. This
+    compatibility entrypoint remains for existing callers while the helper graph
+    in this module is split into a standalone implementation module.
+    """
     from .strategy_registry import resolve_research_strategy_plugin
 
     strategy_plugin = resolve_research_strategy_plugin(strategy_name)

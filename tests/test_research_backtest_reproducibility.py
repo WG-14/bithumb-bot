@@ -2641,6 +2641,36 @@ def test_sma_common_kernel_matches_legacy_sma_execution_accounting_and_metrics()
     assert all(decision["strategy_plugin_contract"]["name"] == "sma_with_filter" for decision in via_kernel.decisions)
 
 
+def test_sma_common_kernel_insufficient_data_does_not_call_legacy(monkeypatch) -> None:
+    snapshot = _snapshot_from_closes([100, 101, 102])
+
+    def fail_legacy(**_kwargs):
+        raise AssertionError("legacy SMA backtest must not run for kernel insufficient-data handling")
+
+    monkeypatch.setattr(backtest_engine, "_run_sma_backtest_legacy", fail_legacy)
+
+    result = backtest_engine.run_sma_backtest_via_kernel(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        context=BacktestRunContext(report_detail="full"),
+    )
+
+    assert result.trades == ()
+    assert result.decisions == ()
+    assert result.warnings == ("not_enough_candles",)
+    assert result.execution_event_summary == backtest_engine.empty_execution_event_summary()
+    assert result.metrics_v2.as_dict() == backtest_engine._empty_metrics_v2(
+        starting_cash=1_000_000.0,
+        initial_position_qty=0.0,
+    ).as_dict()
+    assert result.strategy_diagnostics["strategy_diagnostics_namespace"] == "sma_with_filter"
+    assert result.resource_usage["decision_count"] == 0
+    assert result.resource_usage["trade_count"] == 0
+    assert result.resource_usage["composite_behavior_hash_v2"].startswith("sha256:")
+
+
 def test_precomputed_sma_values_match_legacy_sma() -> None:
     values = [100.0, 99.5, 101.25, 102.0, 100.75, 99.0]
 
