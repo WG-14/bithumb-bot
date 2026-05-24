@@ -9,7 +9,7 @@ import pytest
 
 from bithumb_bot.approved_profile import ApprovedProfileError, runtime_contract_from_env_values
 from bithumb_bot.paths import PathManager
-from bithumb_bot.research import validation_protocol
+from bithumb_bot.research import backtest_kernel, validation_protocol
 from bithumb_bot.research.backtest_engine import BacktestRunContext
 from bithumb_bot.research.backtest_kernel import run_decision_event_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
@@ -159,6 +159,34 @@ def test_buy_and_hold_baseline_uses_common_execution_kernel() -> None:
     assert buy_decisions[0]["strategy_decision_contract_version"] == (
         "research_buy_and_hold_baseline_decision_contract.v1"
     )
+
+
+def test_buy_and_hold_baseline_enters_common_kernel_through_public_boundary(monkeypatch) -> None:
+    runner = resolve_research_strategy("buy_and_hold_baseline")
+    calls: list[str] = []
+    original = backtest_kernel.run_decision_event_backtest
+
+    def counting_kernel(**kwargs):
+        calls.append(str(kwargs["strategy_name"]))
+        return original(**kwargs)
+
+    monkeypatch.setattr(backtest_kernel, "run_decision_event_backtest", counting_kernel)
+
+    result = runner(
+        _dataset(),
+        {"BUY_HOLD_BUY_INDEX": 1, "BUY_HOLD_DECISION_REASON": "canary"},
+        0.001,
+        5.0,
+        None,
+        None,
+        None,
+        None,
+        BacktestRunContext(report_detail="full"),
+    )
+
+    assert calls == ["buy_and_hold_baseline"]
+    assert result.execution_event_summary["execution_attempt_count"] == 1
+    assert result.strategy_diagnostics["strategy_diagnostics_namespace"] == "buy_and_hold_baseline"
 
 
 def test_decision_event_kernel_does_not_require_sma_features() -> None:

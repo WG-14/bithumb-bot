@@ -12,7 +12,7 @@ import pytest
 from bithumb_bot.paths import PathManager
 from bithumb_bot.canonical_decision import export_research_decisions, export_runtime_replay_decisions
 from bithumb_bot.decision_equivalence import compare_decision_equivalence
-from bithumb_bot.research import backtest_engine
+from bithumb_bot.research import backtest_engine, backtest_kernel
 from bithumb_bot.research.backtest_engine import (
     BacktestHeartbeatPolicy,
     BacktestResourceLimitExceeded,
@@ -2608,6 +2608,30 @@ def test_sma_backtest_consumes_sma_decision_adapter_events(monkeypatch) -> None:
     assert {decision["strategy_plugin_contract"]["name"] for decision in result.decisions} == {
         "sma_with_filter"
     }
+
+
+def test_sma_backtest_enters_common_kernel_through_public_boundary(monkeypatch) -> None:
+    snapshot = _snapshot_from_closes([100, 99, 98, 97, 99, 102, 105, 104, 103, 100, 98, 96])
+    calls: list[str] = []
+    original = backtest_kernel.run_decision_event_backtest
+
+    def counting_kernel(**kwargs):
+        calls.append(str(kwargs["strategy_name"]))
+        return original(**kwargs)
+
+    monkeypatch.setattr(backtest_kernel, "run_decision_event_backtest", counting_kernel)
+
+    result = run_sma_backtest(
+        dataset=snapshot,
+        parameter_values={"SMA_SHORT": 2, "SMA_LONG": 4},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        context=BacktestRunContext(report_detail="full"),
+    )
+
+    assert calls == ["sma_with_filter"]
+    assert result.decisions
+    assert result.resource_usage["common_decision_behavior_hash"].startswith("sha256:")
 
 
 def test_sma_backtest_source_has_no_growing_prefix_or_hot_loop_sma_calls() -> None:

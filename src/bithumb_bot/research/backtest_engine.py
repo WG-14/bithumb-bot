@@ -689,7 +689,9 @@ def run_sma_backtest_via_kernel(
         slippage_bps=slippage_bps,
         timing_policy=timing_policy,
     )
-    return run_decision_event_backtest(
+    from .backtest_kernel import run_decision_event_backtest as _run_decision_event_backtest
+
+    return _run_decision_event_backtest(
         dataset=dataset,
         strategy_name="sma_with_filter",
         parameter_values=effective_parameters,
@@ -1827,7 +1829,9 @@ def run_buy_and_hold_baseline_backtest(
                 ),
             )
         )
-    return run_decision_event_backtest(
+    from .backtest_kernel import run_decision_event_backtest as _run_decision_event_backtest
+
+    return _run_decision_event_backtest(
         dataset=dataset,
         strategy_name=strategy_plugin.name,
         parameter_values=effective_parameters,
