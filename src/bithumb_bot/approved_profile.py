@@ -34,7 +34,12 @@ from .research.strategy_spec import (
     strategy_parameter_source_map,
     strategy_spec_for_name,
 )
-from .research.strategy_registry import ResearchStrategyRegistryError, resolve_research_strategy_plugin
+from .research.strategy_registry import (
+    ResearchStrategyRegistryError,
+    resolve_research_strategy_plugin,
+    runtime_strategy_parameters_from_env,
+    runtime_strategy_parameters_from_settings,
+)
 from .storage_io import write_json_atomic
 
 
@@ -1177,45 +1182,7 @@ def runtime_contract_from_env_values(env: dict[str, str]) -> dict[str, Any]:
 
     strategy_name = _value("STRATEGY_NAME", default="sma_with_filter")
     _require_runtime_replay_supported_strategy(strategy_name)
-    strategy_parameters = {
-        "SMA_SHORT": _value("SMA_SHORT", default="7"),
-        "SMA_LONG": _value("SMA_LONG", default="30"),
-        "SMA_FILTER_GAP_MIN_RATIO": _value("SMA_FILTER_GAP_MIN_RATIO", default="0.0012"),
-        "SMA_FILTER_VOL_WINDOW": _value("SMA_FILTER_VOL_WINDOW", default="10"),
-        "SMA_FILTER_VOL_MIN_RANGE_RATIO": _value("SMA_FILTER_VOL_MIN_RANGE_RATIO", default="0.003"),
-        "SMA_FILTER_OVEREXT_LOOKBACK": _value("SMA_FILTER_OVEREXT_LOOKBACK", default="3"),
-        "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": _value("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", default="0.02"),
-        "SMA_MARKET_REGIME_ENABLED": _value("SMA_MARKET_REGIME_ENABLED", default="true"),
-        "SMA_COST_EDGE_ENABLED": _value("SMA_COST_EDGE_ENABLED", default="true"),
-        "SMA_COST_EDGE_MIN_RATIO": _value(
-            "SMA_COST_EDGE_MIN_RATIO",
-            "STRATEGY_MIN_EXPECTED_EDGE_RATIO",
-            default="0",
-        ),
-        "ENTRY_EDGE_BUFFER_RATIO": _value("ENTRY_EDGE_BUFFER_RATIO", default="0.0005"),
-        "STRATEGY_MIN_EXPECTED_EDGE_RATIO": _value("STRATEGY_MIN_EXPECTED_EDGE_RATIO", default="0"),
-        "STRATEGY_ENTRY_SLIPPAGE_BPS": _value(
-            "STRATEGY_ENTRY_SLIPPAGE_BPS",
-            "MAX_MARKET_SLIPPAGE_BPS",
-            "SLIPPAGE_BPS",
-            default="0",
-        ),
-        "LIVE_FEE_RATE_ESTIMATE": _value(
-            "LIVE_FEE_RATE_ESTIMATE",
-            "PAPER_FEE_RATE",
-            "PAPER_FEE_RATE_ESTIMATE",
-            "FEE_RATE",
-            default="0.0004",
-        ),
-        "STRATEGY_EXIT_RULES": _value("STRATEGY_EXIT_RULES", default="stop_loss,opposite_cross,max_holding_time"),
-        "STRATEGY_EXIT_STOP_LOSS_RATIO": _value("STRATEGY_EXIT_STOP_LOSS_RATIO", default="0"),
-        "STRATEGY_EXIT_MAX_HOLDING_MIN": _value("STRATEGY_EXIT_MAX_HOLDING_MIN", default="0"),
-        "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": _value("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", default="0"),
-        "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": _value(
-            "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO",
-            default="0",
-        ),
-    }
+    strategy_parameters = runtime_strategy_parameters_from_env(strategy_name, env)
     runtime = {
         "mode": _value("MODE", default="paper"),
         "live_dry_run": _value("LIVE_DRY_RUN", default="true"),
@@ -1259,6 +1226,7 @@ def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
     )
     strategy_name = str(getattr(cfg, "STRATEGY_NAME", "") or "sma_with_filter")
     _require_runtime_replay_supported_strategy(strategy_name)
+    strategy_parameters = runtime_strategy_parameters_from_settings(strategy_name, cfg)
     runtime = {
         "mode": str(getattr(cfg, "MODE", "")),
         "live_dry_run": bool(getattr(cfg, "LIVE_DRY_RUN", True)),
@@ -1267,29 +1235,7 @@ def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
         "strategy_name": strategy_name,
         "market": str(getattr(cfg, "PAIR", "")),
         "interval": str(getattr(cfg, "INTERVAL", "")),
-        "strategy_parameters": {
-            "SMA_SHORT": int(getattr(cfg, "SMA_SHORT")),
-            "SMA_LONG": int(getattr(cfg, "SMA_LONG")),
-            "SMA_FILTER_GAP_MIN_RATIO": float(getattr(cfg, "SMA_FILTER_GAP_MIN_RATIO")),
-            "SMA_FILTER_VOL_WINDOW": int(getattr(cfg, "SMA_FILTER_VOL_WINDOW")),
-            "SMA_FILTER_VOL_MIN_RANGE_RATIO": float(getattr(cfg, "SMA_FILTER_VOL_MIN_RANGE_RATIO")),
-            "SMA_FILTER_OVEREXT_LOOKBACK": int(getattr(cfg, "SMA_FILTER_OVEREXT_LOOKBACK")),
-            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": float(getattr(cfg, "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO")),
-            "SMA_MARKET_REGIME_ENABLED": bool(getattr(cfg, "SMA_MARKET_REGIME_ENABLED", True)),
-            "SMA_COST_EDGE_ENABLED": bool(getattr(cfg, "SMA_COST_EDGE_ENABLED")),
-            "SMA_COST_EDGE_MIN_RATIO": float(getattr(cfg, "SMA_COST_EDGE_MIN_RATIO")),
-            "ENTRY_EDGE_BUFFER_RATIO": float(getattr(cfg, "ENTRY_EDGE_BUFFER_RATIO")),
-            "STRATEGY_MIN_EXPECTED_EDGE_RATIO": float(getattr(cfg, "STRATEGY_MIN_EXPECTED_EDGE_RATIO")),
-            "STRATEGY_ENTRY_SLIPPAGE_BPS": float(getattr(cfg, "STRATEGY_ENTRY_SLIPPAGE_BPS")),
-            "LIVE_FEE_RATE_ESTIMATE": float(getattr(cfg, "LIVE_FEE_RATE_ESTIMATE")),
-            "STRATEGY_EXIT_RULES": str(getattr(cfg, "STRATEGY_EXIT_RULES")),
-            "STRATEGY_EXIT_STOP_LOSS_RATIO": float(getattr(cfg, "STRATEGY_EXIT_STOP_LOSS_RATIO")),
-            "STRATEGY_EXIT_MAX_HOLDING_MIN": int(getattr(cfg, "STRATEGY_EXIT_MAX_HOLDING_MIN")),
-            "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": float(getattr(cfg, "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO")),
-            "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": float(
-                getattr(cfg, "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO")
-            ),
-        },
+        "strategy_parameters": strategy_parameters,
         "cost_model": {
             "fee_rate": float(getattr(cfg, "LIVE_FEE_RATE_ESTIMATE")),
             "slippage_bps": float(getattr(cfg, "STRATEGY_ENTRY_SLIPPAGE_BPS")),

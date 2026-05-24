@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -38,7 +39,11 @@ from bithumb_bot.paths import PathConfig, PathManager, PathPolicyError
 from bithumb_bot.execution_reality_contract import build_execution_reality_contract
 from bithumb_bot.execution_reality_contract import execution_capability_contract_hash, execution_contract_hash
 from bithumb_bot.research.promotion_gate import build_candidate_profile
-from bithumb_bot.research.strategy_registry import resolve_research_strategy_plugin
+from bithumb_bot.research.strategy_registry import (
+    runtime_strategy_parameters_from_env,
+    runtime_strategy_parameters_from_settings,
+    resolve_research_strategy_plugin,
+)
 from bithumb_bot.research.strategy_spec import strategy_spec_for_name
 from bithumb_bot.research.validation_pipeline import validation_run_binding_hash, validation_run_content_hash
 from bithumb_bot.storage_io import write_json_atomic
@@ -1289,6 +1294,77 @@ def test_runtime_contract_includes_sma_market_regime_enabled(tmp_path: Path) -> 
     runtime = runtime_contract_from_env_values(parse_env_file(env_path))
 
     assert runtime["strategy_parameters"]["SMA_MARKET_REGIME_ENABLED"] == "false"
+
+
+def test_runtime_contract_extracts_sma_parameters_through_strategy_adapter() -> None:
+    env = {
+        "STRATEGY_NAME": "sma_with_filter",
+        "SMA_SHORT": "2",
+        "SMA_LONG": "4",
+        "SMA_MARKET_REGIME_ENABLED": "false",
+        "SMA_COST_EDGE_MIN_RATIO": "0.001",
+        "STRATEGY_ENTRY_SLIPPAGE_BPS": "50",
+        "LIVE_FEE_RATE_ESTIMATE": "0.0025",
+    }
+
+    runtime = runtime_contract_from_env_values(env)
+    adapter_parameters = runtime_strategy_parameters_from_env("sma_with_filter", env)
+
+    assert runtime["strategy_parameters"] == adapter_parameters
+    assert set(adapter_parameters) <= set(strategy_spec_for_name("sma_with_filter").accepted_parameter_names)
+    source = inspect.getsource(runtime_contract_from_env_values)
+    assert "runtime_strategy_parameters_from_env(strategy_name, env)" in source
+    assert '"SMA_SHORT":' not in source
+
+
+def test_runtime_contract_from_settings_uses_strategy_adapter() -> None:
+    class Cfg:
+        MODE = "paper"
+        LIVE_DRY_RUN = True
+        LIVE_REAL_ORDER_ARMED = False
+        APPROVED_STRATEGY_PROFILE_PATH = ""
+        STRATEGY_APPROVED_PROFILE_PATH = ""
+        STRATEGY_NAME = "sma_with_filter"
+        PAIR = "KRW-BTC"
+        INTERVAL = "1m"
+        SMA_SHORT = 2
+        SMA_LONG = 4
+        SMA_FILTER_GAP_MIN_RATIO = 0.0012
+        SMA_FILTER_VOL_WINDOW = 10
+        SMA_FILTER_VOL_MIN_RANGE_RATIO = 0.003
+        SMA_FILTER_OVEREXT_LOOKBACK = 3
+        SMA_FILTER_OVEREXT_MAX_RETURN_RATIO = 0.02
+        SMA_MARKET_REGIME_ENABLED = True
+        SMA_COST_EDGE_ENABLED = True
+        SMA_COST_EDGE_MIN_RATIO = 0.001
+        ENTRY_EDGE_BUFFER_RATIO = 0.0005
+        STRATEGY_MIN_EXPECTED_EDGE_RATIO = 0.001
+        STRATEGY_ENTRY_SLIPPAGE_BPS = 50
+        LIVE_FEE_RATE_ESTIMATE = 0.0025
+        STRATEGY_EXIT_RULES = "opposite_cross,max_holding_time"
+        STRATEGY_EXIT_STOP_LOSS_RATIO = 0
+        STRATEGY_EXIT_MAX_HOLDING_MIN = 0
+        STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO = 0
+        STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO = 0
+
+    runtime = runtime_contract_from_settings(Cfg)
+    adapter_parameters = runtime_strategy_parameters_from_settings("sma_with_filter", Cfg)
+
+    assert runtime["strategy_parameters"] == adapter_parameters
+    assert set(adapter_parameters) <= set(strategy_spec_for_name("sma_with_filter").accepted_parameter_names)
+    source = inspect.getsource(runtime_contract_from_settings)
+    assert "runtime_strategy_parameters_from_settings(strategy_name, cfg)" in source
+    assert '"SMA_SHORT":' not in source
+
+
+def test_runtime_parameter_adapter_fails_closed_for_non_runtime_replay_strategies() -> None:
+    with pytest.raises(ApprovedProfileError, match="runtime_replay_unsupported_for_strategy:buy_and_hold_baseline"):
+        runtime_contract_from_env_values(
+            {"STRATEGY_NAME": "buy_and_hold_baseline", "SMA_SHORT": "2", "SMA_LONG": "4"}
+        )
+
+    with pytest.raises(ApprovedProfileError, match="runtime_replay_unsupported_for_strategy:noop_baseline"):
+        runtime_contract_from_env_values({"STRATEGY_NAME": "noop_baseline", "SMA_SHORT": "2", "SMA_LONG": "4"})
 
 
 def test_strategy_parameter_env_keys_include_all_runtime_bound_behavior_params() -> None:
