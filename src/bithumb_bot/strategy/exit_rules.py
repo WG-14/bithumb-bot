@@ -193,6 +193,28 @@ def create_exit_rules(
     return rules
 
 
+def merge_exit_rules(
+    common_exit_rules: list[ExitRule],
+    strategy_exit_rules: list[ExitRule],
+) -> list[ExitRule]:
+    """Preserve common risk exits while allowing plugin-owned strategy exits."""
+    merged: list[ExitRule] = []
+    seen: set[str] = set()
+    common_names = {rule.name for rule in common_exit_rules}
+    strategy_names = {rule.name for rule in strategy_exit_rules}
+    if strategy_exit_rules and common_names <= strategy_names:
+        ordered_sources = (strategy_exit_rules, common_exit_rules)
+    else:
+        ordered_sources = (common_exit_rules, strategy_exit_rules)
+    for source in ordered_sources:
+        for rule in source:
+            if rule.name in seen:
+                continue
+            merged.append(rule)
+            seen.add(rule.name)
+    return merged
+
+
 def create_sma_exit_rules(
     *,
     rule_names: list[str],

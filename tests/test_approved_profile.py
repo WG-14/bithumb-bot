@@ -1496,8 +1496,40 @@ def test_runtime_contract_missing_strategy_name_uses_sma_compatibility_default()
     runtime = runtime_contract_from_env_values({"SMA_SHORT": "2", "SMA_LONG": "4"})
 
     assert runtime["strategy_name"] == "sma_with_filter"
+    assert runtime["strategy_name_default_source"] == "backward_compatibility_sma_default"
     assert runtime["strategy_parameters"]["SMA_SHORT"] == "2"
     assert runtime["exit_policy"]["strategy_name"] == "sma_with_filter"
+
+
+def test_runtime_contract_live_like_env_requires_explicit_strategy_name() -> None:
+    with pytest.raises(ApprovedProfileError, match="runtime_strategy_name_required_for_live_like_mode"):
+        runtime_contract_from_env_values({"MODE": "live", "LIVE_DRY_RUN": "true", "SMA_SHORT": "2", "SMA_LONG": "4"})
+
+    runtime = runtime_contract_from_env_values(
+        {
+            "MODE": "live",
+            "LIVE_DRY_RUN": "true",
+            "STRATEGY_NAME": "sma_with_filter",
+            "SMA_SHORT": "2",
+            "SMA_LONG": "4",
+        }
+    )
+
+    assert runtime["strategy_name"] == "sma_with_filter"
+    assert runtime["strategy_name_default_source"] == "explicit_env"
+
+
+def test_runtime_contract_live_like_settings_requires_explicit_strategy_name() -> None:
+    class Cfg:
+        MODE = "live"
+        LIVE_DRY_RUN = False
+        LIVE_REAL_ORDER_ARMED = True
+        APPROVED_STRATEGY_PROFILE_PATH = ""
+        STRATEGY_APPROVED_PROFILE_PATH = ""
+        STRATEGY_NAME = ""
+
+    with pytest.raises(ApprovedProfileError, match="runtime_strategy_name_required_for_live_like_mode"):
+        runtime_contract_from_settings(Cfg)
 
 
 def test_profile_hash_changes_when_effective_strategy_parameter_changes(tmp_path: Path) -> None:

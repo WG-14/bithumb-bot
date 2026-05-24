@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from bithumb_bot.market_regime import aggregate_regime_coverage, aggregate_regime_performance
+from bithumb_bot.strategy.exit_rules import merge_exit_rules
 
 from . import backtest_engine as _engine
 from .decision_event import ResearchDecisionEvent
@@ -356,7 +357,7 @@ def _run_decision_event_backtest_impl(
                         else 0.0
                     ),
                 )
-                exit_rules = _create_exit_rules(
+                common_exit_rules = _create_exit_rules(
                     rule_names=list(active_exit_policy.get("common_rules") or ()),
                     stop_loss_ratio=float(active_exit_policy.get("stop_loss", {}).get("stop_loss_ratio", 0.0)),
                     max_holding_sec=float(
@@ -364,12 +365,16 @@ def _run_decision_event_backtest_impl(
                     )
                     * 60.0,
                 )
+                strategy_exit_rules = []
                 if strategy_plugin.exit_rule_factory is not None:
-                    exit_rules = strategy_plugin.exit_rule_factory(
+                    strategy_exit_rules = strategy_plugin.exit_rule_factory(
                         active_exit_policy,
                         parameter_values,
                         fee_rate,
                     )
+                exit_rules = merge_exit_rules(common_exit_rules, strategy_exit_rules)
+                common_exit_rule_names = {rule.name for rule in common_exit_rules}
+                strategy_exit_rule_names = {rule.name for rule in strategy_exit_rules}
                 for rule in exit_rules:
                     strategy_signal_context = (
                         strategy_plugin.exit_signal_context_builder(event)
@@ -391,6 +396,11 @@ def _run_decision_event_backtest_impl(
                     exit_evaluations.append(
                         {
                             "rule": rule.name,
+                            "rule_source": _exit_rule_source(
+                                rule_name=rule.name,
+                                common_exit_rule_names=common_exit_rule_names,
+                                strategy_exit_rule_names=strategy_exit_rule_names,
+                            ),
                             "triggered": bool(result.should_exit),
                             "reason": result.reason,
                             "context": result.context,
@@ -696,6 +706,7 @@ def _run_decision_event_backtest_impl(
         slippage_total=slippage_total,
         closed_pnls=closed_pnls,
     )
+
     _mark_pending_fills_at_end(pending_fills=pending_fills, trades=trades, final_mark_ts=last_mark_ts)
     final_equity = cash + qty * float(last.close)
     retain_final_equity = accumulator.retain_equity_point()
@@ -779,3 +790,20 @@ def _run_decision_event_backtest_impl(
         ),
         audit_trace_index=audit_trace_index,
     )
+
+
+def _exit_rule_source(
+    *,
+    rule_name: str,
+    common_exit_rule_names: set[str],
+    strategy_exit_rule_names: set[str],
+) -> str:
+    in_common = rule_name in common_exit_rule_names
+    in_strategy = rule_name in strategy_exit_rule_names
+    if in_common and in_strategy:
+        return "common_risk_and_plugin"
+    if in_common:
+        return "common_risk"
+    if in_strategy:
+        return "plugin"
+    return "unknown"

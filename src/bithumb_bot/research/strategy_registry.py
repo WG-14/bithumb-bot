@@ -61,10 +61,83 @@ class ResearchStrategyRegistryError(ValueError):
 
 
 @dataclass(frozen=True)
+class DataCapabilityRequirement:
+    name: str
+    required: bool = True
+    min_coverage_pct: float | None = None
+    evidence_level: str | None = None
+    source: str | None = None
+    notes: str | None = None
+
+    def __post_init__(self) -> None:
+        normalized = str(self.name or "").strip().lower()
+        if not normalized:
+            raise ValueError("data capability name must be non-empty")
+        object.__setattr__(self, "name", normalized)
+        if self.min_coverage_pct is not None:
+            coverage = float(self.min_coverage_pct)
+            if coverage < 0.0 or coverage > 100.0:
+                raise ValueError("data capability min_coverage_pct must be between 0 and 100")
+            object.__setattr__(self, "min_coverage_pct", coverage)
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": self.name,
+            "required": bool(self.required),
+        }
+        if self.min_coverage_pct is not None:
+            payload["min_coverage_pct"] = float(self.min_coverage_pct)
+        if self.evidence_level is not None:
+            payload["evidence_level"] = str(self.evidence_level)
+        if self.source is not None:
+            payload["source"] = str(self.source)
+        if self.notes is not None:
+            payload["notes"] = str(self.notes)
+        return payload
+
+
+@dataclass(frozen=True)
 class ResearchStrategyDataRequirements:
     required_data: tuple[str, ...]
     optional_data: tuple[str, ...] = ()
     unsupported_without: tuple[str, ...] = ()
+    capabilities: tuple[DataCapabilityRequirement, ...] = ()
+
+    def normalized_capabilities(self) -> tuple[DataCapabilityRequirement, ...]:
+        return normalized_data_capabilities(
+            required_data=self.required_data,
+            optional_data=self.optional_data,
+            capabilities=self.capabilities,
+        )
+
+    def capability_contract_payload(self) -> dict[str, Any]:
+        capabilities = self.normalized_capabilities()
+        return {
+            "schema_version": 1,
+            "required_data": list(self.required_data),
+            "optional_data": list(self.optional_data),
+            "capabilities": [capability.as_dict() for capability in capabilities],
+        }
+
+
+def normalized_data_capabilities(
+    *,
+    required_data: tuple[str, ...],
+    optional_data: tuple[str, ...] = (),
+    capabilities: tuple[DataCapabilityRequirement, ...] = (),
+) -> tuple[DataCapabilityRequirement, ...]:
+    by_name: dict[str, DataCapabilityRequirement] = {}
+    for raw_name in required_data:
+        name = str(raw_name).strip().lower()
+        if name:
+            by_name[name] = DataCapabilityRequirement(name=name, required=True)
+    for raw_name in optional_data:
+        name = str(raw_name).strip().lower()
+        if name and name not in by_name:
+            by_name[name] = DataCapabilityRequirement(name=name, required=False)
+    for capability in capabilities:
+        by_name[capability.name] = capability
+    return tuple(by_name[name] for name in sorted(by_name))
 
 
 @dataclass(frozen=True)
@@ -92,12 +165,17 @@ class ResearchStrategyPlugin:
     research_export_normalizer: ResearchExportNormalizer | None = None
 
     def contract_payload(self) -> dict[str, Any]:
+        data_requirements = ResearchStrategyDataRequirements(
+            required_data=self.required_data,
+            optional_data=self.optional_data,
+        )
         return {
             "name": self.name,
             "version": self.version,
             "strategy_spec_hash": self.spec.spec_hash(),
             "required_data": list(self.required_data),
             "optional_data": list(self.optional_data),
+            "data_capability_contract": data_requirements.capability_contract_payload(),
             "behavior_affecting_parameter_names": list(self.spec.behavior_affecting_parameter_names),
             "runner_module": self.runner.__module__,
             "runner_qualname": self.runner.__qualname__,
@@ -179,7 +257,19 @@ TEST_TOP_OF_BOOK_REQUIRED_STRATEGY = "__test_top_of_book_required__"
 
 def research_strategy_data_requirements(strategy_name: str) -> ResearchStrategyDataRequirements:
     if strategy_name == TEST_TOP_OF_BOOK_REQUIRED_STRATEGY:
-        return ResearchStrategyDataRequirements(required_data=("candles", "top_of_book"))
+        return ResearchStrategyDataRequirements(
+            required_data=("candles", "top_of_book"),
+            capabilities=(
+                DataCapabilityRequirement(
+                    name="top_of_book",
+                    required=True,
+                    min_coverage_pct=100.0,
+                    evidence_level="best_bid_ask",
+                    source="sqlite_orderbook_top_snapshots",
+                    notes="private test hook for required top-of-book preflight",
+                ),
+            ),
+        )
     plugin = resolve_research_strategy_plugin(strategy_name)
     return ResearchStrategyDataRequirements(
         required_data=plugin.required_data,

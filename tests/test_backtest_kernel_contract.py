@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 
 from bithumb_bot.research import backtest_engine, backtest_kernel
+import bithumb_bot.research.strategy_registry as strategy_registry
 from bithumb_bot.research.backtest_engine import BacktestRunContext
 from bithumb_bot.research.backtest_kernel import BacktestKernel, run_decision_event_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.decision_event import ResearchDecisionEvent
 from bithumb_bot.research.experiment_manifest import DateRange
+from bithumb_bot.strategy.exit_rules import create_exit_rules, create_sma_exit_rules
 
 
 def test_decision_event_backtest_kernel_executes_buy_and_updates_portfolio() -> None:
@@ -195,6 +198,97 @@ def test_decision_event_backtest_kernel_evaluates_exit_intent_without_sma_fields
     assert result.strategy_diagnostics["stop_loss_exit_count"] == 1
     assert result.resource_usage["common_decision_behavior_hash"].startswith("sha256:")
     assert result.resource_usage["composite_behavior_hash_v2"].startswith("sha256:")
+
+
+def test_plugin_exit_factory_cannot_remove_common_stop_loss(monkeypatch) -> None:
+    dataset = DatasetSnapshot(
+        snapshot_id="kernel_exit_common_risk_preserved",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=(
+            Candle(0, 100.0, 100.0, 100.0, 100.0, 1.0),
+            Candle(60_000, 100.0, 100.0, 100.0, 100.0, 1.0),
+            Candle(120_000, 90.0, 90.0, 90.0, 90.0, 1.0),
+        ),
+    )
+    plugin = strategy_registry.resolve_research_strategy_plugin("sma_with_filter")
+    changed = replace(plugin, exit_rule_factory=lambda _policy, _params, _fee: [])
+    monkeypatch.setitem(strategy_registry._RESEARCH_STRATEGY_PLUGINS, "sma_with_filter", changed)
+    events = (
+        ResearchDecisionEvent(
+            candle_ts=dataset.candles[0].ts,
+            decision_ts=dataset.candles[0].ts + 60_000,
+            strategy_name="sma_with_filter",
+            strategy_version="sma_with_filter.research_contract.v1",
+            raw_signal="BUY",
+            final_signal="BUY",
+            reason="entry",
+            feature_snapshot={"close": 100.0},
+            strategy_diagnostics={},
+            entry_signal="BUY",
+            order_intent={"side": "BUY"},
+            exit_intent={"mode": "evaluate_exit_policy"},
+        ),
+        ResearchDecisionEvent(
+            candle_ts=dataset.candles[2].ts,
+            decision_ts=dataset.candles[2].ts + 60_000,
+            strategy_name="sma_with_filter",
+            strategy_version="sma_with_filter.research_contract.v1",
+            raw_signal="HOLD",
+            final_signal="HOLD",
+            reason="hold",
+            feature_snapshot={"close": 90.0},
+            strategy_diagnostics={},
+            entry_signal="HOLD",
+            exit_signal="HOLD",
+            exit_intent={"mode": "evaluate_exit_policy"},
+        ),
+    )
+
+    result = run_decision_event_backtest(
+        dataset=dataset,
+        strategy_name="sma_with_filter",
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 4,
+            "STRATEGY_EXIT_RULES": "stop_loss",
+            "STRATEGY_EXIT_STOP_LOSS_RATIO": 0.05,
+            "STRATEGY_EXIT_MAX_HOLDING_MIN": 0,
+            "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": 0,
+            "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": 0,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        decision_events=events,
+        context=BacktestRunContext(report_detail="full"),
+    )
+
+    assert result.decisions[-1]["exit_rule"] == "stop_loss"
+    assert result.decisions[-1]["exit_evaluations"][0]["rule"] == "stop_loss"
+    assert result.decisions[-1]["exit_evaluations"][0]["rule_source"] == "common_risk"
+
+
+def test_common_and_sma_exit_factories_keep_strategy_owned_opposite_cross_boundary() -> None:
+    try:
+        create_exit_rules(rule_names=["opposite_cross"], max_holding_sec=0.0)
+    except ValueError as exc:
+        assert "unknown exit rule='opposite_cross'" in str(exc)
+    else:
+        raise AssertionError("common create_exit_rules accepted opposite_cross")
+
+    rules = create_sma_exit_rules(
+        rule_names=["stop_loss", "opposite_cross", "max_holding_time"],
+        max_holding_sec=60.0,
+        min_take_profit_ratio=0.0,
+        live_fee_rate_estimate=0.0,
+        small_loss_tolerance_ratio=0.0,
+        stop_loss_ratio=0.01,
+    )
+
+    assert [rule.name for rule in rules] == ["stop_loss", "opposite_cross", "max_holding_time"]
 
 
 def test_backtest_kernel_class_preserves_decision_event_api_behavior() -> None:

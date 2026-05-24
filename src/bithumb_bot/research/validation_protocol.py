@@ -4455,8 +4455,34 @@ def _quality_reports(
 
 def _validate_strategy_data_requirements(manifest: ExperimentManifest) -> None:
     requirements = research_strategy_data_requirements(manifest.strategy_name)
-    if "top_of_book" in requirements.required_data and manifest.dataset.top_of_book is None:
-        raise ResearchValidationError("research_data_requirement_top_of_book_missing")
+    available = _manifest_data_capabilities(manifest)
+    missing = [
+        capability.name
+        for capability in requirements.normalized_capabilities()
+        if capability.required and not bool(available.get(capability.name))
+    ]
+    if missing:
+        reason = ",".join(missing)
+        if missing == ["top_of_book"]:
+            raise ResearchValidationError("research_data_requirement_top_of_book_missing")
+        raise ResearchValidationError(f"research_data_capability_missing:{reason}")
+
+
+def _manifest_data_capabilities(manifest: ExperimentManifest) -> dict[str, bool]:
+    top_of_book_requested = manifest.dataset.top_of_book is not None
+    return {
+        "candles": manifest.dataset.source == "sqlite_candles",
+        "top_of_book": top_of_book_requested,
+        "l2_depth_snapshot": any(scenario.type == "depth_walk" for scenario in manifest.execution_model.scenarios),
+        "depth_walk": any(scenario.type == "depth_walk" for scenario in manifest.execution_model.scenarios),
+        "trade_ticks": False,
+        "funding": False,
+        "cross_asset": False,
+        "on_chain": False,
+        "calibration_artifacts": bool(manifest.execution_model.calibration_required),
+        "execution_evidence": top_of_book_requested
+        or any(scenario.type == "depth_walk" for scenario in manifest.execution_model.scenarios),
+    }
 
 
 def _combined_dataset_quality_gate(

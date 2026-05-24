@@ -1164,17 +1164,31 @@ def runtime_contract_from_env_values(env: dict[str, str]) -> dict[str, Any]:
                 return env[key]
         return default
 
+    raw_strategy_name = _value("STRATEGY_NAME")
+    mode = _value("MODE", default="paper")
+    live_dry_run = _value("LIVE_DRY_RUN", default="true")
+    live_real_order_armed = _value("LIVE_REAL_ORDER_ARMED", default="false")
+    if not raw_strategy_name and _live_like_runtime_requires_explicit_strategy(
+        mode=mode,
+        live_dry_run=live_dry_run,
+        live_real_order_armed=live_real_order_armed,
+    ):
+        raise ApprovedProfileError("runtime_strategy_name_required_for_live_like_mode")
     # Backward-compatibility default for existing paper/runtime env files.
     # Unsupported or non-runtime-capable explicit strategy names still fail closed below.
-    strategy_name = _value("STRATEGY_NAME", default="sma_with_filter")
+    strategy_name = raw_strategy_name or "sma_with_filter"
+    strategy_name_default_source = (
+        "explicit_env" if raw_strategy_name else "backward_compatibility_sma_default"
+    )
     _require_runtime_replay_supported_strategy(strategy_name)
     strategy_parameters = runtime_strategy_parameters_from_env(strategy_name, env)
     runtime = {
-        "mode": _value("MODE", default="paper"),
-        "live_dry_run": _value("LIVE_DRY_RUN", default="true"),
-        "live_real_order_armed": _value("LIVE_REAL_ORDER_ARMED", default="false"),
+        "mode": mode,
+        "live_dry_run": live_dry_run,
+        "live_real_order_armed": live_real_order_armed,
         "profile_selector": _value(APPROVED_PROFILE_SELECTOR_ENV, "STRATEGY_APPROVED_PROFILE_PATH"),
         "strategy_name": strategy_name,
+        "strategy_name_default_source": strategy_name_default_source,
         "market": _value("MARKET", "PAIR", default="KRW-BTC"),
         "interval": _value("INTERVAL", default="1m"),
         "strategy_parameters": strategy_parameters,
@@ -1210,17 +1224,31 @@ def runtime_contract_from_settings(cfg: object) -> dict[str, Any]:
         str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
         or str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
     )
+    mode = str(getattr(cfg, "MODE", ""))
+    live_dry_run = bool(getattr(cfg, "LIVE_DRY_RUN", True))
+    live_real_order_armed = bool(getattr(cfg, "LIVE_REAL_ORDER_ARMED", False))
+    raw_strategy_name = str(getattr(cfg, "STRATEGY_NAME", "") or "").strip()
+    if not raw_strategy_name and _live_like_runtime_requires_explicit_strategy(
+        mode=mode,
+        live_dry_run=live_dry_run,
+        live_real_order_armed=live_real_order_armed,
+    ):
+        raise ApprovedProfileError("runtime_strategy_name_required_for_live_like_mode")
     # Backward-compatibility default for existing paper/runtime settings objects.
     # Unsupported or non-runtime-capable explicit strategy names still fail closed below.
-    strategy_name = str(getattr(cfg, "STRATEGY_NAME", "") or "sma_with_filter")
+    strategy_name = raw_strategy_name or "sma_with_filter"
+    strategy_name_default_source = (
+        "explicit_settings" if raw_strategy_name else "backward_compatibility_sma_default"
+    )
     _require_runtime_replay_supported_strategy(strategy_name)
     strategy_parameters = runtime_strategy_parameters_from_settings(strategy_name, cfg)
     runtime = {
-        "mode": str(getattr(cfg, "MODE", "")),
-        "live_dry_run": bool(getattr(cfg, "LIVE_DRY_RUN", True)),
-        "live_real_order_armed": bool(getattr(cfg, "LIVE_REAL_ORDER_ARMED", False)),
+        "mode": mode,
+        "live_dry_run": live_dry_run,
+        "live_real_order_armed": live_real_order_armed,
         "profile_selector": profile_selector,
         "strategy_name": strategy_name,
+        "strategy_name_default_source": strategy_name_default_source,
         "market": str(getattr(cfg, "PAIR", "")),
         "interval": str(getattr(cfg, "INTERVAL", "")),
         "strategy_parameters": strategy_parameters,
@@ -1247,6 +1275,18 @@ def _require_runtime_replay_supported_strategy(strategy_name: str) -> None:
         raise ApprovedProfileError(f"runtime_strategy_unsupported:{strategy_name}") from exc
     if plugin.runtime_replay_builder is None:
         raise ApprovedProfileError(f"runtime_replay_unsupported_for_strategy:{plugin.name}")
+
+
+def _live_like_runtime_requires_explicit_strategy(
+    *,
+    mode: object,
+    live_dry_run: object,
+    live_real_order_armed: object,
+) -> bool:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode != "live":
+        return False
+    return _bool_value(live_dry_run) or _bool_value(live_real_order_armed)
 
 
 def _execution_contract_from_env_values(env: dict[str, str]) -> dict[str, Any] | None:

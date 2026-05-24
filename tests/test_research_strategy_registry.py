@@ -7,15 +7,18 @@ from dataclasses import replace
 import pytest
 
 from bithumb_bot.research.strategy_registry import (
+    DataCapabilityRequirement,
     TEST_TOP_OF_BOOK_REQUIRED_STRATEGY,
     ResearchStrategyRegistryError,
     RuntimeParameterAdapter,
+    ResearchStrategyDataRequirements,
     research_strategy_data_requirements,
     resolve_research_strategy_plugin,
     resolve_research_strategy,
     runtime_strategy_parameter_env_keys,
 )
 import bithumb_bot.research.strategy_registry as strategy_registry
+import bithumb_bot.research.validation_protocol as validation_protocol
 from bithumb_bot.research.strategy_spec import exit_policy_from_parameters, strategy_spec_for_name
 from bithumb_bot.research.experiment_manifest import parse_manifest
 from bithumb_bot.research.validation_protocol import ResearchValidationError, _validate_strategy_data_requirements
@@ -60,6 +63,50 @@ def test_research_strategy_registry_resolves_sma_with_filter() -> None:
     requirements = research_strategy_data_requirements("sma_with_filter")
     assert requirements.required_data == ("candles",)
     assert requirements.optional_data == ("top_of_book",)
+    assert requirements.normalized_capabilities()[0].name == "candles"
+    assert plugin.contract_payload()["data_capability_contract"]["schema_version"] == 1
+    assert {"name": "candles", "required": True} in plugin.contract_payload()["data_capability_contract"][
+        "capabilities"
+    ]
+    assert {"name": "top_of_book", "required": False} in plugin.contract_payload()["data_capability_contract"][
+        "capabilities"
+    ]
+
+
+def test_data_capability_requirement_contract_supports_required_optional_and_coverage() -> None:
+    requirements = ResearchStrategyDataRequirements(
+        required_data=("candles",),
+        optional_data=("top_of_book",),
+        capabilities=(
+            DataCapabilityRequirement(
+                name="l2_depth_snapshot",
+                required=True,
+                min_coverage_pct=95.0,
+                evidence_level="depth_walk",
+                source="sqlite_orderbook_depth_snapshots",
+                notes="required by depth-aware strategy",
+            ),
+            DataCapabilityRequirement(name="trade_ticks", required=False, evidence_level="tick_replay"),
+        ),
+    )
+
+    payload = requirements.capability_contract_payload()
+
+    assert payload["required_data"] == ["candles"]
+    assert payload["optional_data"] == ["top_of_book"]
+    assert {"name": "candles", "required": True} in payload["capabilities"]
+    assert {"name": "top_of_book", "required": False} in payload["capabilities"]
+    assert {
+        "name": "l2_depth_snapshot",
+        "required": True,
+        "min_coverage_pct": 95.0,
+        "evidence_level": "depth_walk",
+        "source": "sqlite_orderbook_depth_snapshots",
+        "notes": "required by depth-aware strategy",
+    } in payload["capabilities"]
+    assert {"name": "trade_ticks", "required": False, "evidence_level": "tick_replay"} in payload[
+        "capabilities"
+    ]
 
 
 def test_research_strategy_registry_resolves_noop_baseline_as_independent_plugin() -> None:
@@ -215,6 +262,89 @@ def test_required_data_preflight_fails_before_backtest_when_manifest_lacks_top_o
 
     with pytest.raises(ResearchValidationError, match="research_data_requirement_top_of_book_missing"):
         _validate_strategy_data_requirements(manifest)
+
+
+def test_required_l2_or_trade_tick_capability_fails_before_backtest(monkeypatch) -> None:
+    manifest = parse_manifest(
+        {
+            "experiment_id": "required_data_capability_preflight",
+            "hypothesis": "required capability preflight fails before backtest execution",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "dataset": {
+                "source": "sqlite_candles",
+                "snapshot_id": "candles_only",
+                "train": {"start": "2023-01-01", "end": "2023-01-01"},
+                "validation": {"start": "2023-01-02", "end": "2023-01-02"},
+            },
+            "parameter_space": {"SMA_SHORT": [2], "SMA_LONG": [4]},
+            "cost_model": {"fee_rate": 0.001, "slippage_bps": [0]},
+            "acceptance_gate": {
+                "min_trade_count": 1,
+                "max_mdd_pct": 50,
+                "min_profit_factor": 1.0,
+                "oos_return_must_be_positive": True,
+                "parameter_stability_required": False,
+            },
+        }
+    )
+
+    monkeypatch.setattr(
+        validation_protocol,
+        "research_strategy_data_requirements",
+        lambda _strategy_name: ResearchStrategyDataRequirements(
+            required_data=("candles",),
+            capabilities=(
+                DataCapabilityRequirement(name="l2_depth_snapshot", required=True),
+                DataCapabilityRequirement(name="trade_ticks", required=True),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        ResearchValidationError,
+        match="research_data_capability_missing:l2_depth_snapshot,trade_ticks",
+    ):
+        _validate_strategy_data_requirements(manifest)
+
+
+def test_optional_data_capability_does_not_fail_preflight(monkeypatch) -> None:
+    manifest = parse_manifest(
+        {
+            "experiment_id": "optional_data_capability_preflight",
+            "hypothesis": "optional capability preflight does not fail execution",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "dataset": {
+                "source": "sqlite_candles",
+                "snapshot_id": "candles_only",
+                "train": {"start": "2023-01-01", "end": "2023-01-01"},
+                "validation": {"start": "2023-01-02", "end": "2023-01-02"},
+            },
+            "parameter_space": {"SMA_SHORT": [2], "SMA_LONG": [4]},
+            "cost_model": {"fee_rate": 0.001, "slippage_bps": [0]},
+            "acceptance_gate": {
+                "min_trade_count": 1,
+                "max_mdd_pct": 50,
+                "min_profit_factor": 1.0,
+                "oos_return_must_be_positive": True,
+                "parameter_stability_required": False,
+            },
+        }
+    )
+
+    monkeypatch.setattr(
+        validation_protocol,
+        "research_strategy_data_requirements",
+        lambda _strategy_name: ResearchStrategyDataRequirements(
+            required_data=("candles",),
+            capabilities=(DataCapabilityRequirement(name="trade_ticks", required=False),),
+        ),
+    )
+
+    _validate_strategy_data_requirements(manifest)
 
 
 def test_old_top_of_book_required_test_name_is_not_operator_supported() -> None:
