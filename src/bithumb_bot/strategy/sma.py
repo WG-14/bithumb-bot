@@ -1618,6 +1618,11 @@ class SmaWithFilterStrategy:
         )
 
 
+_evaluate_sma_with_filter_normalized_db_decision = (
+    SmaWithFilterStrategy._decide_from_normalized_db
+)
+
+
 def decide_sma_with_filter_snapshot_from_db(
     conn: sqlite3.Connection,
     strategy: SmaWithFilterStrategy,
@@ -1629,7 +1634,7 @@ def decide_sma_with_filter_snapshot_from_db(
 
     This helper is the explicit bridge from mutable runtime state to immutable
     policy snapshots: state normalization may persist before the read-only
-    strategy facade loads market and position snapshots.
+    final-decision assembler path loads market and position snapshots.
     """
     signal_through_ts_ms = _resolve_signal_through_ts_ms(
         interval=strategy.interval,
@@ -1651,7 +1656,11 @@ def decide_sma_with_filter_snapshot_from_db(
             slippage_bps=float(strategy.slippage_bps),
             entry_edge_buffer_ratio=float(strategy.entry_edge_buffer_ratio),
         )
-    return strategy._decide_from_normalized_db(conn, through_ts_ms=signal_through_ts_ms)
+    return _evaluate_sma_with_filter_normalized_db_decision(
+        strategy,
+        conn,
+        through_ts_ms=signal_through_ts_ms,
+    )
 
 
 def _resolve_signal_through_ts_ms(*, interval: str, through_ts_ms: int | None) -> int | None:

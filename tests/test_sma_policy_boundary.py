@@ -594,7 +594,7 @@ def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() ->
     assert "_load_position_context(" in normalized_db_source
     assert "normalize_and_persist(" in orchestration_source
     assert "strategy.decide(" not in orchestration_source
-    assert "_decide_from_normalized_db(" in orchestration_source
+    assert "_evaluate_sma_with_filter_normalized_db_decision(" in orchestration_source
 
 
 class _CommitCountingConnection:
@@ -754,7 +754,15 @@ def test_snapshot_orchestration_does_not_call_legacy_decide_facade(monkeypatch) 
     def _raise_legacy_decide(*args, **kwargs):
         raise AssertionError("legacy decide facade was called")
 
+    def _raise_legacy_normalized_db_decide(*args, **kwargs):
+        raise AssertionError("legacy normalized DB strategy method was called")
+
     monkeypatch.setattr(runtime_sma.SmaWithFilterStrategy, "decide", _raise_legacy_decide)
+    monkeypatch.setattr(
+        runtime_sma.SmaWithFilterStrategy,
+        "_decide_from_normalized_db",
+        _raise_legacy_normalized_db_decide,
+    )
 
     class _Normalizer:
         def normalize_and_persist(self, conn, **kwargs):
@@ -783,11 +791,19 @@ def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -
     def _raise_legacy_decide(*args, **kwargs):
         raise AssertionError("legacy decide facade was called")
 
+    def _raise_legacy_normalized_db_decide(*args, **kwargs):
+        raise AssertionError("legacy normalized DB strategy method was called")
+
     def _decide_snapshot(self, **kwargs):
         events.append("policy")
         return original_decide_snapshot(self, **kwargs)
 
     monkeypatch.setattr(runtime_sma.SmaWithFilterStrategy, "decide", _raise_legacy_decide)
+    monkeypatch.setattr(
+        runtime_sma.SmaWithFilterStrategy,
+        "_decide_from_normalized_db",
+        _raise_legacy_normalized_db_decide,
+    )
     monkeypatch.setattr(runtime_sma.SmaWithFilterStrategy, "decide_snapshot", _decide_snapshot)
 
     try:

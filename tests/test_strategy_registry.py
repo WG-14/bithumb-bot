@@ -12,6 +12,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import compute_signal
 from bithumb_bot.strategy import create_strategy, list_strategies
+from bithumb_bot.strategy.base import StrategyDecision
 
 
 def test_registry_default_strategy_available() -> None:
@@ -70,7 +71,11 @@ def test_compute_signal_routes_sma_with_filter_through_snapshot_orchestration(
 
     def _snapshot_orchestration(conn, strategy, *, through_ts_ms=None, normalizer=None):
         calls.append(strategy.name)
-        return strategy.decide(conn, through_ts_ms=through_ts_ms)
+        return StrategyDecision(
+            signal="HOLD",
+            reason="test snapshot orchestration",
+            context={"strategy": strategy.name},
+        )
 
     monkeypatch.setattr(
         engine_module,
