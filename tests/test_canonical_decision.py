@@ -4,8 +4,10 @@ from bithumb_bot.canonical_decision import (
     CANONICAL_DECISION_SCHEMA_FIELDS,
     canonical_flat_position_state_hash,
     export_research_decisions,
+    export_runtime_replay_decisions,
     runtime_decision_to_canonical_event,
 )
+from bithumb_bot import strategy as strategy_module
 from bithumb_bot.strategy.base import StrategyDecision
 
 
@@ -91,6 +93,62 @@ def test_runtime_strategy_decision_exports_canonical_operational_fields() -> Non
         "required_edge_ratio",
     ):
         assert sma_field not in CANONICAL_DECISION_SCHEMA_FIELDS
+
+
+def test_runtime_replay_routes_sma_with_filter_through_snapshot_orchestration(monkeypatch) -> None:
+    calls: list[int] = []
+
+    class _Strategy:
+        name = "sma_with_filter"
+
+        def decide(self, conn, *, through_ts_ms=None):
+            raise AssertionError("runtime replay must use snapshot orchestration for sma_with_filter")
+
+    def _snapshot_orchestration(conn, strategy, *, through_ts_ms=None, normalizer=None):
+        calls.append(int(through_ts_ms))
+        return StrategyDecision(
+            signal="HOLD",
+            reason="unit",
+            context={
+                "strategy": strategy.name,
+                "ts": int(through_ts_ms),
+                "raw_signal": "HOLD",
+                "final_signal": "HOLD",
+                "position_gate": {
+                    "entry_allowed": True,
+                    "exit_allowed": False,
+                    "dust_state": "flat",
+                    "effective_flat": True,
+                    "normalized_exposure_active": False,
+                    "order_rules": {
+                        "min_qty": 0.0001,
+                        "qty_step": 0.0001,
+                        "max_qty_decimals": 4,
+                        "min_notional_krw": 5000,
+                        "source": "test",
+                    },
+                },
+                "exit": {"rule": None, "reason": "none", "evaluations": []},
+                "fee_authority": {"fee_source": "test"},
+            },
+        )
+
+    monkeypatch.setattr(
+        strategy_module,
+        "decide_sma_with_filter_snapshot_from_db",
+        _snapshot_orchestration,
+    )
+
+    events = export_runtime_replay_decisions(
+        conn=object(),
+        strategy=_Strategy(),
+        through_ts_list=[1_714_521_660_000],
+        market="KRW-BTC",
+        interval="1m",
+    )
+
+    assert len(events) == 1
+    assert calls == [1_714_521_660_000]
 
 
 def test_runtime_order_rules_hash_changes_with_rule_inputs() -> None:

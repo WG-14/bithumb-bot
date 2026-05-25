@@ -5,6 +5,7 @@ from .sma import (
     SmaWithFilterStrategy,
     create_sma_strategy,
     create_sma_with_filter_strategy,
+    decide_sma_with_filter_snapshot_from_db,
 )
 
 register_strategy("sma_cross", create_sma_strategy)
@@ -18,6 +19,7 @@ __all__ = [
     "SmaWithFilterStrategy",
     "create_sma_strategy",
     "create_sma_with_filter_strategy",
+    "decide_sma_with_filter_snapshot_from_db",
     "register_strategy",
     "create_strategy",
     "list_strategies",

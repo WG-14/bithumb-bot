@@ -18,7 +18,11 @@ from .config import (
     validate_market_runtime,
 )
 from .marketdata import cmd_sync
-from .strategy import create_strategy
+from .strategy import (
+    SmaWithFilterStrategy,
+    create_strategy,
+    decide_sma_with_filter_snapshot_from_db,
+)
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import (
@@ -429,7 +433,14 @@ def compute_signal(
         pair=settings.PAIR,
         interval=settings.INTERVAL,
     )
-    decision = strategy.decide(conn, through_ts_ms=through_ts_ms)
+    if selected_strategy_name == "sma_with_filter" and isinstance(strategy, SmaWithFilterStrategy):
+        decision = decide_sma_with_filter_snapshot_from_db(
+            conn,
+            strategy,
+            through_ts_ms=through_ts_ms,
+        )
+    else:
+        decision = strategy.decide(conn, through_ts_ms=through_ts_ms)
     if decision is None:
         return None
     payload = decision.as_dict()

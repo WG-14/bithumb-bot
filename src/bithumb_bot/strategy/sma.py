@@ -1070,8 +1070,9 @@ class SmaWithFilterStrategy:
         *,
         through_ts_ms: int | None = None,
     ) -> StrategyDecision | None:
-        # Legacy DB-bound compatibility facade. It explicitly runs state
-        # normalization before building immutable snapshots.
+        # Deprecated DB-bound compatibility facade. Runtime orchestration must
+        # call PositionStateNormalizer explicitly before entering this read-only
+        # snapshot path.
         if self.short_n >= self.long_n:
             raise ValueError("short는 long보다 작아야 해. 예: short=7 long=30")
 
@@ -1119,13 +1120,6 @@ class SmaWithFilterStrategy:
             "curr_s": curr_s,
             "curr_l": curr_l,
         }
-        PositionStateNormalizer().normalize_and_persist(
-            conn,
-            pair=self.pair,
-            market_price=float(closes[-1]),
-            slippage_bps=float(self.slippage_bps),
-            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
-        )
         position, exposure, position_state, order_rules_snapshot = _load_position_context(
             conn,
             pair=self.pair,
@@ -1534,6 +1528,77 @@ class SmaWithFilterStrategy:
             exit_signal=base_signal,
             exit_reason=base_reason,
         )
+
+
+def decide_sma_with_filter_snapshot_from_db(
+    conn: sqlite3.Connection,
+    strategy: SmaWithFilterStrategy,
+    *,
+    through_ts_ms: int | None = None,
+    normalizer: PositionStateNormalizer | None = None,
+) -> StrategyDecision | None:
+    """Live/runtime orchestration boundary for sma_with_filter decisions.
+
+    This helper is the explicit bridge from mutable runtime state to immutable
+    policy snapshots: state normalization may persist before the read-only
+    strategy facade loads market and position snapshots.
+    """
+    signal_through_ts_ms = _resolve_signal_through_ts_ms(
+        interval=strategy.interval,
+        through_ts_ms=through_ts_ms,
+    )
+    if signal_through_ts_ms is None:
+        return None
+    market_price = _latest_signal_close(
+        conn,
+        pair=strategy.pair,
+        interval=strategy.interval,
+        through_ts_ms=signal_through_ts_ms,
+    )
+    if market_price is not None:
+        (normalizer or PositionStateNormalizer()).normalize_and_persist(
+            conn,
+            pair=strategy.pair,
+            market_price=float(market_price),
+            slippage_bps=float(strategy.slippage_bps),
+            entry_edge_buffer_ratio=float(strategy.entry_edge_buffer_ratio),
+        )
+    return strategy.decide(conn, through_ts_ms=signal_through_ts_ms)
+
+
+def _resolve_signal_through_ts_ms(*, interval: str, through_ts_ms: int | None) -> int | None:
+    interval_sec = parse_interval_sec(interval)
+    signal_through_ts_ms = through_ts_ms
+    if signal_through_ts_ms is None:
+        signal_through_ts_ms = _closed_candle_cutoff_ts_ms(interval_sec=interval_sec)
+        if signal_through_ts_ms is None:
+            return None
+    return int(signal_through_ts_ms)
+
+
+def _latest_signal_close(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    interval: str,
+    through_ts_ms: int,
+) -> float | None:
+    try:
+        row = conn.execute(
+            """
+            SELECT close
+            FROM candles
+            WHERE pair=? AND interval=? AND ts <= ?
+            ORDER BY ts DESC
+            LIMIT 1
+            """,
+            (pair, interval, int(through_ts_ms)),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or row[0] is None:
+        return None
+    return float(row[0])
 
 
 def create_sma_strategy(

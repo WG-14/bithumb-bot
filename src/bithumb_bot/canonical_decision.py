@@ -582,7 +582,16 @@ def export_runtime_replay_decisions(
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for through_ts_ms in through_ts_list:
-        decision = strategy.decide(conn, through_ts_ms=int(through_ts_ms))
+        if str(getattr(strategy, "name", "")).strip().lower() == "sma_with_filter":
+            from bithumb_bot.strategy import decide_sma_with_filter_snapshot_from_db
+
+            decision = decide_sma_with_filter_snapshot_from_db(
+                conn,
+                strategy,
+                through_ts_ms=int(through_ts_ms),
+            )
+        else:
+            decision = strategy.decide(conn, through_ts_ms=int(through_ts_ms))
         if decision is None:
             continue
         events.append(

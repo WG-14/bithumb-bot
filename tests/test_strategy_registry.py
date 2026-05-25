@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from bithumb_bot import config
+from bithumb_bot import engine as engine_module
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import compute_signal
@@ -57,6 +58,58 @@ def test_compute_signal_uses_default_strategy_name_from_settings(tmp_path) -> No
     assert result["signal"] in {"BUY", "SELL", "HOLD"}
     assert result["strategy"] == "sma_with_filter"
     assert "reason" in result
+
+
+def test_compute_signal_routes_sma_with_filter_through_snapshot_orchestration(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_db_path = settings.DB_PATH
+    old_strategy_name = settings.STRATEGY_NAME
+    old_env_db_path = os.environ.get("DB_PATH")
+    calls: list[str] = []
+
+    def _snapshot_orchestration(conn, strategy, *, through_ts_ms=None, normalizer=None):
+        calls.append(strategy.name)
+        return strategy.decide(conn, through_ts_ms=through_ts_ms)
+
+    monkeypatch.setattr(
+        engine_module,
+        "decide_sma_with_filter_snapshot_from_db",
+        _snapshot_orchestration,
+    )
+
+    db_path = str(tmp_path / "strategy_snapshot_route.sqlite")
+    os.environ["DB_PATH"] = db_path
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "STRATEGY_NAME", "sma_with_filter")
+
+    conn = ensure_db()
+    base_ts = 1_700_000_000_000
+    try:
+        closes = [10.0 + 0.2 * idx for idx in range(40)]
+        for idx, close in enumerate(closes):
+            ts = base_ts + idx * 60_000
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO candles(ts, pair, interval, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ts, settings.PAIR, settings.INTERVAL, close, close, close, close, 1.0),
+            )
+        conn.commit()
+
+        result = compute_signal(conn, 2, 3)
+    finally:
+        conn.close()
+        object.__setattr__(settings, "DB_PATH", old_db_path)
+        object.__setattr__(settings, "STRATEGY_NAME", old_strategy_name)
+        if old_env_db_path is None:
+            os.environ.pop("DB_PATH", None)
+        else:
+            os.environ["DB_PATH"] = old_env_db_path
+
+    assert result is not None
+    assert calls == ["sma_with_filter"]
 
 
 def test_compute_signal_allows_strategy_override_for_backtest_compatibility(tmp_path) -> None:

@@ -431,10 +431,11 @@ def test_research_kernel_open_snapshot_matches_live_open_exit_policy_fields() ->
     assert research_exit.reason == live_exit.reason == "exit by stop loss"
 
 
-def test_runtime_decide_db_mutation_boundary_remains_explicit_migration_gap() -> None:
+def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() -> None:
     load_position_source = inspect.getsource(runtime_sma._load_position_context)
     normalizer_source = inspect.getsource(runtime_sma.PositionStateNormalizer.normalize_and_persist)
     decide_source = inspect.getsource(runtime_sma.SmaWithFilterStrategy.decide)
+    orchestration_source = inspect.getsource(runtime_sma.decide_sma_with_filter_snapshot_from_db)
 
     assert "mark_harmless_dust_positions" not in load_position_source
     assert "reclassify_non_executable_open_exposure" not in load_position_source
@@ -442,8 +443,10 @@ def test_runtime_decide_db_mutation_boundary_remains_explicit_migration_gap() ->
     assert "mark_harmless_dust_positions" in normalizer_source
     assert "reclassify_non_executable_open_exposure" in normalizer_source
     assert "conn.commit()" in normalizer_source
-    assert "PositionStateNormalizer().normalize_and_persist(" in decide_source
+    assert "normalize_and_persist(" not in decide_source
     assert "_load_position_context(" in decide_source
+    assert "normalize_and_persist(" in orchestration_source
+    assert "strategy.decide(" in orchestration_source
 
 
 class _CommitCountingConnection:
@@ -465,11 +468,6 @@ class _CommitCountingConnection:
 def test_post_normalization_decision_path_does_not_commit(monkeypatch) -> None:
     closes = [10.0, 10.0, 10.0, 10.0, 11.0]
     wrapped = _CommitCountingConnection(_build_candle_db(closes))
-    monkeypatch.setattr(
-        runtime_sma.PositionStateNormalizer,
-        "normalize_and_persist",
-        lambda self, conn, **kwargs: 0,
-    )
 
     try:
         decision = create_sma_with_filter_strategy(
@@ -494,6 +492,95 @@ def test_post_normalization_decision_path_does_not_commit(monkeypatch) -> None:
 
     assert decision is not None
     assert wrapped.commit_count == 0
+
+
+def test_load_position_context_does_not_commit() -> None:
+    closes = [10.0, 10.0, 10.0, 10.0, 11.0]
+    wrapped = _CommitCountingConnection(_build_candle_db(closes))
+
+    try:
+        runtime_sma._load_position_context(
+            wrapped,
+            pair="BTC_KRW",
+            candle_ts=1_700_000_240_000,
+            market_price=11.0,
+            signal_context={"strategy": "sma_with_filter"},
+            slippage_bps=0.0,
+            entry_edge_buffer_ratio=0.0,
+        )
+    finally:
+        wrapped.close()
+
+    assert wrapped.commit_count == 0
+
+
+def test_position_state_normalizer_is_the_commit_boundary(monkeypatch) -> None:
+    wrapped = _CommitCountingConnection(_build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0]))
+    monkeypatch.setattr(runtime_sma, "mark_harmless_dust_positions", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(
+        runtime_sma,
+        "reclassify_non_executable_open_exposure",
+        lambda *args, **kwargs: 0,
+    )
+
+    try:
+        updated = runtime_sma.PositionStateNormalizer().normalize_and_persist(
+            wrapped,
+            pair="BTC_KRW",
+            market_price=11.0,
+            slippage_bps=0.0,
+            entry_edge_buffer_ratio=0.0,
+        )
+    finally:
+        wrapped.close()
+
+    assert updated == 1
+    assert wrapped.commit_count == 1
+
+
+def test_snapshot_orchestration_normalizes_before_policy_evaluation(monkeypatch) -> None:
+    events: list[str] = []
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    original_decide_snapshot = runtime_sma.SmaWithFilterStrategy.decide_snapshot
+
+    class _Normalizer:
+        def normalize_and_persist(self, conn, **kwargs):
+            events.append("normalize")
+            return 0
+
+    def _decide_snapshot(self, **kwargs):
+        events.append("policy")
+        return original_decide_snapshot(self, **kwargs)
+
+    monkeypatch.setattr(runtime_sma.SmaWithFilterStrategy, "decide_snapshot", _decide_snapshot)
+
+    try:
+        decision = runtime_sma.decide_sma_with_filter_snapshot_from_db(
+            conn,
+            create_sma_with_filter_strategy(
+                short_n=2,
+                long_n=3,
+                pair="BTC_KRW",
+                interval="1m",
+                min_gap_ratio=0.0,
+                volatility_window=3,
+                min_volatility_ratio=0.0,
+                overextended_lookback=1,
+                overextended_max_return_ratio=0.0,
+                slippage_bps=0.0,
+                live_fee_rate_estimate=0.0,
+                entry_edge_buffer_ratio=0.0,
+                cost_edge_enabled=False,
+                market_regime_enabled=False,
+                candidate_regime_policy=_allowing_policy(),
+            ),
+            normalizer=_Normalizer(),
+        )
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert events == ["normalize", "policy"]
 
 
 def test_research_kernel_reevaluates_policy_with_flat_simulated_position() -> None:
