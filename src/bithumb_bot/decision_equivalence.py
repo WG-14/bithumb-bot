@@ -865,6 +865,12 @@ def _reason_for_field(field: str) -> str:
         return "decision_exit_rule_mismatch"
     if field == "execution_timing_policy_hash":
         return "decision_execution_timing_policy_mismatch"
+    if field == "policy_contract_hash":
+        return "policy_contract_hash_mismatch"
+    if field == "policy_input_hash":
+        return "policy_input_hash_mismatch"
+    if field == "policy_decision_hash":
+        return "policy_decision_hash_mismatch"
     if field in {"profile_content_hash", "candidate_profile_hash"}:
         return "decision_profile_hash_mismatch"
     if field in {"dataset_content_hash", "db_data_fingerprint"}:

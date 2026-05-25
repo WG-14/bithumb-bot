@@ -46,6 +46,7 @@ from ..strategy_config import (
 from ..utils_time import parse_interval_sec
 from .base import PositionContext, StrategyDecision
 from .exit_rules import ExitPolicyConfig, evaluate_sma_exit_policy
+from .sma_decision_assembler import evaluate_sma_final_decision
 from ..sma_decision import evaluate_entry_edge_filter, evaluate_sma_entry_decision
 
 
@@ -802,6 +803,76 @@ def _apply_entry_exit_policy(
         return StrategyDecision(signal=resolved_entry_signal, reason=resolved_entry_reason, context=context)
 
 
+def _legacy_strategy_decision_from_sma_final_decision(
+    *,
+    decision: StrategyDecisionV2,
+    base_context: dict[str, Any],
+    position: PositionContext,
+    exposure: NormalizedExposure,
+    position_state: PositionStateModel,
+) -> StrategyDecision:
+    context = dict(base_context)
+    context["position"] = position.as_dict()
+    context["position_gate"] = _build_position_gate_context(
+        position_state.normalized_exposure,
+        order_rules=(
+            context.get("order_rules") if isinstance(context.get("order_rules"), dict) else {}
+        ),
+    )
+    context["position_state"] = _build_position_state_context(position_state)
+    context["raw_signal"] = decision.raw_signal
+    context["raw_reason"] = decision.raw_reason
+    context["entry_signal"] = decision.entry_signal
+    context["entry_reason"] = decision.entry_reason
+    context["exit_signal"] = decision.exit_signal
+    context["exit_reason_raw"] = decision.exit_reason
+    context["final_signal"] = decision.final_signal
+    context["entry_blocked"] = bool(decision.entry_blocked)
+    context["entry_block_reason"] = decision.entry_block_reason
+    context["exit"] = _build_exit_decision_context(
+        exposure=exposure,
+        triggered=bool(decision.exit_rule and decision.final_signal == "SELL"),
+        reason=decision.exit_reason,
+        rule=decision.exit_rule,
+        evaluations=[dict(item) for item in decision.exit_evaluations],
+    )
+    context["exit_evaluations"] = [dict(item) for item in decision.exit_evaluations]
+    context["exit_rule"] = decision.exit_rule
+    context["exit_reason"] = decision.exit_reason
+    context["protective_exit_overrode_entry"] = bool(decision.protective_exit_overrode_entry)
+    context["exit_filter_suppression_prevented"] = bool(decision.exit_filter_suppression_prevented)
+    context["execution_intent_v2"] = (
+        dict(decision.execution_intent) if decision.execution_intent is not None else None
+    )
+    context["policy_contract_hash"] = decision.policy_contract_hash
+    context["policy_input_hash"] = decision.policy_input_hash
+    context["policy_decision_hash"] = decision.policy_decision_hash
+    context["pure_policy_hash"] = decision.policy_hash
+    context["pure_policy_trace"] = decision.as_trace()
+    normalized_state = context["position_state"]["normalized_exposure"]
+    state_interpretation = context["position_state"]["state_interpretation"]
+    context["dust_classification"] = str(normalized_state["dust_classification"])
+    context["entry_allowed"] = bool(normalized_state["entry_allowed"])
+    context["effective_flat"] = bool(normalized_state["effective_flat"])
+    context["raw_qty_open"] = float(normalized_state["raw_qty_open"])
+    context["raw_total_asset_qty"] = float(normalized_state["raw_total_asset_qty"])
+    context["normalized_exposure_active"] = bool(normalized_state["normalized_exposure_active"])
+    context["has_executable_exposure"] = bool(normalized_state.get("has_executable_exposure", False))
+    context["has_any_position_residue"] = bool(normalized_state.get("has_any_position_residue", False))
+    context["has_non_executable_residue"] = bool(normalized_state.get("has_non_executable_residue", False))
+    context["has_dust_only_remainder"] = bool(normalized_state.get("has_dust_only_remainder", False))
+    context["exit_allowed"] = bool(normalized_state["exit_allowed"])
+    context["exit_block_reason"] = str(normalized_state["exit_block_reason"])
+    context["terminal_state"] = str(normalized_state["terminal_state"])
+    context["state_outcome"] = str(state_interpretation["operator_outcome"])
+    context["exit_submit_expected"] = bool(state_interpretation["exit_submit_expected"])
+    return StrategyDecision(
+        signal=decision.final_signal,  # type: ignore[arg-type]
+        reason=decision.final_reason,
+        context=apply_decision_contract(context),
+    )
+
+
 @dataclass(frozen=True)
 class SmaCrossStrategy:
     short_n: int
@@ -1129,45 +1200,49 @@ class SmaWithFilterStrategy:
             slippage_bps=float(self.slippage_bps),
             entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
         )
+        market_snapshot = MarketWindow(
+            pair=self.pair,
+            interval=self.interval,
+            candle_ts=int(ts_list[-1]),
+            closes=tuple(float(value) for value in closes),
+            prev_s=float(prev_s),
+            prev_l=float(prev_l),
+            curr_s=float(curr_s),
+            curr_l=float(curr_l),
+            through_ts_ms=signal_through_ts_ms,
+        )
+        position_snapshot = _policy_position_snapshot(position=position, exposure=exposure)
+        policy_config = SmaPolicyConfig(
+            strategy_name=self.name,
+            short_n=int(self.short_n),
+            long_n=int(self.long_n),
+            min_gap_ratio=float(self.min_gap_ratio),
+            volatility_window=int(self.volatility_window),
+            min_volatility_ratio=float(self.min_volatility_ratio),
+            overextended_lookback=int(self.overextended_lookback),
+            overextended_max_return_ratio=float(self.overextended_max_return_ratio),
+            slippage_bps=float(self.slippage_bps),
+            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
+            cost_edge_enabled=bool(self.cost_edge_enabled),
+            cost_edge_min_ratio=float(self.cost_edge_min_ratio),
+            market_regime_enabled=bool(self.market_regime_enabled),
+            buy_fraction=float(self.buy_fraction),
+            max_order_krw=float(self.max_order_krw),
+            candidate_regime_policy=self.candidate_regime_policy,
+            require_candidate_regime_policy=True,
+        )
+        execution_snapshot = ExecutionConstraintSnapshot(
+            fee_rate_for_decision=fee_rate_for_decision,
+            fee_authority_degraded_blocks_entry=_live_armed_entry_fee_authority_blocks(fee_authority),
+            fee_authority=_fee_authority_context(fee_authority),
+            order_rules=order_rules_snapshot,
+        )
         policy_decision = self.decide_snapshot(
-            market=MarketWindow(
-                pair=self.pair,
-                interval=self.interval,
-                candle_ts=int(ts_list[-1]),
-                closes=tuple(float(value) for value in closes),
-                prev_s=float(prev_s),
-                prev_l=float(prev_l),
-                curr_s=float(curr_s),
-                curr_l=float(curr_l),
-                through_ts_ms=signal_through_ts_ms,
-            ),
-            position=_policy_position_snapshot(position=position, exposure=exposure),
-            config=SmaPolicyConfig(
-                strategy_name=self.name,
-                short_n=int(self.short_n),
-                long_n=int(self.long_n),
-                min_gap_ratio=float(self.min_gap_ratio),
-                volatility_window=int(self.volatility_window),
-                min_volatility_ratio=float(self.min_volatility_ratio),
-                overextended_lookback=int(self.overextended_lookback),
-                overextended_max_return_ratio=float(self.overextended_max_return_ratio),
-                slippage_bps=float(self.slippage_bps),
-                live_fee_rate_estimate=float(self.live_fee_rate_estimate),
-                entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
-                cost_edge_enabled=bool(self.cost_edge_enabled),
-                cost_edge_min_ratio=float(self.cost_edge_min_ratio),
-                market_regime_enabled=bool(self.market_regime_enabled),
-                buy_fraction=float(self.buy_fraction),
-                max_order_krw=float(self.max_order_krw),
-                candidate_regime_policy=self.candidate_regime_policy,
-                require_candidate_regime_policy=True,
-            ),
-            execution_context=ExecutionConstraintSnapshot(
-                fee_rate_for_decision=fee_rate_for_decision,
-                fee_authority_degraded_blocks_entry=_live_armed_entry_fee_authority_blocks(fee_authority),
-                fee_authority=_fee_authority_context(fee_authority),
-                order_rules=order_rules_snapshot,
-            ),
+            market=market_snapshot,
+            position=position_snapshot,
+            config=policy_config,
+            execution_context=execution_snapshot,
         )
         entry_decision = policy_decision.entry_decision
         base_signal = policy_decision.raw_signal
@@ -1197,6 +1272,13 @@ class SmaWithFilterStrategy:
             live_fee_rate_estimate=fee_rate_for_decision,
             small_loss_tolerance_ratio=float(self.exit_small_loss_tolerance_ratio),
             stop_loss_ratio=float(self.exit_stop_loss_ratio),
+        )
+        final_policy_decision = evaluate_sma_final_decision(
+            market=market_snapshot,
+            position=position_snapshot,
+            config=policy_config,
+            execution_context=execution_snapshot,
+            exit_policy_config=exit_policy_config,
         )
 
         base_context = {
@@ -1376,8 +1458,11 @@ class SmaWithFilterStrategy:
             "base_reason": base_reason,
             "entry_signal": entry_signal,
             "entry_reason": entry_reason,
-            "pure_policy_hash": policy_decision.policy_hash,
-            "pure_policy_trace": policy_decision.as_trace(),
+            "pure_policy_hash": final_policy_decision.policy_hash,
+            "pure_policy_trace": final_policy_decision.as_trace(),
+            "policy_contract_hash": final_policy_decision.policy_contract_hash,
+            "policy_input_hash": final_policy_decision.policy_input_hash,
+            "policy_decision_hash": final_policy_decision.policy_decision_hash,
             "prev_s": prev_s,
             "prev_l": prev_l,
             "curr_s": curr_s,
@@ -1515,18 +1600,12 @@ class SmaWithFilterStrategy:
             regime_version=str(market_regime.get("version") or ""),
         )
 
-        return _apply_entry_exit_policy(
-            base_signal=entry_signal,
-            base_reason=entry_reason,
+        return _legacy_strategy_decision_from_sma_final_decision(
+            decision=final_policy_decision,
             base_context=base_context,
             position=position,
             exposure=exposure,
             position_state=position_state,
-            exit_policy_config=exit_policy_config,
-            raw_signal=base_signal,
-            raw_reason=base_reason,
-            exit_signal=base_signal,
-            exit_reason=base_reason,
         )
 
 

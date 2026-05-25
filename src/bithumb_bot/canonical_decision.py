@@ -65,6 +65,9 @@ COMMON_CANONICAL_DECISION_FIELDS_V2 = (
     "exit_reason",
     "exit_evaluations_hash",
     "execution_timing_policy_hash",
+    "policy_contract_hash",
+    "policy_input_hash",
+    "policy_decision_hash",
     "replay_fingerprint_hash",
     "feature_snapshot_hash",
     "strategy_behavior_hash",
@@ -454,6 +457,9 @@ def runtime_decision_to_canonical_event(
         "exit_reason": exit_context.get("reason") or "",
         "exit_evaluations_hash": canonical_payload_hash(exit_context.get("evaluations") or ()),
         "execution_timing_policy_hash": execution_timing_policy_hash,
+        "policy_contract_hash": str(context.get("policy_contract_hash") or ""),
+        "policy_input_hash": str(context.get("policy_input_hash") or ""),
+        "policy_decision_hash": str(context.get("policy_decision_hash") or ""),
         "replay_fingerprint_hash": canonical_payload_hash(context.get("replay_fingerprint") or {}),
     }
     payload["feature_snapshot_hash"] = canonical_payload_hash(payload["feature_snapshot"])
@@ -504,6 +510,9 @@ def research_decision_to_canonical_event(
     payload["execution_timing_policy_hash"] = execution_timing_policy_hash or str(
         payload.get("execution_timing_policy_hash") or ""
     )
+    payload["policy_contract_hash"] = str(payload.get("policy_contract_hash") or "")
+    payload["policy_input_hash"] = str(payload.get("policy_input_hash") or "")
+    payload["policy_decision_hash"] = str(payload.get("policy_decision_hash") or "")
     normalized = normalize_canonical_decision(payload)
     if isinstance(payload.get("position_authority"), dict):
         normalized["position_authority"] = dict(payload["position_authority"])  # type: ignore[arg-type]

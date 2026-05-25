@@ -20,6 +20,15 @@ def _stable_hash(payload: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+SMA_POLICY_CONTRACT_HASH = _stable_hash(
+    {
+        "contract": "sma_with_filter_final_decision",
+        "version": 1,
+        "authority": "typed_final_strategy_decision",
+    }
+)
+
+
 @dataclass(frozen=True)
 class MarketWindow:
     pair: str
@@ -111,13 +120,27 @@ class StrategyDecisionV2:
     final_signal: Signal
     final_reason: str
     blocked_filters: tuple[str, ...]
+    entry_blocked: bool
+    entry_block_reason: str | None
+    exit_rule: str | None
+    exit_evaluations: tuple[dict[str, object], ...]
+    protective_exit_overrode_entry: bool
+    exit_filter_suppression_prevented: bool
+    position_snapshot: PositionSnapshot
+    execution_intent: dict[str, object] | None
     entry_decision: SmaEntryDecision
     trace: dict[str, object]
     policy_hash: str
+    policy_contract_hash: str
+    policy_input_hash: str
+    policy_decision_hash: str
 
     def as_trace(self) -> dict[str, object]:
         payload = dict(self.trace)
         payload["policy_hash"] = self.policy_hash
+        payload["policy_contract_hash"] = self.policy_contract_hash
+        payload["policy_input_hash"] = self.policy_input_hash
+        payload["policy_decision_hash"] = self.policy_decision_hash
         return payload
 
 
@@ -291,7 +314,54 @@ def evaluate_sma_policy(
             "order_rules": dict(execution_context.order_rules),
         },
     }
+    policy_input = {
+        "market": trace["market"],
+        "position": trace["position"],
+        "execution_constraints": trace["execution_constraints"],
+        "config": {
+            "strategy_name": config.strategy_name,
+            "short_n": int(config.short_n),
+            "long_n": int(config.long_n),
+            "min_gap_ratio": float(config.min_gap_ratio),
+            "volatility_window": int(config.volatility_window),
+            "min_volatility_ratio": float(config.min_volatility_ratio),
+            "overextended_lookback": int(config.overextended_lookback),
+            "overextended_max_return_ratio": float(config.overextended_max_return_ratio),
+            "slippage_bps": float(config.slippage_bps),
+            "live_fee_rate_estimate": float(config.live_fee_rate_estimate),
+            "entry_edge_buffer_ratio": float(config.entry_edge_buffer_ratio),
+            "cost_edge_enabled": bool(config.cost_edge_enabled),
+            "cost_edge_min_ratio": float(config.cost_edge_min_ratio),
+            "market_regime_enabled": bool(config.market_regime_enabled),
+            "buy_fraction": float(config.buy_fraction),
+            "max_order_krw": float(config.max_order_krw),
+            "candidate_regime_policy": config.candidate_regime_policy,
+            "require_candidate_regime_policy": bool(config.require_candidate_regime_policy),
+        },
+    }
     policy_hash = _stable_hash(trace)
+    policy_input_hash = _stable_hash(policy_input)
+    policy_decision_hash = _stable_hash(
+        {
+            "strategy_name": config.strategy_name,
+            "raw_signal": raw_signal,
+            "raw_reason": raw_reason,
+            "entry_signal": entry_signal,
+            "entry_reason": entry_reason,
+            "exit_signal": exit_signal,
+            "exit_reason": exit_reason,
+            "final_signal": final_signal,
+            "final_reason": final_reason,
+            "blocked_filters": list(resolved_blocked_filters),
+            "entry_blocked": bool(resolved_entry_blocked),
+            "entry_block_reason": (
+                position.entry_block_reason
+                if bool(resolved_entry_blocked) and position.entry_block_reason
+                else None
+            ),
+            "position_terminal_state": position.terminal_state,
+        }
+    )
     return StrategyDecisionV2(
         strategy_name=config.strategy_name,
         raw_signal=raw_signal,
@@ -303,7 +373,22 @@ def evaluate_sma_policy(
         final_signal=final_signal,
         final_reason=final_reason,
         blocked_filters=tuple(resolved_blocked_filters),
+        entry_blocked=bool(resolved_entry_blocked),
+        entry_block_reason=(
+            position.entry_block_reason
+            if bool(resolved_entry_blocked) and position.entry_block_reason
+            else None
+        ),
+        exit_rule=None,
+        exit_evaluations=(),
+        protective_exit_overrode_entry=False,
+        exit_filter_suppression_prevented=False,
+        position_snapshot=position,
+        execution_intent=None,
         entry_decision=entry_decision,
         trace=trace,
         policy_hash=policy_hash,
+        policy_contract_hash=SMA_POLICY_CONTRACT_HASH,
+        policy_input_hash=policy_input_hash,
+        policy_decision_hash=policy_decision_hash,
     )

@@ -263,6 +263,27 @@ def test_canonical_v2_feature_snapshot_hash_is_diagnostic_not_equivalence_author
     assert "decision_feature_mismatch" not in result.report["reason_codes"]
 
 
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ("policy_contract_hash", "policy_contract_hash_mismatch"),
+        ("policy_input_hash", "policy_input_hash_mismatch"),
+        ("policy_decision_hash", "policy_decision_hash_mismatch"),
+    ],
+)
+def test_canonical_v2_policy_hash_mismatches_have_explicit_reasons(
+    field: str,
+    reason: str,
+) -> None:
+    result = _compare(
+        _decision_v2(**{field: "sha256:research_policy"}),
+        _decision_v2(**{field: "sha256:runtime_policy"}),
+    )
+
+    assert result.ok is False
+    assert reason in result.report["reason_codes"]
+
+
 def test_mixed_canonical_contract_versions_fail_with_reason_code() -> None:
     result = _compare(_decision(), _decision_v2())
 
@@ -523,6 +544,9 @@ def test_incomplete_runtime_positive_state_missing_lot_fields_fails_closed() -> 
                 "ts": 1_714_521_660_000,
                 "raw_signal": "HOLD",
                 "final_signal": "HOLD",
+                "policy_contract_hash": "sha256:contract",
+                "policy_input_hash": "sha256:input",
+                "policy_decision_hash": "sha256:decision",
                 "prev_s": 100.0,
                 "prev_l": 101.0,
                 "curr_s": 102.0,
@@ -573,6 +597,9 @@ def test_incomplete_runtime_positive_state_missing_lot_fields_fails_closed() -> 
     assert event["position_authority"]["state_class"] == "open_exposure"  # type: ignore[index]
     assert event["position_authority"]["unsupported_reason"] == "research_model_lacks_lot_native_authority"  # type: ignore[index]
     assert result.report["state_coverage_matrix"]["open_exposure"]["fail_closed_expected"] is True
+    assert event["policy_contract_hash"] == "sha256:contract"
+    assert event["policy_input_hash"] == "sha256:input"
+    assert event["policy_decision_hash"] == "sha256:decision"
 
 
 def test_unmodeled_lifecycle_plus_actual_signal_drift_returns_actual_drift() -> None:

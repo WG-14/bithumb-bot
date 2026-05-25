@@ -10,9 +10,9 @@ from bithumb_bot.core.sma_policy import (
     PositionSnapshot,
     SmaPolicyConfig,
     StrategyDecisionV2,
-    evaluate_sma_policy,
 )
 from bithumb_bot.strategy.exit_rules import ExitPolicyConfig, evaluate_sma_exit_policy, merge_exit_rules
+from bithumb_bot.strategy.sma_decision_assembler import evaluate_sma_final_decision
 
 from . import backtest_engine as _engine
 from .decision_event import ResearchDecisionEvent
@@ -176,6 +176,8 @@ def _reevaluate_sma_policy_with_research_position(
     parameter_values: dict[str, Any],
     fee_rate: float,
     slippage_bps: float,
+    exit_policy_config: ExitPolicyConfig,
+    rule_sources: dict[str, str] | None = None,
 ) -> StrategyDecisionV2 | None:
     event_extra = event.extra_payload if isinstance(event.extra_payload, dict) else {}
     entry_decision = event_extra.get("entry_decision")
@@ -184,34 +186,39 @@ def _reevaluate_sma_policy_with_research_position(
     candles = dataset.candles[: candle_index + 1]
     prev_above = event_extra.get("prev_above")
     previous_cross_state = "unknown" if prev_above is None else "above" if bool(prev_above) else "below"
-    return evaluate_sma_policy(
-        market=MarketWindow(
-            pair=dataset.market,
-            interval=dataset.interval,
-            candle_ts=int(event.candle_ts),
-            closes=tuple(float(item.close) for item in candles),
-            prev_s=float(event_extra.get("prev_s", 0.0) or 0.0),
-            prev_l=float(event_extra.get("prev_l", 0.0) or 0.0),
-            curr_s=float(event_extra.get("curr_s", 0.0) or 0.0),
-            curr_l=float(event_extra.get("curr_l", 0.0) or 0.0),
-            gap_ratio=float(getattr(entry_decision, "gap_ratio", 0.0) or 0.0),
-            volatility_ratio=float(getattr(entry_decision, "volatility_ratio", 0.0) or 0.0),
-            overextended_ratio=float(getattr(entry_decision, "overextended_ratio", 0.0) or 0.0),
-            market_regime_snapshot=dict(event_extra.get("regime_snapshot") or {}),
-            entry_decision=entry_decision,
-            previous_cross_state=previous_cross_state,
-            allow_initial_cross=False,
-        ),
+    market = MarketWindow(
+        pair=dataset.market,
+        interval=dataset.interval,
+        candle_ts=int(event.candle_ts),
+        closes=tuple(float(item.close) for item in candles),
+        prev_s=float(event_extra.get("prev_s", 0.0) or 0.0),
+        prev_l=float(event_extra.get("prev_l", 0.0) or 0.0),
+        curr_s=float(event_extra.get("curr_s", 0.0) or 0.0),
+        curr_l=float(event_extra.get("curr_l", 0.0) or 0.0),
+        gap_ratio=float(getattr(entry_decision, "gap_ratio", 0.0) or 0.0),
+        volatility_ratio=float(getattr(entry_decision, "volatility_ratio", 0.0) or 0.0),
+        overextended_ratio=float(getattr(entry_decision, "overextended_ratio", 0.0) or 0.0),
+        market_regime_snapshot=dict(event_extra.get("regime_snapshot") or {}),
+        entry_decision=entry_decision,
+        previous_cross_state=previous_cross_state,
+        allow_initial_cross=False,
+    )
+    config = _sma_policy_config_from_research_parameters(
+        strategy_name=event.strategy_name,
+        parameter_values=parameter_values,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+    )
+    execution_context = ExecutionConstraintSnapshot(
+        fee_rate_for_decision=float(parameter_values.get("LIVE_FEE_RATE_ESTIMATE") or fee_rate),
+    )
+    return evaluate_sma_final_decision(
+        market=market,
         position=position,
-        config=_sma_policy_config_from_research_parameters(
-            strategy_name=event.strategy_name,
-            parameter_values=parameter_values,
-            fee_rate=fee_rate,
-            slippage_bps=slippage_bps,
-        ),
-        execution_context=ExecutionConstraintSnapshot(
-            fee_rate_for_decision=float(parameter_values.get("LIVE_FEE_RATE_ESTIMATE") or fee_rate),
-        ),
+        config=config,
+        execution_context=execution_context,
+        exit_policy_config=exit_policy_config,
+        rule_sources=rule_sources,
     )
 
 @dataclass(frozen=True)
@@ -472,6 +479,23 @@ def _run_decision_event_backtest_impl(
             candle_ts=int(candle.ts),
             market_price=float(candle.close),
         )
+        sma_exit_policy_config = ExitPolicyConfig(
+            rule_names=tuple(active_exit_policy.get("rules") or ()),
+            stop_loss_ratio=float(
+                active_exit_policy.get("stop_loss", {}).get("stop_loss_ratio", 0.0)
+            ),
+            max_holding_sec=float(
+                active_exit_policy.get("max_holding_time", {}).get("max_holding_min", 0.0)
+            )
+            * 60.0,
+            min_take_profit_ratio=float(
+                active_exit_policy.get("opposite_cross", {}).get("min_take_profit_ratio", 0.0)
+            ),
+            small_loss_tolerance_ratio=float(
+                active_exit_policy.get("opposite_cross", {}).get("small_loss_tolerance_ratio", 0.0)
+            ),
+            live_fee_rate_estimate=float(parameter_values.get("LIVE_FEE_RATE_ESTIMATE") or fee_rate),
+        )
         policy_decision = (
             _reevaluate_sma_policy_with_research_position(
                 event=event,
@@ -481,6 +505,15 @@ def _run_decision_event_backtest_impl(
                 parameter_values=parameter_values,
                 fee_rate=fee_rate,
                 slippage_bps=slippage_bps,
+                exit_policy_config=sma_exit_policy_config,
+                rule_sources={
+                    name: _exit_rule_source(
+                        rule_name=name,
+                        common_exit_rule_names=set(active_exit_policy.get("common_rules") or ()),
+                        strategy_exit_rule_names=set(active_exit_policy.get("strategy_rules") or ()),
+                    )
+                    for name in active_exit_policy.get("rules") or ()
+                },
             )
             if strategy_plugin.name == "sma_with_filter"
             else None
@@ -521,7 +554,9 @@ def _run_decision_event_backtest_impl(
             isinstance(event.exit_intent, dict)
             and str(event.exit_intent.get("mode") or "") == "evaluate_exit_policy"
         )
-        if evaluates_exit_policy:
+        if evaluates_exit_policy and not (
+            strategy_plugin.name == "sma_with_filter" and policy_decision is not None
+        ):
             action = "BUY" if requested_action == "BUY" else "HOLD"
             if sellable_qty > 1e-12:
                 position = _ResearchPositionContext(
@@ -666,18 +701,28 @@ def _run_decision_event_backtest_impl(
             block_reason = "sell_blocked_no_sellable_qty"
         elif action not in {"BUY", "SELL", "HOLD"}:
             raise ValueError(f"unsupported_decision_event_final_signal:{event.final_signal}")
-        protective_exit_overrode_entry = bool(
-            raw_signal == "BUY"
-            and action == "SELL"
-            and exit_rule in {"stop_loss", "max_holding_time"}
-        )
-        entry_blocked = bool(raw_signal == "BUY" and action == "HOLD" and raw_filter_would_block)
-        exit_filter_suppression_prevented = bool(
-            raw_signal == "SELL"
-            and raw_filter_would_block
-            and sellable_qty > 1e-12
-            and bool(exit_evaluations)
-        )
+        if policy_decision is not None:
+            exit_evaluations = [dict(item) for item in policy_decision.exit_evaluations]
+            exit_rule = str(policy_decision.exit_rule or "")
+            exit_reason = policy_decision.exit_reason
+            protective_exit_overrode_entry = bool(policy_decision.protective_exit_overrode_entry)
+            entry_blocked = bool(policy_decision.entry_blocked)
+            exit_filter_suppression_prevented = bool(
+                policy_decision.exit_filter_suppression_prevented
+            )
+        else:
+            protective_exit_overrode_entry = bool(
+                raw_signal == "BUY"
+                and action == "SELL"
+                and exit_rule in {"stop_loss", "max_holding_time"}
+            )
+            entry_blocked = bool(raw_signal == "BUY" and action == "HOLD" and raw_filter_would_block)
+            exit_filter_suppression_prevented = bool(
+                raw_signal == "SELL"
+                and raw_filter_would_block
+                and sellable_qty > 1e-12
+                and bool(exit_evaluations)
+            )
         decision_payload = _research_decision_payload(
             dataset=dataset,
             dataset_content_hash=dataset_content_hash,
@@ -746,7 +791,15 @@ def _run_decision_event_backtest_impl(
         )
         if policy_decision is not None:
             decision_payload["pure_policy_hash"] = policy_decision.policy_hash
+            decision_payload["policy_contract_hash"] = policy_decision.policy_contract_hash
+            decision_payload["policy_input_hash"] = policy_decision.policy_input_hash
+            decision_payload["policy_decision_hash"] = policy_decision.policy_decision_hash
             decision_payload["pure_policy_trace"] = policy_decision.as_trace()
+            decision_payload["execution_intent_v2"] = (
+                dict(policy_decision.execution_intent)
+                if policy_decision.execution_intent is not None
+                else None
+            )
             diagnostics = (
                 dict(decision_payload["strategy_diagnostics"])
                 if isinstance(decision_payload.get("strategy_diagnostics"), dict)
@@ -755,6 +808,9 @@ def _run_decision_event_backtest_impl(
             diagnostics.update(
                 {
                     "pure_policy_hash": policy_decision.policy_hash,
+                    "policy_contract_hash": policy_decision.policy_contract_hash,
+                    "policy_input_hash": policy_decision.policy_input_hash,
+                    "policy_decision_hash": policy_decision.policy_decision_hash,
                     "policy_position_terminal_state": policy_position.terminal_state,
                     "policy_recomputed_with_simulated_position": True,
                 }

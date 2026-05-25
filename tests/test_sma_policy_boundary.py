@@ -21,6 +21,7 @@ from bithumb_bot.research.experiment_manifest import DateRange, ExecutionTimingP
 from bithumb_bot.strategy.sma import create_sma_with_filter_strategy
 from bithumb_bot.strategy import sma as runtime_sma
 from bithumb_bot.strategy.exit_rules import ExitPolicyConfig, evaluate_sma_exit_policy
+from bithumb_bot.strategy.sma_decision_assembler import evaluate_sma_final_decision
 
 
 def _policy_config() -> SmaPolicyConfig:
@@ -60,6 +61,44 @@ def _market_window() -> MarketWindow:
 
 def _flat_position() -> PositionSnapshot:
     return PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False)
+
+
+def _open_position(**overrides: object) -> PositionSnapshot:
+    payload = {
+        "in_position": True,
+        "entry_allowed": False,
+        "exit_allowed": True,
+        "entry_block_reason": "open_exposure",
+        "terminal_state": "open_exposure",
+        "entry_ts": 1_700_000_000_000,
+        "entry_price": 10.0,
+        "qty_open": 1.0,
+        "holding_time_sec": 60.0,
+        "unrealized_pnl": 1.0,
+        "unrealized_pnl_ratio": 0.1,
+        "raw_qty_open": 1.0,
+        "raw_total_asset_qty": 1.0,
+        "open_lot_count": 1,
+        "sellable_executable_lot_count": 1,
+        "effective_flat": False,
+        "has_executable_exposure": True,
+        "has_any_position_residue": True,
+    }
+    payload.update(overrides)
+    return PositionSnapshot(**payload)  # type: ignore[arg-type]
+
+
+def _exit_policy_config(**overrides: object) -> ExitPolicyConfig:
+    payload = {
+        "rule_names": ("stop_loss", "opposite_cross", "max_holding_time"),
+        "stop_loss_ratio": 0.05,
+        "max_holding_sec": 3_600.0,
+        "min_take_profit_ratio": 0.0,
+        "small_loss_tolerance_ratio": 0.0,
+        "live_fee_rate_estimate": 0.0,
+    }
+    payload.update(overrides)
+    return ExitPolicyConfig(**payload)  # type: ignore[arg-type]
 
 
 def _allowing_policy() -> dict[str, object]:
@@ -136,6 +175,105 @@ def test_evaluate_sma_policy_open_position_defers_exit_to_wrapper_without_entry_
     assert decision.final_signal == "HOLD"
     assert decision.final_reason == "position held: exit policy evaluation required"
     assert decision.trace["position"]["terminal_state"] == "open_exposure"
+
+
+def test_final_sma_decision_assembler_is_deterministic_and_hashes_policy_material() -> None:
+    first = evaluate_sma_final_decision(
+        market=_market_window(),
+        position=_flat_position(),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+        exit_policy_config=_exit_policy_config(),
+    )
+    second = evaluate_sma_final_decision(
+        market=_market_window(),
+        position=_flat_position(),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+        exit_policy_config=_exit_policy_config(),
+    )
+    changed = evaluate_sma_final_decision(
+        market=_market_window(),
+        position=_flat_position(),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.001),
+        exit_policy_config=_exit_policy_config(),
+    )
+
+    assert first == second
+    assert first.final_signal == "BUY"
+    assert first.execution_intent == {
+        "side": "BUY",
+        "intent": "enter_open_exposure",
+        "pair": "BTC_KRW",
+        "budget_model": "cash_fraction_capped_by_max_order_krw",
+        "budget_fraction_of_cash": 0.99,
+        "max_budget_krw": 100_000.0,
+        "requires_execution_sizing": True,
+    }
+    assert first.policy_contract_hash == second.policy_contract_hash
+    assert first.policy_input_hash == second.policy_input_hash
+    assert first.policy_decision_hash == second.policy_decision_hash
+    assert changed.policy_input_hash != first.policy_input_hash
+
+
+def test_final_sma_decision_assembler_owns_opposite_cross_sell() -> None:
+    decision = evaluate_sma_final_decision(
+        market=MarketWindow(
+            pair="BTC_KRW",
+            interval="1m",
+            candle_ts=1_700_000_240_000,
+            closes=(12.0, 12.0, 12.0, 12.0, 11.0),
+            prev_s=12.0,
+            prev_l=11.5,
+            curr_s=11.0,
+            curr_l=11.5,
+        ),
+        position=_open_position(),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+        exit_policy_config=_exit_policy_config(rule_names=("opposite_cross",), stop_loss_ratio=0.0),
+    )
+
+    assert decision.raw_signal == "SELL"
+    assert decision.final_signal == "SELL"
+    assert decision.exit_rule == "opposite_cross"
+    assert decision.protective_exit_overrode_entry is False
+    assert decision.exit_filter_suppression_prevented is False
+
+
+def test_final_sma_decision_assembler_owns_protective_stop_loss_override() -> None:
+    decision = evaluate_sma_final_decision(
+        market=_market_window(),
+        position=_open_position(unrealized_pnl=-1.0, unrealized_pnl_ratio=-0.1),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+        exit_policy_config=_exit_policy_config(rule_names=("stop_loss",)),
+    )
+
+    assert decision.raw_signal == "BUY"
+    assert decision.final_signal == "SELL"
+    assert decision.exit_rule == "stop_loss"
+    assert decision.protective_exit_overrode_entry is True
+
+
+def test_final_sma_decision_assembler_owns_protective_max_holding_override() -> None:
+    decision = evaluate_sma_final_decision(
+        market=_market_window(),
+        position=_open_position(holding_time_sec=7_200.0),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+        exit_policy_config=_exit_policy_config(
+            rule_names=("max_holding_time",),
+            max_holding_sec=3_600.0,
+            stop_loss_ratio=0.0,
+        ),
+    )
+
+    assert decision.raw_signal == "BUY"
+    assert decision.final_signal == "SELL"
+    assert decision.exit_rule == "max_holding_time"
+    assert decision.protective_exit_overrode_entry is True
 
 
 def test_snapshot_strategy_policy_decides_without_sqlite() -> None:
