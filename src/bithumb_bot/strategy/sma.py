@@ -29,6 +29,7 @@ from ..core.sma_policy import (
     MarketWindow,
     PositionSnapshot,
     SmaPolicyConfig,
+    StrategyDecisionV2,
     evaluate_sma_policy,
 )
 from ..decision_contract import apply_decision_contract, build_replay_fingerprint
@@ -271,6 +272,78 @@ def _has_tracked_open_exposure(exposure: NormalizedExposure) -> bool:
     return bool(exposure.normalized_exposure_active)
 
 
+class PositionStateNormalizer:
+    """Explicit pre-decision persistence boundary for position state repairs."""
+
+    def normalize_and_persist(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        pair: str,
+        market_price: float,
+        slippage_bps: float,
+        entry_edge_buffer_ratio: float,
+    ) -> int:
+        dust_context = build_dust_display_context(_load_last_reconcile_metadata(conn))
+        updated = 0
+        try:
+            updated += int(
+                mark_harmless_dust_positions(
+                    conn,
+                    pair=pair,
+                    dust_metadata=dust_context,
+                )
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        resolution = get_effective_order_rules(pair)
+        rules = resolution.rules
+        fee_authority = build_fee_authority_snapshot(resolution)
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    SUM(qty_open) AS qty_open
+                FROM open_position_lots
+                WHERE pair=? AND position_state=? AND qty_open > 1e-12
+                  AND COALESCE(position_semantic_basis, '')='lot-native'
+                  AND COALESCE(executable_lot_count, 0) > 0
+                  AND COALESCE(dust_tracking_lot_count, 0) = 0
+                """,
+                (pair, OPEN_POSITION_STATE),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        qty_open = float(row[0]) if row is not None and row[0] is not None else 0.0
+        if qty_open > 1e-12:
+            executable_lot = build_executable_lot(
+                qty=qty_open,
+                market_price=float(market_price),
+                min_qty=float(rules.min_qty),
+                qty_step=float(rules.qty_step),
+                min_notional_krw=float(rules.min_notional_krw),
+                max_qty_decimals=int(rules.max_qty_decimals),
+                exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
+                exit_slippage_bps=float(slippage_bps),
+                exit_buffer_ratio=float(entry_edge_buffer_ratio),
+            )
+            if executable_lot.executable_qty <= 1e-12:
+                try:
+                    updated += int(
+                        reclassify_non_executable_open_exposure(
+                            conn,
+                            pair=pair,
+                            executable_lot=executable_lot,
+                        )
+                    )
+                except sqlite3.OperationalError:
+                    pass
+        if updated > 0:
+            conn.commit()
+        return updated
+
+
 def _evaluate_entry_edge_filter(
     *,
     base_signal: str,
@@ -331,15 +404,6 @@ def _load_position_context(
     order_rules_snapshot = order_rules_snapshot_payload(resolution, pair=pair)
     fee_authority = build_fee_authority_snapshot(resolution)
     reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=pair)
-    try:
-        if mark_harmless_dust_positions(
-            conn,
-            pair=pair,
-            dust_metadata=dust_context,
-        ) > 0:
-            conn.commit()
-    except sqlite3.OperationalError:
-        pass
     try:
         row = conn.execute(
             """
@@ -433,16 +497,6 @@ def _load_position_context(
         exit_slippage_bps=float(slippage_bps),
         exit_buffer_ratio=float(entry_edge_buffer_ratio),
     )
-    if qty_open > 1e-12 and executable_lot.executable_qty <= 1e-12:
-        try:
-            if reclassify_non_executable_open_exposure(
-                conn,
-                pair=pair,
-                executable_lot=executable_lot,
-            ) > 0:
-                conn.commit()
-        except sqlite3.OperationalError:
-            pass
     lot_snapshot = summarize_position_lots(conn, pair=pair, executable_lot=executable_lot)
     lot_definition = getattr(lot_snapshot, "lot_definition", None)
     position_state = build_position_state_model(
@@ -769,6 +823,7 @@ class SmaCrossStrategy:
     max_order_krw: float = settings.MAX_ORDER_KRW
 
     name: str = "sma_cross"
+    legacy_status: str = "legacy_db_bound_smoke_only_not_promotion_grade"
 
     @classmethod
     def from_config(cls, config: SmaStrategyConfig) -> "SmaCrossStrategy":
@@ -796,6 +851,8 @@ class SmaCrossStrategy:
         *,
         through_ts_ms: int | None = None,
     ) -> StrategyDecision | None:
+        # Legacy DB-bound compatibility path. Live mode rejects this strategy;
+        # promotion-grade equivalence work should use sma_with_filter.
         if self.short_n >= self.long_n:
             raise ValueError("short는 long보다 작아야 해. 예: short=7 long=30")
 
@@ -864,6 +921,13 @@ class SmaCrossStrategy:
             "curr_s": curr_s,
             "curr_l": curr_l,
         }
+        PositionStateNormalizer().normalize_and_persist(
+            conn,
+            pair=self.pair,
+            market_price=float(closes[-1]),
+            slippage_bps=float(self.slippage_bps),
+            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
+        )
         position, exposure, position_state, order_rules_snapshot = _load_position_context(
             conn,
             pair=self.pair,
@@ -985,12 +1049,29 @@ class SmaWithFilterStrategy:
 
     name: str = "sma_with_filter"
 
+    def decide_snapshot(
+        self,
+        *,
+        market: MarketWindow,
+        position: PositionSnapshot,
+        config: SmaPolicyConfig,
+        execution_context: ExecutionConstraintSnapshot,
+    ) -> StrategyDecisionV2:
+        return evaluate_sma_policy(
+            market=market,
+            position=position,
+            config=config,
+            execution_context=execution_context,
+        )
+
     def decide(
         self,
         conn: sqlite3.Connection,
         *,
         through_ts_ms: int | None = None,
     ) -> StrategyDecision | None:
+        # Legacy DB-bound compatibility facade. It explicitly runs state
+        # normalization before building immutable snapshots.
         if self.short_n >= self.long_n:
             raise ValueError("short는 long보다 작아야 해. 예: short=7 long=30")
 
@@ -1038,6 +1119,13 @@ class SmaWithFilterStrategy:
             "curr_s": curr_s,
             "curr_l": curr_l,
         }
+        PositionStateNormalizer().normalize_and_persist(
+            conn,
+            pair=self.pair,
+            market_price=float(closes[-1]),
+            slippage_bps=float(self.slippage_bps),
+            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
+        )
         position, exposure, position_state, order_rules_snapshot = _load_position_context(
             conn,
             pair=self.pair,
@@ -1047,7 +1135,7 @@ class SmaWithFilterStrategy:
             slippage_bps=float(self.slippage_bps),
             entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
         )
-        policy_decision = evaluate_sma_policy(
+        policy_decision = self.decide_snapshot(
             market=MarketWindow(
                 pair=self.pair,
                 interval=self.interval,

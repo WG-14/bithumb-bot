@@ -4,6 +4,14 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from bithumb_bot.core.sma_policy import (
+    ExecutionConstraintSnapshot,
+    MarketWindow,
+    PositionSnapshot,
+    SmaPolicyConfig,
+    StrategyDecisionV2,
+)
+
 Signal = Literal["BUY", "SELL", "HOLD"]
 
 
@@ -47,9 +55,25 @@ class PositionContext:
 class Strategy(Protocol):
     name: str
 
+    # Legacy compatibility facade. New strategy code should build immutable
+    # snapshots and call the strategy policy boundary instead of deciding from
+    # a mutable SQLite connection.
     def decide(
         self,
         conn: sqlite3.Connection,
         *,
         through_ts_ms: int | None = None,
     ) -> StrategyDecision | None: ...
+
+
+class StrategyPolicy(Protocol):
+    name: str
+
+    def decide_snapshot(
+        self,
+        *,
+        market: MarketWindow,
+        position: PositionSnapshot,
+        config: SmaPolicyConfig,
+        execution_context: ExecutionConstraintSnapshot,
+    ) -> StrategyDecisionV2: ...

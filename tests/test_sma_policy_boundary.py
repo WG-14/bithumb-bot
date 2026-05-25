@@ -14,6 +14,8 @@ from bithumb_bot.core.sma_policy import (
 )
 from bithumb_bot.market_regime import MARKET_REGIME_VERSION
 from bithumb_bot.research.backtest_engine import SmaWithFilterDecisionAdapter
+from bithumb_bot.research.backtest_engine import run_sma_backtest
+from bithumb_bot.research import backtest_kernel
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.experiment_manifest import DateRange, ExecutionTimingPolicy
 from bithumb_bot.strategy.sma import create_sma_with_filter_strategy
@@ -134,6 +136,36 @@ def test_evaluate_sma_policy_open_position_defers_exit_to_wrapper_without_entry_
     assert decision.final_signal == "HOLD"
     assert decision.final_reason == "position held: exit policy evaluation required"
     assert decision.trace["position"]["terminal_state"] == "open_exposure"
+
+
+def test_snapshot_strategy_policy_decides_without_sqlite() -> None:
+    strategy = create_sma_with_filter_strategy(
+        short_n=2,
+        long_n=3,
+        pair="BTC_KRW",
+        interval="1m",
+        min_gap_ratio=0.0,
+        volatility_window=3,
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        slippage_bps=0.0,
+        live_fee_rate_estimate=0.0,
+        entry_edge_buffer_ratio=0.0,
+        cost_edge_enabled=False,
+        market_regime_enabled=False,
+        candidate_regime_policy=_allowing_policy(),
+    )
+
+    decision = strategy.decide_snapshot(
+        market=_market_window(),
+        position=_flat_position(),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+    )
+
+    assert decision.final_signal == "BUY"
+    assert decision.policy_hash.startswith("sha256:")
 
 
 def _build_candle_db(closes: list[float]) -> sqlite3.Connection:
@@ -338,11 +370,170 @@ def test_shared_sma_exit_policy_is_deterministic_for_runtime_and_research_snapsh
     assert runtime_exit.reason == "exit by stop loss"
 
 
+def test_research_kernel_open_snapshot_matches_live_open_exit_policy_fields() -> None:
+    market = MarketWindow(
+        pair="BTC_KRW",
+        interval="1m",
+        candle_ts=1_700_000_240_000,
+        closes=(95.0,),
+        prev_s=100.0,
+        prev_l=99.0,
+        curr_s=98.0,
+        curr_l=99.0,
+    )
+    config = ExitPolicyConfig(
+        rule_names=("stop_loss", "opposite_cross", "max_holding_time"),
+        stop_loss_ratio=0.04,
+        max_holding_sec=600.0,
+        min_take_profit_ratio=0.0,
+        small_loss_tolerance_ratio=0.0,
+        live_fee_rate_estimate=0.0,
+    )
+    research_snapshot = backtest_kernel._research_position_snapshot(
+        qty=1.0,
+        sellable_qty=1.0,
+        pending_buy_qty=0.0,
+        pending_sell_qty=0.0,
+        entry_ts=1_700_000_000_000,
+        entry_price=100.0,
+        candle_ts=1_700_000_240_000,
+        market_price=95.0,
+    )
+    live_snapshot = PositionSnapshot(
+        **{
+            **research_snapshot.__dict__,
+            "terminal_state": "open_exposure",
+        }
+    )
+
+    research_exit = evaluate_sma_exit_policy(
+        position=research_snapshot,
+        market=market,
+        raw_signal="SELL",
+        raw_reason="sma dead cross",
+        entry_signal="SELL",
+        exit_signal="SELL",
+        config=config,
+    )
+    live_exit = evaluate_sma_exit_policy(
+        position=live_snapshot,
+        market=market,
+        raw_signal="SELL",
+        raw_reason="sma dead cross",
+        entry_signal="SELL",
+        exit_signal="SELL",
+        config=config,
+    )
+
+    assert research_snapshot.terminal_state == "research_simulated_open_exposure"
+    assert research_exit.final_signal == live_exit.final_signal == "SELL"
+    assert research_exit.rule == live_exit.rule == "stop_loss"
+    assert research_exit.reason == live_exit.reason == "exit by stop loss"
+
+
 def test_runtime_decide_db_mutation_boundary_remains_explicit_migration_gap() -> None:
     load_position_source = inspect.getsource(runtime_sma._load_position_context)
+    normalizer_source = inspect.getsource(runtime_sma.PositionStateNormalizer.normalize_and_persist)
     decide_source = inspect.getsource(runtime_sma.SmaWithFilterStrategy.decide)
 
-    assert "mark_harmless_dust_positions" in load_position_source
-    assert "reclassify_non_executable_open_exposure" in load_position_source
-    assert "conn.commit()" in load_position_source
+    assert "mark_harmless_dust_positions" not in load_position_source
+    assert "reclassify_non_executable_open_exposure" not in load_position_source
+    assert "conn.commit()" not in load_position_source
+    assert "mark_harmless_dust_positions" in normalizer_source
+    assert "reclassify_non_executable_open_exposure" in normalizer_source
+    assert "conn.commit()" in normalizer_source
+    assert "PositionStateNormalizer().normalize_and_persist(" in decide_source
     assert "_load_position_context(" in decide_source
+
+
+class _CommitCountingConnection:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.commit_count = 0
+
+    def execute(self, *args, **kwargs):
+        return self.conn.execute(*args, **kwargs)
+
+    def commit(self) -> None:
+        self.commit_count += 1
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+def test_post_normalization_decision_path_does_not_commit(monkeypatch) -> None:
+    closes = [10.0, 10.0, 10.0, 10.0, 11.0]
+    wrapped = _CommitCountingConnection(_build_candle_db(closes))
+    monkeypatch.setattr(
+        runtime_sma.PositionStateNormalizer,
+        "normalize_and_persist",
+        lambda self, conn, **kwargs: 0,
+    )
+
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.0,
+            entry_edge_buffer_ratio=0.0,
+            cost_edge_enabled=False,
+            market_regime_enabled=False,
+            candidate_regime_policy=_allowing_policy(),
+        ).decide(wrapped)
+    finally:
+        wrapped.close()
+
+    assert decision is not None
+    assert wrapped.commit_count == 0
+
+
+def test_research_kernel_reevaluates_policy_with_flat_simulated_position() -> None:
+    result = run_sma_backtest(
+        dataset=_dataset_from_closes([10.0, 10.0, 10.0, 10.0, 11.0]),
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+    )
+
+    assert result.decisions
+    decision = result.decisions[-1]
+    assert decision["research_policy_recomputed_with_simulated_position"] is True
+    assert decision["research_policy_position_terminal_state"] == "research_simulated_flat"
+    assert decision["pure_policy_trace"]["position"]["terminal_state"] == "research_simulated_flat"
+
+
+def test_research_adapter_placeholder_is_not_full_position_equivalence() -> None:
+    events = SmaWithFilterDecisionAdapter(
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        timing_policy=ExecutionTimingPolicy(),
+    ).build_events(_dataset_from_closes([10.0, 10.0, 10.0, 10.0, 11.0]))
+
+    placeholder_state = events[-1].extra_payload["pure_policy_trace"]["position"]["terminal_state"]
+    assert placeholder_state == "research_event_adapter_position_deferred_to_kernel"
