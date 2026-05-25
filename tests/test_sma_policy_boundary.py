@@ -721,6 +721,16 @@ def test_runtime_snapshot_builder_does_not_import_private_strategy_sma_helpers()
             assert imported.isdisjoint(forbidden_helpers)
 
 
+def test_research_kernel_does_not_import_private_strategy_sma_helpers() -> None:
+    source = inspect.getsource(backtest_kernel)
+    tree = ast.parse(source)
+
+    assert "from bithumb_bot.strategy import sma as runtime_sma" not in source
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            assert not node.module.endswith("strategy.sma")
+
+
 def test_runtime_context_owns_sma_legacy_serialization_helpers() -> None:
     builder_source = inspect.getsource(runtime_sma.RuntimeSmaDecisionResult.legacy_strategy_decision)
     strategy_module_source = inspect.getsource(SmaWithFilterStrategy)
@@ -728,25 +738,18 @@ def test_runtime_context_owns_sma_legacy_serialization_helpers() -> None:
     assert "runtime_sma_context" in inspect.getsource(runtime_sma)
     assert "legacy_strategy_decision_from_sma_final_decision(" in builder_source
     assert "_legacy_strategy_decision_from_sma_final_decision(" not in builder_source
-    assert "Deprecated DB-bound compatibility facade" in strategy_module_source
+    assert "Promotion-grade snapshot SMA strategy" in strategy_module_source
+    assert "def decide(" not in strategy_module_source
 
 
-def test_strategy_sma_db_bound_shims_delegate_to_runtime_modules() -> None:
+def test_strategy_sma_is_compatibility_facade_not_implementation_authority() -> None:
     module_source = inspect.getsource(strategy_sma)
-    shim_sources = [
-        inspect.getsource(strategy_sma._load_signal_rows),
-        inspect.getsource(strategy_sma._closed_candle_cutoff_ts_ms),
-        inspect.getsource(strategy_sma._load_position_context),
-        inspect.getsource(strategy_sma._policy_position_snapshot),
-        inspect.getsource(strategy_sma.build_sma_with_filter_decision_from_normalized_db),
-        inspect.getsource(strategy_sma.decide_sma_with_filter_snapshot_from_db),
-        inspect.getsource(SmaWithFilterStrategy.decide),
-        inspect.getsource(SmaWithFilterStrategy._decide_from_normalized_db),
-    ]
 
-    assert "Compatibility shim" in module_source
-    for source in shim_sources:
-        assert "runtime_sma_snapshot_builder" in source
+    assert "Compatibility facade" in module_source
+    assert "import sqlite3" not in module_source
+    assert "class SmaWithFilterStrategy" not in module_source
+    assert "class SmaCrossStrategy" not in module_source
+    assert SmaWithFilterStrategy.__module__ == "bithumb_bot.strategy.sma_policy_strategy"
     assert "evaluate_sma_policy(" in inspect.getsource(SmaWithFilterStrategy.decide_snapshot)
 
 
@@ -918,11 +921,12 @@ def test_snapshot_orchestration_does_not_call_legacy_decide_facade(monkeypatch) 
     def _raise_legacy_normalized_db_decide(*args, **kwargs):
         raise AssertionError("legacy normalized DB strategy method was called")
 
-    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _raise_legacy_decide)
+    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _raise_legacy_decide, raising=False)
     monkeypatch.setattr(
         SmaWithFilterStrategy,
         "_decide_from_normalized_db",
         _raise_legacy_normalized_db_decide,
+        raising=False,
     )
 
     class _Normalizer:
@@ -1003,11 +1007,12 @@ def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -
         events.append("builder")
         return original_builder(conn, strategy, through_ts_ms=through_ts_ms)
 
-    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _raise_legacy_decide)
+    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _raise_legacy_decide, raising=False)
     monkeypatch.setattr(
         SmaWithFilterStrategy,
         "_decide_from_normalized_db",
         _raise_legacy_normalized_db_decide,
+        raising=False,
     )
     monkeypatch.setattr(runtime_sma, "build_sma_with_filter_runtime_decision_from_normalized_db", _builder)
 
@@ -1061,7 +1066,8 @@ def test_typed_runtime_sma_result_preserves_policy_hashes_until_legacy_serializa
     legacy_payload = result.as_legacy_dict()
 
     assert result.decision.policy_decision_hash == original_policy_decision_hash
-    assert result.policy_hashes["policy_decision_hash"] == original_policy_decision_hash
+    assert result.policy_hashes.policy_decision_hash == original_policy_decision_hash
+    assert result.policy_observability["policy_decision_hash"] == original_policy_decision_hash
     assert legacy_payload["policy_decision_hash"] == original_policy_decision_hash
     assert legacy_payload["pure_policy_trace"]["policy_decision_hash"] == original_policy_decision_hash
 
@@ -1098,11 +1104,12 @@ def test_runtime_replay_export_uses_direct_sma_with_filter_snapshot_path(monkeyp
         events.append("builder")
         return original_builder(conn, strategy, through_ts_ms=through_ts_ms)
 
-    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _raise_legacy_decide)
+    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _raise_legacy_decide, raising=False)
     monkeypatch.setattr(
         SmaWithFilterStrategy,
         "_decide_from_normalized_db",
         _raise_legacy_normalized_db_decide,
+        raising=False,
     )
     monkeypatch.setattr(runtime_sma, "build_sma_with_filter_runtime_decision_from_normalized_db", _builder)
 

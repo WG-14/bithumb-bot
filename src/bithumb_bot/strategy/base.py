@@ -70,11 +70,9 @@ class LegacyDbStrategy(Protocol):
     ) -> StrategyDecision | None: ...
 
 
-class Strategy(LegacyDbStrategy, Protocol):
-    """Deprecated alias for existing registry compatibility."""
-
-
 class StrategyPolicy(Protocol):
+    """Promotion-grade snapshot strategy interface."""
+
     name: str
 
     def decide_snapshot(

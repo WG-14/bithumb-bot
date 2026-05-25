@@ -85,6 +85,13 @@ class ExecutionSubmitPlan:
             "idempotency_key": self.idempotency_key,
         }
 
+    def as_final_payload(self, *, extra: dict[str, object] | None = None) -> dict[str, object]:
+        payload = self.as_dict()
+        if extra:
+            payload.update(extra)
+        validate_execution_submit_plan_payload(payload, field_name="execution_submit_plan")
+        return payload
+
 
 EXECUTION_SUBMIT_PLAN_REQUIRED_FIELDS = frozenset(
     {
@@ -827,23 +834,74 @@ def build_execution_decision_summary(
                     performance_gate_fields.get("strategy_performance_gate_reason_code")
                     or "STRATEGY_PERFORMANCE_BLOCKED"
                 )
-            target_submit_plan = ExecutionSubmitPlan(
-                side=str(target_decision.delta_side),
-                source="target_delta",
-                authority="canonical_target_delta_sizing",
-                final_action=(
-                    "REBALANCE_TO_TARGET"
-                    if submit_allowed
+            target_final_action = (
+                "REBALANCE_TO_TARGET"
+                if submit_allowed
+                else (
+                    "BLOCK_STRATEGY_PERFORMANCE_GATE"
+                    if performance_gate_blocks_buy
                     else (
-                        "BLOCK_STRATEGY_PERFORMANCE_GATE"
-                        if performance_gate_blocks_buy
-                        else (
                         "HOLD_TARGET_TRUE_DUST"
                         if target_decision.block_reason == "delta_below_exchange_min"
                         else "BLOCK_TARGET_DELTA"
-                        )
                     )
+                )
+            )
+            target_block_reason = str(sizing_block_reason or target_decision.block_reason)
+            target_plan_extra = {
+                "intent_type": "target_delta_rebalance",
+                "strategy_context": "target_delta",
+                "authority_source": "target_delta",
+                "target_desired_qty": target_decision.submit_qty,
+                "target_exchange_constrained_qty": (
+                    None if target_sizing is None else target_sizing.exchange_constrained_qty
                 ),
+                "target_final_submitted_qty": (
+                    None if target_sizing is None else target_sizing.final_submitted_qty
+                ),
+                "target_final_submitted_notional_krw": (
+                    None if target_sizing is None else target_sizing.final_submitted_notional_krw
+                ),
+                "target_sizing": target_sizing_dict,
+                "invariant_status": (
+                    "not_required" if target_sizing is None else target_sizing.invariant_status
+                ),
+                "dust_policy": "no_delta" if target_sizing is None else target_sizing.dust_policy,
+                "rejected_remainder": (
+                    None if target_sizing is None else target_sizing.rejected_remainder
+                ),
+                "target_qty": target_decision.target_qty,
+                "target_previous_exposure_krw": target_decision.previous_target_exposure_krw,
+                "target_delta_qty": target_decision.delta_qty,
+                "target_delta_side": target_decision.delta_side,
+                "target_dust_classification": target_decision.dust_classification,
+                "target_position_truth_state": target_decision.position_truth_state,
+                "target_order_rule_min_qty": target_decision.order_rule_min_qty,
+                "target_order_rule_min_notional_krw": target_decision.order_rule_min_notional_krw,
+                "target_order_rule_qty_step": target_decision.order_rule_qty_step,
+                "order_rule_authority": target_decision.order_rule_authority,
+                "order_rule_authority_source": target_decision.order_rule_authority_source,
+                "order_rule_authority_source_mode": target_decision.order_rule_authority_source_mode,
+                "target_order_rule_min_qty_source": target_decision.order_rule_min_qty_source,
+                "target_order_rule_min_notional_krw_source": target_decision.order_rule_min_notional_krw_source,
+                "target_origin": target_decision.target_origin,
+                "target_policy_action": target_decision.target_policy_action,
+                "target_adoption_reason": target_decision.target_adoption_reason,
+                "target_adopted_broker_qty": target_decision.target_adopted_broker_qty,
+                "target_adopted_exposure_krw": target_decision.target_adopted_exposure_krw,
+                "target_startup_policy_state": target_decision.target_startup_policy_state,
+                "target_existing_state_present": target_decision.target_existing_state_present,
+                "target_missing_state_resolution": target_decision.target_missing_state_resolution,
+                "target_closeout_requested": target_decision.target_closeout_requested,
+                "target_strategy_signal_source": target_decision.target_strategy_signal_source,
+            }
+            if performance_gate_fields and str(target_decision.delta_side) == "BUY":
+                target_plan_extra.update(performance_gate_fields)
+            target_plan = ExecutionSubmitPlan(
+                side=str(target_decision.delta_side),
+                source="target_delta",
+                authority="canonical_target_delta_sizing",
+                final_action=target_final_action,
                 qty=(None if target_sizing is None else target_sizing.final_submitted_qty),
                 notional_krw=(
                     None if target_sizing is None else target_sizing.final_submitted_notional_krw
@@ -853,79 +911,39 @@ def build_execution_decision_summary(
                 delta_krw=target_decision.delta_notional_krw,
                 submit_expected=submit_allowed,
                 pre_submit_proof_status=("passed" if submit_allowed else "failed"),
-                block_reason=str(sizing_block_reason or target_decision.block_reason),
+                block_reason=target_block_reason,
                 idempotency_key=target_idempotency_key,
-            ).as_dict()
-            target_submit_plan.update(
-                {
-                    "intent_type": "target_delta_rebalance",
-                    "strategy_context": "target_delta",
-                    "authority_source": "target_delta",
-                    "target_desired_qty": target_decision.submit_qty,
-                    "target_exchange_constrained_qty": (
-                        None if target_sizing is None else target_sizing.exchange_constrained_qty
-                    ),
-                    "target_final_submitted_qty": (
-                        None if target_sizing is None else target_sizing.final_submitted_qty
-                    ),
-                    "target_final_submitted_notional_krw": (
-                        None if target_sizing is None else target_sizing.final_submitted_notional_krw
-                    ),
-                    "target_sizing": target_sizing_dict,
-                    "invariant_status": (
-                        "not_required" if target_sizing is None else target_sizing.invariant_status
-                    ),
-                    "dust_policy": (
-                        "no_delta" if target_sizing is None else target_sizing.dust_policy
-                    ),
-                    "rejected_remainder": (
-                        None if target_sizing is None else target_sizing.rejected_remainder
-                    ),
-                    "target_qty": target_decision.target_qty,
-                    "target_previous_exposure_krw": target_decision.previous_target_exposure_krw,
-                    "target_delta_qty": target_decision.delta_qty,
-                    "target_delta_side": target_decision.delta_side,
-                    "target_dust_classification": target_decision.dust_classification,
-                    "target_position_truth_state": target_decision.position_truth_state,
-                    "target_order_rule_min_qty": target_decision.order_rule_min_qty,
-                    "target_order_rule_min_notional_krw": target_decision.order_rule_min_notional_krw,
-                    "target_order_rule_qty_step": target_decision.order_rule_qty_step,
-                    "order_rule_authority": target_decision.order_rule_authority,
-                    "order_rule_authority_source": target_decision.order_rule_authority_source,
-                    "order_rule_authority_source_mode": target_decision.order_rule_authority_source_mode,
-                    "target_order_rule_min_qty_source": target_decision.order_rule_min_qty_source,
-                    "target_order_rule_min_notional_krw_source": target_decision.order_rule_min_notional_krw_source,
-                    "target_origin": target_decision.target_origin,
-                    "target_policy_action": target_decision.target_policy_action,
-                    "target_adoption_reason": target_decision.target_adoption_reason,
-                    "target_adopted_broker_qty": target_decision.target_adopted_broker_qty,
-                    "target_adopted_exposure_krw": target_decision.target_adopted_exposure_krw,
-                    "target_startup_policy_state": target_decision.target_startup_policy_state,
-                    "target_existing_state_present": target_decision.target_existing_state_present,
-                    "target_missing_state_resolution": target_decision.target_missing_state_resolution,
-                    "target_closeout_requested": target_decision.target_closeout_requested,
-                    "target_strategy_signal_source": target_decision.target_strategy_signal_source,
-                }
             )
-            if performance_gate_fields and str(target_decision.delta_side) == "BUY":
-                target_submit_plan.update(performance_gate_fields)
+            pre_trade_plan = target_plan.as_final_payload(extra=target_plan_extra)
             pre_trade_economics = _build_buy_pre_trade_economics(
                 decision_context=payload,
-                plan=target_submit_plan,
+                plan=pre_trade_plan,
                 side=str(target_decision.delta_side),
                 source="target_submit_plan",
             )
             if pre_trade_economics is not None:
-                target_submit_plan["pre_trade_economics"] = pre_trade_economics
+                target_plan_extra["pre_trade_economics"] = pre_trade_economics
                 if bool(pre_trade_economics.get("blocking_enabled")) and not bool(
                     pre_trade_economics.get("meaningful_edge")
                 ):
-                    target_submit_plan["submit_expected"] = False
-                    target_submit_plan["pre_submit_proof_status"] = "failed"
-                    target_submit_plan["final_action"] = "BLOCK_PRE_TRADE_ECONOMICS"
-                    target_submit_plan["block_reason"] = str(
-                        pre_trade_economics.get("reason") or "net_edge_below_minimum"
+                    target_plan = ExecutionSubmitPlan(
+                        side=target_plan.side,
+                        source=target_plan.source,
+                        authority=target_plan.authority,
+                        final_action="BLOCK_PRE_TRADE_ECONOMICS",
+                        qty=target_plan.qty,
+                        notional_krw=target_plan.notional_krw,
+                        target_exposure_krw=target_plan.target_exposure_krw,
+                        current_effective_exposure_krw=target_plan.current_effective_exposure_krw,
+                        delta_krw=target_plan.delta_krw,
+                        submit_expected=False,
+                        pre_submit_proof_status="failed",
+                        block_reason=str(
+                            pre_trade_economics.get("reason") or "net_edge_below_minimum"
+                        ),
+                        idempotency_key=target_plan.idempotency_key,
                     )
+            target_submit_plan = target_plan.as_final_payload(extra=target_plan_extra)
 
     if execution_engine == "target_delta":
         if target_submit_plan is not None:

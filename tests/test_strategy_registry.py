@@ -34,13 +34,13 @@ def test_registry_default_strategy_available() -> None:
 
 def test_db_bound_strategy_protocol_is_explicitly_legacy() -> None:
     legacy_source = inspect.getsource(strategy_base.LegacyDbStrategy)
-    strategy_source = inspect.getsource(strategy_base.Strategy)
     policy_source = inspect.getsource(strategy_base.StrategyPolicy)
 
     assert "Deprecated DB-bound strategy facade" in legacy_source
     assert "compatibility-only" in legacy_source
     assert "decide(" in legacy_source
-    assert "Deprecated alias" in strategy_source
+    assert not hasattr(strategy_base, "Strategy")
+    assert "Promotion-grade snapshot strategy interface" in policy_source
     assert "decide_snapshot(" in policy_source
 
 
@@ -166,11 +166,12 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
     def _fail_legacy_normalized_db(*args, **kwargs):
         raise AssertionError("legacy _decide_from_normalized_db path called")
 
-    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _fail_legacy_decide)
+    monkeypatch.setattr(SmaWithFilterStrategy, "decide", _fail_legacy_decide, raising=False)
     monkeypatch.setattr(
         SmaWithFilterStrategy,
         "_decide_from_normalized_db",
         _fail_legacy_normalized_db,
+        raising=False,
     )
 
     db_path = str(tmp_path / "strategy_no_legacy_decide.sqlite")
@@ -469,6 +470,53 @@ def test_registry_rejects_unknown_strategy_name() -> None:
 def test_registry_can_create_filtered_sma_strategy() -> None:
     strategy = create_strategy("sma_with_filter", short_n=2, long_n=3)
     assert strategy.name == "sma_with_filter"
+    assert strategy.__class__.__module__ == "bithumb_bot.strategy.sma_policy_strategy"
+    assert hasattr(strategy, "decide_snapshot")
+    assert not hasattr(strategy, "decide")
+
+
+def test_engine_prepares_persistence_context_and_execution_request() -> None:
+    class _Summary:
+        def as_dict(self) -> dict[str, object]:
+            return {
+                "final_action": "REBALANCE_TO_TARGET",
+                "submit_expected": True,
+                "pre_submit_proof_status": "passed",
+                "block_reason": "none",
+                "residual_live_sell_mode": "block",
+                "residual_buy_sizing_mode": "block",
+                "target_shadow_decision": {"target_policy_action": "maintain"},
+            }
+
+    context = engine_module.prepare_strategy_decision_persistence_context(
+        decision_context={"strategy": "sma_with_filter"},
+        execution_decision_summary=_Summary(),
+        readiness_payload={"residual_inventory_state": "none"},
+        target_policy_metadata={"target_origin": "runtime_state"},
+    )
+
+    assert context["execution_decision"]["final_action"] == "REBALANCE_TO_TARGET"  # type: ignore[index]
+    assert context["final_action"] == "REBALANCE_TO_TARGET"
+    assert context["submit_expected"] is True
+    assert context["pre_submit_proof_status"] == "passed"
+    assert context["execution_block_reason"] == "none"
+    assert context["residual_inventory_state"] == "none"
+    assert context["target_policy_action"] == "maintain"
+    assert context["target_origin"] == "runtime_state"
+
+    request = engine_module.build_signal_execution_request(
+        signal="BUY",
+        ts=123,
+        market_price=10.0,
+        strategy_name="sma_with_filter",
+        decision_id=7,
+        decision_reason="reason",
+        exit_rule_name=None,
+        execution_decision_summary=None,
+        decision_context=context,
+    )
+    assert request.signal == "BUY"
+    assert request.decision_context is context
 
 
 def test_engine_no_direct_sma_import() -> None:

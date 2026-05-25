@@ -44,6 +44,30 @@ from .strategy.sma_decision_assembler import evaluate_sma_final_decision
 
 
 @dataclass(frozen=True)
+class RuntimeSmaPolicyHashes:
+    pure_policy_hash: str
+    policy_contract_hash: str
+    policy_input_hash: str
+    policy_decision_hash: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "pure_policy_hash": self.pure_policy_hash,
+            "policy_contract_hash": self.policy_contract_hash,
+            "policy_input_hash": self.policy_input_hash,
+            "policy_decision_hash": self.policy_decision_hash,
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeSmaReplayFingerprint:
+    payload: dict[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        return dict(self.payload)
+
+
+@dataclass(frozen=True)
 class RuntimeSmaDecisionResult:
     """Typed SMA runtime decision before legacy persistence serialization."""
 
@@ -56,26 +80,62 @@ class RuntimeSmaDecisionResult:
     market_price: float
     replay_fingerprint: dict[str, object]
 
+    def __post_init__(self) -> None:
+        # ``base_context`` is legacy serialization material. Keep a private copy
+        # boundary so callers cannot mutate the originally supplied mapping after
+        # construction and accidentally alter this result's compatibility payload.
+        object.__setattr__(self, "base_context", dict(self.base_context))
+        object.__setattr__(self, "replay_fingerprint", dict(self.replay_fingerprint))
+
     @property
-    def policy_hashes(self) -> dict[str, str]:
+    def policy_hashes(self) -> RuntimeSmaPolicyHashes:
+        return RuntimeSmaPolicyHashes(
+            pure_policy_hash=self.decision.policy_hash,
+            policy_contract_hash=self.decision.policy_contract_hash,
+            policy_input_hash=self.decision.policy_input_hash,
+            policy_decision_hash=self.decision.policy_decision_hash,
+        )
+
+    @property
+    def replay_fingerprint_snapshot(self) -> RuntimeSmaReplayFingerprint:
+        return RuntimeSmaReplayFingerprint(self.replay_fingerprint)
+
+    @property
+    def policy_observability(self) -> dict[str, object]:
+        return {
+            **self.policy_hashes.as_dict(),
+            "pure_policy_trace": self.decision.as_trace(),
+            "final_signal": self.decision.final_signal,
+            "final_reason": self.decision.final_reason,
+            "blocked_filters": list(self.decision.blocked_filters),
+            "entry_blocked": self.decision.entry_blocked,
+            "entry_block_reason": self.decision.entry_block_reason,
+            "exit_rule": self.decision.exit_rule,
+            "exit_evaluations": [dict(item) for item in self.decision.exit_evaluations],
+        }
+
+    def _authoritative_policy_context(self) -> dict[str, object]:
         return {
             "pure_policy_hash": self.decision.policy_hash,
             "policy_contract_hash": self.decision.policy_contract_hash,
             "policy_input_hash": self.decision.policy_input_hash,
             "policy_decision_hash": self.decision.policy_decision_hash,
+            "pure_policy_trace": self.decision.as_trace(),
         }
 
     def legacy_strategy_decision(self) -> StrategyDecision:
         return legacy_strategy_decision_from_sma_final_decision(
             decision=self.decision,
-            base_context=dict(self.base_context),
+            base_context={**dict(self.base_context), **self._authoritative_policy_context()},
             position=self.position,
             exposure=self.exposure,
             position_state=self.position_state,
         )
 
     def as_legacy_dict(self) -> dict[str, Any]:
-        return self.legacy_strategy_decision().as_dict()
+        payload = self.legacy_strategy_decision().as_dict()
+        payload.update(self._authoritative_policy_context())
+        return payload
 
 
 def _load_signal_rows(

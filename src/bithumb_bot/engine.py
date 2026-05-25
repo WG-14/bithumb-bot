@@ -491,6 +491,90 @@ def compute_strategy_decision_snapshot(
     return None if decision is None else (decision, strategy)
 
 
+READINESS_CONTEXT_KEYS = (
+    "residual_inventory_mode",
+    "residual_inventory_state",
+    "residual_inventory_policy_allows_run",
+    "residual_inventory_policy_allows_buy",
+    "residual_inventory_policy_allows_sell",
+    "residual_inventory_qty",
+    "residual_inventory_notional_krw",
+    "residual_inventory_exchange_sellable",
+    "total_effective_exposure_qty",
+    "total_effective_exposure_notional_krw",
+    "residual_sell_candidate",
+    "unresolved_open_order_count",
+    "submit_unknown_count",
+    "target_policy_action",
+    "target_origin",
+    "target_adoption_reason",
+    "target_adopted_broker_qty",
+    "target_adopted_exposure_krw",
+    "target_startup_policy_state",
+    "target_existing_state_present",
+    "target_missing_state_resolution",
+    "target_closeout_requested",
+    "target_strategy_signal_source",
+)
+
+
+def prepare_strategy_decision_persistence_context(
+    *,
+    decision_context: dict[str, object],
+    execution_decision_summary: object,
+    readiness_payload: dict[str, object],
+    target_policy_metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Attach execution summary fields needed by persistence/logging."""
+    if not hasattr(execution_decision_summary, "as_dict"):
+        raise TypeError("execution_decision_summary_missing_as_dict")
+    execution_decision = execution_decision_summary.as_dict()
+    context = dict(decision_context)
+    context["execution_decision"] = execution_decision
+    context["final_action"] = execution_decision["final_action"]
+    context["submit_expected"] = execution_decision["submit_expected"]
+    context["pre_submit_proof_status"] = execution_decision["pre_submit_proof_status"]
+    context["execution_block_reason"] = execution_decision["block_reason"]
+    context["residual_live_sell_mode"] = execution_decision.get("residual_live_sell_mode")
+    context["residual_buy_sizing_mode"] = execution_decision.get("residual_buy_sizing_mode")
+    target_shadow = execution_decision.get("target_shadow_decision")
+    if isinstance(target_shadow, dict):
+        for target_key, target_value in target_shadow.items():
+            context[target_key] = target_value
+    if isinstance(target_policy_metadata, dict):
+        for target_key, target_value in target_policy_metadata.items():
+            context.setdefault(target_key, target_value)
+    for key in READINESS_CONTEXT_KEYS:
+        if key in readiness_payload:
+            context[key] = readiness_payload[key]
+    return context
+
+
+def build_signal_execution_request(
+    *,
+    signal: str,
+    ts: int,
+    market_price: float,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
+    execution_decision_summary: object | None,
+    decision_context: dict[str, object] | None,
+) -> SignalExecutionRequest:
+    return SignalExecutionRequest(
+        signal=signal,
+        ts=ts,
+        market_price=market_price,
+        strategy_name=strategy_name,
+        decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+        execution_decision_summary=execution_decision_summary,
+        decision_context=decision_context,
+    )
+
+
 @dataclass(frozen=True)
 class HaltReason:
     code: str
@@ -3292,48 +3376,14 @@ def run_loop(short_n: int, long_n: int) -> None:
                         previous_target_exposure_krw=previous_target_exposure_krw,
                         strategy_performance_gate=strategy_performance_gate,
                     )
-                    execution_decision = execution_decision_summary_for_trade.as_dict()
-                    context["execution_decision"] = execution_decision
-                    context["final_action"] = execution_decision["final_action"]
-                    context["submit_expected"] = execution_decision["submit_expected"]
-                    context["pre_submit_proof_status"] = execution_decision["pre_submit_proof_status"]
-                    context["execution_block_reason"] = execution_decision["block_reason"]
-                    context["residual_live_sell_mode"] = execution_decision.get("residual_live_sell_mode")
-                    context["residual_buy_sizing_mode"] = execution_decision.get("residual_buy_sizing_mode")
-                    target_shadow = execution_decision.get("target_shadow_decision")
-                    if isinstance(target_shadow, dict):
-                        for target_key, target_value in target_shadow.items():
-                            context[target_key] = target_value
-                    if isinstance(target_policy_metadata, dict):
-                        for target_key, target_value in target_policy_metadata.items():
-                            context.setdefault(target_key, target_value)
-                    for key in (
-                        "residual_inventory_mode",
-                        "residual_inventory_state",
-                        "residual_inventory_policy_allows_run",
-                        "residual_inventory_policy_allows_buy",
-                        "residual_inventory_policy_allows_sell",
-                        "residual_inventory_qty",
-                        "residual_inventory_notional_krw",
-                        "residual_inventory_exchange_sellable",
-                        "total_effective_exposure_qty",
-                        "total_effective_exposure_notional_krw",
-                        "residual_sell_candidate",
-                        "unresolved_open_order_count",
-                        "submit_unknown_count",
-                        "target_policy_action",
-                        "target_origin",
-                        "target_adoption_reason",
-                        "target_adopted_broker_qty",
-                        "target_adopted_exposure_krw",
-                        "target_startup_policy_state",
-                        "target_existing_state_present",
-                        "target_missing_state_resolution",
-                        "target_closeout_requested",
-                        "target_strategy_signal_source",
-                    ):
-                        if key in readiness_payload:
-                            context[key] = readiness_payload[key]
+                    context = prepare_strategy_decision_persistence_context(
+                        decision_context=context,
+                        execution_decision_summary=execution_decision_summary_for_trade,
+                        readiness_payload=readiness_payload,
+                        target_policy_metadata=target_policy_metadata,
+                    )
+                    decision_context_for_trade = context
+                    execution_decision = context["execution_decision"]
                 except Exception as exc:
                     execution_decision = {
                         "final_action": "BLOCK_RECOVERY",
@@ -3342,6 +3392,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                         "block_reason": f"execution_decision_unavailable:{type(exc).__name__}",
                     }
                     context["execution_decision"] = execution_decision
+                    decision_context_for_trade = context
                 exit_ctx = context.get("exit")
                 if isinstance(exit_ctx, dict):
                     raw_rule = exit_ctx.get("rule")
@@ -3453,7 +3504,7 @@ def run_loop(short_n: int, long_n: int) -> None:
             if execution_service is not None:
                 try:
                     trade = execution_service.execute(
-                        SignalExecutionRequest(
+                        build_signal_execution_request(
                             signal=r["signal"],
                             ts=r["ts"],
                             market_price=float(r["last_close"]),

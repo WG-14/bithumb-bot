@@ -7,6 +7,7 @@ import pytest
 from bithumb_bot.config import settings
 from bithumb_bot.execution_service import (
     ExecutionDecisionSummary,
+    ExecutionSubmitPlan,
     LiveSignalExecutionService,
     SignalExecutionRequest,
 )
@@ -109,6 +110,45 @@ def _typed_target_execution_summary() -> ExecutionDecisionSummary:
         target_shadow_decision=None,
         target_submit_plan=_valid_target_submit_plan(),
     )
+
+
+def test_execution_submit_plan_final_payload_validates_after_extra_fields() -> None:
+    plan = ExecutionSubmitPlan(
+        side="BUY",
+        source="target_delta",
+        authority="canonical_target_delta_sizing",
+        final_action="REBALANCE_TO_TARGET",
+        qty=0.001,
+        notional_krw=100_000.0,
+        target_exposure_krw=100_000.0,
+        current_effective_exposure_krw=0.0,
+        delta_krw=100_000.0,
+        submit_expected=True,
+        pre_submit_proof_status="passed",
+        block_reason="none",
+        idempotency_key="target-plan-key",
+    )
+
+    payload = plan.as_final_payload(extra={"intent_type": "target_delta_rebalance"})
+    assert payload["intent_type"] == "target_delta_rebalance"
+
+    invalid = ExecutionSubmitPlan(
+        side="BUY",
+        source="target_delta",
+        authority="canonical_target_delta_sizing",
+        final_action="REBALANCE_TO_TARGET",
+        qty=0.001,
+        notional_krw=100_000.0,
+        target_exposure_krw=100_000.0,
+        current_effective_exposure_krw=0.0,
+        delta_krw=100_000.0,
+        submit_expected=True,
+        pre_submit_proof_status="failed",
+        block_reason="none",
+        idempotency_key="target-plan-key",
+    )
+    with pytest.raises(ValueError, match="execution_submit_plan_schema_submit_expected_with_failed_proof"):
+        invalid.as_final_payload()
 
 
 @pytest.mark.parametrize(

@@ -236,10 +236,13 @@ def _reevaluate_sma_policy_with_research_position(
 
 
 def _research_fee_authority_context(*, pair: str, fee_rate: float) -> dict[str, object]:
-    from bithumb_bot.strategy import sma as runtime_sma
+    from bithumb_bot.runtime_sma_context import (
+        fee_authority_context,
+        resolve_strategy_fee_authority,
+    )
 
-    return runtime_sma._fee_authority_context(  # noqa: SLF001
-        runtime_sma._resolve_strategy_fee_authority(  # noqa: SLF001
+    return fee_authority_context(
+        resolve_strategy_fee_authority(
             pair=pair,
             config_fallback_fee_rate=float(fee_rate),
         )
@@ -248,9 +251,9 @@ def _research_fee_authority_context(*, pair: str, fee_rate: float) -> dict[str, 
 
 def _research_order_rules_snapshot(*, pair: str) -> dict[str, object]:
     from bithumb_bot.canonical_decision import order_rules_snapshot_payload
-    from bithumb_bot.strategy import sma as runtime_sma
+    from bithumb_bot.broker.order_rules import get_effective_order_rules
 
-    return order_rules_snapshot_payload(runtime_sma.get_effective_order_rules(pair), pair=pair)
+    return order_rules_snapshot_payload(get_effective_order_rules(pair), pair=pair)
 
 
 @dataclass(frozen=True)
