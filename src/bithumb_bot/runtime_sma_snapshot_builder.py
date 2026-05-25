@@ -25,6 +25,17 @@ from .runtime_position_state_normalizer import (
     PositionStateNormalizer,
     load_last_reconcile_metadata,
 )
+from .runtime_sma_context import (
+    build_entry_decision_context,
+    build_position_gate_context,
+    build_position_state_context,
+    fee_authority_context,
+    legacy_strategy_decision_from_sma_final_decision,
+    live_armed_entry_fee_authority_blocks,
+    resolve_strategy_fee_authority,
+    safe_ratio,
+    sma,
+)
 from .strategy.base import PositionContext, StrategyDecision
 from .strategy.exit_rules import ExitPolicyConfig
 from .strategy.sma_decision_assembler import evaluate_sma_final_decision
@@ -65,8 +76,6 @@ def _load_position_context(
     slippage_bps: float,
     entry_edge_buffer_ratio: float,
 ) -> tuple[PositionContext, object, object, dict[str, object]]:
-    from .strategy.sma import _safe_ratio
-
     dust_context = build_dust_display_context(load_last_reconcile_metadata(conn))
     resolution = get_effective_order_rules(pair)
     rules = resolution.rules
@@ -194,7 +203,7 @@ def _load_position_context(
     exposure = position_state.normalized_exposure
     holding_time_sec = max(0.0, (int(candle_ts) - entry_ts) / 1000.0)
     unrealized_pnl = (float(market_price) - entry_price) * tracked_open_qty
-    unrealized_pnl_ratio = _safe_ratio(float(market_price) - entry_price, entry_price)
+    unrealized_pnl_ratio = safe_ratio(float(market_price) - entry_price, entry_price)
 
     return (
         PositionContext(
@@ -254,16 +263,6 @@ def build_sma_with_filter_decision_from_normalized_db(
     through_ts_ms: int | None = None,
 ) -> StrategyDecision | None:
     """Read normalized DB state and serialize the typed final decision."""
-    from .strategy.sma import (
-        _build_entry_decision_context,
-        _build_position_gate_context,
-        _build_position_state_context,
-        _fee_authority_context,
-        _legacy_strategy_decision_from_sma_final_decision,
-        _live_armed_entry_fee_authority_blocks,
-        _resolve_strategy_fee_authority,
-        _sma,
-    )
     from .utils_time import parse_interval_sec
 
     if int(strategy.short_n) >= int(strategy.long_n):
@@ -296,12 +295,12 @@ def build_sma_with_filter_decision_from_normalized_db(
     end_prev = len(closes) - 1
     end_curr = len(closes)
 
-    prev_s = _sma(closes, int(strategy.short_n), end_prev)
-    prev_l = _sma(closes, int(strategy.long_n), end_prev)
-    curr_s = _sma(closes, int(strategy.short_n), end_curr)
-    curr_l = _sma(closes, int(strategy.long_n), end_curr)
+    prev_s = sma(closes, int(strategy.short_n), end_prev)
+    prev_l = sma(closes, int(strategy.long_n), end_prev)
+    curr_s = sma(closes, int(strategy.short_n), end_curr)
+    curr_l = sma(closes, int(strategy.long_n), end_curr)
 
-    fee_authority = _resolve_strategy_fee_authority(
+    fee_authority = resolve_strategy_fee_authority(
         pair=strategy.pair,
         config_fallback_fee_rate=float(strategy.live_fee_rate_estimate),
     )
@@ -356,8 +355,8 @@ def build_sma_with_filter_decision_from_normalized_db(
     )
     execution_snapshot = ExecutionConstraintSnapshot(
         fee_rate_for_decision=fee_rate_for_decision,
-        fee_authority_degraded_blocks_entry=_live_armed_entry_fee_authority_blocks(fee_authority),
-        fee_authority=_fee_authority_context(fee_authority),
+        fee_authority_degraded_blocks_entry=live_armed_entry_fee_authority_blocks(fee_authority),
+        fee_authority=fee_authority_context(fee_authority),
         order_rules=order_rules_snapshot,
     )
     exit_policy_config = ExitPolicyConfig(
@@ -607,12 +606,12 @@ def build_sma_with_filter_decision_from_normalized_db(
         "regime_policy_present": bool(candidate_regime_decision.get("regime_policy_present")),
         "regime_policy_valid": bool(candidate_regime_decision.get("regime_policy_valid")),
         "order_rules": order_rules_snapshot,
-        "position_gate": _build_position_gate_context(
+        "position_gate": build_position_gate_context(
             position_state.normalized_exposure,
             order_rules=order_rules_snapshot,
         ),
-        "position_state": _build_position_state_context(position_state),
-        "fee_authority": _fee_authority_context(fee_authority),
+        "position_state": build_position_state_context(position_state),
+        "fee_authority": fee_authority_context(fee_authority),
         "filters": {
             "gap": {
                 "enabled": entry_decision.gap_filter_enabled,
@@ -671,7 +670,7 @@ def build_sma_with_filter_decision_from_normalized_db(
         "blocked_by_cost_filter": bool(should_filter_entry and edge_filter_triggered),
         "blocked_by_fee_authority": bool("fee_authority_degraded" in blocked_filters),
         "entry": {
-            **_build_entry_decision_context(
+            **build_entry_decision_context(
                 pair=strategy.pair,
                 base_signal=base_signal,
                 base_reason=base_reason,
@@ -709,12 +708,12 @@ def build_sma_with_filter_decision_from_normalized_db(
         short_n=int(strategy.short_n),
         long_n=int(strategy.long_n),
         thresholds=thresholds,
-        fee_authority=_fee_authority_context(fee_authority),
+        fee_authority=fee_authority_context(fee_authority),
         slippage_bps=float(strategy.slippage_bps),
         regime_version=str(market_regime.get("version") or ""),
     )
 
-    return _legacy_strategy_decision_from_sma_final_decision(
+    return legacy_strategy_decision_from_sma_final_decision(
         decision=final_policy_decision,
         base_context=base_context,
         position=position,

@@ -228,6 +228,41 @@ def test_final_sma_decision_assembler_is_deterministic_and_hashes_policy_materia
     assert changed.policy_input_hash != first.policy_input_hash
 
 
+def test_policy_hashes_ignore_transient_fee_authority_timestamps() -> None:
+    base_fee_authority = {
+        "fee_source": "order_rules",
+        "taker_bid_fee_rate": 0.001,
+        "taker_ask_fee_rate": 0.001,
+        "retrieved_at_sec": 1_700_000_000,
+        "expires_at_sec": 1_700_000_300,
+    }
+    first = evaluate_sma_policy(
+        market=_market_window(),
+        position=_flat_position(),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(
+            fee_rate_for_decision=0.001,
+            fee_authority=base_fee_authority,
+        ),
+    )
+    second = evaluate_sma_policy(
+        market=_market_window(),
+        position=_flat_position(),
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(
+            fee_rate_for_decision=0.001,
+            fee_authority={
+                **base_fee_authority,
+                "retrieved_at_sec": 1_700_000_200,
+                "expires_at_sec": 1_700_000_500,
+            },
+        ),
+    )
+
+    assert second.policy_input_hash == first.policy_input_hash
+    assert second.policy_decision_hash == first.policy_decision_hash
+
+
 def test_final_sma_decision_assembler_owns_opposite_cross_sell() -> None:
     decision = evaluate_sma_final_decision(
         market=MarketWindow(
@@ -360,23 +395,27 @@ def test_live_wrapper_and_research_adapter_share_policy_entry_boundary() -> None
     closes = [10.0, 10.0, 10.0, 10.0, 11.0]
     conn = _build_candle_db(closes)
     try:
-        runtime_decision = create_sma_with_filter_strategy(
-            short_n=2,
-            long_n=3,
-            pair="BTC_KRW",
-            interval="1m",
-            min_gap_ratio=0.0,
-            volatility_window=3,
-            min_volatility_ratio=0.0,
-            overextended_lookback=1,
-            overextended_max_return_ratio=0.0,
-            slippage_bps=0.0,
-            live_fee_rate_estimate=0.0,
-            entry_edge_buffer_ratio=0.0,
-            cost_edge_enabled=False,
-            market_regime_enabled=False,
-            candidate_regime_policy=_allowing_policy(),
-        ).decide(conn)
+        runtime_decision = runtime_sma.decide_sma_with_filter_snapshot_from_db(
+            conn,
+            create_sma_with_filter_strategy(
+                short_n=2,
+                long_n=3,
+                pair="BTC_KRW",
+                interval="1m",
+                min_gap_ratio=0.0,
+                volatility_window=3,
+                min_volatility_ratio=0.0,
+                overextended_lookback=1,
+                overextended_max_return_ratio=0.0,
+                slippage_bps=0.0,
+                live_fee_rate_estimate=0.0,
+                entry_edge_buffer_ratio=0.0,
+                cost_edge_enabled=False,
+                market_regime_enabled=False,
+                candidate_regime_policy=_allowing_policy(),
+            ),
+            normalizer=runtime_sma_snapshot.ReadOnlyPositionStateNormalizer(),
+        )
     finally:
         conn.close()
 
@@ -606,6 +645,42 @@ def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() ->
     assert "decide_sma_with_filter_snapshot_from_db as _strategy_snapshot_from_db" not in runtime_boundary_module_source
 
 
+def test_runtime_snapshot_builder_does_not_import_private_strategy_sma_helpers() -> None:
+    tree = ast.parse(inspect.getsource(runtime_sma))
+    forbidden_helpers = {
+        "_safe_ratio",
+        "_sma",
+        "_build_entry_decision_context",
+        "_build_position_gate_context",
+        "_build_position_state_context",
+        "_fee_authority_context",
+        "_legacy_strategy_decision_from_sma_final_decision",
+        "_live_armed_entry_fee_authority_blocks",
+        "_resolve_strategy_fee_authority",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        assert node.module not in {
+            ".strategy.sma",
+            "bithumb_bot.strategy.sma",
+            "strategy.sma",
+        }
+        if node.module.endswith("strategy.sma"):
+            imported = {alias.name for alias in node.names}
+            assert imported.isdisjoint(forbidden_helpers)
+
+
+def test_runtime_context_owns_sma_legacy_serialization_helpers() -> None:
+    builder_source = inspect.getsource(runtime_sma.build_sma_with_filter_decision_from_normalized_db)
+    strategy_module_source = inspect.getsource(SmaWithFilterStrategy)
+
+    assert "runtime_sma_context" in inspect.getsource(runtime_sma)
+    assert "legacy_strategy_decision_from_sma_final_decision(" in builder_source
+    assert "_legacy_strategy_decision_from_sma_final_decision(" not in builder_source
+    assert "Deprecated DB-bound compatibility facade" in strategy_module_source
+
+
 class _CommitCountingConnection:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
@@ -796,6 +871,50 @@ def test_snapshot_orchestration_does_not_call_legacy_decide_facade(monkeypatch) 
 
     assert decision is not None
     assert decision.context["policy_decision_hash"].startswith("sha256:")
+
+
+def test_replay_bundle_uses_read_only_noop_normalizer(monkeypatch) -> None:
+    conn = _build_candle_db([10.0] * 11 + [11.0])
+    strategy = create_sma_with_filter_strategy(
+        short_n=2,
+        long_n=3,
+        pair="BTC_KRW",
+        interval="1m",
+        min_gap_ratio=0.0,
+        volatility_window=3,
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        slippage_bps=0.0,
+        live_fee_rate_estimate=0.0,
+        entry_edge_buffer_ratio=0.0,
+        cost_edge_enabled=False,
+        market_regime_enabled=False,
+        candidate_regime_policy=_allowing_policy(),
+    )
+
+    def _raise_real_normalizer(*args, **kwargs):
+        raise AssertionError("real normalizer should not run during replay bundle construction")
+
+    monkeypatch.setattr(
+        runtime_sma.PositionStateNormalizer,
+        "normalize_and_persist",
+        _raise_real_normalizer,
+    )
+
+    try:
+        bundle = runtime_sma_snapshot.build_sma_with_filter_replay_bundle(
+            conn,
+            strategy,
+            through_ts_ms=1_700_000_000_000 + 11 * 60_000,
+        )
+    finally:
+        conn.close()
+
+    assert bundle is not None
+    assert bundle["boundary_stages"]["snapshot_builder"] == (
+        "runtime_sma_snapshot.decide_sma_with_filter_snapshot_from_db"
+    )
 
 
 def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -> None:
