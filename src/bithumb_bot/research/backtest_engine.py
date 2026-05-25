@@ -14,6 +14,13 @@ from bithumb_bot.market_regime import (
 )
 from bithumb_bot.market_regime.thresholds import MarketRegimeThresholds
 from bithumb_bot.canonical_decision import canonical_payload_hash
+from bithumb_bot.core.sma_policy import (
+    ExecutionConstraintSnapshot,
+    MarketWindow,
+    PositionSnapshot,
+    SmaPolicyConfig,
+    evaluate_sma_policy,
+)
 from bithumb_bot.position_authority import research_position_authority_snapshot
 from bithumb_bot.sma_decision import evaluate_sma_entry_decision_from_features
 
@@ -523,7 +530,7 @@ class SmaWithFilterDecisionAdapter:
                 overextended_lookback=overextended_lookback,
                 overextended_max_return_ratio=overextended_max_return_ratio,
             ).as_dict()
-            entry_decision = evaluate_sma_entry_decision_from_features(
+            precomputed_entry_decision = evaluate_sma_entry_decision_from_features(
                 prev_s=prev_short,
                 prev_l=prev_long,
                 curr_s=curr_short,
@@ -543,6 +550,61 @@ class SmaWithFilterDecisionAdapter:
                 market_regime_enabled=bool(self.parameter_values.get("SMA_MARKET_REGIME_ENABLED", True)),
                 candidate_regime_policy=None,
             )
+            policy_decision = evaluate_sma_policy(
+                market=MarketWindow(
+                    pair=dataset.market,
+                    interval=dataset.interval,
+                    candle_ts=int(candle.ts),
+                    closes=tuple(float(value) for value in closes[: index + 1]),
+                    prev_s=float(prev_short),
+                    prev_l=float(prev_long),
+                    curr_s=float(curr_short),
+                    curr_l=float(curr_long),
+                    gap_ratio=abs((curr_short - curr_long) / curr_long) if curr_long != 0.0 else 0.0,
+                    volatility_ratio=float(close_volatility_ratios[index]),
+                    overextended_ratio=float(overextended_ratios[index]),
+                    market_regime_snapshot=regime_snapshot,
+                    entry_decision=precomputed_entry_decision,
+                ),
+                position=PositionSnapshot(
+                    in_position=False,
+                    entry_allowed=True,
+                    exit_allowed=False,
+                    terminal_state="research_event_adapter_position_deferred_to_kernel",
+                ),
+                config=SmaPolicyConfig(
+                    strategy_name=self.strategy_name,
+                    short_n=short_n,
+                    long_n=long_n,
+                    min_gap_ratio=min_gap,
+                    volatility_window=volatility_window,
+                    min_volatility_ratio=min_range,
+                    overextended_lookback=overextended_lookback,
+                    overextended_max_return_ratio=overextended_max_return_ratio,
+                    slippage_bps=float(
+                        self.parameter_values.get("STRATEGY_ENTRY_SLIPPAGE_BPS", self.slippage_bps)
+                        or 0.0
+                    ),
+                    live_fee_rate_estimate=float(
+                        self.parameter_values.get("LIVE_FEE_RATE_ESTIMATE") or self.fee_rate
+                    ),
+                    entry_edge_buffer_ratio=float(
+                        self.parameter_values.get("ENTRY_EDGE_BUFFER_RATIO") or 0.0
+                    ),
+                    cost_edge_enabled=bool(self.parameter_values.get("SMA_COST_EDGE_ENABLED", True)),
+                    cost_edge_min_ratio=float(self.parameter_values.get("SMA_COST_EDGE_MIN_RATIO") or 0.0),
+                    market_regime_enabled=bool(self.parameter_values.get("SMA_MARKET_REGIME_ENABLED", True)),
+                    buy_fraction=float(self.parameter_values.get("BUY_FRACTION") or 0.0),
+                    max_order_krw=float(self.parameter_values.get("MAX_ORDER_KRW") or 0.0),
+                    candidate_regime_policy=None,
+                ),
+                execution_context=ExecutionConstraintSnapshot(
+                    fee_rate_for_decision=float(
+                        self.parameter_values.get("LIVE_FEE_RATE_ESTIMATE") or self.fee_rate
+                    ),
+                ),
+            )
+            entry_decision = policy_decision.entry_decision
             raw_signal = "HOLD"
             raw_reason = "sma no crossover"
             if prev_above is not None:
@@ -591,6 +653,7 @@ class SmaWithFilterDecisionAdapter:
                         "blocked_filters": blocked_filters,
                         "market_regime_triggered": bool(entry_decision.market_regime_triggered),
                         "candidate_regime_triggered": bool(entry_decision.candidate_regime_triggered),
+                        "pure_policy_hash": policy_decision.policy_hash,
                     },
                     entry_signal=entry_signal,
                     exit_signal=raw_signal,
@@ -618,6 +681,8 @@ class SmaWithFilterDecisionAdapter:
                         "min_gap_ratio": float(min_gap),
                         "regime_snapshot": regime_snapshot,
                         "entry_decision": entry_decision,
+                        "pure_policy_hash": policy_decision.policy_hash,
+                        "pure_policy_trace": policy_decision.as_trace(),
                         "raw_reason": raw_reason,
                         "raw_filter_would_block": raw_filter_would_block,
                         "entry_filter_blocked": entry_filter_blocked,

@@ -24,6 +24,13 @@ from ..lifecycle import (
 )
 from ..broker.order_rules import get_effective_order_rules
 from ..canonical_decision import order_rules_snapshot_payload
+from ..core.sma_policy import (
+    ExecutionConstraintSnapshot,
+    MarketWindow,
+    PositionSnapshot,
+    SmaPolicyConfig,
+    evaluate_sma_policy,
+)
 from ..decision_contract import apply_decision_contract, build_replay_fingerprint
 from ..fee_authority import (
     FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
@@ -493,6 +500,40 @@ def _load_position_context(
         exposure,
         position_state,
         order_rules_snapshot,
+    )
+
+
+def _policy_position_snapshot(
+    *,
+    position: PositionContext,
+    exposure: NormalizedExposure,
+) -> PositionSnapshot:
+    return PositionSnapshot(
+        in_position=bool(position.in_position),
+        entry_allowed=bool(exposure.entry_allowed),
+        exit_allowed=bool(exposure.exit_allowed),
+        entry_block_reason=str(exposure.entry_block_reason or ""),
+        exit_block_reason=str(exposure.exit_block_reason or ""),
+        terminal_state=str(exposure.terminal_state),
+        entry_ts=position.entry_ts,
+        entry_price=position.entry_price,
+        qty_open=float(position.qty_open),
+        holding_time_sec=float(position.holding_time_sec),
+        unrealized_pnl=float(position.unrealized_pnl),
+        unrealized_pnl_ratio=float(position.unrealized_pnl_ratio),
+        raw_qty_open=float(exposure.raw_qty_open),
+        raw_total_asset_qty=float(exposure.raw_total_asset_qty),
+        open_lot_count=int(exposure.open_lot_count),
+        dust_tracking_lot_count=int(exposure.dust_tracking_lot_count),
+        reserved_exit_lot_count=int(exposure.reserved_exit_lot_count),
+        sellable_executable_lot_count=int(exposure.sellable_executable_lot_count),
+        dust_classification=str(exposure.dust_classification),
+        dust_state=str(exposure.dust_state),
+        effective_flat=bool(exposure.effective_flat),
+        has_executable_exposure=bool(exposure.has_executable_exposure),
+        has_any_position_residue=bool(exposure.has_any_position_residue),
+        has_non_executable_residue=bool(exposure.has_non_executable_residue),
+        has_dust_only_remainder=bool(exposure.has_dust_only_remainder),
     )
 
 
@@ -993,56 +1034,8 @@ class SmaWithFilterStrategy:
             config_fallback_fee_rate=float(self.live_fee_rate_estimate),
         )
         fee_rate_for_decision = float(fee_authority.taker_roundtrip_fee_rate / 2)
-        entry_decision = evaluate_sma_entry_decision(
-            closes=closes,
-            prev_s=prev_s,
-            prev_l=prev_l,
-            curr_s=curr_s,
-            curr_l=curr_l,
-            min_gap_ratio=float(self.min_gap_ratio),
-            volatility_window=int(self.volatility_window),
-            min_volatility_ratio=float(self.min_volatility_ratio),
-            overextended_lookback=int(self.overextended_lookback),
-            overextended_max_return_ratio=float(self.overextended_max_return_ratio),
-            slippage_bps=float(self.slippage_bps),
-            live_fee_rate_estimate=fee_rate_for_decision,
-            entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
-            cost_edge_enabled=bool(self.cost_edge_enabled),
-            cost_edge_min_ratio=float(self.cost_edge_min_ratio),
-            market_regime_enabled=bool(self.market_regime_enabled),
-            candidate_regime_policy=self.candidate_regime_policy,
-            require_candidate_regime_policy=True,
-            fee_authority_degraded_blocks_entry=_live_armed_entry_fee_authority_blocks(fee_authority),
-        )
-        base_signal = entry_decision.base_signal
-        base_reason = entry_decision.base_reason
-        entry_signal = entry_decision.entry_signal
-        entry_reason = entry_decision.entry_reason
-        gap_ratio = entry_decision.gap_ratio
-        volatility_ratio = entry_decision.volatility_ratio
-        overextended_ratio = entry_decision.overextended_ratio
-        edge_filter_details = entry_decision.edge_filter_details
-        edge_filter_triggered = entry_decision.edge_filter_triggered
-        blocked_filters = list(entry_decision.blocked_filters)
-        market_regime_triggered = entry_decision.market_regime_triggered
-        candidate_regime_triggered = entry_decision.candidate_regime_triggered
-        candidate_regime_decision = entry_decision.candidate_regime_decision
-        market_regime = entry_decision.market_regime
-        vol_window = max(1, int(self.volatility_window))
-        overext_lookback = max(1, int(self.overextended_lookback))
-        raw_filter_would_block = bool(
-            base_signal in ("BUY", "SELL")
-            and (blocked_filters or market_regime_triggered or candidate_regime_triggered)
-        )
-        entry_blocked_by_filter = bool(base_signal == "BUY" and raw_filter_would_block)
-        should_filter_entry = base_signal == "BUY"
-
         signal_context = {
             "strategy": self.name,
-            "base_signal": base_signal,
-            "base_reason": base_reason,
-            "entry_signal": entry_signal,
-            "entry_reason": entry_reason,
             "prev_s": prev_s,
             "prev_l": prev_l,
             "curr_s": curr_s,
@@ -1057,6 +1050,67 @@ class SmaWithFilterStrategy:
             slippage_bps=float(self.slippage_bps),
             entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
         )
+        policy_decision = evaluate_sma_policy(
+            market=MarketWindow(
+                pair=self.pair,
+                interval=self.interval,
+                candle_ts=int(ts_list[-1]),
+                closes=tuple(float(value) for value in closes),
+                prev_s=float(prev_s),
+                prev_l=float(prev_l),
+                curr_s=float(curr_s),
+                curr_l=float(curr_l),
+                through_ts_ms=signal_through_ts_ms,
+            ),
+            position=_policy_position_snapshot(position=position, exposure=exposure),
+            config=SmaPolicyConfig(
+                strategy_name=self.name,
+                short_n=int(self.short_n),
+                long_n=int(self.long_n),
+                min_gap_ratio=float(self.min_gap_ratio),
+                volatility_window=int(self.volatility_window),
+                min_volatility_ratio=float(self.min_volatility_ratio),
+                overextended_lookback=int(self.overextended_lookback),
+                overextended_max_return_ratio=float(self.overextended_max_return_ratio),
+                slippage_bps=float(self.slippage_bps),
+                live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+                entry_edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
+                cost_edge_enabled=bool(self.cost_edge_enabled),
+                cost_edge_min_ratio=float(self.cost_edge_min_ratio),
+                market_regime_enabled=bool(self.market_regime_enabled),
+                buy_fraction=float(self.buy_fraction),
+                max_order_krw=float(self.max_order_krw),
+                candidate_regime_policy=self.candidate_regime_policy,
+                require_candidate_regime_policy=True,
+            ),
+            execution_context=ExecutionConstraintSnapshot(
+                fee_rate_for_decision=fee_rate_for_decision,
+                fee_authority_degraded_blocks_entry=_live_armed_entry_fee_authority_blocks(fee_authority),
+                fee_authority=_fee_authority_context(fee_authority),
+                order_rules=order_rules_snapshot,
+            ),
+        )
+        entry_decision = policy_decision.entry_decision
+        base_signal = policy_decision.raw_signal
+        base_reason = policy_decision.raw_reason
+        entry_signal = policy_decision.entry_signal
+        entry_reason = policy_decision.entry_reason
+        gap_ratio = entry_decision.gap_ratio
+        volatility_ratio = entry_decision.volatility_ratio
+        overextended_ratio = entry_decision.overextended_ratio
+        edge_filter_details = entry_decision.edge_filter_details
+        edge_filter_triggered = entry_decision.edge_filter_triggered
+        blocked_filters = list(policy_decision.blocked_filters)
+        market_regime_triggered = entry_decision.market_regime_triggered
+        candidate_regime_triggered = entry_decision.candidate_regime_triggered
+        candidate_regime_decision = entry_decision.candidate_regime_decision
+        market_regime = entry_decision.market_regime
+        vol_window = max(1, int(self.volatility_window))
+        overext_lookback = max(1, int(self.overextended_lookback))
+        raw_filter_would_block = bool(entry_decision.raw_filter_would_block)
+        entry_blocked_by_filter = bool(entry_decision.entry_blocked)
+        should_filter_entry = base_signal == "BUY"
+
         exit_rules = create_sma_exit_rules(
             rule_names=self.exit_rule_names,
             max_holding_sec=float(self.exit_max_holding_min) * 60.0,
@@ -1241,6 +1295,8 @@ class SmaWithFilterStrategy:
             "base_reason": base_reason,
             "entry_signal": entry_signal,
             "entry_reason": entry_reason,
+            "pure_policy_hash": policy_decision.policy_hash,
+            "pure_policy_trace": policy_decision.as_trace(),
             "prev_s": prev_s,
             "prev_l": prev_l,
             "curr_s": curr_s,
