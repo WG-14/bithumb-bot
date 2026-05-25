@@ -5,6 +5,7 @@ from .sma import (
     SmaWithFilterStrategy,
     create_sma_strategy,
     create_sma_with_filter_strategy,
+    build_sma_with_filter_decision_from_normalized_db,
     decide_sma_with_filter_snapshot_from_db,
 )
 
@@ -19,6 +20,7 @@ __all__ = [
     "SmaWithFilterStrategy",
     "create_sma_strategy",
     "create_sma_with_filter_strategy",
+    "build_sma_with_filter_decision_from_normalized_db",
     "decide_sma_with_filter_snapshot_from_db",
     "register_strategy",
     "create_strategy",

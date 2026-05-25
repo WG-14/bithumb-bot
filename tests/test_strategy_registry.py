@@ -11,6 +11,10 @@ from bithumb_bot import engine as engine_module
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import compute_signal
+from bithumb_bot.research.strategy_registry import (
+    ResearchStrategyRegistryError,
+    resolve_research_strategy_plugin,
+)
 from bithumb_bot.strategy import create_strategy, list_strategies
 from bithumb_bot.strategy.base import StrategyDecision
 
@@ -201,6 +205,11 @@ def test_live_compute_signal_rejects_plain_sma_cross_override() -> None:
         object.__setattr__(settings, "MODE", old_mode)
 
     assert "plain_sma_live_not_allowed" in str(exc.value)
+
+
+def test_sma_cross_is_excluded_from_research_promotion_plugin_registry() -> None:
+    with pytest.raises(ResearchStrategyRegistryError, match="unsupported research strategy: sma_cross"):
+        resolve_research_strategy_plugin("sma_cross")
 
 
 def test_registry_rejects_unknown_strategy_name() -> None:

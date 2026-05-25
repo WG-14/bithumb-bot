@@ -582,6 +582,7 @@ def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() ->
     normalizer_source = inspect.getsource(runtime_sma.PositionStateNormalizer.normalize_and_persist)
     decide_source = inspect.getsource(runtime_sma.SmaWithFilterStrategy.decide)
     normalized_db_source = inspect.getsource(runtime_sma.SmaWithFilterStrategy._decide_from_normalized_db)
+    builder_source = inspect.getsource(runtime_sma.build_sma_with_filter_decision_from_normalized_db)
     orchestration_source = inspect.getsource(runtime_sma.decide_sma_with_filter_snapshot_from_db)
 
     assert "mark_harmless_dust_positions" not in load_position_source
@@ -591,10 +592,14 @@ def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() ->
     assert "reclassify_non_executable_open_exposure" in normalizer_source
     assert "conn.commit()" in normalizer_source
     assert "normalize_and_persist(" not in decide_source
-    assert "_load_position_context(" in normalized_db_source
+    assert "build_sma_with_filter_decision_from_normalized_db(" in decide_source
+    assert "build_sma_with_filter_decision_from_normalized_db(" in normalized_db_source
+    assert "_load_position_context(" in builder_source
+    assert "evaluate_sma_final_decision(" in builder_source
     assert "normalize_and_persist(" in orchestration_source
     assert "strategy.decide(" not in orchestration_source
-    assert "_evaluate_sma_with_filter_normalized_db_decision(" in orchestration_source
+    assert "_decide_from_normalized_db(" not in orchestration_source
+    assert "build_sma_with_filter_decision_from_normalized_db(" in orchestration_source
 
 
 class _CommitCountingConnection:
@@ -618,7 +623,7 @@ def test_post_normalization_decision_path_does_not_commit(monkeypatch) -> None:
     wrapped = _CommitCountingConnection(_build_candle_db(closes))
 
     try:
-        decision = create_sma_with_filter_strategy(
+        strategy = create_sma_with_filter_strategy(
             short_n=2,
             long_n=3,
             pair="BTC_KRW",
@@ -634,7 +639,11 @@ def test_post_normalization_decision_path_does_not_commit(monkeypatch) -> None:
             cost_edge_enabled=False,
             market_regime_enabled=False,
             candidate_regime_policy=_allowing_policy(),
-        ).decide(wrapped)
+        )
+        decision = runtime_sma.build_sma_with_filter_decision_from_normalized_db(
+            wrapped,
+            strategy,
+        )
     finally:
         wrapped.close()
 
@@ -689,18 +698,18 @@ def test_position_state_normalizer_is_the_commit_boundary(monkeypatch) -> None:
 def test_snapshot_orchestration_normalizes_before_policy_evaluation(monkeypatch) -> None:
     events: list[str] = []
     conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
-    original_decide_snapshot = runtime_sma.SmaWithFilterStrategy.decide_snapshot
+    original_final_decision = runtime_sma.evaluate_sma_final_decision
 
     class _Normalizer:
         def normalize_and_persist(self, conn, **kwargs):
             events.append("normalize")
             return 0
 
-    def _decide_snapshot(self, **kwargs):
+    def _final_decision(**kwargs):
         events.append("policy")
-        return original_decide_snapshot(self, **kwargs)
+        return original_final_decision(**kwargs)
 
-    monkeypatch.setattr(runtime_sma.SmaWithFilterStrategy, "decide_snapshot", _decide_snapshot)
+    monkeypatch.setattr(runtime_sma, "evaluate_sma_final_decision", _final_decision)
 
     try:
         decision = runtime_sma.decide_sma_with_filter_snapshot_from_db(
@@ -784,7 +793,7 @@ def test_snapshot_orchestration_does_not_call_legacy_decide_facade(monkeypatch) 
 def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -> None:
     conn = _build_candle_db([10.0] * 11 + [11.0])
     events: list[str] = []
-    original_decide_snapshot = runtime_sma.SmaWithFilterStrategy.decide_snapshot
+    original_builder = runtime_sma.build_sma_with_filter_decision_from_normalized_db
     old_pair = engine.settings.PAIR
     old_interval = engine.settings.INTERVAL
 
@@ -794,9 +803,9 @@ def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -
     def _raise_legacy_normalized_db_decide(*args, **kwargs):
         raise AssertionError("legacy normalized DB strategy method was called")
 
-    def _decide_snapshot(self, **kwargs):
-        events.append("policy")
-        return original_decide_snapshot(self, **kwargs)
+    def _builder(conn, strategy, *, through_ts_ms=None):
+        events.append("builder")
+        return original_builder(conn, strategy, through_ts_ms=through_ts_ms)
 
     monkeypatch.setattr(runtime_sma.SmaWithFilterStrategy, "decide", _raise_legacy_decide)
     monkeypatch.setattr(
@@ -804,7 +813,7 @@ def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -
         "_decide_from_normalized_db",
         _raise_legacy_normalized_db_decide,
     )
-    monkeypatch.setattr(runtime_sma.SmaWithFilterStrategy, "decide_snapshot", _decide_snapshot)
+    monkeypatch.setattr(runtime_sma, "build_sma_with_filter_decision_from_normalized_db", _builder)
 
     try:
         object.__setattr__(engine.settings, "PAIR", "BTC_KRW")
@@ -818,7 +827,7 @@ def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -
     assert payload is not None
     assert payload["strategy"] == "sma_with_filter"
     assert payload["policy_decision_hash"].startswith("sha256:")
-    assert events == ["policy"]
+    assert events == ["builder"]
 
 
 def test_research_kernel_reevaluates_policy_with_flat_simulated_position() -> None:
@@ -974,6 +983,73 @@ def test_research_pending_fill_snapshot_is_not_comparable_or_flat() -> None:
     assert snapshot.effective_flat is True
     assert snapshot.entry_block_reason == "research_pending_fill_not_policy_comparable"
     assert snapshot.exit_block_reason == "research_pending_fill_not_policy_comparable"
+
+
+def test_final_sma_decision_harmless_dust_is_explicit_effective_flat_for_entry() -> None:
+    position = PositionSnapshot(
+        in_position=False,
+        entry_allowed=True,
+        exit_allowed=False,
+        exit_block_reason="dust_only_remainder",
+        terminal_state="dust_only",
+        raw_qty_open=0.00009629,
+        raw_total_asset_qty=0.00009629,
+        dust_tracking_lot_count=1,
+        dust_classification="harmless_dust",
+        dust_state="harmless_dust",
+        effective_flat=True,
+        has_any_position_residue=True,
+        has_non_executable_residue=True,
+        has_dust_only_remainder=True,
+    )
+
+    decision = evaluate_sma_final_decision(
+        market=_market_window(),
+        position=position,
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+        exit_policy_config=_exit_policy_config(),
+    )
+
+    assert decision.final_signal == "BUY"
+    assert decision.position_snapshot.terminal_state == "dust_only"
+    assert decision.position_snapshot.dust_classification == "harmless_dust"
+    assert decision.position_snapshot.effective_flat is True
+    assert decision.position_snapshot.has_dust_only_remainder is True
+
+
+def test_final_sma_decision_blocking_dust_fails_closed_not_flat() -> None:
+    position = PositionSnapshot(
+        in_position=False,
+        entry_allowed=False,
+        exit_allowed=False,
+        entry_block_reason="blocking_dust_not_tradable",
+        exit_block_reason="dust_only_remainder",
+        terminal_state="dust_only",
+        raw_qty_open=0.0002,
+        raw_total_asset_qty=0.0002,
+        dust_tracking_lot_count=1,
+        dust_classification="blocking_dust",
+        dust_state="blocking_dust",
+        effective_flat=False,
+        has_any_position_residue=True,
+        has_non_executable_residue=True,
+        has_dust_only_remainder=True,
+    )
+
+    decision = evaluate_sma_final_decision(
+        market=_market_window(),
+        position=position,
+        config=_policy_config(),
+        execution_context=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+        exit_policy_config=_exit_policy_config(),
+    )
+
+    assert decision.final_signal == "HOLD"
+    assert decision.final_reason == "blocking_dust_not_tradable"
+    assert decision.position_snapshot.terminal_state == "dust_only"
+    assert decision.position_snapshot.dust_classification == "blocking_dust"
+    assert decision.position_snapshot.effective_flat is False
 
 
 def test_final_sma_decision_unsupported_states_fail_closed_not_flat() -> None:
