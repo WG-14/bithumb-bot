@@ -20,7 +20,8 @@ from .config import (
 from .marketdata import cmd_sync
 from .strategy import (
     SmaWithFilterStrategy,
-    create_strategy,
+    create_legacy_strategy,
+    create_strategy_policy,
 )
 from .runtime_sma_snapshot import (
     decide_sma_with_filter_runtime_snapshot_from_db,
@@ -472,21 +473,30 @@ def compute_strategy_decision_snapshot(
     """
     selected_strategy_name = str(strategy_name or settings.STRATEGY_NAME).strip().lower()
     validate_live_strategy_selection(replace(settings, STRATEGY_NAME=selected_strategy_name))
-    strategy = create_strategy(
-        selected_strategy_name,
-        short_n=short_n,
-        long_n=long_n,
-        pair=settings.PAIR,
-        interval=settings.INTERVAL,
-    )
-    if selected_strategy_name == "sma_with_filter" and isinstance(strategy, SmaWithFilterStrategy):
+    if selected_strategy_name == "sma_with_filter":
+        strategy = create_strategy_policy(
+            selected_strategy_name,
+            short_n=short_n,
+            long_n=long_n,
+            pair=settings.PAIR,
+            interval=settings.INTERVAL,
+        )
+        if not isinstance(strategy, SmaWithFilterStrategy):
+            raise RuntimeError(f"strategy_policy_invalid:{selected_strategy_name}")
         return decide_sma_with_filter_runtime_snapshot_from_db(
             conn,
             strategy,
             through_ts_ms=through_ts_ms,
         )
     if not _legacy_db_strategy_fallback_allowed(selected_strategy_name=selected_strategy_name):
-        raise RuntimeError(f"legacy_db_strategy_not_allowed_for_live_real_order:{selected_strategy_name}")
+        raise RuntimeError(f"legacy_db_strategy_not_allowed_for_live:{selected_strategy_name}")
+    strategy = create_legacy_strategy(
+        selected_strategy_name,
+        short_n=short_n,
+        long_n=long_n,
+        pair=settings.PAIR,
+        interval=settings.INTERVAL,
+    )
     decision = strategy.decide(conn, through_ts_ms=through_ts_ms)
     return None if decision is None else (decision, strategy)
 

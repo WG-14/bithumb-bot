@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import inspect
@@ -23,13 +24,20 @@ import bithumb_bot.strategy.base as strategy_base
 import bithumb_bot.strategy.registry as strategy_registry
 from bithumb_bot.strategy.sma import SmaWithFilterStrategy
 from bithumb_bot.strategy.sma_legacy_adapter import LEGACY_DB_BOUND_STRATEGY_STATUS
-from bithumb_bot.strategy import create_strategy, list_strategies
+from bithumb_bot.strategy import (
+    create_legacy_strategy,
+    create_strategy_policy,
+    list_legacy_strategies,
+    list_strategy_policies,
+)
 from bithumb_bot.strategy.base import StrategyDecision
 
 
 def test_registry_default_strategy_available() -> None:
-    assert "sma_cross" in list_strategies()
-    assert "sma_with_filter" in list_strategies()
+    assert "sma_cross" in list_legacy_strategies()
+    assert "sma_cross" not in list_strategy_policies()
+    assert "sma_with_filter" in list_strategy_policies()
+    assert "sma_with_filter" not in list_legacy_strategies()
 
 
 def test_db_bound_strategy_protocol_is_explicitly_legacy() -> None:
@@ -44,12 +52,13 @@ def test_db_bound_strategy_protocol_is_explicitly_legacy() -> None:
     assert "decide_snapshot(" in policy_source
 
 
-def test_registry_factory_type_no_longer_names_db_bound_strategy_as_generic_strategy() -> None:
-    annotations = strategy_registry.create_strategy.__annotations__
+def test_registry_has_separate_policy_and_legacy_creation_paths() -> None:
+    policy_annotations = strategy_registry.create_strategy_policy.__annotations__
+    legacy_annotations = strategy_registry.create_legacy_strategy.__annotations__
 
-    assert "Strategy]" not in str(annotations.get("return"))
-    assert "LegacyDbStrategy" in str(annotations.get("return"))
-    assert "StrategyPolicy" in str(annotations.get("return"))
+    assert "StrategyPolicy" in str(policy_annotations.get("return"))
+    assert "LegacyDbStrategy" in str(legacy_annotations.get("return"))
+    assert "StrategyPolicy" not in str(legacy_annotations.get("return"))
     assert LEGACY_DB_BOUND_STRATEGY_STATUS.endswith("not_promotion_grade")
 
 
@@ -157,6 +166,9 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     old_db_path = settings.DB_PATH
+    old_mode = settings.MODE
+    old_armed = settings.LIVE_REAL_ORDER_ARMED
+    old_dry_run = settings.LIVE_DRY_RUN
     old_strategy_name = settings.STRATEGY_NAME
     old_env_db_path = os.environ.get("DB_PATH")
 
@@ -173,10 +185,31 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
         _fail_legacy_normalized_db,
         raising=False,
     )
+    monkeypatch.setattr(
+        engine_module,
+        "create_legacy_strategy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy registry creation path called")
+        ),
+    )
+    snapshot_calls: list[str] = []
+
+    def _snapshot_boundary(_conn, strategy, *, through_ts_ms=None):
+        snapshot_calls.append(strategy.name)
+        return None
+
+    monkeypatch.setattr(
+        engine_module,
+        "decide_sma_with_filter_runtime_snapshot_from_db",
+        _snapshot_boundary,
+    )
 
     db_path = str(tmp_path / "strategy_no_legacy_decide.sqlite")
     os.environ["DB_PATH"] = db_path
     object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "STRATEGY_NAME", "sma_with_filter")
 
     conn = ensure_db()
@@ -194,18 +227,21 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
             )
         conn.commit()
 
-        result = compute_signal(conn, 2, 3)
+        result = engine_module.compute_strategy_decision_snapshot(conn, 2, 3)
     finally:
         conn.close()
         object.__setattr__(settings, "DB_PATH", old_db_path)
+        object.__setattr__(settings, "MODE", old_mode)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", old_armed)
+        object.__setattr__(settings, "LIVE_DRY_RUN", old_dry_run)
         object.__setattr__(settings, "STRATEGY_NAME", old_strategy_name)
         if old_env_db_path is None:
             os.environ.pop("DB_PATH", None)
         else:
             os.environ["DB_PATH"] = old_env_db_path
 
-    assert result is not None
-    assert result["strategy"] == "sma_with_filter"
+    assert result is None
+    assert snapshot_calls == ["sma_with_filter"]
 
 
 def test_runtime_replay_bundle_contains_reproducibility_material(tmp_path) -> None:
@@ -231,7 +267,7 @@ def test_runtime_replay_bundle_contains_reproducibility_material(tmp_path) -> No
             )
         conn.commit()
 
-        strategy = create_strategy(
+        strategy = create_strategy_policy(
             "sma_with_filter",
             short_n=2,
             long_n=3,
@@ -463,16 +499,47 @@ def test_sma_cross_is_excluded_from_research_promotion_plugin_registry() -> None
 
 
 def test_registry_rejects_unknown_strategy_name() -> None:
-    with pytest.raises(ValueError, match="unknown strategy"):
-        create_strategy("does_not_exist")
+    with pytest.raises(ValueError, match="strategy_policy_not_registered"):
+        create_strategy_policy("does_not_exist")
 
 
 def test_registry_can_create_filtered_sma_strategy() -> None:
-    strategy = create_strategy("sma_with_filter", short_n=2, long_n=3)
+    strategy = create_strategy_policy("sma_with_filter", short_n=2, long_n=3)
     assert strategy.name == "sma_with_filter"
     assert strategy.__class__.__module__ == "bithumb_bot.strategy.sma_policy_strategy"
     assert hasattr(strategy, "decide_snapshot")
     assert not hasattr(strategy, "decide")
+
+
+def test_policy_registry_excludes_plain_sma_cross() -> None:
+    with pytest.raises(ValueError, match="strategy_policy_not_registered:sma_cross"):
+        create_strategy_policy("sma_cross", short_n=2, long_n=3)
+
+
+def test_legacy_registry_can_create_plain_sma_cross_for_compatibility() -> None:
+    strategy = create_legacy_strategy("sma_cross", short_n=2, long_n=3)
+    assert strategy.name == "sma_cross"
+    assert hasattr(strategy, "decide")
+    assert not hasattr(strategy, "decide_snapshot")
+
+
+def test_promotion_grade_modules_do_not_import_sma_legacy_adapter() -> None:
+    promotion_modules = [
+        Path("src/bithumb_bot/engine.py"),
+        Path("src/bithumb_bot/runtime_sma_snapshot.py"),
+        Path("src/bithumb_bot/runtime_sma_snapshot_builder.py"),
+        Path("src/bithumb_bot/strategy/sma_policy_strategy.py"),
+    ]
+
+    for module_path in promotion_modules:
+        tree = ast.parse(module_path.read_text(encoding="utf-8-sig"))
+        imported: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+        assert "sma_legacy_adapter" not in "\n".join(imported)
 
 
 def test_engine_prepares_persistence_context_and_execution_request() -> None:

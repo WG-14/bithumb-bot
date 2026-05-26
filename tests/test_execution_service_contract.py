@@ -112,6 +112,29 @@ def _typed_target_execution_summary() -> ExecutionDecisionSummary:
     )
 
 
+def _typed_residual_execution_summary() -> ExecutionDecisionSummary:
+    return ExecutionDecisionSummary(
+        raw_signal="SELL",
+        final_signal="SELL",
+        final_action="CLOSE_RESIDUAL_CANDIDATE",
+        submit_expected=True,
+        pre_submit_proof_status="passed",
+        block_reason="none",
+        strategy_sell_candidate=None,
+        residual_sell_candidate=None,
+        target_exposure_krw=None,
+        current_effective_exposure_krw=None,
+        tracked_residual_exposure_krw=55_000.0,
+        buy_delta_krw=None,
+        residual_live_sell_mode="enabled",
+        residual_buy_sizing_mode="block",
+        residual_submit_plan=_valid_residual_submit_plan(),
+        buy_submit_plan=None,
+        target_shadow_decision=None,
+        target_submit_plan=None,
+    )
+
+
 def test_execution_submit_plan_final_payload_validates_after_extra_fields() -> None:
     plan = ExecutionSubmitPlan(
         side="BUY",
@@ -209,7 +232,7 @@ def test_malformed_explicit_submit_plan_blocks_executor_without_fallback(
 
     assert result is None
     assert calls == []
-    assert expected_reason in caplog.text
+    assert "live_real_order_missing_typed_execution_summary" in caplog.text
 
 
 def test_explicit_plan_present_but_not_consumed_does_not_call_executor(
@@ -223,7 +246,8 @@ def test_explicit_plan_present_but_not_consumed_does_not_call_executor(
             signal="BUY",
             ts=123,
             market_price=100_000_000.0,
-            decision_context={"execution_decision": {"target_submit_plan": _valid_target_submit_plan()}},
+            decision_context={},
+            execution_decision_summary=_typed_target_execution_summary(),
         )
     )
 
@@ -241,7 +265,8 @@ def test_valid_target_plan_reaches_executor_only_for_target_delta_engine() -> No
             signal="BUY",
             ts=123,
             market_price=100_000_000.0,
-            decision_context={"execution_decision": {"target_submit_plan": _valid_target_submit_plan()}},
+            decision_context={},
+            execution_decision_summary=_typed_target_execution_summary(),
         )
     )
     assert blocked is None
@@ -253,7 +278,8 @@ def test_valid_target_plan_reaches_executor_only_for_target_delta_engine() -> No
             signal="BUY",
             ts=124,
             market_price=100_000_000.0,
-            decision_context={"execution_decision": {"target_submit_plan": _valid_target_submit_plan()}},
+            decision_context={},
+            execution_decision_summary=_typed_target_execution_summary(),
         )
     )
 
@@ -334,9 +360,8 @@ def test_valid_residual_plan_reaches_executor_only_when_residual_live_submit_is_
             signal="SELL",
             ts=123,
             market_price=100_000_000.0,
-            decision_context={
-                "execution_decision": {"residual_submit_plan": _valid_residual_submit_plan()}
-            },
+            decision_context={},
+            execution_decision_summary=_typed_residual_execution_summary(),
         )
     )
 
@@ -352,8 +377,8 @@ def test_valid_residual_plan_reaches_executor_only_when_residual_live_submit_is_
     ("decision_context", "expected_reason"),
     [
         (None, "live_real_order_missing_decision_context"),
-        ({}, "live_real_order_missing_execution_decision"),
-        ({"execution_decision": {}}, "live_real_order_missing_execution_submit_plan"),
+        ({}, "live_real_order_missing_typed_execution_summary"),
+        ({"execution_decision": {}}, "live_real_order_missing_typed_execution_summary"),
     ],
 )
 def test_missing_execution_plan_contract_fails_closed_in_live_real_order_mode(
@@ -376,3 +401,64 @@ def test_missing_execution_plan_contract_fails_closed_in_live_real_order_mode(
     assert result is None
     assert calls == []
     assert expected_reason in caplog.text
+
+
+def test_live_real_order_blocks_dict_only_execution_decision_even_with_submit_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _arm_live_real_orders(engine="target_delta")
+    calls: list[dict[str, object]] = []
+
+    result = _service(calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=100_000_000.0,
+            decision_context={"execution_decision": {"target_submit_plan": _valid_target_submit_plan()}},
+        )
+    )
+
+    assert result is None
+    assert calls == []
+    assert "live_real_order_missing_typed_execution_summary" in caplog.text
+
+
+def test_live_real_order_blocks_typed_summary_without_submit_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _arm_live_real_orders(engine="target_delta")
+    calls: list[dict[str, object]] = []
+    summary = ExecutionDecisionSummary(
+        raw_signal="BUY",
+        final_signal="BUY",
+        final_action="REBALANCE_TO_TARGET",
+        submit_expected=True,
+        pre_submit_proof_status="passed",
+        block_reason="none",
+        strategy_sell_candidate=None,
+        residual_sell_candidate=None,
+        target_exposure_krw=100_000.0,
+        current_effective_exposure_krw=0.0,
+        tracked_residual_exposure_krw=None,
+        buy_delta_krw=100_000.0,
+        residual_live_sell_mode="block",
+        residual_buy_sizing_mode="block",
+        residual_submit_plan=None,
+        buy_submit_plan=None,
+        target_shadow_decision=None,
+        target_submit_plan=None,
+    )
+
+    result = _service(calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=100_000_000.0,
+            decision_context={},
+            execution_decision_summary=summary,
+        )
+    )
+
+    assert result is None
+    assert calls == []
+    assert "live_real_order_missing_typed_submit_plan" in caplog.text

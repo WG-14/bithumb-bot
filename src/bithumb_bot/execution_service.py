@@ -288,11 +288,15 @@ def _request_execution_decision_payload(
         if isinstance(request.decision_context, dict)
         else None
     )
-    typed_summary = request.execution_decision_summary
-    typed_payload = typed_summary.as_dict() if typed_summary is not None else None
-
     if raw_execution_decision is not None and not isinstance(raw_execution_decision, dict):
         return None, "execution_decision_schema_not_object"
+    typed_summary, typed_summary_error = require_typed_execution_decision_summary_for_live_real_order(
+        request
+    )
+    if typed_summary_error is not None:
+        return None, typed_summary_error
+    typed_payload = typed_summary.as_dict() if typed_summary is not None else None
+
     if typed_payload is not None and raw_execution_decision is not None:
         raw_payload = dict(raw_execution_decision)
         if typed_payload != raw_payload:
@@ -388,6 +392,18 @@ def _live_real_order_submit_plan_required() -> bool:
         and bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False))
         and not bool(getattr(settings, "LIVE_DRY_RUN", True))
     )
+
+
+def require_typed_execution_decision_summary_for_live_real_order(
+    request: SignalExecutionRequest,
+) -> tuple[ExecutionDecisionSummary | None, str | None]:
+    if not _live_real_order_submit_plan_required():
+        return request.execution_decision_summary, None
+    if request.execution_decision_summary is None:
+        return None, "live_real_order_missing_typed_execution_summary"
+    if not isinstance(request.execution_decision_summary, ExecutionDecisionSummary):
+        return None, "live_real_order_invalid_typed_execution_summary"
+    return request.execution_decision_summary, None
 
 
 def _strategy_performance_gate_payload(raw_gate: object | None) -> dict[str, object] | None:
@@ -1324,6 +1340,14 @@ class LiveSignalExecutionService:
             if isinstance(execution_decision.get("target_submit_plan"), dict)
             else {}
         )
+        if submit_plan_required and not target_plan and not residual_plan:
+            _log_live_submit_plan_block(
+                reason="live_real_order_missing_typed_submit_plan",
+                field_name="execution_decision",
+                source=execution_decision.get("source"),
+                side=request.signal,
+            )
+            return None
         if target_plan and not _live_submit_plan_schema_valid(
             target_plan,
             field_name="target_submit_plan",

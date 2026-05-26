@@ -14,6 +14,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import get_health_status, run_loop
 from bithumb_bot.execution_service import (
+    ExecutionDecisionSummary,
     LiveSignalExecutionService,
     SignalExecutionRequest,
     build_signal_execution_service,
@@ -1120,6 +1121,7 @@ def test_residual_sell_policy_dry_run_builds_plan_without_broker_submit() -> Non
             ts=123,
             market_price=115_679_000.0,
             decision_context={"execution_decision": decision.as_dict()},
+            execution_decision_summary=decision,
         )
     )
     assert broker.orders == []
@@ -1185,6 +1187,7 @@ def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_
             ts=123,
             market_price=115_679_000.0,
             decision_context={"execution_decision": decision.as_dict()},
+            execution_decision_summary=decision,
         )
     )
     assert trade is not None
@@ -1400,6 +1403,29 @@ def _valid_residual_submit_plan() -> dict[str, object]:
     }
 
 
+def _typed_target_execution_summary() -> ExecutionDecisionSummary:
+    return ExecutionDecisionSummary(
+        raw_signal="BUY",
+        final_signal="BUY",
+        final_action="REBALANCE_TO_TARGET",
+        submit_expected=True,
+        pre_submit_proof_status="passed",
+        block_reason="none",
+        strategy_sell_candidate=None,
+        residual_sell_candidate=None,
+        target_exposure_krw=0.0,
+        current_effective_exposure_krw=57_500.0,
+        tracked_residual_exposure_krw=None,
+        buy_delta_krw=None,
+        residual_live_sell_mode="block",
+        residual_buy_sizing_mode="block",
+        residual_submit_plan=None,
+        buy_submit_plan=None,
+        target_shadow_decision=None,
+        target_submit_plan=_valid_target_submit_plan(),
+    )
+
+
 @pytest.mark.parametrize(
     ("case_id", "mutate", "expected_reason"),
     [
@@ -1556,7 +1582,7 @@ def test_live_real_order_missing_submit_plan_blocks_legacy_signal_fallback(caplo
 
     assert result is None
     assert executor_calls == []
-    assert "live_real_order_missing_execution_submit_plan" in caplog.text
+    assert "live_real_order_missing_typed_execution_summary" in caplog.text
 
 
 def test_valid_unconsumed_explicit_submit_plan_does_not_fall_through_to_legacy_signal(
@@ -1578,7 +1604,8 @@ def test_valid_unconsumed_explicit_submit_plan_does_not_fall_through_to_legacy_s
             signal="BUY",
             ts=123,
             market_price=115_000_000.0,
-            decision_context={"execution_decision": {"target_submit_plan": _valid_target_submit_plan()}},
+            decision_context={},
+            execution_decision_summary=_typed_target_execution_summary(),
         )
     )
 
@@ -1594,11 +1621,11 @@ def test_valid_unconsumed_explicit_submit_plan_does_not_fall_through_to_legacy_s
         ({"execution_decision": "not-a-decision"}, "execution_decision_schema_not_object"),
         (
             {"execution_decision": {"target_submit_plan": "not-a-plan"}},
-            "target_submit_plan_schema_not_object",
+            "live_real_order_missing_typed_execution_summary",
         ),
         (
             {"execution_decision": {"residual_submit_plan": "not-a-plan"}},
-            "residual_submit_plan_schema_not_object",
+            "live_real_order_missing_typed_execution_summary",
         ),
     ],
 )
@@ -2026,6 +2053,7 @@ def test_default_live_service_wrapper_preserves_residual_execution_submit_plan(m
             ts=123,
             market_price=115_679_000.0,
             decision_context={"execution_decision": decision.as_dict()},
+            execution_decision_summary=decision,
         )
     )
 

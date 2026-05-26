@@ -10,7 +10,7 @@ from .canonical_decision import (
     order_rules_snapshot_payload,
 )
 from .runtime_sma_snapshot import build_sma_with_filter_replay_bundle
-from .strategy import create_strategy
+from .strategy import create_strategy_policy
 from .approved_profile import (
     ApprovedProfileError,
     build_approved_profile,
@@ -620,7 +620,7 @@ def cmd_replay_decision(
         selected_strategy = str(strategy_name or "").strip().lower()
         if selected_strategy != "sma_with_filter":
             raise ValueError(f"replay_decision_unsupported_strategy:{selected_strategy or 'missing'}")
-        strategy = create_strategy(
+        strategy = create_strategy_policy(
             selected_strategy,
             short_n=int(settings.SMA_SHORT),
             long_n=int(settings.SMA_LONG),
