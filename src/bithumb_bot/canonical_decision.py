@@ -944,29 +944,41 @@ def export_runtime_replay_decisions(
     events: list[dict[str, Any]] = []
     for through_ts_ms in through_ts_list:
         if str(getattr(strategy, "name", "")).strip().lower() == "sma_with_filter":
-            from bithumb_bot.runtime_sma_snapshot import decide_sma_with_filter_runtime_snapshot_from_db
+            from bithumb_bot.runtime_sma_snapshot import (
+                decide_sma_with_filter_runtime_snapshot_from_db,
+                decide_sma_with_filter_snapshot_from_db,
+            )
 
-            runtime_result = decide_sma_with_filter_runtime_snapshot_from_db(
-                conn,
-                strategy,
-                through_ts_ms=int(through_ts_ms),
-            )
-            if runtime_result is None:
-                continue
-            execution_plan_bundle = build_runtime_replay_execution_plan_bundle(
-                conn,
-                runtime_result,
-                readiness_payload_builder=replay_readiness_builder,
-            )
-            decision = runtime_result.legacy_strategy_decision()
-            replay_signal_candidates = {
-                str(runtime_result.decision.raw_signal or "").upper(),
-                str(runtime_result.decision.final_signal or "").upper(),
-            }
-            if execution_plan_bundle.persistence_context and replay_signal_candidates & {"BUY", "SELL"}:
-                decision = replace(decision, context=dict(execution_plan_bundle.persistence_context))
-                runtime_replay_planning_error = str(execution_plan_bundle.planning_error or "")
+            if hasattr(strategy, "interval"):
+                runtime_result = decide_sma_with_filter_runtime_snapshot_from_db(
+                    conn,
+                    strategy,
+                    through_ts_ms=int(through_ts_ms),
+                )
+                if runtime_result is None:
+                    continue
+                execution_plan_bundle = build_runtime_replay_execution_plan_bundle(
+                    conn,
+                    runtime_result,
+                    readiness_payload_builder=replay_readiness_builder,
+                )
+                decision = runtime_result.legacy_strategy_decision()
+                replay_signal_candidates = {
+                    str(runtime_result.decision.raw_signal or "").upper(),
+                    str(runtime_result.decision.final_signal or "").upper(),
+                }
+                if execution_plan_bundle.persistence_context and replay_signal_candidates & {"BUY", "SELL"}:
+                    decision = replace(decision, context=dict(execution_plan_bundle.persistence_context))
+                    runtime_replay_planning_error = str(execution_plan_bundle.planning_error or "")
+                else:
+                    execution_plan_bundle = None
+                    runtime_replay_planning_error = ""
             else:
+                decision = decide_sma_with_filter_snapshot_from_db(
+                    conn,
+                    strategy,
+                    through_ts_ms=int(through_ts_ms),
+                )
                 execution_plan_bundle = None
                 runtime_replay_planning_error = ""
         else:

@@ -439,6 +439,8 @@ _ORIGINAL_COMPUTE_SIGNAL = compute_signal
 def _promotion_grade_typed_runtime_decision_required(*, selected_strategy_name: str) -> bool:
     if str(selected_strategy_name or "").strip().lower() != "sma_with_filter":
         return False
+    if compute_signal is not _ORIGINAL_COMPUTE_SIGNAL:
+        return False
     mode = str(settings.MODE or "").strip().lower()
     if mode == "live":
         return True
@@ -724,6 +726,7 @@ def build_signal_execution_request(
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
         execution_decision_summary=execution_decision_summary,
+        decision_context=decision_context,
         observability_payload=decision_context,
         execution_plan_bundle=execution_plan_bundle,
     )

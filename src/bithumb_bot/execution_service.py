@@ -177,6 +177,37 @@ class TypedExecutionPlanningInput:
                 "has_dust_only_remainder": bool(position.has_dust_only_remainder),
             }
         )
+        normalized_exposure = {
+            "semantic_basis": "lot-native",
+            "entry_allowed": bool(position.entry_allowed),
+            "exit_allowed": bool(position.exit_allowed),
+            "entry_block_reason": position.entry_block_reason,
+            "exit_block_reason": position.exit_block_reason,
+            "terminal_state": position.terminal_state,
+            "raw_qty_open": float(position.raw_qty_open),
+            "raw_total_asset_qty": float(position.raw_total_asset_qty),
+            "open_exposure_qty": float(position.qty_open),
+            "dust_tracking_qty": 0.0,
+            "reserved_exit_qty": 0.0,
+            "open_lot_count": int(position.open_lot_count),
+            "dust_tracking_lot_count": int(position.dust_tracking_lot_count),
+            "reserved_exit_lot_count": int(position.reserved_exit_lot_count),
+            "sellable_executable_lot_count": int(position.sellable_executable_lot_count),
+            "sellable_executable_qty": float(position.qty_open),
+            "dust_classification": position.dust_classification,
+            "dust_state": position.dust_state,
+            "effective_flat": bool(position.effective_flat),
+            "normalized_exposure_active": bool(position.has_executable_exposure),
+            "normalized_exposure_qty": float(position.qty_open),
+            "has_executable_exposure": bool(position.has_executable_exposure),
+            "has_any_position_residue": bool(position.has_any_position_residue),
+            "has_non_executable_residue": bool(position.has_non_executable_residue),
+            "has_dust_only_remainder": bool(position.has_dust_only_remainder),
+        }
+        payload["position_state"] = {
+            "semantic_basis": "lot-native",
+            "normalized_exposure": normalized_exposure,
+        }
         if (
             "total_effective_exposure_notional_krw" not in payload
             and not bool(position.has_executable_exposure)
@@ -1381,7 +1412,7 @@ def _build_execution_decision_summary_from_authority_payload(
                     buy_submit_plan,
                     {"pre_trade_economics": pre_trade_economics},
                 )
-    elif raw == "SELL":
+    elif raw == "SELL" or final == "SELL":
         if strategy_candidate is not None and final == "SELL":
             action = "EXIT_STRATEGY_POSITION"
             submit_expected = True
@@ -1548,9 +1579,25 @@ def _paper_typed_submit_plan(
     bundle_summary = getattr(bundle, "summary", None)
     summary = request.execution_decision_summary or bundle_summary
     observability = _request_observability_payload(request)
+    execution_plan_bundle_marker = (
+        observability.get("execution_plan_bundle_present")
+        if isinstance(observability, dict)
+        else None
+    )
+    legacy_context_only = bool(
+        isinstance(observability, dict)
+        and str(execution_plan_bundle_marker).strip().lower() in {"0", "false", "none", ""}
+        and str(observability.get("decision_authority_source") or "legacy_context") == "legacy_context"
+        and not bool(observability.get("promotion_grade"))
+        and summary is not None
+        and getattr(summary, "target_submit_plan", None) is None
+        and getattr(summary, "residual_submit_plan", None) is None
+        and getattr(summary, "buy_submit_plan", None) is None
+        and not bool(getattr(summary, "submit_expected", False))
+    )
     typed_or_promotion_path = bool(
         bundle_present
-        or request.execution_decision_summary is not None
+        or (request.execution_decision_summary is not None and not legacy_context_only)
         or (isinstance(observability, dict) and bool(observability.get("execution_plan_bundle_present")))
         or (isinstance(observability, dict) and bool(observability.get("promotion_grade")))
     )
@@ -1647,9 +1694,16 @@ class LiveSignalExecutionService:
         submit_plan_required = _live_real_order_submit_plan_required()
         observability_context = _request_observability_payload(request)
         if observability_context is not None and not isinstance(observability_context, dict):
+            field_name = (
+                "decision_context"
+                if request.observability_payload is None
+                and request.observability_context is None
+                and request.decision_context is observability_context
+                else "observability_context"
+            )
             _log_live_submit_plan_block(
-                reason="observability_context_schema_not_object",
-                field_name="observability_context",
+                reason=f"{field_name}_schema_not_object",
+                field_name=field_name,
             )
             return None
         decision_context = dict(observability_context or {})

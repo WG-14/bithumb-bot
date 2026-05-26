@@ -364,6 +364,20 @@ def _research_execution_plan_bundle(
             or summary.typed_residual_submit_plan()
             or summary.typed_buy_submit_plan()
         )
+        if (
+            submit_plan is None
+            and str(policy_decision.final_signal or "").upper() == "SELL"
+            and bool(summary.submit_expected)
+            and str(summary.final_action) == "EXIT_STRATEGY_POSITION"
+        ):
+            submit_plan = _research_execution_submit_plan(
+                side="SELL",
+                cash=cash,
+                buy_fraction=buy_fraction,
+                sellable_qty=sellable_qty,
+                reference_price=reference_price,
+                policy_decision=policy_decision,
+            )
         return ResearchExecutionPlanBundle(
             submit_plan=submit_plan,
             summary=summary,
@@ -529,18 +543,13 @@ def _research_position_snapshot(
     if pending_buy_qty > 1e-12 or pending_sell_qty > 1e-12:
         open_lots = _research_lot_count(qty)
         reserved_lots = open_lots if pending_sell_qty > 1e-12 and open_lots > 0 else 0
-        terminal_state = (
-            "reserved_exit_pending"
-            if reserved_lots > 0
-            else "research_pending_fill_not_policy_comparable"
-        )
         return PositionSnapshot(
             in_position=bool(qty > 1e-12),
             entry_allowed=False,
             exit_allowed=False,
             entry_block_reason="research_pending_fill_not_policy_comparable",
             exit_block_reason="research_pending_fill_not_policy_comparable",
-            terminal_state=terminal_state,
+            terminal_state="research_pending_fill_not_policy_comparable",
             entry_ts=entry_ts,
             entry_price=entry_price,
             qty_open=float(qty),
@@ -551,7 +560,7 @@ def _research_position_snapshot(
             sellable_executable_lot_count=0,
             dust_classification="no_dust",
             dust_state="no_dust",
-            effective_flat=False,
+            effective_flat=True,
             has_executable_exposure=bool(qty > 1e-12),
             has_any_position_residue=bool(qty > 1e-12),
         )
@@ -577,7 +586,7 @@ def _research_position_snapshot(
             exit_allowed=True,
             entry_block_reason="position_has_executable_exposure",
             exit_block_reason="none",
-            terminal_state="open_exposure",
+            terminal_state="research_simulated_open_exposure",
             entry_ts=entry_ts,
             entry_price=entry_price,
             qty_open=float(sellable_qty),
@@ -600,7 +609,7 @@ def _research_position_snapshot(
         exit_allowed=False,
         entry_block_reason="none",
         exit_block_reason="no_position",
-        terminal_state="flat",
+        terminal_state="research_simulated_flat",
         dust_classification="no_dust",
         dust_state="no_dust",
     )

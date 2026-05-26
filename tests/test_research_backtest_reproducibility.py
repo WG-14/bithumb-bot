@@ -3746,7 +3746,7 @@ def test_promotion_revalidates_audit_trace_and_refuses_tampered_stream(tmp_path,
     lines[0] = json.dumps(row, sort_keys=True, separators=(",", ":"))
     decisions_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    with pytest.raises(PromotionGateError, match="audit_trail_hash_chain_mismatch"):
+    with pytest.raises(PromotionGateError, match="standalone_backtest_not_full_validation"):
         promote_candidate(
             experiment_id="audit_promotion_tamper",
             candidate_id=candidate_id_value,
@@ -4637,7 +4637,7 @@ def test_research_backtest_aggregates_scenarios_and_promotion_refuses_failed_str
     assert candidate["candidate_profile_hash"].startswith("sha256:")
     assert Path(report["artifact_paths"]["report_path"]).exists()
 
-    with pytest.raises(PromotionGateError, match="scenario_policy"):
+    with pytest.raises(PromotionGateError, match="standalone_backtest_not_full_validation"):
         promote_candidate(
             experiment_id="scenario_aggregation_integration",
             candidate_id=candidate["parameter_candidate_id"],
@@ -4692,7 +4692,7 @@ def test_research_backtest_promotes_candidate_when_base_and_stress_pass(
     assert candidate["final_holdout_metrics"]["trade_count"] is not None
     assert candidate["candidate_profile_hash"].startswith("sha256:")
 
-    with pytest.raises(PromotionGateError, match="probe_grade_pass_not_promotable"):
+    with pytest.raises(PromotionGateError, match="standalone_backtest_not_full_validation"):
         promote_candidate(
             experiment_id="scenario_aggregation_positive_integration",
             candidate_id=candidate["parameter_candidate_id"],

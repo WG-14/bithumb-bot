@@ -284,7 +284,15 @@ def _load_position_context(
     if row is None or row[0] is None or row[2] is None:
         lot_snapshot = summarize_position_lots(conn, pair=pair)
         lot_definition = getattr(lot_snapshot, "lot_definition", None)
-        tracked_qty = float(lot_snapshot.raw_total_asset_qty)
+        metadata_residue_qty = 0.0
+        if dust_context.raw_holdings.present:
+            metadata_residue_qty = max(
+                0.0,
+                float(dust_context.raw_holdings.local_qty),
+                float(dust_context.raw_holdings.broker_qty),
+            )
+        tracked_qty = max(float(lot_snapshot.raw_total_asset_qty), metadata_residue_qty)
+        dust_tracking_qty = max(float(lot_snapshot.dust_tracking_qty), metadata_residue_qty)
         raw_qty_open = (
             tracked_qty
             if (
@@ -299,7 +307,7 @@ def _load_position_context(
             metadata_raw=dust_context.classification,
             raw_total_asset_qty=tracked_qty,
             open_exposure_qty=0.0,
-            dust_tracking_qty=lot_snapshot.dust_tracking_qty,
+            dust_tracking_qty=dust_tracking_qty,
             reserved_exit_qty=reserved_exit_qty,
             open_lot_count=lot_snapshot.open_lot_count,
             dust_tracking_lot_count=lot_snapshot.dust_tracking_lot_count,

@@ -302,7 +302,7 @@ def test_research_report_surfaces_quality_and_promotion_refuses_failed_quality(
     assert report["dataset_splits"]["train"]["quality_hash"].startswith("sha256:")
     assert report["candidates"][0]["acceptance_gate_result"] == "FAIL"
     assert any(reason.startswith("dataset_quality_train_") for reason in report["candidates"][0]["gate_fail_reasons"])
-    with pytest.raises(PromotionGateError, match="dataset_quality"):
+    with pytest.raises(PromotionGateError, match="standalone_backtest_not_full_validation"):
         promote_candidate(
             experiment_id="quality_unit",
             candidate_id=report["candidates"][0]["parameter_candidate_id"],

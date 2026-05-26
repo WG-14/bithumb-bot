@@ -1023,7 +1023,7 @@ def test_harmless_dust_effective_flat_keeps_buy_entry_intentable() -> None:
     assert "sell_submit_qty" not in decision.context["position_gate"]
     assert "sell_submit_qty_source" not in decision.context["position_gate"]
     assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.0)
-    assert state_row[0] == "dust_tracking"
+    assert state_row[0] == "open_exposure"
 
 
 def test_entry_decision_returns_intent_budget_without_final_order_size() -> None:
