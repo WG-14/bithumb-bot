@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +69,70 @@ class RuntimeSmaReplayFingerprint:
 
 
 @dataclass(frozen=True)
+class RuntimeSmaDecisionContext:
+    """Typed authority-critical SMA decision context.
+
+    ``as_dict`` is for persistence and replay observability. Execution
+    authority stays with typed policy and execution objects.
+    """
+
+    policy_contract_hash: str
+    policy_input_hash: str
+    policy_decision_hash: str
+    pure_policy_hash: str
+    pure_policy_trace: dict[str, object]
+    final_signal: str
+    final_reason: str
+    blocked_filters: tuple[str, ...]
+    entry_blocked: bool
+    entry_block_reason: str
+    execution_intent: dict[str, object] | None
+    replay_fingerprint: dict[str, object]
+
+    @classmethod
+    def from_decision(
+        cls,
+        *,
+        decision: StrategyDecisionV2,
+        replay_fingerprint: dict[str, object],
+    ) -> "RuntimeSmaDecisionContext":
+        trace = decision.as_trace()
+        raw_intent = trace.get("execution_intent")
+        return cls(
+            policy_contract_hash=decision.policy_contract_hash,
+            policy_input_hash=decision.policy_input_hash,
+            policy_decision_hash=decision.policy_decision_hash,
+            pure_policy_hash=decision.policy_hash,
+            pure_policy_trace=deepcopy(trace),
+            final_signal=decision.final_signal,
+            final_reason=decision.final_reason,
+            blocked_filters=tuple(str(item) for item in decision.blocked_filters),
+            entry_blocked=bool(decision.entry_blocked),
+            entry_block_reason=str(decision.entry_block_reason or ""),
+            execution_intent=dict(raw_intent) if isinstance(raw_intent, dict) else None,
+            replay_fingerprint=dict(replay_fingerprint),
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "policy_contract_hash": self.policy_contract_hash,
+            "policy_input_hash": self.policy_input_hash,
+            "policy_decision_hash": self.policy_decision_hash,
+            "pure_policy_hash": self.pure_policy_hash,
+            "pure_policy_trace": deepcopy(self.pure_policy_trace),
+            "final_signal": self.final_signal,
+            "final_reason": self.final_reason,
+            "blocked_filters": list(self.blocked_filters),
+            "entry_blocked": bool(self.entry_blocked),
+            "entry_block_reason": self.entry_block_reason,
+            "execution_intent": (
+                None if self.execution_intent is None else deepcopy(self.execution_intent)
+            ),
+            "replay_fingerprint": deepcopy(self.replay_fingerprint),
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeSmaDecisionResult:
     """Typed SMA runtime decision before legacy persistence serialization."""
 
@@ -101,17 +166,27 @@ class RuntimeSmaDecisionResult:
         return RuntimeSmaReplayFingerprint(self.replay_fingerprint)
 
     @property
+    def runtime_decision_context(self) -> RuntimeSmaDecisionContext:
+        return RuntimeSmaDecisionContext.from_decision(
+            decision=self.decision,
+            replay_fingerprint=self.replay_fingerprint,
+        )
+
+    @property
     def policy_observability(self) -> dict[str, object]:
+        context = self.runtime_decision_context.as_dict()
         return {
             **self.policy_hashes.as_dict(),
-            "pure_policy_trace": self.decision.as_trace(),
-            "final_signal": self.decision.final_signal,
-            "final_reason": self.decision.final_reason,
-            "blocked_filters": list(self.decision.blocked_filters),
-            "entry_blocked": self.decision.entry_blocked,
-            "entry_block_reason": self.decision.entry_block_reason,
+            "pure_policy_trace": context["pure_policy_trace"],
+            "final_signal": context["final_signal"],
+            "final_reason": context["final_reason"],
+            "blocked_filters": context["blocked_filters"],
+            "entry_blocked": context["entry_blocked"],
+            "entry_block_reason": context["entry_block_reason"],
             "exit_rule": self.decision.exit_rule,
             "exit_evaluations": [dict(item) for item in self.decision.exit_evaluations],
+            "execution_intent": context["execution_intent"],
+            "replay_fingerprint": context["replay_fingerprint"],
         }
 
     def _authoritative_policy_context(self) -> dict[str, object]:

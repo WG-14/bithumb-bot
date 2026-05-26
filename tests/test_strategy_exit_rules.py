@@ -16,7 +16,12 @@ from bithumb_bot.strategy.exit_rules import (
     create_sma_exit_rules,
     merge_exit_rules,
 )
-from bithumb_bot.strategy.sma import create_sma_strategy, create_sma_with_filter_strategy
+from bithumb_bot.strategy.sma import (
+    create_legacy_sma_with_filter_db_adapter,
+    create_sma_strategy,
+)
+
+create_sma_with_filter_strategy = create_legacy_sma_with_filter_db_adapter
 
 
 def _insert_candles(conn, closes: list[float], *, base_ts: int = 1_700_000_000_000) -> int:

@@ -79,6 +79,7 @@ from .risk import (
 from .oms import collect_risky_order_state
 from .flatten import flatten_btc_position
 from .execution_service import (
+    ExecutionDecisionSummary,
     SignalExecutionRequest,
     build_execution_decision_summary,
     build_signal_execution_service,
@@ -613,6 +614,35 @@ def build_signal_execution_request(
         exit_rule_name=exit_rule_name,
         execution_decision_summary=execution_decision_summary,
         decision_context=decision_context,
+    )
+
+
+@dataclass(frozen=True)
+class TypedExecutionSubmitExpectation:
+    submit_expected: bool
+    plan_source: str | None = None
+    block_reason: str | None = None
+
+
+def resolve_typed_execution_submit_expectation(
+    summary: ExecutionDecisionSummary | None,
+) -> TypedExecutionSubmitExpectation:
+    if summary is None:
+        return TypedExecutionSubmitExpectation(submit_expected=False)
+    engine_name = str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
+    if engine_name != "target_delta":
+        return TypedExecutionSubmitExpectation(submit_expected=bool(summary.submit_expected))
+    target_plan = summary.typed_target_submit_plan()
+    if target_plan is None:
+        return TypedExecutionSubmitExpectation(
+            submit_expected=False,
+            block_reason="missing_typed_target_submit_plan",
+        )
+    return TypedExecutionSubmitExpectation(
+        submit_expected=bool(target_plan.submit_expected)
+        and str(target_plan.block_reason or "none") == "none",
+        plan_source=target_plan.source,
+        block_reason=target_plan.block_reason,
     )
 
 
@@ -3545,24 +3575,13 @@ def run_loop(short_n: int, long_n: int) -> None:
             finally:
                 conn.close()
 
-            execution_plan = (
-                decision_context_for_trade.get("execution_decision", {})
-                if isinstance(decision_context_for_trade, dict)
-                and isinstance(decision_context_for_trade.get("execution_decision"), dict)
-                else {}
-            )
-            target_submit_plan = (
-                execution_plan.get("target_submit_plan")
-                if isinstance(execution_plan, dict)
-                and isinstance(execution_plan.get("target_submit_plan"), dict)
-                else None
+            submit_expectation = resolve_typed_execution_submit_expectation(
+                execution_decision_summary_for_trade
             )
             target_delta_submit = bool(
                 str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
                 == "target_delta"
-                and isinstance(target_submit_plan, dict)
-                and bool(target_submit_plan.get("submit_expected"))
-                and str(target_submit_plan.get("block_reason") or "none") == "none"
+                and submit_expectation.submit_expected
             )
             if r["signal"] not in ("BUY", "SELL") and not target_delta_submit:
                 continue

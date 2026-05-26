@@ -291,6 +291,15 @@ class ExecutionDecisionSummary:
             "actual_primary_block_reason": actual_primary_block_reason,
         }
 
+    def typed_target_submit_plan(self) -> ExecutionSubmitPlan | None:
+        return _typed_submit_plan(self.target_submit_plan)
+
+    def typed_residual_submit_plan(self) -> ExecutionSubmitPlan | None:
+        return _typed_submit_plan(self.residual_submit_plan)
+
+    def typed_buy_submit_plan(self) -> ExecutionSubmitPlan | None:
+        return _typed_submit_plan(self.buy_submit_plan)
+
 
 def _submit_plan_payload(
     plan: ExecutionSubmitPlan | dict[str, object] | None,

@@ -31,6 +31,21 @@ def test_live_preflight_rejects_plain_sma_cross() -> None:
     assert "STRATEGY_CANDIDATE_PROFILE_PATH" in message
 
 
+def test_live_real_order_preflight_rejects_plain_sma_cross_before_run() -> None:
+    cfg = replace(
+        settings,
+        MODE="live",
+        LIVE_REAL_ORDER_ARMED=True,
+        LIVE_DRY_RUN=False,
+        STRATEGY_NAME="sma_cross",
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(cfg)
+
+    assert "plain_sma_live_not_allowed" in str(exc.value)
+
+
 def test_plain_sma_cross_remains_allowed_outside_live_preflight() -> None:
     cfg = replace(settings, MODE="paper", STRATEGY_NAME="sma_cross")
 

@@ -320,8 +320,14 @@ def test_policy_hashes_normalize_research_runtime_comparable_terminal_states() -
     assert research_flat.trace["position"]["terminal_state"] == "research_simulated_flat"
     assert runtime_flat.policy_input_hash == research_flat.policy_input_hash
     assert runtime_flat.policy_decision_hash == research_flat.policy_decision_hash
+    assert runtime_flat.final_signal == research_flat.final_signal
+    assert list(runtime_flat.blocked_filters) == list(research_flat.blocked_filters)
+    assert runtime_flat.trace.get("execution_intent") == research_flat.trace.get("execution_intent")
     assert runtime_open.policy_input_hash == research_open.policy_input_hash
     assert runtime_open.policy_decision_hash == research_open.policy_decision_hash
+    assert runtime_open.final_signal == research_open.final_signal
+    assert list(runtime_open.blocked_filters) == list(research_open.blocked_filters)
+    assert runtime_open.trace.get("execution_intent") == research_open.trace.get("execution_intent")
 
     runtime_final = evaluate_sma_final_decision(
         market=_market_window(),
@@ -1139,6 +1145,14 @@ def test_typed_runtime_sma_result_preserves_policy_hashes_until_legacy_serializa
     assert result.policy_observability["policy_decision_hash"] == original_policy_decision_hash
     assert legacy_payload["policy_decision_hash"] == original_policy_decision_hash
     assert legacy_payload["pure_policy_trace"]["policy_decision_hash"] == original_policy_decision_hash
+
+    typed_context = result.runtime_decision_context
+    serialized_context = typed_context.as_dict()
+    serialized_context["policy_decision_hash"] = "sha256:mutated_serialized_context"
+    serialized_context["blocked_filters"] = ["mutated"]
+    assert typed_context.policy_decision_hash == original_policy_decision_hash
+    assert list(typed_context.blocked_filters) == list(result.decision.blocked_filters)
+    assert result.decision.policy_decision_hash == original_policy_decision_hash
 
 
 def test_persistence_context_serializes_typed_policy_and_execution_summary_fields() -> None:

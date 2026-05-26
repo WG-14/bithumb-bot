@@ -24,7 +24,11 @@ from bithumb_bot.research.strategy_registry import (
 import bithumb_bot.strategy.base as strategy_base
 import bithumb_bot.strategy.registry as strategy_registry
 from bithumb_bot.strategy.sma import SmaWithFilterStrategy
-from bithumb_bot.strategy.sma_legacy_adapter import LEGACY_DB_BOUND_STRATEGY_STATUS
+from bithumb_bot.strategy.sma_legacy_adapter import (
+    LEGACY_DB_BOUND_STRATEGY_STATUS,
+    LegacySmaWithFilterDbAdapter,
+    create_legacy_sma_with_filter_db_adapter,
+)
 from bithumb_bot.strategy import (
     create_legacy_strategy,
     create_strategy_policy,
@@ -38,6 +42,30 @@ def test_registry_default_strategy_available() -> None:
     assert "sma_cross" in list_legacy_strategies()
     assert "sma_cross" not in list_strategy_policies()
     assert "sma_with_filter" in list_strategy_policies()
+
+
+def test_public_sma_with_filter_name_resolves_to_policy_strategy() -> None:
+    from bithumb_bot.strategy import SmaWithFilterStrategy as PublicSmaWithFilterStrategy
+
+    assert PublicSmaWithFilterStrategy.__module__ == "bithumb_bot.strategy.sma_policy_strategy"
+    assert SmaWithFilterStrategy.__module__ == "bithumb_bot.strategy.sma_policy_strategy"
+
+
+def test_legacy_sma_adapter_has_explicit_non_policy_name() -> None:
+    import bithumb_bot.strategy.sma_legacy_adapter as legacy_adapter
+
+    assert "class SmaWithFilterStrategy" not in inspect.getsource(legacy_adapter)
+    legacy = create_legacy_sma_with_filter_db_adapter(short_n=2, long_n=3)
+    assert isinstance(legacy, LegacySmaWithFilterDbAdapter)
+    assert hasattr(legacy, "decide")
+    assert not hasattr(legacy, "decide_snapshot")
+
+
+def test_live_policy_registry_cannot_instantiate_legacy_sma_with_filter_adapter() -> None:
+    policy = create_strategy_policy("sma_with_filter", short_n=2, long_n=3)
+
+    assert policy.__class__.__module__ == "bithumb_bot.strategy.sma_policy_strategy"
+    assert not isinstance(policy, LegacySmaWithFilterDbAdapter)
     assert "sma_with_filter" not in list_legacy_strategies()
 
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from bithumb_bot import engine as engine_module
 from bithumb_bot import runtime_state
 from bithumb_bot.broker.base import BrokerBalance, BrokerOrder, BrokerRejectError
 from bithumb_bot.broker.balance_source import _default_flat_start_safety_check
@@ -1604,6 +1605,109 @@ def test_live_real_order_missing_submit_plan_blocks_legacy_signal_fallback(caplo
     assert "live_real_order_missing_typed_execution_summary" in caplog.text
 
 
+def test_live_real_order_rejects_raw_dict_submit_plan_even_when_summary_present(caplog) -> None:
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    raw_summary = ExecutionDecisionSummary(
+        raw_signal="BUY",
+        final_signal="BUY",
+        final_action="REBALANCE_TO_TARGET",
+        submit_expected=True,
+        pre_submit_proof_status="passed",
+        block_reason="none",
+        strategy_sell_candidate=None,
+        residual_sell_candidate=None,
+        target_exposure_krw=0.0,
+        current_effective_exposure_krw=57_500.0,
+        tracked_residual_exposure_krw=None,
+        buy_delta_krw=None,
+        residual_live_sell_mode="block",
+        residual_buy_sizing_mode="block",
+        residual_submit_plan=None,
+        buy_submit_plan=None,
+        target_shadow_decision=None,
+        target_submit_plan=_valid_target_submit_plan(),
+    )
+    executor_calls: list[dict[str, object]] = []
+    service = LiveSignalExecutionService(
+        broker=_ResidualFakeBroker(),
+        executor=lambda *_args, **kwargs: executor_calls.append(dict(kwargs)) or {"status": "unexpected"},
+        harmless_dust_recorder=lambda **_k: False,
+    )
+
+    result = service.execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=115_000_000.0,
+            decision_context={"execution_decision": raw_summary.as_dict()},
+            execution_decision_summary=raw_summary,
+        )
+    )
+
+    assert result is None
+    assert executor_calls == []
+    assert "live_real_order_missing_typed_submit_plan" in caplog.text
+
+
+def test_live_real_order_rejects_typed_summary_serialized_context_mismatch(caplog) -> None:
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    summary = _typed_target_execution_summary()
+    serialized = summary.as_dict()
+    assert isinstance(serialized["target_submit_plan"], dict)
+    serialized["target_submit_plan"]["submit_expected"] = False  # type: ignore[index]
+    executor_calls: list[dict[str, object]] = []
+    service = LiveSignalExecutionService(
+        broker=_ResidualFakeBroker(),
+        executor=lambda *_args, **kwargs: executor_calls.append(dict(kwargs)) or {"status": "unexpected"},
+        harmless_dust_recorder=lambda **_k: False,
+    )
+
+    result = service.execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=115_000_000.0,
+            decision_context={"execution_decision": serialized},
+            execution_decision_summary=summary,
+        )
+    )
+
+    assert result is None
+    assert executor_calls == []
+    assert "execution_decision_summary_context_mismatch" in caplog.text
+
+
+def test_paper_compatibility_can_still_consume_legacy_raw_target_plan() -> None:
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "MODE", "paper")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    executor_calls: list[dict[str, object]] = []
+    service = LiveSignalExecutionService(
+        broker=_ResidualFakeBroker(),
+        executor=lambda *_args, **kwargs: executor_calls.append(dict(kwargs)) or {"status": "submitted"},
+        harmless_dust_recorder=lambda **_k: False,
+    )
+
+    result = service.execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=115_000_000.0,
+            decision_context={"execution_decision": {"target_submit_plan": _valid_target_submit_plan()}},
+        )
+    )
+
+    assert result == {"status": "submitted"}
+    assert executor_calls[0]["execution_submit_plan"] == _valid_target_submit_plan()
+
+
 def test_valid_unconsumed_explicit_submit_plan_does_not_fall_through_to_legacy_signal(
     caplog,
 ) -> None:
@@ -1631,6 +1735,23 @@ def test_valid_unconsumed_explicit_submit_plan_does_not_fall_through_to_legacy_s
     assert result is None
     assert executor_calls == []
     assert "explicit_submit_plan_not_consumed" in caplog.text
+
+
+def test_typed_submit_expectation_ignores_mutated_serialized_execution_context() -> None:
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    summary = _typed_target_execution_summary()
+    context = engine_module.prepare_strategy_decision_persistence_context(
+        decision_context={"strategy": "sma_with_filter"},
+        execution_decision_summary=summary,
+        readiness_payload={},
+    )
+    assert isinstance(context["execution_decision"], dict)
+    assert isinstance(context["execution_decision"]["target_submit_plan"], dict)  # type: ignore[index]
+    context["execution_decision"]["target_submit_plan"]["submit_expected"] = False  # type: ignore[index]
+
+    expectation = engine_module.resolve_typed_execution_submit_expectation(summary)
+
+    assert expectation.submit_expected is True
 
 
 @pytest.mark.parametrize(

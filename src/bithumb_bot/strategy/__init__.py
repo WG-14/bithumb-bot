@@ -11,7 +11,12 @@ from .registry import (
     register_strategy_policy,
 )
 from .sma import build_sma_with_filter_decision_from_normalized_db, decide_sma_with_filter_snapshot_from_db
-from .sma_legacy_adapter import SmaCrossStrategy, create_sma_strategy
+from .sma_legacy_adapter import (
+    LegacySmaWithFilterDbAdapter,
+    SmaCrossStrategy,
+    create_legacy_sma_with_filter_db_adapter,
+    create_sma_strategy,
+)
 from .sma_policy_strategy import SmaWithFilterStrategy, create_sma_with_filter_strategy
 
 register_legacy_strategy("sma_cross", create_sma_strategy)
@@ -24,6 +29,8 @@ __all__ = [
     "PositionContext",
     "SmaCrossStrategy",
     "SmaWithFilterStrategy",
+    "LegacySmaWithFilterDbAdapter",
+    "create_legacy_sma_with_filter_db_adapter",
     "create_sma_strategy",
     "create_sma_with_filter_strategy",
     "build_sma_with_filter_decision_from_normalized_db",

@@ -14,12 +14,9 @@ from ..dust import (
 )
 from ..broker.order_rules import get_effective_order_rules
 from ..core.sma_policy import (
-    ExecutionConstraintSnapshot,
     MarketWindow,
     PositionSnapshot,
-    SmaPolicyConfig,
     StrategyDecisionV2,
-    evaluate_sma_policy,
 )
 from ..decision_contract import apply_decision_contract
 from ..fee_authority import (
@@ -731,7 +728,7 @@ class SmaCrossStrategy:
 
 
 @dataclass(frozen=True)
-class SmaWithFilterStrategy:
+class LegacySmaWithFilterDbAdapter:
     short_n: int
     long_n: int
     pair: str = settings.PAIR
@@ -759,21 +756,6 @@ class SmaWithFilterStrategy:
     candidate_regime_policy: dict[str, object] | None = None
 
     name: str = "sma_with_filter"
-
-    def decide_snapshot(
-        self,
-        *,
-        market: MarketWindow,
-        position: PositionSnapshot,
-        config: SmaPolicyConfig,
-        execution_context: ExecutionConstraintSnapshot,
-    ) -> StrategyDecisionV2:
-        return evaluate_sma_policy(
-            market=market,
-            position=position,
-            config=config,
-            execution_context=execution_context,
-        )
 
     def decide(
         self,
@@ -811,7 +793,7 @@ class SmaWithFilterStrategy:
 
 def build_sma_with_filter_decision_from_normalized_db(
     conn: sqlite3.Connection,
-    strategy: SmaWithFilterStrategy,
+    strategy: LegacySmaWithFilterDbAdapter,
     *,
     through_ts_ms: int | None = None,
 ) -> StrategyDecision | None:
@@ -825,7 +807,7 @@ def build_sma_with_filter_decision_from_normalized_db(
 
 def decide_sma_with_filter_snapshot_from_db(
     conn: sqlite3.Connection,
-    strategy: SmaWithFilterStrategy,
+    strategy: LegacySmaWithFilterDbAdapter,
     *,
     through_ts_ms: int | None = None,
     normalizer: PositionStateNormalizer | None = None,
@@ -951,7 +933,7 @@ def create_sma_strategy(
     return SmaCrossStrategy.from_config(config)
 
 
-def create_sma_with_filter_strategy(
+def create_legacy_sma_with_filter_db_adapter(
     *,
     short_n: int | None = None,
     long_n: int | None = None,
@@ -975,9 +957,9 @@ def create_sma_with_filter_strategy(
     exit_max_holding_min: int | None = None,
     exit_min_take_profit_ratio: float | None = None,
     exit_small_loss_tolerance_ratio: float | None = None,
-) -> SmaWithFilterStrategy:
+) -> LegacySmaWithFilterDbAdapter:
     settings_config = sma_strategy_config_from_settings(short_n=short_n, long_n=long_n)
-    return SmaWithFilterStrategy(
+    return LegacySmaWithFilterDbAdapter(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
         long_n=int(settings.SMA_LONG if long_n is None else long_n),
         pair=settings.PAIR if pair is None else str(pair),
