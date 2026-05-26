@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import pytest
+
 import backtest
+from bithumb_bot.approved_profile import ApprovedProfileError, verify_promotion_artifact
 from bithumb_bot import smoke_backtest
+from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
+from bithumb_bot.research.promotion_gate import validate_backtest_candidate_for_promotion
 
 
 def test_root_backtest_output_is_diagnostic_only_and_non_promotable(monkeypatch) -> None:
@@ -58,3 +63,31 @@ def test_root_backtest_diagnostic_opt_in_runs_real_wrapper_path(monkeypatch, cap
     assert "promotion_grade=false" in output
     assert "evidence_scope=smoke_only_not_manifest_backed" in output
     assert "standalone_backtest_not_full_validation=true" in output
+
+
+def test_direct_smoke_artifact_is_rejected_by_promotion_candidate_gate(monkeypatch) -> None:
+    candles = [(index * 60_000, float(100 + index)) for index in range(20)]
+    monkeypatch.setattr(smoke_backtest, "load_candles", lambda limit: candles)
+
+    allowed, reasons = validate_backtest_candidate_for_promotion(
+        smoke_backtest.backtest(short_n=2, long_n=4, entry="cross")
+    )
+
+    assert allowed is False
+    assert "smoke_backtest_artifact_not_promotable" in reasons
+    assert "backtest_smoke_backtest_artifact_not_promotable" in reasons
+    assert "diagnostic_only_evidence_artifact" in reasons
+
+
+def test_direct_smoke_artifact_is_rejected_by_promotion_artifact_verifier(monkeypatch) -> None:
+    candles = [(index * 60_000, float(100 + index)) for index in range(20)]
+    monkeypatch.setattr(smoke_backtest, "load_candles", lambda limit: candles)
+    smoke_artifact = smoke_backtest.backtest(short_n=2, long_n=4, entry="cross")
+    promotion = {
+        **smoke_artifact,
+        "candidate_profile": dict(smoke_artifact),
+    }
+    promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
+
+    with pytest.raises(ApprovedProfileError, match="promotion_smoke_evidence_not_promotable"):
+        verify_promotion_artifact(promotion)

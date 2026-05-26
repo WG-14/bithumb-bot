@@ -68,6 +68,63 @@ def test_decision_event_backtest_kernel_executes_buy_and_updates_portfolio() -> 
     assert result.resource_usage["composite_behavior_hash_v2"].startswith("sha256:")
 
 
+def test_decision_event_backtest_uses_typed_execution_service_boundary(monkeypatch) -> None:
+    dataset = DatasetSnapshot(
+        snapshot_id="kernel_typed_execution_service",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=tuple(
+            Candle(index * 60_000, 100.0 + index, 100.0 + index, 100.0 + index, 100.0 + index, 1.0)
+            for index in range(4)
+        ),
+    )
+    event = ResearchDecisionEvent(
+        candle_ts=dataset.candles[1].ts,
+        decision_ts=dataset.candles[1].ts + 60_000,
+        strategy_name="buy_and_hold_baseline",
+        strategy_version="buy_and_hold_baseline.research_contract.v1",
+        raw_signal="BUY",
+        final_signal="BUY",
+        reason="kernel_contract_buy",
+        feature_snapshot={"candle_index": 1, "close": dataset.candles[1].close},
+        strategy_diagnostics={"schema_version": 1, "emitted_buy_intent": True},
+        entry_signal="BUY",
+        order_intent={"side": "BUY"},
+    )
+    calls = {"execute": 0}
+    real_service = backtest_kernel.ResearchVirtualExecutionService
+
+    class SpyResearchVirtualExecutionService(real_service):
+        def execute(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            calls["execute"] += 1
+            return super().execute(*args, **kwargs)
+
+    monkeypatch.setattr(
+        backtest_kernel,
+        "ResearchVirtualExecutionService",
+        SpyResearchVirtualExecutionService,
+    )
+
+    result = run_decision_event_backtest(
+        dataset=dataset,
+        strategy_name="buy_and_hold_baseline",
+        parameter_values={"BUY_HOLD_BUY_INDEX": 1, "BUY_HOLD_DECISION_REASON": "kernel_contract_buy"},
+        fee_rate=0.001,
+        slippage_bps=5.0,
+        decision_events=(event,),
+        context=BacktestRunContext(report_detail="full"),
+    )
+
+    assert calls["execute"] == 1
+    assert result.trades
+    assert result.decisions[0]["typed_execution_boundary"] == "SignalExecutionRequest"
+    loop_source = inspect.getsource(backtest_kernel._run_decision_event_backtest_impl)
+    assert ".simulate_submit_plan(" not in loop_source
+
+
 def test_decision_event_backtest_kernel_executes_sell_without_sma_fields() -> None:
     dataset = DatasetSnapshot(
         snapshot_id="kernel_sell_contract",

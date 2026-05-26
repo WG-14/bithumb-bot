@@ -346,6 +346,51 @@ def test_research_virtual_execution_service_rejects_forged_dict_submit_plan() ->
         )
 
 
+def test_research_virtual_execution_service_execute_rejects_forged_dict_submit_plan() -> None:
+    service = ResearchVirtualExecutionService(
+        execution_model=FixedBpsExecutionModel(fee_rate=0.001, slippage_bps=0.0),
+        fee_rate=0.001,
+    )
+    summary = object.__new__(ExecutionDecisionSummary)
+    for field_name, value in {
+        "raw_signal": "BUY",
+        "final_signal": "BUY",
+        "final_action": "ENTER_STRATEGY_POSITION",
+        "submit_expected": True,
+        "pre_submit_proof_status": "not_required",
+        "block_reason": "none",
+        "strategy_sell_candidate": None,
+        "residual_sell_candidate": None,
+        "target_exposure_krw": 10_000.0,
+        "current_effective_exposure_krw": 0.0,
+        "tracked_residual_exposure_krw": None,
+        "buy_delta_krw": 10_000.0,
+        "residual_live_sell_mode": "block",
+        "residual_buy_sizing_mode": "block",
+        "residual_submit_plan": None,
+        "buy_submit_plan": {"side": "BUY", "submit_expected": True},
+        "target_shadow_decision": None,
+        "target_submit_plan": None,
+        "pre_trade_economics": None,
+        "signal_flow": None,
+    }.items():
+        object.__setattr__(summary, field_name, value)
+
+    with pytest.raises(ValueError, match="research_dict_only_submit_plan_not_authority:buy_submit_plan"):
+        service.execute(
+            SignalExecutionRequest(
+                signal="BUY",
+                ts=100,
+                market_price=10.0,
+                execution_decision_summary=summary,
+            ),
+            signal_ts=100,
+            decision_ts=200,
+            timing_fields={},
+            depth_fields={},
+        )
+
+
 def test_research_virtual_execution_service_blocked_plan_creates_no_fill() -> None:
     service = ResearchVirtualExecutionService(
         execution_model=FixedBpsExecutionModel(fee_rate=0.001, slippage_bps=0.0),
@@ -363,6 +408,35 @@ def test_research_virtual_execution_service_blocked_plan_creates_no_fill() -> No
         signal_ts=100,
         decision_ts=200,
         reference_price=10.0,
+        timing_fields={},
+        depth_fields={},
+    )
+
+    assert fill is None
+
+
+def test_research_virtual_execution_service_execute_blocked_plan_creates_no_fill() -> None:
+    service = ResearchVirtualExecutionService(
+        execution_model=FixedBpsExecutionModel(fee_rate=0.001, slippage_bps=0.0),
+        fee_rate=0.001,
+    )
+    plan = _plan(
+        side="BUY",
+        qty=None,
+        notional_krw=None,
+        submit_expected=False,
+        block_reason="research_zero_buy_notional",
+    )
+
+    fill = service.execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=100,
+            market_price=10.0,
+            execution_decision_summary=_summary(plan),
+        ),
+        signal_ts=100,
+        decision_ts=200,
         timing_fields={},
         depth_fields={},
     )

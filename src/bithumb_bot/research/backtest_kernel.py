@@ -135,7 +135,7 @@ def execution_submit_plan_to_research_request(
 
 @dataclass(frozen=True)
 class ResearchVirtualExecutionService:
-    """Research execution adapter whose public authority input is ExecutionSubmitPlan."""
+    """Research execution adapter whose public boundary is SignalExecutionRequest."""
 
     execution_model: ExecutionModel
     fee_rate: float
@@ -456,6 +456,9 @@ def _execution_plan_evidence(
             "execution_plan_bundle_present": plan_bundle is not None,
             "execution_plan_status": "" if plan_bundle is None else plan_bundle.status,
             "execution_plan_reason_code": "" if plan_bundle is None else plan_bundle.reason_code,
+            "typed_execution_service": False,
+            "typed_submit_plan": False,
+            "typed_execution_boundary": "none",
             "research_compatibility_execution_fallback": (
                 False if plan_bundle is None else bool(plan_bundle.compatibility_fallback)
             ),
@@ -501,6 +504,9 @@ def _execution_plan_evidence(
         "execution_plan_bundle_present": True,
         "execution_plan_status": "PLANNED" if submit_plan.submit_expected else "BLOCKED",
         "execution_plan_reason_code": "none" if submit_plan.submit_expected else submit_plan.block_reason,
+        "typed_execution_service": True,
+        "typed_submit_plan": isinstance(submit_plan, ExecutionSubmitPlan),
+        "typed_execution_boundary": "SignalExecutionRequest",
         "research_compatibility_execution_fallback": bool(plan_bundle.compatibility_fallback),
         "compatibility_fallback": bool(plan_bundle.compatibility_fallback),
         "promotion_grade": bool(plan_bundle.promotion_grade and not plan_bundle.compatibility_fallback),
@@ -1370,23 +1376,17 @@ def _run_decision_event_backtest_impl(
                 policy=timing_policy,
                 model_latency_ms=_model_latency_ms(model),
             )
-            request = execution_submit_plan_to_research_request(
-                submit_plan=submit_plan,
-                signal_ts=signal.signal_candle_start_ts,
-                decision_ts=signal.decision_ts,
-                reference_price=float(reference.fill_reference_price or signal.signal_reference_price),
+            execution_service = ResearchVirtualExecutionService(
+                execution_model=model,
                 fee_rate=fee_rate,
-                timing_fields=_timing_request_fields(signal, reference, timing_policy),
-                depth_fields=_depth_request_fields(
-                    dataset=dataset,
-                    reference=reference,
-                    model=model,
-                    timing_policy=timing_policy,
-                ),
             )
-            if request is None:
-                warnings.append("research_submit_plan_not_expected")
-                continue
+            timing_fields = _timing_request_fields(signal, reference, timing_policy)
+            depth_fields = _depth_request_fields(
+                dataset=dataset,
+                reference=reference,
+                model=model,
+                timing_policy=timing_policy,
+            )
             if reference.fill_reference_price is None:
                 fill = _failed_fill(
                     model=model,
@@ -1395,28 +1395,33 @@ def _run_decision_event_backtest_impl(
                     timing_policy=timing_policy,
                     side=side,
                     fee_rate=fee_rate,
-                    requested_qty=request.requested_qty,
-                    requested_notional=request.requested_notional,
+                    requested_qty=_positive_float_or_none(submit_plan.qty),
+                    requested_notional=_positive_float_or_none(submit_plan.notional_krw),
                 )
             else:
-                fill = ResearchVirtualExecutionService(
-                    execution_model=model,
-                    fee_rate=fee_rate,
-                ).simulate_submit_plan(
-                    submit_plan=submit_plan,
-                    signal_ts=signal.signal_candle_start_ts,
-                    decision_ts=signal.decision_ts,
-                    reference_price=float(reference.fill_reference_price or signal.signal_reference_price),
-                    timing_fields=_timing_request_fields(signal, reference, timing_policy),
-                    depth_fields=_depth_request_fields(
-                        dataset=dataset,
-                        reference=reference,
-                        model=model,
-                        timing_policy=timing_policy,
-                    ),
-                )
+                try:
+                    fill = execution_service.execute(
+                        SignalExecutionRequest(
+                            signal=side,
+                            ts=signal.signal_candle_start_ts,
+                            market_price=float(reference.fill_reference_price),
+                            strategy_name=strategy_plugin.name,
+                            decision_reason=block_reason,
+                            execution_decision_summary=execution_plan_bundle.summary,
+                            execution_plan_bundle=execution_plan_bundle,
+                        ),
+                        signal_ts=signal.signal_candle_start_ts,
+                        decision_ts=signal.decision_ts,
+                        timing_fields=timing_fields,
+                        depth_fields=depth_fields,
+                    )
+                except ValueError as exc:
+                    warnings.append(f"research_typed_execution_service_failed:{exc}")
+                    continue
                 if fill is None:
-                    warnings.append("research_submit_plan_not_expected")
+                    warnings.append(
+                        f"research_typed_execution_service_no_fill:{submit_plan.block_reason or 'none'}"
+                    )
                     continue
             warnings.extend(_execution_reference_warnings(fill))
             if fill.fill_status == "failed" or fill.avg_fill_price is None or fill.filled_qty <= 0.0:
