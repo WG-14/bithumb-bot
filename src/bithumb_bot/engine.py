@@ -490,7 +490,52 @@ def _legacy_db_strategy_fallback_allowed(*, selected_strategy_name: str) -> bool
     return not live_real_order
 
 
+@dataclass(frozen=True)
+class DecisionRunner:
+    """Small orchestration seam for runtime strategy decisions.
+
+    This keeps the strategy selection and typed snapshot boundary callable
+    independently from the larger run loop while preserving the existing public
+    ``compute_strategy_decision_snapshot`` API.
+    """
+
+    strategy_name: str | None = None
+
+    def decide_snapshot(
+        self,
+        conn,
+        short_n: int,
+        long_n: int,
+        *,
+        through_ts_ms: int | None = None,
+        strategy_name: str | None = None,
+    ) -> RuntimeSmaDecisionResult | tuple[object, object] | None:
+        return _compute_strategy_decision_snapshot_impl(
+            conn,
+            short_n,
+            long_n,
+            through_ts_ms=through_ts_ms,
+            strategy_name=strategy_name or self.strategy_name,
+        )
+
+
 def compute_strategy_decision_snapshot(
+    conn,
+    short_n: int,
+    long_n: int,
+    *,
+    through_ts_ms: int | None = None,
+    strategy_name: str | None = None,
+) -> RuntimeSmaDecisionResult | tuple[object, object] | None:
+    return DecisionRunner(strategy_name=strategy_name).decide_snapshot(
+        conn,
+        short_n,
+        long_n,
+        through_ts_ms=through_ts_ms,
+    )
+
+
+def _compute_strategy_decision_snapshot_impl(
     conn,
     short_n: int,
     long_n: int,

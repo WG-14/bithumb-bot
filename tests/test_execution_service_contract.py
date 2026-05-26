@@ -520,4 +520,31 @@ def test_live_real_order_blocks_summary_with_dict_only_submit_plan(
 
     assert result is None
     assert calls == []
-    assert "live_real_order_missing_typed_submit_plan" in caplog.text
+    assert "live_real_order_missing_typed_submit_plan:target_submit_plan" in caplog.text
+
+
+def test_execution_decision_summary_rejects_malformed_dict_submit_plan_schema() -> None:
+    malformed_plan = dict(_valid_target_submit_plan())
+    malformed_plan.pop("authority")
+
+    with pytest.raises(ValueError, match="target_submit_plan_schema_missing_fields:authority"):
+        ExecutionDecisionSummary(
+            raw_signal="BUY",
+            final_signal="BUY",
+            final_action="REBALANCE_TO_TARGET",
+            submit_expected=True,
+            pre_submit_proof_status="passed",
+            block_reason="none",
+            strategy_sell_candidate=None,
+            residual_sell_candidate=None,
+            target_exposure_krw=100_000.0,
+            current_effective_exposure_krw=0.0,
+            tracked_residual_exposure_krw=None,
+            buy_delta_krw=100_000.0,
+            residual_live_sell_mode="block",
+            residual_buy_sizing_mode="block",
+            residual_submit_plan=None,
+            buy_submit_plan=None,
+            target_shadow_decision=None,
+            target_submit_plan=malformed_plan,
+        )

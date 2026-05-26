@@ -333,11 +333,11 @@ def _live_real_order_typed_submit_plan_error(
     residual_plan = _typed_submit_plan(summary.residual_submit_plan)
     buy_plan = _typed_submit_plan(summary.buy_submit_plan)
     if target_plan is None and summary.target_submit_plan is not None:
-        return "live_real_order_missing_typed_submit_plan"
+        return "live_real_order_missing_typed_submit_plan:target_submit_plan"
     if residual_plan is None and summary.residual_submit_plan is not None:
-        return "live_real_order_missing_typed_submit_plan"
+        return "live_real_order_missing_typed_submit_plan:residual_submit_plan"
     if buy_plan is None and summary.buy_submit_plan is not None:
-        return "live_real_order_missing_typed_submit_plan"
+        return "live_real_order_missing_typed_submit_plan:buy_submit_plan"
     if target_plan is None and residual_plan is None and buy_plan is None:
         return "live_real_order_missing_typed_submit_plan"
     return None

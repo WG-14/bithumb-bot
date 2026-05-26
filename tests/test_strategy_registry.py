@@ -273,6 +273,56 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
     assert snapshot_calls == ["sma_with_filter"]
 
 
+def test_decision_runner_exposes_typed_strategy_decision_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, str | None]] = []
+
+    def _fake_impl(conn, short_n, long_n, *, through_ts_ms=None, strategy_name=None):
+        calls.append((short_n, long_n, strategy_name))
+        return None
+
+    monkeypatch.setattr(engine_module, "_compute_strategy_decision_snapshot_impl", _fake_impl)
+
+    runner = engine_module.DecisionRunner(strategy_name="sma_with_filter")
+    with sqlite3.connect(":memory:") as conn:
+        result = runner.decide_snapshot(conn, 2, 3, through_ts_ms=123)
+
+    assert result is None
+    assert calls == [(2, 3, "sma_with_filter")]
+
+
+def test_live_real_sma_cross_rejected_before_legacy_strategy_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_mode = settings.MODE
+    old_armed = settings.LIVE_REAL_ORDER_ARMED
+    old_dry_run = settings.LIVE_DRY_RUN
+    old_strategy_name = settings.STRATEGY_NAME
+    legacy_calls: list[str] = []
+
+    def _fail_legacy_creation(name: str, **_kwargs):
+        legacy_calls.append(name)
+        raise AssertionError("legacy DB strategy creation must not be reached")
+
+    monkeypatch.setattr(engine_module, "create_legacy_strategy", _fail_legacy_creation)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "STRATEGY_NAME", "sma_cross")
+    try:
+        with sqlite3.connect(":memory:") as conn:
+            with pytest.raises(config.LiveModeValidationError, match="plain_sma_live_not_allowed"):
+                engine_module.compute_strategy_decision_snapshot(conn, 2, 3)
+    finally:
+        object.__setattr__(settings, "MODE", old_mode)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", old_armed)
+        object.__setattr__(settings, "LIVE_DRY_RUN", old_dry_run)
+        object.__setattr__(settings, "STRATEGY_NAME", old_strategy_name)
+
+    assert legacy_calls == []
+
+
 def test_runtime_replay_bundle_contains_reproducibility_material(tmp_path) -> None:
     old_db_path = settings.DB_PATH
     old_env_db_path = os.environ.get("DB_PATH")
@@ -334,6 +384,8 @@ def test_runtime_replay_bundle_contains_reproducibility_material(tmp_path) -> No
         "replay_fingerprint",
         "pure_policy_trace",
         "final_strategy_decision",
+        "execution_decision_reconstructable",
+        "execution_decision_reconstruction_reason",
         "execution_decision_summary",
     }.issubset(bundle)
     assert changes_after_replay == changes_before_replay
@@ -348,6 +400,10 @@ def test_runtime_replay_bundle_contains_reproducibility_material(tmp_path) -> No
     assert bundle["replay_fingerprint"]["through_ts_ms"] == base_ts + 39 * 60_000
     assert bundle["pure_policy_trace"]
     assert bundle["final_strategy_decision"]["strategy"] == "sma_with_filter"
+    assert bundle["execution_decision_reconstructable"] is False
+    assert bundle["execution_decision_reconstruction_reason"] == (
+        "live_readiness_context_not_available_in_db_snapshot"
+    )
     assert bundle["execution_decision_summary"]["execution_engine"] in {"lot_native", "target_delta"}
 
 
@@ -413,6 +469,10 @@ def test_replay_decision_cli_outputs_single_read_only_replay_bundle(tmp_path, ca
     assert bundle["decision_context_schema_version"] == 1
     assert bundle["code_provenance"] == {"source": "unavailable"}
     assert bundle["final_typed_strategy_decision"]["policy_decision_hash"] == bundle["policy_decision_hash"]
+    assert bundle["execution_decision_reconstructable"] is False
+    assert bundle["execution_decision_reconstruction_reason"] == (
+        "live_readiness_context_not_available_in_db_snapshot"
+    )
     assert "execution_decision_summary" in bundle
     assert changes_after_replay == 0
     assert changes_before_replay > 0

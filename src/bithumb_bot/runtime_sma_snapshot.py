@@ -131,6 +131,12 @@ def build_sma_with_filter_replay_bundle(
         final_reason=strategy_payload.get("reason"),
         previous_target_exposure_krw=previous_target_exposure_krw,
     )
+    execution_decision_reconstructable = readiness_payload is not None
+    execution_decision_reconstruction_reason = (
+        "readiness_payload_supplied"
+        if execution_decision_reconstructable
+        else "live_readiness_context_not_available_in_db_snapshot"
+    )
     pure_policy_trace = (
         dict(context.get("pure_policy_trace"))
         if isinstance(context.get("pure_policy_trace"), dict)
@@ -174,5 +180,7 @@ def build_sma_with_filter_replay_bundle(
         "pure_policy_trace": pure_policy_trace,
         "final_strategy_decision": strategy_payload,
         "final_typed_strategy_decision": _typed_strategy_decision_payload(typed_result),
+        "execution_decision_reconstructable": execution_decision_reconstructable,
+        "execution_decision_reconstruction_reason": execution_decision_reconstruction_reason,
         "execution_decision_summary": execution_summary.as_dict(),
     }
