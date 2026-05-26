@@ -518,6 +518,15 @@ def validate_backtest_candidate_for_promotion(candidate: dict[str, Any] | None) 
     if smoke_reasons:
         reasons.extend(f"backtest_{reason}" for reason in smoke_reasons)
         reasons.extend(smoke_reasons)
+    if candidate.get("compatibility_fallback") is True or candidate.get(
+        "research_compatibility_execution_fallback"
+    ) is True:
+        reasons.extend(
+            [
+                "backtest_compatibility_fallback_not_promotion_grade",
+                "compatibility_fallback_not_promotion_grade",
+            ]
+        )
     gate = candidate.get("acceptance_gate_result")
     if gate != "PASS":
         reasons.extend(["backtest_acceptance_gate_not_passed", "acceptance_gate_not_passed"])

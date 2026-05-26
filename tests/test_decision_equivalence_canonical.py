@@ -545,6 +545,36 @@ def test_partial_typed_lifecycle_evidence_does_not_upgrade_to_full_lifecycle() -
     assert "live_submit_equivalence_evidence_missing" in report["unsupported_lifecycle_reasons"]
 
 
+@pytest.mark.parametrize(
+    ("missing_group", "expected_reason"),
+    (
+        ("research_simulated_fills", "fill_equivalence_evidence_missing"),
+        ("paper_submit_fills", "paper_submit_fill_equivalence_evidence_missing"),
+        ("live_submit_responses", "live_submit_equivalence_evidence_missing"),
+        ("accounting_replays", "accounting_replay_equivalence_missing"),
+        ("position_lifecycle_snapshots", "position_lifecycle_equivalence_evidence_missing"),
+    ),
+)
+def test_full_lifecycle_requires_all_typed_evidence_groups(
+    missing_group: str,
+    expected_reason: str,
+) -> None:
+    groups = {
+        "research_simulated_fills": _complete_lifecycle_evidence().research_simulated_fills,
+        "paper_submit_fills": _complete_lifecycle_evidence().paper_submit_fills,
+        "live_submit_responses": _complete_lifecycle_evidence().live_submit_responses,
+        "accounting_replays": _complete_lifecycle_evidence().accounting_replays,
+        "position_lifecycle_snapshots": _complete_lifecycle_evidence().position_lifecycle_snapshots,
+    }
+    groups[missing_group] = ()
+
+    validation = validate_lifecycle_evidence_scope(CanonicalLifecycleEvidenceBundle(**groups))
+
+    assert validation.full_lifecycle_equivalence_supported is False
+    assert expected_reason in validation.reason_codes
+    assert "execution_lifecycle_scope_not_supported" in validation.reason_codes
+
+
 def test_complete_typed_hash_bound_lifecycle_evidence_can_enable_stronger_claim_scope() -> None:
     evidence = _complete_lifecycle_evidence()
 

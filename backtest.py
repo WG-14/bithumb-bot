@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     from tools.diagnostic_smoke_backtest import main as smoke_main
 
-    return smoke_main(remaining)
+    return smoke_main(["--diagnostic-smoke-only", *remaining])
 
 
 if __name__ == "__main__":

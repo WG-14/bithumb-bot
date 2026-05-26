@@ -626,6 +626,18 @@ def test_backtest_candidate_standalone_marker_alone_fails_closed_for_promotion()
     assert "backtest_standalone_backtest_not_full_validation" in reasons
 
 
+@pytest.mark.parametrize("field", ("compatibility_fallback", "research_compatibility_execution_fallback"))
+def test_backtest_candidate_compatibility_fallback_fails_closed_for_promotion(field: str) -> None:
+    candidate = _production_candidate(**{field: True})
+    candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
+
+    allowed, reasons = validate_backtest_candidate_for_promotion(candidate)
+
+    assert not allowed
+    assert "compatibility_fallback_not_promotion_grade" in reasons
+    assert "backtest_compatibility_fallback_not_promotion_grade" in reasons
+
+
 def test_candidate_regime_policy_equivalence_evidence_can_be_bound_to_candidate_profile(tmp_path: Path) -> None:
     candidate = _production_candidate(
         candidate_regime_policy_required_for_live=True,

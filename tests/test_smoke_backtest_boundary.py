@@ -40,6 +40,49 @@ def test_root_backtest_default_refuses_to_run_smoke_backtest(capsys) -> None:
     assert "uv run bithumb-bot research-validate --manifest <path>" in captured.err
 
 
+def test_direct_smoke_backtest_main_without_ack_refuses(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("SMOKE_BACKTEST_ACK", raising=False)
+
+    assert smoke_backtest.main(["--short", "2", "--long", "4"]) == 2
+    captured = capsys.readouterr()
+
+    assert "diagnostic_only=true" in captured.err
+    assert "non_promotable=true" in captured.err
+    assert "promotion_grade=false" in captured.err
+    assert "evidence_scope=smoke_only_not_manifest_backed" in captured.err
+    assert "reason_code=standalone_backtest_not_full_validation" in captured.err
+    assert "operator_next_action=use_manifest_backed_research_validation" in captured.err
+    assert "uv run bithumb-bot research-validate --manifest <path>" in captured.err
+
+
+def test_direct_smoke_backtest_main_with_flag_runs(monkeypatch, capsys) -> None:
+    candles = [(index * 60_000, float(100 + index)) for index in range(20)]
+    monkeypatch.delenv("SMOKE_BACKTEST_ACK", raising=False)
+    monkeypatch.setattr(smoke_backtest, "load_candles", lambda limit: candles)
+
+    assert smoke_backtest.main(["--diagnostic-smoke-only", "--short", "2", "--long", "4"]) == 0
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+
+    assert "diagnostic_only=true" in output
+    assert "non_promotable=true" in output
+    assert "promotion_grade=false" in output
+
+
+def test_direct_smoke_backtest_main_with_env_ack_runs(monkeypatch, capsys) -> None:
+    candles = [(index * 60_000, float(100 + index)) for index in range(20)]
+    monkeypatch.setenv("SMOKE_BACKTEST_ACK", "diagnostic_only")
+    monkeypatch.setattr(smoke_backtest, "load_candles", lambda limit: candles)
+
+    assert smoke_backtest.main(["--short", "2", "--long", "4"]) == 0
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+
+    assert "diagnostic_only=true" in output
+    assert "non_promotable=true" in output
+    assert "promotion_grade=false" in output
+
+
 def test_root_backtest_refusal_lines_are_generated_from_shared_payload() -> None:
     payload = backtest.ROOT_BACKTEST_REFUSAL
     lines = "\n".join(backtest.root_backtest_refusal_lines())

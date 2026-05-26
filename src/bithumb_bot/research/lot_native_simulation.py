@@ -11,6 +11,7 @@ from bithumb_bot.position_authority import (
     POSITIVE_EQUIVALENCE_STATE_CLASSES,
     PositionAuthoritySnapshot,
     lot_native_comparison_position_state,
+    research_lot_native_position_authority_snapshot,
 )
 
 
@@ -113,6 +114,32 @@ class LotNativeResearchPositionModel:
             }
         )
         position_state_hash = canonical_payload_hash(comparison_state)
+        lot_native_fields = {
+            "raw_total_asset_qty": float(exposure.raw_total_asset_qty),
+            "open_lot_count": int(exposure.open_lot_count),
+            "dust_tracking_lot_count": int(exposure.dust_tracking_lot_count),
+            "reserved_exit_lot_count": int(exposure.reserved_exit_lot_count),
+            "sellable_executable_lot_count": int(exposure.sellable_executable_lot_count),
+            "open_exposure_qty": float(exposure.open_exposure_qty),
+            "dust_tracking_qty": float(exposure.dust_tracking_qty),
+            "reserved_exit_qty": float(exposure.reserved_exit_qty),
+            "sellable_executable_qty": float(exposure.sellable_executable_qty),
+            "terminal_state": str(exposure.terminal_state),
+            "entry_allowed": bool(exposure.entry_allowed),
+            "exit_allowed": bool(exposure.exit_allowed),
+            "recovery_blocked": bool(exposure.recovery_blocked),
+            "recovery_block_reason": str(exposure.recovery_block_reason or "none"),
+            "order_rules_hash": str(order_rules_hash),
+            "fee_authority_hash": str(fee_authority_hash),
+            "position_state_hash": position_state_hash,
+        }
+        if not unsupported_reason:
+            return research_lot_native_position_authority_snapshot(
+                lot_native_fields=lot_native_fields,
+                order_rules_hash=str(order_rules_hash),
+                fee_authority_hash=str(fee_authority_hash),
+                position_state_hash=position_state_hash,
+            )
         return PositionAuthoritySnapshot(
             raw_total_asset_qty=float(exposure.raw_total_asset_qty),
             open_lot_count=int(exposure.open_lot_count),

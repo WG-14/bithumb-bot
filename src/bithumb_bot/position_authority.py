@@ -11,6 +11,20 @@ POSITIVE_EQUIVALENCE_STATE_CLASSES = frozenset(
 )
 LOT_NATIVE_RESEARCH_POSITION_MODEL = "lot_native_simulation_v1"
 LEGACY_RESEARCH_POSITION_MODEL = "cash_qty_simulation_v1"
+RESEARCH_LOT_NATIVE_AUTHORITY_REQUIRED_FIELDS = (
+    "open_lot_count",
+    "sellable_executable_lot_count",
+    "reserved_exit_lot_count",
+    "dust_tracking_lot_count",
+    "open_exposure_qty",
+    "sellable_executable_qty",
+    "reserved_exit_qty",
+    "dust_tracking_qty",
+    "terminal_state",
+    "order_rules_hash",
+    "fee_authority_hash",
+    "position_state_hash",
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +137,70 @@ def research_position_authority_snapshot(
         state_class=state_class,
         unsupported_reason=unsupported_reason,
         research_position_model=LEGACY_RESEARCH_POSITION_MODEL,
+    )
+
+
+def research_lot_native_position_authority_snapshot(
+    *,
+    lot_native_fields: dict[str, Any],
+    order_rules_hash: str,
+    fee_authority_hash: str,
+    position_state_hash: str,
+) -> PositionAuthoritySnapshot:
+    fields = dict(lot_native_fields)
+    state_class = str(fields.get("terminal_state") or fields.get("state_class") or "").strip()
+    if state_class == "flat":
+        state_class = "flat_no_dust_no_position"
+    if bool(fields.get("recovery_blocked")):
+        state_class = "recovery_blocked"
+    unsupported_reason = (
+        ""
+        if _research_lot_native_fields_support_positive_equivalence(
+            fields,
+            state_class=state_class,
+            order_rules_hash=order_rules_hash,
+            fee_authority_hash=fee_authority_hash,
+            position_state_hash=position_state_hash,
+        )
+        else _research_lot_native_unsupported_reason(state_class)
+    )
+    return PositionAuthoritySnapshot(
+        raw_total_asset_qty=max(
+            0.0,
+            _float(fields.get("raw_total_asset_qty"))
+            or _float(fields.get("open_exposure_qty")) + _float(fields.get("dust_tracking_qty")),
+        ),
+        open_lot_count=_int(fields.get("open_lot_count")),
+        dust_tracking_lot_count=_int(fields.get("dust_tracking_lot_count")),
+        reserved_exit_lot_count=_int(fields.get("reserved_exit_lot_count")),
+        sellable_executable_lot_count=_int(fields.get("sellable_executable_lot_count")),
+        open_exposure_qty=_float(fields.get("open_exposure_qty")),
+        dust_tracking_qty=_float(fields.get("dust_tracking_qty")),
+        reserved_exit_qty=_float(fields.get("reserved_exit_qty")),
+        sellable_executable_qty=_float(fields.get("sellable_executable_qty")),
+        terminal_state=str(fields.get("terminal_state") or state_class),
+        entry_allowed=(
+            bool(fields.get("entry_allowed"))
+            if "entry_allowed" in fields
+            else state_class == "flat_no_dust_no_position"
+        ),
+        exit_allowed=(
+            bool(fields.get("exit_allowed"))
+            if "exit_allowed" in fields
+            else _int(fields.get("sellable_executable_lot_count")) > 0
+        ),
+        recovery_blocked=bool(fields.get("recovery_blocked")),
+        recovery_block_reason=str(fields.get("recovery_block_reason") or "none"),
+        order_rules_hash=order_rules_hash,
+        fee_authority_hash=fee_authority_hash,
+        position_state_hash=position_state_hash,
+        state_class=state_class or "research_model_lacks_lot_native_authority",
+        unsupported_reason=unsupported_reason,
+        research_position_model=(
+            LOT_NATIVE_RESEARCH_POSITION_MODEL
+            if not unsupported_reason and state_class in POSITIVE_EQUIVALENCE_STATE_CLASSES
+            else f"{LOT_NATIVE_RESEARCH_POSITION_MODEL}_partial"
+        ),
     )
 
 
@@ -319,6 +397,78 @@ def _runtime_state_has_required_lot_native_fields(position_gate: dict[str, Any],
             and bool(position_gate.get("exit_allowed")) is False
         )
     return False
+
+
+def _research_lot_native_fields_support_positive_equivalence(
+    fields: dict[str, Any],
+    *,
+    state_class: str,
+    order_rules_hash: str,
+    fee_authority_hash: str,
+    position_state_hash: str,
+) -> bool:
+    if state_class not in POSITIVE_EQUIVALENCE_STATE_CLASSES:
+        return False
+    if any(field not in fields for field in RESEARCH_LOT_NATIVE_AUTHORITY_REQUIRED_FIELDS):
+        return False
+    if str(fields.get("order_rules_hash") or "") != str(order_rules_hash):
+        return False
+    if str(fields.get("fee_authority_hash") or "") != str(fee_authority_hash):
+        return False
+    if str(fields.get("position_state_hash") or "") != str(position_state_hash):
+        return False
+    open_lots = _int(fields.get("open_lot_count"))
+    sellable_lots = _int(fields.get("sellable_executable_lot_count"))
+    reserved_lots = _int(fields.get("reserved_exit_lot_count"))
+    dust_lots = _int(fields.get("dust_tracking_lot_count"))
+    open_qty = _float(fields.get("open_exposure_qty"))
+    sellable_qty = _float(fields.get("sellable_executable_qty"))
+    reserved_qty = _float(fields.get("reserved_exit_qty"))
+    dust_qty = _float(fields.get("dust_tracking_qty"))
+    if min(open_lots, sellable_lots, reserved_lots, dust_lots) < 0:
+        return False
+    if min(open_qty, sellable_qty, reserved_qty, dust_qty) < 0.0:
+        return False
+    if bool(fields.get("recovery_blocked")):
+        return False
+    if state_class == "flat_no_dust_no_position":
+        return (
+            open_lots == 0
+            and sellable_lots == 0
+            and reserved_lots == 0
+            and dust_lots == 0
+            and open_qty <= 1e-12
+            and sellable_qty <= 1e-12
+            and reserved_qty <= 1e-12
+            and dust_qty <= 1e-12
+        )
+    if state_class == "open_exposure":
+        return (
+            str(fields.get("terminal_state") or "") == "open_exposure"
+            and open_lots > 0
+            and sellable_lots == open_lots
+            and reserved_lots == 0
+            and dust_lots == 0
+            and open_qty > 1e-12
+            and sellable_qty > 1e-12
+            and reserved_qty <= 1e-12
+            and dust_qty <= 1e-12
+        )
+    return False
+
+
+def _research_lot_native_unsupported_reason(state_class: str) -> str:
+    if state_class == "dust_only":
+        return "research_model_lacks_dust_state"
+    if state_class in {
+        "open_exposure",
+        "reserved_exit_pending",
+        "non_executable_position",
+        "recovery_blocked",
+        "flat_no_dust_no_position",
+    }:
+        return "research_model_lacks_lot_native_authority"
+    return "research_runtime_state_not_comparable"
 
 
 def _is_runtime_flat_no_dust(position_gate: dict[str, Any]) -> bool:

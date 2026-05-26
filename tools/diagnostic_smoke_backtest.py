@@ -18,6 +18,17 @@ SMOKE_BACKTEST_WARNING = (
     "This is a smoke backtest only. It must not be used as evidence for strategy promotion, "
     "approved profiles, live readiness, or capital allocation."
 )
+SMOKE_BACKTEST_ACK_ENV = "SMOKE_BACKTEST_ACK"
+SMOKE_BACKTEST_ACK_VALUE = "diagnostic_only"
+SMOKE_BACKTEST_REFUSAL = {
+    "diagnostic_only": True,
+    "non_promotable": True,
+    "promotion_grade": False,
+    "evidence_scope": "smoke_only_not_manifest_backed",
+    "reason_code": "standalone_backtest_not_full_validation",
+    "operator_next_action": "use_manifest_backed_research_validation",
+    "recommended_command": "uv run bithumb-bot research-validate --manifest <path>",
+}
 
 path_manager = PathManager.from_env(PROJECT_ROOT)
 _db_path_env = os.getenv("DB_PATH", "")
@@ -36,6 +47,32 @@ FEE_RATE = float(os.getenv("FEE_RATE", "0.0004"))
 BUY_FRACTION = float(os.getenv("BUY_FRACTION", "0.99"))
 
 KST = timezone(timedelta(hours=9))
+
+
+def smoke_backtest_refusal_lines() -> tuple[str, ...]:
+    payload = SMOKE_BACKTEST_REFUSAL
+    return (
+        f"[SMOKE-BACKTEST REFUSED] {SMOKE_BACKTEST_WARNING}",
+        " ".join(
+            (
+                f"diagnostic_only={str(payload['diagnostic_only']).lower()}",
+                f"non_promotable={str(payload['non_promotable']).lower()}",
+                f"promotion_grade={str(payload['promotion_grade']).lower()}",
+                f"evidence_scope={payload['evidence_scope']}",
+            )
+        ),
+        " ".join(
+            (
+                f"reason_code={payload['reason_code']}",
+                f"operator_next_action={payload['operator_next_action']}",
+                f"recommended_command='{payload['recommended_command']}'",
+            )
+        ),
+    )
+
+
+def _diagnostic_smoke_acknowledged(args: argparse.Namespace) -> bool:
+    return bool(args.diagnostic_smoke_only) or os.getenv(SMOKE_BACKTEST_ACK_ENV) == SMOKE_BACKTEST_ACK_VALUE
 
 
 def kst_str(ts_ms: int) -> str:
@@ -196,11 +233,20 @@ def main(argv: list[str] | None = None) -> int:
     started_at = monotonic()
     rc = 1
     ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--diagnostic-smoke-only",
+        action="store_true",
+        help="Acknowledge that this direct smoke backtest is diagnostic-only and non-promotable.",
+    )
     ap.add_argument("--short", type=int, required=True)
     ap.add_argument("--long", type=int, required=True)
     ap.add_argument("--entry", choices=["cross", "regime"], default="cross")
     ap.add_argument("--show-trades", type=int, default=10)
     args = ap.parse_args(argv)
+    if not _diagnostic_smoke_acknowledged(args):
+        for line in smoke_backtest_refusal_lines():
+            print(line, file=sys.stderr)
+        return 2
 
     try:
         print(f"[SMOKE-BACKTEST WARNING] {SMOKE_BACKTEST_WARNING}", file=sys.stderr)
