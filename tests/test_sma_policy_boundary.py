@@ -498,7 +498,6 @@ def test_live_wrapper_and_research_adapter_share_policy_entry_boundary() -> None
                 market_regime_enabled=False,
                 candidate_regime_policy=_allowing_policy(),
             ),
-            normalizer=runtime_sma_snapshot.ReadOnlyPositionStateNormalizer(),
         )
     finally:
         conn.close()
@@ -552,7 +551,6 @@ def test_runtime_db_and_research_adapter_policy_input_hashes_are_non_comparable_
                 candidate_regime_policy=_allowing_policy(),
             ),
             through_ts_ms=1_700_000_240_000,
-            normalizer=runtime_sma_snapshot.ReadOnlyPositionStateNormalizer(),
         )
     finally:
         conn.close()
@@ -779,6 +777,7 @@ def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() ->
     )
     builder_source = inspect.getsource(runtime_sma.build_sma_with_filter_runtime_decision_from_normalized_db)
     orchestration_source = inspect.getsource(runtime_sma.decide_sma_with_filter_runtime_snapshot_from_db)
+    engine_normalization_source = inspect.getsource(engine.normalize_position_state_before_strategy_decision)
     runtime_boundary_source = inspect.getsource(runtime_sma_snapshot.decide_sma_with_filter_snapshot_from_db)
     runtime_boundary_module_source = inspect.getsource(runtime_sma_snapshot)
 
@@ -790,7 +789,8 @@ def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() ->
     assert "conn.commit()" in normalizer_source
     assert "_load_position_context(" in builder_source
     assert "evaluate_sma_final_decision(" in builder_source
-    assert "normalize_and_persist(" in orchestration_source
+    assert "normalize_and_persist(" not in orchestration_source
+    assert "normalize_and_persist(" in engine_normalization_source
     assert "strategy.decide(" not in orchestration_source
     assert "_decide_from_normalized_db(" not in orchestration_source
     assert "build_sma_with_filter_runtime_decision_from_normalized_db(" in orchestration_source
@@ -1041,57 +1041,50 @@ def test_position_normalizer_is_the_only_runtime_decision_mutation_boundary() ->
         runtime_position_state_normalizer.PositionStateNormalizer.normalize_and_persist
     )
     orchestration_source = inspect.getsource(runtime_sma.decide_sma_with_filter_runtime_snapshot_from_db)
+    engine_normalization_source = inspect.getsource(engine.normalize_position_state_before_strategy_decision)
 
     assert "mark_harmless_dust_positions(" in normalizer_source
     assert "reclassify_non_executable_open_exposure(" in normalizer_source
     assert "conn.commit()" in normalizer_source
-    assert "normalize_and_persist(" in orchestration_source
+    assert "normalize_and_persist(" not in orchestration_source
+    assert "normalize_and_persist(" in engine_normalization_source
     assert "build_sma_with_filter_runtime_decision_from_normalized_db(" in orchestration_source
 
 
-def test_snapshot_orchestration_normalizes_before_policy_evaluation(monkeypatch) -> None:
+def test_engine_orchestration_normalizes_before_snapshot_decision(monkeypatch) -> None:
     events: list[str] = []
     conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
-    original_final_decision = runtime_sma.evaluate_sma_final_decision
+    old_pair = engine.settings.PAIR
+    old_interval = engine.settings.INTERVAL
 
-    class _Normalizer:
-        def normalize_and_persist(self, conn, **kwargs):
-            events.append("normalize")
-            return 0
+    def _normalize(conn, strategy, *, through_ts_ms=None, normalizer=None):
+        events.append("normalize")
+        return 0
 
-    def _final_decision(**kwargs):
-        events.append("policy")
-        return original_final_decision(**kwargs)
+    def _decide(conn, strategy, *, through_ts_ms=None):
+        events.append("decision")
+        return None
 
-    monkeypatch.setattr(runtime_sma, "evaluate_sma_final_decision", _final_decision)
+    monkeypatch.setattr(engine, "normalize_position_state_before_strategy_decision", _normalize)
+    monkeypatch.setattr(engine, "decide_sma_with_filter_runtime_snapshot_from_db", _decide)
 
     try:
-        decision = runtime_sma.decide_sma_with_filter_snapshot_from_db(
+        object.__setattr__(engine.settings, "PAIR", "BTC_KRW")
+        object.__setattr__(engine.settings, "INTERVAL", "1m")
+        decision = engine.compute_strategy_decision_snapshot(
             conn,
-            create_sma_with_filter_strategy(
-                short_n=2,
-                long_n=3,
-                pair="BTC_KRW",
-                interval="1m",
-                min_gap_ratio=0.0,
-                volatility_window=3,
-                min_volatility_ratio=0.0,
-                overextended_lookback=1,
-                overextended_max_return_ratio=0.0,
-                slippage_bps=0.0,
-                live_fee_rate_estimate=0.0,
-                entry_edge_buffer_ratio=0.0,
-                cost_edge_enabled=False,
-                market_regime_enabled=False,
-                candidate_regime_policy=_allowing_policy(),
-            ),
-            normalizer=_Normalizer(),
+            2,
+            3,
+            through_ts_ms=1_700_000_240_000,
+            strategy_name="sma_with_filter",
         )
     finally:
+        object.__setattr__(engine.settings, "PAIR", old_pair)
+        object.__setattr__(engine.settings, "INTERVAL", old_interval)
         conn.close()
 
-    assert decision is not None
-    assert events == ["normalize", "policy"]
+    assert decision is None
+    assert events == ["normalize", "decision"]
 
 
 def test_snapshot_orchestration_does_not_call_legacy_decide_facade(monkeypatch) -> None:
@@ -1128,15 +1121,10 @@ def test_snapshot_orchestration_does_not_call_legacy_decide_facade(monkeypatch) 
         raising=False,
     )
 
-    class _Normalizer:
-        def normalize_and_persist(self, conn, **kwargs):
-            return 0
-
     try:
         decision = runtime_sma.decide_sma_with_filter_snapshot_from_db(
             conn,
             strategy,
-            normalizer=_Normalizer(),
         )
     finally:
         conn.close()
@@ -1145,7 +1133,49 @@ def test_snapshot_orchestration_does_not_call_legacy_decide_facade(monkeypatch) 
     assert decision.context["policy_decision_hash"].startswith("sha256:")
 
 
-def test_replay_bundle_uses_read_only_noop_normalizer(monkeypatch) -> None:
+def test_runtime_sma_decision_helper_does_not_call_position_normalizer(monkeypatch) -> None:
+    conn = _build_candle_db([10.0] * 11 + [11.0])
+    strategy = create_sma_with_filter_strategy(
+        short_n=2,
+        long_n=3,
+        pair="BTC_KRW",
+        interval="1m",
+        min_gap_ratio=0.0,
+        volatility_window=3,
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        slippage_bps=0.0,
+        live_fee_rate_estimate=0.0,
+        entry_edge_buffer_ratio=0.0,
+        cost_edge_enabled=False,
+        market_regime_enabled=False,
+        candidate_regime_policy=_allowing_policy(),
+    )
+
+    def _raise_mutating_normalizer(*args, **kwargs):
+        raise AssertionError("runtime SMA decision helper must be read-only")
+
+    monkeypatch.setattr(
+        runtime_position_state_normalizer.PositionStateNormalizer,
+        "normalize_and_persist",
+        _raise_mutating_normalizer,
+    )
+
+    try:
+        result = runtime_sma.decide_sma_with_filter_runtime_snapshot_from_db(
+            conn,
+            strategy,
+            through_ts_ms=1_700_000_000_000 + 11 * 60_000,
+        )
+    finally:
+        conn.close()
+
+    assert result is not None
+    assert result.decision.policy_decision_hash.startswith("sha256:")
+
+
+def test_replay_bundle_uses_read_only_normalized_builder(monkeypatch) -> None:
     conn = _build_candle_db([10.0] * 11 + [11.0])
     strategy = create_sma_with_filter_strategy(
         short_n=2,
@@ -1169,7 +1199,7 @@ def test_replay_bundle_uses_read_only_noop_normalizer(monkeypatch) -> None:
         raise AssertionError("real normalizer should not run during replay bundle construction")
 
     monkeypatch.setattr(
-        runtime_sma.PositionStateNormalizer,
+        runtime_position_state_normalizer.PositionStateNormalizer,
         "normalize_and_persist",
         _raise_real_normalizer,
     )
@@ -1185,7 +1215,10 @@ def test_replay_bundle_uses_read_only_noop_normalizer(monkeypatch) -> None:
 
     assert bundle is not None
     assert bundle["boundary_stages"]["snapshot_builder"] == (
-        "runtime_sma_snapshot.decide_sma_with_filter_snapshot_from_db"
+        "runtime_sma_snapshot_builder.build_sma_with_filter_runtime_decision_from_normalized_db"
+    )
+    assert bundle["boundary_stages"]["pre_decision_normalization"] == (
+        "engine.normalize_position_state_before_strategy_decision"
     )
     assert bundle["decision_context_schema_version"] == 1
     assert set(bundle["code_provenance"]) == {
@@ -1219,23 +1252,11 @@ def test_replay_decision_uses_read_only_normalizer_and_does_not_mutate_db(monkey
         market_regime_enabled=False,
         candidate_regime_policy=_allowing_policy(),
     )
-    observed_normalizer: list[str] = []
-    original_read_only_normalize = runtime_sma_snapshot.ReadOnlyPositionStateNormalizer.normalize_and_persist
-
-    def _read_only_normalize(self, conn, **kwargs):
-        observed_normalizer.append(type(self).__name__)
-        return original_read_only_normalize(self, conn, **kwargs)
-
     def _raise_mutating_normalizer(*args, **kwargs):
         raise AssertionError("mutating normalizer should not run during replay")
 
     monkeypatch.setattr(
-        runtime_sma_snapshot.ReadOnlyPositionStateNormalizer,
-        "normalize_and_persist",
-        _read_only_normalize,
-    )
-    monkeypatch.setattr(
-        runtime_sma.PositionStateNormalizer,
+        runtime_position_state_normalizer.PositionStateNormalizer,
         "normalize_and_persist",
         _raise_mutating_normalizer,
     )
@@ -1252,7 +1273,6 @@ def test_replay_decision_uses_read_only_normalizer_and_does_not_mutate_db(monkey
         conn.close()
 
     assert bundle is not None
-    assert observed_normalizer == ["ReadOnlyPositionStateNormalizer"]
     assert changes_after == changes_before
     assert {
         "boundary_stages",

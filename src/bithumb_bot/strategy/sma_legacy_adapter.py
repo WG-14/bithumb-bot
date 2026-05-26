@@ -810,9 +810,8 @@ def decide_sma_with_filter_snapshot_from_db(
     strategy: LegacySmaWithFilterDbAdapter,
     *,
     through_ts_ms: int | None = None,
-    normalizer: PositionStateNormalizer | None = None,
 ) -> StrategyDecision | None:
-    """Compatibility shim; runtime_sma_snapshot_builder owns this boundary."""
+    """Read-only compatibility shim; runtime_sma_snapshot_builder owns this boundary."""
     from ..runtime_sma_snapshot_builder import (
         decide_sma_with_filter_snapshot_from_db as _runtime_snapshot_from_db,
     )
@@ -821,7 +820,6 @@ def decide_sma_with_filter_snapshot_from_db(
         conn,
         strategy,
         through_ts_ms=through_ts_ms,
-        normalizer=normalizer,
     )
 
 

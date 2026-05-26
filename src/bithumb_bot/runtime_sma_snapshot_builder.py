@@ -25,7 +25,6 @@ from .lifecycle import (
     summarize_reserved_exit_qty,
 )
 from .runtime_position_state_normalizer import (
-    PositionStateNormalizer,
     load_last_reconcile_metadata,
 )
 from .runtime_sma_context import (
@@ -439,9 +438,8 @@ def build_sma_with_filter_runtime_decision_from_normalized_db(
     This is the post-normalization read-only phase. It may read candles,
     position projections, fee/rule snapshots, and assemble replay/legacy
     observability payloads, but it must not repair, reclassify, or persist DB
-    state. Runtime callers that need state repair must use
-    ``decide_sma_with_filter_runtime_snapshot_from_db`` so the mutating
-    ``PositionStateNormalizer`` phase remains explicit and testable.
+    state. Runtime callers that need state repair must run the explicit
+    pre-decision normalizer before entering this helper.
     """
     from .utils_time import parse_interval_sec
 
@@ -926,14 +924,12 @@ def decide_sma_with_filter_snapshot_from_db(
     strategy: object,
     *,
     through_ts_ms: int | None = None,
-    normalizer: PositionStateNormalizer | None = None,
 ) -> StrategyDecision | None:
-    """Compatibility serializer for legacy callers expecting StrategyDecision."""
+    """Read-only compatibility serializer for legacy callers expecting StrategyDecision."""
     result = decide_sma_with_filter_runtime_snapshot_from_db(
         conn,
         strategy,
         through_ts_ms=through_ts_ms,
-        normalizer=normalizer,
     )
     return None if result is None else result.legacy_strategy_decision()
 
@@ -943,13 +939,11 @@ def decide_sma_with_filter_runtime_snapshot_from_db(
     strategy: object,
     *,
     through_ts_ms: int | None = None,
-    normalizer: PositionStateNormalizer | None = None,
 ) -> RuntimeSmaDecisionResult | None:
-    """Live/runtime orchestration boundary for typed sma_with_filter decisions.
+    """Read normalized DB state and return a typed sma_with_filter decision.
 
-    This is the only SMA runtime decision helper in this module allowed to run
-    the pre-decision normalizer. After ``normalize_and_persist`` returns, the
-    normalized builder and pure policy evaluation must remain read-only.
+    This helper is intentionally read-only. Position/dust repair must happen at
+    a named orchestration boundary before this function is called.
     """
     signal_through_ts_ms = _resolve_signal_through_ts_ms(
         interval=strategy.interval,
@@ -957,20 +951,6 @@ def decide_sma_with_filter_runtime_snapshot_from_db(
     )
     if signal_through_ts_ms is None:
         return None
-    market_price = _latest_signal_close(
-        conn,
-        pair=strategy.pair,
-        interval=strategy.interval,
-        through_ts_ms=signal_through_ts_ms,
-    )
-    if market_price is not None:
-        (normalizer or PositionStateNormalizer()).normalize_and_persist(
-            conn,
-            pair=strategy.pair,
-            market_price=float(market_price),
-            slippage_bps=float(strategy.slippage_bps),
-            entry_edge_buffer_ratio=float(strategy.entry_edge_buffer_ratio),
-        )
     return build_sma_with_filter_runtime_decision_from_normalized_db(
         conn,
         strategy,

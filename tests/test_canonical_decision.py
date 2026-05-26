@@ -104,7 +104,7 @@ def test_runtime_replay_routes_sma_with_filter_through_snapshot_orchestration(mo
         def decide(self, conn, *, through_ts_ms=None):
             raise AssertionError("runtime replay must use snapshot orchestration for sma_with_filter")
 
-    def _snapshot_orchestration(conn, strategy, *, through_ts_ms=None, normalizer=None):
+    def _snapshot_orchestration(conn, strategy, *, through_ts_ms=None):
         calls.append(int(through_ts_ms))
         return StrategyDecision(
             signal="HOLD",

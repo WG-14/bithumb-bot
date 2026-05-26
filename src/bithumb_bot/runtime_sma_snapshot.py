@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from .execution_service import build_execution_decision_summary
-from .runtime_position_state_normalizer import PositionStateNormalizer
 from .runtime_sma_snapshot_builder import (
+    build_sma_with_filter_runtime_decision_from_normalized_db,
     decide_sma_with_filter_snapshot_from_db as _runtime_snapshot_from_db,
     decide_sma_with_filter_runtime_snapshot_from_db as _runtime_typed_snapshot_from_db,
     RuntimeSmaDecisionResult,
@@ -16,7 +16,8 @@ from .strategy.base import StrategyDecision
 from .strategy.sma_policy_strategy import SmaWithFilterStrategy
 
 SMA_RUNTIME_BOUNDARY_STAGES = {
-    "snapshot_builder": "runtime_sma_snapshot.decide_sma_with_filter_snapshot_from_db",
+    "pre_decision_normalization": "engine.normalize_position_state_before_strategy_decision",
+    "snapshot_builder": "runtime_sma_snapshot_builder.build_sma_with_filter_runtime_decision_from_normalized_db",
     "pure_policy": "core.sma_policy.evaluate_sma_policy",
     "final_decision_assembler": "strategy.sma_decision_assembler.evaluate_sma_final_decision",
     "execution_planner": "run_loop_execution_planner.ExecutionPlanner",
@@ -95,10 +96,10 @@ def _typed_strategy_decision_payload(result: RuntimeSmaDecisionResult) -> dict[s
 
 
 class ReadOnlyPositionStateNormalizer:
-    """Replay/debug adapter that forbids persistence before snapshot loading.
+    """Deprecated replay/debug no-op adapter.
 
-    Replay builds observability evidence from the already-normalized DB
-    snapshot. It must not repair or reclassify position state as a side effect.
+    Replay now enters the normalized read-only snapshot builder directly. This
+    adapter remains only for older tests/imports that asserted no-op behavior.
     """
 
     def normalize_and_persist(self, conn: sqlite3.Connection, **kwargs: object) -> int:
@@ -110,19 +111,17 @@ def decide_sma_with_filter_snapshot_from_db(
     strategy: SmaWithFilterStrategy,
     *,
     through_ts_ms: int | None = None,
-    normalizer: PositionStateNormalizer | None = None,
 ) -> StrategyDecision | None:
-    """Runtime boundary for SMA DB state -> snapshots -> typed final decision.
+    """Read-only runtime boundary for SMA DB state -> snapshots -> typed final decision.
 
     The legacy ``Strategy.decide(conn)`` facade remains available for older
-    callers, but live/replay orchestration should bind here so the mutable DB
-    normalization boundary is explicit and separately testable.
+    callers, but live/replay orchestration should bind here after any required
+    position normalization has already completed.
     """
     decision = _runtime_snapshot_from_db(
         conn,
         strategy,
         through_ts_ms=through_ts_ms,
-        normalizer=normalizer,
     )
     return decision
 
@@ -132,14 +131,12 @@ def decide_sma_with_filter_runtime_snapshot_from_db(
     strategy: SmaWithFilterStrategy,
     *,
     through_ts_ms: int | None = None,
-    normalizer: PositionStateNormalizer | None = None,
 ) -> RuntimeSmaDecisionResult | None:
-    """Typed runtime boundary for SMA DB state -> snapshots -> final decision."""
+    """Typed read-only runtime boundary for SMA DB state -> snapshots -> final decision."""
     return _runtime_typed_snapshot_from_db(
         conn,
         strategy,
         through_ts_ms=through_ts_ms,
-        normalizer=normalizer,
     )
 
 
@@ -152,11 +149,10 @@ def build_sma_with_filter_replay_bundle(
     previous_target_exposure_krw: float | None = None,
 ) -> dict[str, Any] | None:
     """Build structured read-only replay material for one SMA decision."""
-    typed_result = decide_sma_with_filter_runtime_snapshot_from_db(
+    typed_result = build_sma_with_filter_runtime_decision_from_normalized_db(
         conn,
         strategy,
         through_ts_ms=int(through_ts_ms),
-        normalizer=ReadOnlyPositionStateNormalizer(),
     )
     if typed_result is None:
         return None

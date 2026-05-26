@@ -142,13 +142,12 @@ def test_compute_signal_routes_sma_with_filter_through_snapshot_orchestration(
 
     original_typed_boundary = engine_module.decide_sma_with_filter_runtime_snapshot_from_db
 
-    def _snapshot_orchestration(conn, strategy, *, through_ts_ms=None, normalizer=None):
+    def _snapshot_orchestration(conn, strategy, *, through_ts_ms=None):
         calls.append(strategy.name)
         return original_typed_boundary(
             conn,
             strategy,
             through_ts_ms=through_ts_ms,
-            normalizer=normalizer,
         )
 
     monkeypatch.setattr(
@@ -222,11 +221,21 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
         ),
     )
     snapshot_calls: list[str] = []
+    normalization_calls: list[str] = []
+
+    def _normalize_before_decision(_conn, strategy, *, through_ts_ms=None, normalizer=None):
+        normalization_calls.append(strategy.name)
+        return 0
 
     def _snapshot_boundary(_conn, strategy, *, through_ts_ms=None):
         snapshot_calls.append(strategy.name)
         return None
 
+    monkeypatch.setattr(
+        engine_module,
+        "normalize_position_state_before_strategy_decision",
+        _normalize_before_decision,
+    )
     monkeypatch.setattr(
         engine_module,
         "decide_sma_with_filter_runtime_snapshot_from_db",
@@ -270,6 +279,7 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
             os.environ["DB_PATH"] = old_env_db_path
 
     assert result is None
+    assert normalization_calls == ["sma_with_filter"]
     assert snapshot_calls == ["sma_with_filter"]
 
 
@@ -495,7 +505,10 @@ def test_replay_decision_cli_outputs_single_read_only_replay_bundle(tmp_path, ca
     bundle = out["bundle"]
     assert bundle["schema_version"] == 1
     assert bundle["boundary_stages"]["snapshot_builder"] == (
-        "runtime_sma_snapshot.decide_sma_with_filter_snapshot_from_db"
+        "runtime_sma_snapshot_builder.build_sma_with_filter_runtime_decision_from_normalized_db"
+    )
+    assert bundle["boundary_stages"]["pre_decision_normalization"] == (
+        "engine.normalize_position_state_before_strategy_decision"
     )
     assert bundle["market_snapshot"]["candle_ts"] == base_ts + 39 * 60_000
     assert str(bundle["policy_input_hash"]).startswith("sha256:")

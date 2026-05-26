@@ -26,7 +26,12 @@ from .strategy import (
 from .runtime_sma_snapshot import (
     decide_sma_with_filter_runtime_snapshot_from_db,
 )
-from .runtime_sma_snapshot_builder import RuntimeSmaDecisionResult
+from .runtime_position_state_normalizer import PositionStateNormalizer
+from .runtime_sma_snapshot_builder import (
+    RuntimeSmaDecisionResult,
+    _latest_signal_close,
+    _resolve_signal_through_ts_ms,
+)
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import (
@@ -440,6 +445,37 @@ def _legacy_db_strategy_fallback_allowed(*, selected_strategy_name: str) -> bool
     return not live_real_order
 
 
+def normalize_position_state_before_strategy_decision(
+    conn,
+    strategy: SmaWithFilterStrategy,
+    *,
+    through_ts_ms: int | None = None,
+    normalizer: PositionStateNormalizer | None = None,
+) -> int:
+    """Run explicit mutating position normalization before read-only decisions."""
+    signal_through_ts_ms = _resolve_signal_through_ts_ms(
+        interval=strategy.interval,
+        through_ts_ms=through_ts_ms,
+    )
+    if signal_through_ts_ms is None:
+        return 0
+    market_price = _latest_signal_close(
+        conn,
+        pair=strategy.pair,
+        interval=strategy.interval,
+        through_ts_ms=signal_through_ts_ms,
+    )
+    if market_price is None:
+        return 0
+    return (normalizer or PositionStateNormalizer()).normalize_and_persist(
+        conn,
+        pair=strategy.pair,
+        market_price=float(market_price),
+        slippage_bps=float(strategy.slippage_bps),
+        entry_edge_buffer_ratio=float(strategy.entry_edge_buffer_ratio),
+    )
+
+
 @dataclass(frozen=True)
 class DecisionRunner:
     """Small orchestration seam for runtime strategy decisions.
@@ -510,6 +546,11 @@ def _compute_strategy_decision_snapshot_impl(
         )
         if not isinstance(strategy, SmaWithFilterStrategy):
             raise RuntimeError(f"strategy_policy_invalid:{selected_strategy_name}")
+        normalize_position_state_before_strategy_decision(
+            conn,
+            strategy,
+            through_ts_ms=through_ts_ms,
+        )
         return decide_sma_with_filter_runtime_snapshot_from_db(
             conn,
             strategy,
