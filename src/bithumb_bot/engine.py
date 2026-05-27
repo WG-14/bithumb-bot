@@ -51,7 +51,12 @@ from .fee_gap_repair import build_fee_gap_accounting_repair_preview
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
 from .runtime_readiness import compute_runtime_readiness_snapshot
-from .runtime_recovery_gate import RuntimeRecoveryGateService
+from .runtime_recovery_gate import (
+    ResumeBlocker,
+    RuntimeRecoveryGateService,
+    classify_startup_gate_reason,
+    resume_blocker,
+)
 from .strategy_performance import evaluate_strategy_performance_gate
 from .dust import (
     DustClassification,
@@ -68,8 +73,6 @@ from .reason_codes import (
     BLOCKER_BROKER_CASH_DELTA_UNEXPLAINED,
     BLOCKER_EXTERNAL_CASH_ADJUSTMENT_REQUIRED,
     BLOCKER_PORTFOLIO_BROKER_CASH_MISMATCH,
-    BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
-    BLOCKER_TRADE_FILL_UNRESOLVED,
     CANCEL_FAILURE,
     POSITION_LOSS_LIMIT,
     RISKY_ORDER_BLOCK,
@@ -124,8 +127,6 @@ def _runtime_recovery_gate_service() -> RuntimeRecoveryGateService:
         stale_live_execution_broker_halt_clearer=maybe_clear_stale_live_execution_broker_halt,
         stale_risk_state_mismatch_halt_clearer=maybe_clear_stale_risk_state_mismatch_halt,
         state_snapshot=runtime_state.snapshot,
-        startup_gate_reason_classifier=_classify_startup_gate_reason,
-        resume_blocker_factory=_resume_blocker,
     )
 
 
@@ -419,6 +420,26 @@ def _legacy_db_strategy_fallback_allowed(*, selected_strategy_name: str) -> bool
     )
 
 
+def _legacy_context_planning_allowed_for_run_loop(
+    *,
+    selected_strategy_name: str,
+    signal_handoff_fn: object,
+) -> bool:
+    """Limit dict/context planning to explicit compatibility surfaces."""
+    live_real_order = bool(
+        str(settings.MODE).strip().lower() == "live"
+        and bool(settings.LIVE_REAL_ORDER_ARMED)
+        and not bool(settings.LIVE_DRY_RUN)
+    )
+    if live_real_order:
+        return False
+    if signal_handoff_fn is not compute_signal_runtime_handoff:
+        return True
+    return _legacy_db_strategy_fallback_allowed(
+        selected_strategy_name=selected_strategy_name
+    )
+
+
 READINESS_CONTEXT_KEYS = (
     "residual_inventory_mode",
     "residual_inventory_state",
@@ -525,18 +546,6 @@ class HaltReason:
 
 
 @dataclass(frozen=True)
-class ResumeBlocker:
-    code: str
-    detail: str
-    reason_code: str
-    summary: str
-    overridable: bool
-    balance_delta_krw: float | None = None
-    recent_external_cash_adjustment_present: bool | None = None
-    recent_external_cash_adjustment_count: int | None = None
-
-
-@dataclass(frozen=True)
 class ResumeGuidance:
     operator_next_action: str
     recommended_command: str
@@ -567,7 +576,7 @@ def _resume_blocker(
     recent_external_cash_adjustment_present: bool | None = None,
     recent_external_cash_adjustment_count: int | None = None,
 ) -> ResumeBlocker:
-    return ResumeBlocker(
+    return resume_blocker(
         code=code,
         detail=detail,
         reason_code=str(reason_code or code),
@@ -580,67 +589,7 @@ def _resume_blocker(
 
 
 def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> tuple[str, str]:
-    reason = str(startup_gate_reason or "").strip()
-    if not reason:
-        return "-", "no startup gate blocker"
-    if "position_authority_gap=" in reason:
-        return (
-            "POSITION_AUTHORITY_RECOVERY_REQUIRED",
-            "lot authority is missing; manual recovery required",
-        )
-    if "position_authority_correction_required=" in reason:
-        return (
-            "POSITION_AUTHORITY_CORRECTION_REQUIRED",
-            "lot authority conflicts with accounted fill evidence; authority correction required",
-        )
-    if "position_authority_residual_normalization_required=" in reason:
-        return (
-            "POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED",
-            "lot authority needs post-partial-close residual normalization",
-        )
-    if "position_authority_projection_repair_required=" in reason:
-        return (
-            "POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED",
-            "lot projection conflicts with broker/portfolio evidence; projection repair required",
-        )
-    if "position_authority_projection_convergence_required=" in reason:
-        return (
-            "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED",
-            "aggregate lot projection does not converge to canonical holdings",
-        )
-    if "fee_gap_recovery_required=" in reason:
-        return (
-            "FEE_GAP_RECOVERY_REQUIRED",
-            "fee-related accounting inconsistency requires manual recovery",
-        )
-    if "fee_pending_auto_recovering=" in reason:
-        return (
-            "FEE_PENDING_AUTO_RECOVERING",
-            "fee-pending fill accounting is still auto-recovering",
-        )
-    if int(state.recovery_required_count) > 0 or "recovery_required_orders=" in reason:
-        return (
-            BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
-            "recovery-required orders remain",
-        )
-    if "submit_unknown_orders=" in reason:
-        return (
-            BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
-            "submit unknown orders remain",
-        )
-    if (
-        "pending_submit_orders=" in reason
-        or "unresolved_open_orders=" in reason
-        or "stale_new_partial_orders=" in reason
-    ):
-        return (
-            BLOCKER_TRADE_FILL_UNRESOLVED,
-            "trade/fill state remains unresolved",
-        )
-    return (
-        BLOCKER_TRADE_FILL_UNRESOLVED,
-        "startup safety gate blocked",
-    )
+    return classify_startup_gate_reason(startup_gate_reason, state=state)
 
 
 def _classify_dust_resume_blocker(dust_context: dict[str, object]) -> tuple[str, str]:
@@ -3302,6 +3251,10 @@ def run_loop(short_n: int, long_n: int) -> None:
                     strategy_name = str(context.pop("strategy", settings.STRATEGY_NAME))
                     signal = str(context.pop("signal", "HOLD"))
                     reason = str(context.pop("reason", ""))
+                    legacy_context_planning_allowed = _legacy_context_planning_allowed_for_run_loop(
+                        selected_strategy_name=strategy_name,
+                        signal_handoff_fn=signal_handoff_fn,
+                    )
                     planning = ExecutionPlanner(
                         readiness_snapshot_builder=compute_runtime_readiness_snapshot,
                         performance_gate_evaluator=evaluate_strategy_performance_gate,
@@ -3314,7 +3267,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                         signal=signal,
                         reason=reason,
                         updated_ts=int(now * 1000),
-                        allow_legacy_context_planning=True,
+                        allow_legacy_context_planning=legacy_context_planning_allowed,
                     )
                     context = planning.context
                     decision_context_for_trade = context

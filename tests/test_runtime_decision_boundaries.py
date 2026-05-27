@@ -24,6 +24,7 @@ from bithumb_bot.run_loop_execution_planner import (
     ExecutionPlanner,
     ExecutionPlanningInput,
 )
+from bithumb_bot.runtime_recovery_gate import RuntimeRecoveryGateService
 from bithumb_bot.research.backtest_kernel import run_decision_event_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.decision_event import ResearchDecisionEvent
@@ -523,6 +524,62 @@ def test_generic_promotion_adapter_dict_handoff_fails_closed_when_typed_required
     )
 
     assert reason == "typed_runtime_decision_required"
+
+
+def test_run_loop_does_not_unconditionally_enable_legacy_context_planning() -> None:
+    source = Path("src/bithumb_bot/engine.py").read_text(encoding="utf-8-sig")
+    run_loop_source = source.split("def run_loop", 1)[1]
+
+    assert "allow_legacy_context_planning=True" not in run_loop_source
+
+
+def test_run_loop_legacy_context_planning_gate_blocks_normal_live_adapter_path() -> None:
+    original = {
+        "MODE": settings.MODE,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+    }
+    try:
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_DRY_RUN", True)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+
+        allowed = engine._legacy_context_planning_allowed_for_run_loop(
+            selected_strategy_name="sma_with_filter",
+            signal_handoff_fn=engine.compute_signal_runtime_handoff,
+        )
+    finally:
+        for key, value in original.items():
+            object.__setattr__(settings, key, value)
+
+    assert allowed is False
+
+
+def test_recovery_gate_service_classifies_startup_blocker_without_engine_callbacks() -> None:
+    state = type(
+        "State",
+        (),
+        {
+            "last_reconcile_status": "ok",
+            "recovery_required_count": 0,
+        },
+    )()
+    service = RuntimeRecoveryGateService(
+        startup_gate_evaluator=lambda: (
+            "startup safety gate: position_authority_projection_repair_required=projection/portfolio divergence"
+        ),
+        stale_initial_reconcile_halt_clearer=lambda: False,
+        stale_live_execution_broker_halt_clearer=lambda **_kwargs: False,
+        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: False,
+        state_snapshot=lambda: state,
+    )
+
+    blockers = service.startup_safety_resume_blockers(service.prepare_resume_gate().startup_gate_reason)
+
+    assert len(blockers) == 1
+    assert blockers[0].code == "STARTUP_SAFETY_GATE_BLOCKED"
+    assert blockers[0].reason_code == "POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED"
+    assert blockers[0].overridable is False
 
 
 def test_mutating_persistence_context_does_not_change_typed_submit_authority() -> None:
