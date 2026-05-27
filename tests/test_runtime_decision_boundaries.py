@@ -447,6 +447,43 @@ def test_engine_promotion_runtime_path_has_no_concrete_sma_branch() -> None:
     assert "decide_sma_with_filter_runtime_snapshot_from_db" not in called_names
 
 
+def test_engine_import_boundary_stays_thin_for_runtime_entrypoint() -> None:
+    source = Path("src/bithumb_bot/engine.py").read_text(encoding="utf-8-sig")
+    tree = ast.parse(source)
+    imports: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imports.setdefault(node.module, set()).update(alias.name for alias in node.names)
+
+    forbidden_imports = {
+        "runtime_strategy_decision": {
+            "build_read_only_strategy_decision_snapshot",
+            "compute_strategy_decision_after_normalization",
+            "normalize_position_state_before_strategy_decision",
+            "normalize_position_state_for_runtime_decision",
+        },
+        "runtime_sma_snapshot": {"decide_sma_with_filter_runtime_snapshot_from_db"},
+        "runtime_sma_snapshot_builder": {"RuntimeSmaDecisionResult", "RuntimeSmaPolicyHashes"},
+        "strategy.sma_policy_strategy": {"SmaWithFilterStrategy"},
+        "strategy.sma": {"SmaWithFilterStrategy"},
+        "fee_gap_repair": {"build_fee_gap_accounting_repair_preview"},
+        "manual_flat_repair": {"build_manual_flat_accounting_repair_preview"},
+        "notifier": {"format_event", "notify"},
+        "flatten": {"flatten_btc_position"},
+    }
+    violations = {
+        module: sorted(imports.get(module, set()) & names)
+        for module, names in forbidden_imports.items()
+        if imports.get(module, set()) & names
+    }
+
+    assert violations == {}
+    assert "from .runtime_decision_service import" in source
+    assert "from .operator_repair_service import" in source
+    assert "from .operator_notification_service import" in source
+    assert "from .operator_flatten_service import" in source
+
+
 def test_runtime_decision_adapter_registry_drives_promotion_path_without_engine_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

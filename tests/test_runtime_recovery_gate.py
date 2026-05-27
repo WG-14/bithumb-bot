@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bithumb_bot.runtime_recovery_gate import RuntimeRecoveryGateService
+from bithumb_bot.runtime_recovery_gate import ResumeBlocker, RuntimeRecoveryGateService
 
 
 @dataclass(frozen=True)
@@ -92,3 +92,38 @@ def test_reconcile_ok_did_not_clear_blocker_skips_fee_gap_recovery() -> None:
 
     assert service.reconcile_ok_did_not_clear_blockers("startup safety gate: fee_gap") == []
 
+
+def test_default_blocker_factory_and_classifier_preserve_production_structure() -> None:
+    service = RuntimeRecoveryGateService(
+        startup_gate_evaluator=lambda: None,
+        stale_initial_reconcile_halt_clearer=lambda: False,
+        stale_live_execution_broker_halt_clearer=lambda **_kwargs: False,
+        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: False,
+        state_snapshot=lambda: _State(last_reconcile_status="ok", recovery_required_count=1),
+    )
+
+    startup_blockers = service.startup_safety_resume_blockers(
+        "startup safety gate: recovery_required_orders=1"
+    )
+    reconcile_blockers = service.reconcile_ok_did_not_clear_blockers(
+        "startup safety gate: recovery_required_orders=1"
+    )
+
+    assert startup_blockers == [
+        ResumeBlocker(
+            code="STARTUP_SAFETY_GATE_BLOCKED",
+            detail="startup safety gate: recovery_required_orders=1",
+            reason_code="SUBMIT_UNKNOWN_RECOVERY_REQUIRED",
+            summary="recovery-required orders remain",
+            overridable=False,
+        )
+    ]
+    assert reconcile_blockers == [
+        ResumeBlocker(
+            code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
+            detail="latest reconcile reported ok but startup safety gate still blocks resume",
+            reason_code="SUBMIT_UNKNOWN_RECOVERY_REQUIRED",
+            summary="recovery-required orders remain",
+            overridable=False,
+        )
+    ]
