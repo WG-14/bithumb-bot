@@ -482,6 +482,26 @@ def test_engine_import_boundary_stays_thin_for_runtime_entrypoint() -> None:
     assert "from .operator_repair_service import" in source
     assert "from .operator_notification_service import" in source
     assert "from .operator_flatten_service import" in source
+    forbidden_concrete_names = {
+        "build_fee_gap_accounting_repair_preview",
+        "build_manual_flat_accounting_repair_preview",
+        "flatten_btc_position",
+        "format_event",
+        "notify",
+    }
+    called_names = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert forbidden_concrete_names.isdisjoint(called_names)
+    assert forbidden_concrete_names.isdisjoint(imported_names)
 
 
 def test_runtime_decision_adapter_registry_drives_promotion_path_without_engine_branch(
@@ -573,7 +593,8 @@ def test_run_loop_does_not_unconditionally_enable_legacy_context_planning() -> N
     assert "allow_legacy_context_planning=True" not in run_loop_source
     assert "allow_legacy_context_planning=" not in run_loop_source
     assert ".plan_strategy_decision(" not in run_loop_source
-    assert "RunLoopCompatibilityPlanner" in run_loop_source
+    assert "RunLoopCompatibilityPlanner" not in run_loop_source
+    assert "_plan_legacy_run_loop_context_for_compatibility" in run_loop_source
 
 
 def test_run_loop_legacy_context_planning_gate_blocks_normal_live_adapter_path() -> None:
