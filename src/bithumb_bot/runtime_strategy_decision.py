@@ -68,6 +68,10 @@ def register_runtime_decision_adapter(
     _RUNTIME_DECISION_ADAPTERS[_normalize_name(name)] = factory
 
 
+def reset_runtime_decision_adapters_for_tests() -> None:
+    _RUNTIME_DECISION_ADAPTERS.clear()
+
+
 def list_runtime_decision_adapters() -> tuple[str, ...]:
     _ensure_builtin_adapters_registered()
     return tuple(sorted(_RUNTIME_DECISION_ADAPTERS))

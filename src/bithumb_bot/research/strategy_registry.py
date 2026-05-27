@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -331,10 +332,12 @@ def research_strategy_data_requirements(strategy_name: str) -> ResearchStrategyD
 
 
 def resolve_research_strategy_plugin(strategy_name: str) -> ResearchStrategyPlugin:
+    _ensure_discovered_strategy_plugins_loaded()
+    key = str(strategy_name or "").strip().lower()
     try:
-        return _RESEARCH_STRATEGY_PLUGINS[strategy_name]
+        return _RESEARCH_STRATEGY_PLUGINS[key]
     except KeyError as exc:
-        raise ResearchStrategyRegistryError(f"unsupported research strategy: {strategy_name}") from exc
+        raise ResearchStrategyRegistryError(f"unsupported research strategy: {key}") from exc
 
 
 def resolve_research_strategy(strategy_name: str) -> ResearchStrategyRunner:
@@ -780,29 +783,65 @@ _BUY_AND_HOLD_BASELINE_PLUGIN = ResearchStrategyPlugin(
 )
 
 
+_BUILTIN_RESEARCH_STRATEGY_PLUGINS: tuple[ResearchStrategyPlugin, ...] = (
+    _SMA_WITH_FILTER_PLUGIN,
+    _NOOP_BASELINE_PLUGIN,
+    _BUY_AND_HOLD_BASELINE_PLUGIN,
+)
 _RESEARCH_STRATEGY_PLUGINS: dict[str, ResearchStrategyPlugin] = {
-    _SMA_WITH_FILTER_PLUGIN.name: _SMA_WITH_FILTER_PLUGIN,
-    _NOOP_BASELINE_PLUGIN.name: _NOOP_BASELINE_PLUGIN,
-    _BUY_AND_HOLD_BASELINE_PLUGIN.name: _BUY_AND_HOLD_BASELINE_PLUGIN,
+    plugin.name: plugin for plugin in _BUILTIN_RESEARCH_STRATEGY_PLUGINS
 }
+_DISCOVERED_STRATEGY_PLUGINS_LOADED = False
 
 
-def register_research_strategy_plugin(plugin: ResearchStrategyPlugin) -> None:
+def register_research_strategy_plugin(
+    plugin: ResearchStrategyPlugin,
+    *,
+    replace: bool = False,
+) -> None:
     key = str(plugin.name or "").strip().lower()
     if not key:
         raise ResearchStrategyRegistryError("research strategy plugin name must be non-empty")
+    existing = _RESEARCH_STRATEGY_PLUGINS.get(key)
+    if existing is not None and not replace:
+        raise ResearchStrategyRegistryError(f"duplicate research strategy plugin name: {key}")
     _RESEARCH_STRATEGY_PLUGINS[key] = plugin
 
 
 def list_research_strategy_plugins() -> tuple[ResearchStrategyPlugin, ...]:
+    _ensure_discovered_strategy_plugins_loaded()
     return tuple(_RESEARCH_STRATEGY_PLUGINS[name] for name in sorted(_RESEARCH_STRATEGY_PLUGINS))
 
 
-def _load_external_strategy_plugins() -> None:
-    from bithumb_bot.strategy_plugins import iter_builtin_strategy_plugins
+def _ensure_discovered_strategy_plugins_loaded() -> None:
+    global _DISCOVERED_STRATEGY_PLUGINS_LOADED
+    if _DISCOVERED_STRATEGY_PLUGINS_LOADED:
+        return
+    from bithumb_bot.strategy_plugins import iter_discovered_strategy_plugins
 
-    for plugin in iter_builtin_strategy_plugins():
+    _load_strategy_plugins_from_provider(iter_discovered_strategy_plugins)
+    _DISCOVERED_STRATEGY_PLUGINS_LOADED = True
+
+
+def _load_strategy_plugins_from_provider(
+    provider: Callable[[], Iterable[ResearchStrategyPlugin]] | Callable[[], Any],
+) -> None:
+    for plugin in provider():
         register_research_strategy_plugin(plugin)
 
 
-_load_external_strategy_plugins()
+def reload_research_strategy_plugins_for_tests(
+    providers: tuple[Callable[[], Iterable[ResearchStrategyPlugin]], ...] | None = None,
+) -> None:
+    """Reset plugin registry state for tests that monkeypatch discovery."""
+    global _RESEARCH_STRATEGY_PLUGINS, _DISCOVERED_STRATEGY_PLUGINS_LOADED
+    _RESEARCH_STRATEGY_PLUGINS = {
+        plugin.name: plugin for plugin in _BUILTIN_RESEARCH_STRATEGY_PLUGINS
+    }
+    _DISCOVERED_STRATEGY_PLUGINS_LOADED = False
+    if providers is None:
+        _ensure_discovered_strategy_plugins_loaded()
+        return
+    for provider in providers:
+        _load_strategy_plugins_from_provider(provider)
+    _DISCOVERED_STRATEGY_PLUGINS_LOADED = True

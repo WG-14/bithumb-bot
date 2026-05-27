@@ -17,3 +17,8 @@ def ensure_runtime_decision_adapters_registered() -> None:
             register_runtime_decision_adapter(plugin.name, plugin.runtime_decision_adapter_factory)
     register_runtime_decision_adapter(SAFE_HOLD_STRATEGY_NAME, SafeHoldRuntimeDecisionAdapter)
     _REGISTERED = True
+
+
+def reset_runtime_decision_adapter_bootstrap_for_tests() -> None:
+    global _REGISTERED
+    _REGISTERED = False
