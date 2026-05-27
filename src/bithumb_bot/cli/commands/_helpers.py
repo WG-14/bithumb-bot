@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from typing import Any
-
 from bithumb_bot.cli.context import AppContext
 from bithumb_bot.cli.registry import CommandSpec
 
@@ -64,12 +62,6 @@ def make_spec(
         produces_artifact=produces_artifact,
         json_output_supported=json_output_supported,
     )
-
-
-def call_app_impl(function_name: str, /, *args: Any, **kwargs: Any) -> Any:
-    from bithumb_bot import app_impl
-
-    return getattr(app_impl, function_name)(*args, **kwargs)
 
 
 def parser_error(args: argparse.Namespace, message: str) -> None:

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bithumb_bot import app_impl, profile_cli
+from bithumb_bot import profile_cli
 from bithumb_bot.cli.main import main as cli_main
 from bithumb_bot.approved_profile import build_approved_profile
 from bithumb_bot.broker.order_rules import DerivedOrderConstraints, RuleResolution
@@ -103,7 +103,7 @@ def test_cli_dispatch_reaches_research_export_decisions(monkeypatch) -> None:
         calls.update(kwargs)
         return 0
 
-    monkeypatch.setattr(app_impl, "cmd_research_export_decisions", fake_cmd)
+    monkeypatch.setattr(profile_cli, "cmd_research_export_decisions", fake_cmd)
 
     assert cli_main(
         [
@@ -136,7 +136,7 @@ def test_cli_dispatch_reaches_runtime_replay_decisions(monkeypatch) -> None:
         calls.update(kwargs)
         return 0
 
-    monkeypatch.setattr(app_impl, "cmd_runtime_replay_decisions", fake_cmd)
+    monkeypatch.setattr(profile_cli, "cmd_runtime_replay_decisions", fake_cmd)
 
     assert cli_main(
         [
@@ -166,7 +166,7 @@ def test_cli_dispatch_reaches_decision_equivalence(monkeypatch) -> None:
         calls.update(kwargs)
         return 0
 
-    monkeypatch.setattr(app_impl, "cmd_decision_equivalence", fake_cmd)
+    monkeypatch.setattr(profile_cli, "cmd_decision_equivalence", fake_cmd)
 
     assert cli_main(
         [
@@ -273,7 +273,7 @@ def test_cli_dispatch_reaches_candidate_regime_policy_equivalence_evidence(monke
         calls.update(kwargs)
         return 0
 
-    monkeypatch.setattr(app_impl, "cmd_candidate_regime_policy_equivalence_evidence", fake_cmd)
+    monkeypatch.setattr(profile_cli, "cmd_candidate_regime_policy_equivalence_evidence", fake_cmd)
 
     assert cli_main(
         [

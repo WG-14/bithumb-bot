@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from bithumb_bot.app_impl import main
+from bithumb_bot.cli.main import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
 from bithumb_bot.decision_context import resolve_canonical_position_exposure_snapshot
@@ -1463,7 +1463,7 @@ def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeyp
 
 
 def test_live_dry_run_decision_summary_aggregates_contract_causes(tmp_path, monkeypatch, capsys):
-    from bithumb_bot.app_impl import _build_live_dry_run_decision_summary, _print_live_dry_run_decision_summary
+    from bithumb_bot.operator_commands import _build_live_dry_run_decision_summary, _print_live_dry_run_decision_summary
 
     db_path = str(tmp_path / "dry-run-summary.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

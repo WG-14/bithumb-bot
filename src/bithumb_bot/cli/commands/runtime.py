@@ -4,7 +4,7 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec
+from ._helpers import make_spec
 
 
 def _settings_default(name: str):
@@ -15,47 +15,65 @@ def _settings_default(name: str):
 
 def _simple(function_name: str):
     def _handler(_args: argparse.Namespace, _context) -> int | None:
-        return call_app_impl(function_name)
+        from bithumb_bot import operator_commands
+
+        return getattr(operator_commands, function_name)()
 
     return _handler
 
 
 def _with_limit(function_name: str, attr: str = "limit", *, minimum: int | None = None):
     def _handler(args: argparse.Namespace, _context) -> int | None:
+        from bithumb_bot import operator_commands
+
         value = int(getattr(args, attr))
         if minimum is not None:
             value = max(minimum, value)
-        return call_app_impl(function_name, value)
+        return getattr(operator_commands, function_name)(value)
 
     return _handler
 
 
 def _signal(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_signal", args.short, args.long)
+    from bithumb_bot.operator_commands import cmd_signal
+
+    cmd_signal(args.short, args.long)
 
 
 def _explain(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_explain", args.short, args.long)
+    from bithumb_bot.operator_commands import cmd_explain
+
+    cmd_explain(args.short, args.long)
 
 
 def _audit(_args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_audit")
+    from bithumb_bot.operator_commands import cmd_audit
+
+    cmd_audit()
 
 
 def _config_dump(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_config_dump", masked=bool(args.masked))
+    from bithumb_bot.operator_commands import cmd_config_dump
+
+    cmd_config_dump(masked=bool(args.masked))
 
 
 def _validate_db(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_validate_db", as_json=bool(args.json)))
+    from bithumb_bot.operator_commands import cmd_validate_db
+
+    return int(cmd_validate_db(as_json=bool(args.json)))
 
 
 def _run(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_run", args.short, args.long)
+    from bithumb_bot.operator_commands import cmd_run
+
+    cmd_run(args.short, args.long)
 
 
 def _live_dry_run(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_live_dry_run", args.short, args.long)
+    from bithumb_bot.operator_commands import cmd_live_dry_run
+
+    cmd_live_dry_run(args.short, args.long)
 
 
 def _build_window_parser(parser: argparse.ArgumentParser) -> None:

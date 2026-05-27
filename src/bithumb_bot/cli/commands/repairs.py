@@ -4,12 +4,13 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec
+from ._helpers import make_spec
 
 
 def _fee_gap(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_fee_gap_accounting_repair",
+    from bithumb_bot.operator_commands import cmd_fee_gap_accounting_repair
+
+    cmd_fee_gap_accounting_repair(
         apply=bool(args.apply),
         confirm=bool(args.yes),
         note=str(args.note) if args.note is not None else None,
@@ -17,8 +18,9 @@ def _fee_gap(args: argparse.Namespace, _context) -> None:
 
 
 def _fee_pending(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_fee_pending_accounting_repair",
+    from bithumb_bot.operator_commands import cmd_fee_pending_accounting_repair
+
+    cmd_fee_pending_accounting_repair(
         client_order_id=str(args.client_order_id),
         fill_id=str(args.fill_id) if args.fill_id is not None else None,
         exchange_order_id=str(args.exchange_order_id) if args.exchange_order_id is not None else None,
@@ -31,8 +33,9 @@ def _fee_pending(args: argparse.Namespace, _context) -> None:
 
 
 def _rebuild_position_authority(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_rebuild_position_authority",
+    from bithumb_bot.operator_commands import cmd_rebuild_position_authority
+
+    cmd_rebuild_position_authority(
         apply=bool(args.apply),
         confirm=bool(args.yes),
         note=str(args.note) if args.note is not None else None,
@@ -42,8 +45,9 @@ def _rebuild_position_authority(args: argparse.Namespace, _context) -> None:
 
 
 def _external_cash(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_record_external_cash_adjustment",
+    from bithumb_bot.operator_commands import cmd_record_external_cash_adjustment
+
+    cmd_record_external_cash_adjustment(
         event_ts=int(args.event_ts),
         delta_amount=float(args.delta_amount),
         source=str(args.source),
@@ -58,8 +62,9 @@ def _external_cash(args: argparse.Namespace, _context) -> None:
 
 
 def _manual_flat(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_manual_flat_accounting_repair",
+    from bithumb_bot.operator_commands import cmd_manual_flat_accounting_repair
+
+    cmd_manual_flat_accounting_repair(
         apply=bool(args.apply),
         confirm=bool(args.yes),
         note=str(args.note) if args.note is not None else None,
@@ -67,8 +72,9 @@ def _manual_flat(args: argparse.Namespace, _context) -> None:
 
 
 def _external_position(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_external_position_accounting_repair",
+    from bithumb_bot.operator_commands import cmd_external_position_accounting_repair
+
+    cmd_external_position_accounting_repair(
         apply=bool(args.apply),
         confirm=bool(args.yes),
         note=str(args.note) if args.note is not None else None,

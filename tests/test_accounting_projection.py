@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot import runtime_state
-from bithumb_bot.app_impl import _ledger_replay, _load_recovery_report, main as app_main
+from bithumb_bot.cli.main import main as app_main
+from bithumb_bot.operator_commands import _ledger_replay, _load_recovery_report
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
     ACCOUNTING_PROJECTION_MODEL,

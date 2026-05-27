@@ -4,23 +4,31 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec
+from ._helpers import make_spec
 
 
 def _generate(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_profile_generate", promotion_path=str(args.promotion), mode=str(args.mode), out_path=str(args.out) if args.out is not None else None, market=str(args.market) if args.market is not None else None, interval=str(args.interval) if args.interval is not None else None))
+    from bithumb_bot.profile_cli import cmd_profile_generate
+
+    return int(cmd_profile_generate(promotion_path=str(args.promotion), mode=str(args.mode), out_path=str(args.out) if args.out is not None else None, market=str(args.market) if args.market is not None else None, interval=str(args.interval) if args.interval is not None else None))
 
 
 def _diff(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_profile_diff", profile_path=str(args.profile), target_env=str(args.target_env), as_json=bool(args.json)))
+    from bithumb_bot.profile_cli import cmd_profile_diff
+
+    return int(cmd_profile_diff(profile_path=str(args.profile), target_env=str(args.target_env), as_json=bool(args.json)))
 
 
 def _verify(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_profile_verify", profile_path=str(args.profile), env_path=str(args.env)))
+    from bithumb_bot.profile_cli import cmd_profile_verify
+
+    return int(cmd_profile_verify(profile_path=str(args.profile), env_path=str(args.env)))
 
 
 def _promote(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_profile_promote", profile_path=str(args.profile), mode=str(args.mode), out_path=str(args.out) if args.out is not None else None, paper_validation_evidence=str(args.paper_validation_evidence) if args.paper_validation_evidence is not None else None, live_readiness_evidence=str(args.live_readiness_evidence) if args.live_readiness_evidence is not None else None))
+    from bithumb_bot.profile_cli import cmd_profile_promote
+
+    return int(cmd_profile_promote(profile_path=str(args.profile), mode=str(args.mode), out_path=str(args.out) if args.out is not None else None, paper_validation_evidence=str(args.paper_validation_evidence) if args.paper_validation_evidence is not None else None, live_readiness_evidence=str(args.live_readiness_evidence) if args.live_readiness_evidence is not None else None))
 
 
 def command_specs() -> list[CommandSpec]:

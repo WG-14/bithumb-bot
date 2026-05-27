@@ -5,7 +5,8 @@ import sqlite3
 
 import pytest
 
-from bithumb_bot.app_impl import cmd_report, main
+from bithumb_bot.cli.main import main
+from bithumb_bot.operator_commands import cmd_report
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
 from bithumb_bot.config import settings
 from bithumb_bot.execution_quality import (

@@ -354,11 +354,76 @@ def test_legacy_command_module_cannot_dispatch_to_app_impl() -> None:
     assert "legacy_main(argv)" not in source
 
 
+def test_app_module_remains_tiny_compatibility_shim() -> None:
+    path = Path("src/bithumb_bot/app.py")
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defs = [node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+    assert defs == ["__getattr__", "legacy_main"]
+    assert len(source.splitlines()) <= 25
+    assert "from .cli.main import main" in source
+
+
+def test_app_impl_module_remains_deprecated_compatibility_facade() -> None:
+    path = Path("src/bithumb_bot/app_impl.py")
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defs = [node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    forbidden = (
+        "bithumb_bot.broker",
+        "bithumb_bot.db_core",
+        "bithumb_bot.recovery",
+        "bithumb_bot.runtime_state",
+        "bithumb_bot.flatten",
+        "bithumb_bot.fee_",
+        "bithumb_bot.research",
+        "bithumb_bot.profile_cli",
+        "bithumb_bot.strategy_sweep",
+        "bithumb_bot.reporting",
+    )
+
+    assert defs == ["__getattr__", "main"]
+    assert len(source.splitlines()) <= 30
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = _resolve_import_from(path, node)
+            assert not module.startswith(forbidden), f"{path}: {module}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not alias.name.startswith(forbidden), f"{path}: {alias.name}"
+
+
+def test_cli_command_modules_do_not_depend_on_app_impl_or_call_helper() -> None:
+    for path in Path("src/bithumb_bot/cli/commands").glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        assert "call_app_impl" not in source, f"{path}: call_app_impl"
+        assert "bithumb_bot.app_impl" not in source, f"{path}: bithumb_bot.app_impl"
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = _resolve_import_from(path, node)
+                assert module != "bithumb_bot.app_impl", f"{path}: {module}"
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert alias.name != "bithumb_bot.app_impl", f"{path}: {alias.name}"
+
+
 def test_app_main_compatibility_smoke() -> None:
     from bithumb_bot.app import main
     from bithumb_bot.cli.main import main as cli_main
 
     assert main is cli_main
+
+
+def test_app_impl_main_compatibility_smoke(capsys: pytest.CaptureFixture[str]) -> None:
+    from bithumb_bot.app_impl import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+
+    assert exc.value.code == 0
+    assert "bithumb-bot" in capsys.readouterr().out
 
 
 def _resolve_import_from(path: Path, node: ast.ImportFrom) -> str:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from bithumb_bot.paths import PathManager
-from bithumb_bot import app_impl as app_module
+from bithumb_bot.cli.main import main as cli_main
 from bithumb_bot.execution_reality_contract import build_execution_reality_contract
 from bithumb_bot.execution_reality_contract import execution_capability_contract_hash, execution_contract_hash
 from bithumb_bot.research import cli as research_cli
@@ -4431,9 +4431,9 @@ def test_promotion_cli_argument_wires_allow_legacy_lineage(monkeypatch) -> None:
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(app_module, "cmd_research_promote_candidate", fake_promote)
+    monkeypatch.setattr(research_cli, "cmd_research_promote_candidate", fake_promote)
 
-    status = app_module.main(
+    status = cli_main(
         [
             "research-promote-candidate",
             "--experiment-id",

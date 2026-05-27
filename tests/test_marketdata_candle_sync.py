@@ -272,9 +272,9 @@ def test_cmd_sync_orderbook_top_persists_validated_quote(monkeypatch, capsys, _s
 
 def test_sync_orderbook_top_is_registered_in_main_dispatch(monkeypatch, capsys, _settings_guard) -> None:
     calls: list[str | None] = []
-    monkeypatch.setattr("bithumb_bot.app_impl.cmd_sync_orderbook_top", lambda pair=None: calls.append(pair))
+    monkeypatch.setattr("bithumb_bot.marketdata.cmd_sync_orderbook_top", lambda pair=None: calls.append(pair))
 
-    from bithumb_bot.app_impl import main
+    from bithumb_bot.cli.main import main
 
     assert main(["sync-orderbook-top", "--pair", "BTC_KRW"]) == 0
 

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import pytest
 
-from bithumb_bot.app_impl import main as app_main
+from bithumb_bot.cli.main import main as app_main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.execution import record_order_if_missing

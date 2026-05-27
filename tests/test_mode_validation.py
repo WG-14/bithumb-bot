@@ -71,7 +71,7 @@ def test_main_health_fails_fast_on_invalid_mode(monkeypatch: pytest.MonkeyPatch,
         lambda _mode: (_ for _ in ()).throw(config.ModeValidationError("invalid MODE='papre'; allowed values: paper, live")),
     )
     monkeypatch.setattr(
-        "bithumb_bot.cli.commands.runtime.call_app_impl",
+        "bithumb_bot.operator_commands.cmd_health",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not run")),
     )
 
@@ -91,7 +91,7 @@ def test_main_run_fails_fast_on_invalid_mode(monkeypatch: pytest.MonkeyPatch, ca
         lambda _mode: (_ for _ in ()).throw(config.ModeValidationError("invalid MODE='papre'; allowed values: paper, live")),
     )
     monkeypatch.setattr(
-        "bithumb_bot.cli.commands.runtime.call_app_impl",
+        "bithumb_bot.operator_commands.cmd_run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not run")),
     )
 
@@ -109,8 +109,8 @@ def test_main_health_keeps_existing_valid_mode(monkeypatch: pytest.MonkeyPatch) 
 
     object.__setattr__(settings, "MODE", "paper")
     monkeypatch.setattr(
-        "bithumb_bot.cli.commands.runtime.call_app_impl",
-        lambda function_name, *_args, **_kwargs: calls.append(function_name),
+        "bithumb_bot.operator_commands.cmd_health",
+        lambda *_args, **_kwargs: calls.append("cmd_health"),
     )
 
     try:

@@ -4,30 +4,37 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec
+from ._helpers import make_spec
 
 
 def _json_handler(function_name: str):
     def _handler(args: argparse.Namespace, _context) -> int | None:
-        return call_app_impl(function_name, as_json=bool(args.json))
+        from bithumb_bot import operator_commands
+
+        return getattr(operator_commands, function_name)(as_json=bool(args.json))
 
     return _handler
 
 
 def _simple(function_name: str):
     def _handler(_args: argparse.Namespace, _context) -> int | None:
-        return call_app_impl(function_name)
+        from bithumb_bot import operator_commands
+
+        return getattr(operator_commands, function_name)()
 
     return _handler
 
 
 def _diagnose_fill_trade_linkage(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_diagnose_fill_trade_linkage", as_json=bool(args.json), apply_safe=bool(args.apply_safe))
+    from bithumb_bot.operator_commands import cmd_diagnose_fill_trade_linkage
+
+    cmd_diagnose_fill_trade_linkage(as_json=bool(args.json), apply_safe=bool(args.apply_safe))
 
 
 def _recover_order(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_recover_order",
+    from bithumb_bot.operator_commands import cmd_recover_order
+
+    cmd_recover_order(
         client_order_id=str(args.client_order_id),
         exchange_order_id=str(args.exchange_order_id),
         dry_run=bool(args.dry_run),
@@ -36,8 +43,9 @@ def _recover_order(args: argparse.Namespace, _context) -> None:
 
 
 def _backfill_broker_order(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_backfill_broker_order",
+    from bithumb_bot.operator_commands import cmd_backfill_broker_order
+
+    cmd_backfill_broker_order(
         exchange_order_id=str(args.exchange_order_id),
         dry_run=bool(args.dry_run),
         confirm=bool(args.yes),

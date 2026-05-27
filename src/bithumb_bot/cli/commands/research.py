@@ -4,67 +4,97 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec
+from ._helpers import make_spec
 
 
 def _backtest(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_backtest", manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None))
+    from bithumb_bot.research.cli import cmd_research_backtest
+
+    return int(cmd_research_backtest(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None))
 
 
 def _verify_audit(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_verify_audit", experiment_id=str(args.experiment_id)))
+    from bithumb_bot.research.cli import cmd_research_verify_audit
+
+    return int(cmd_research_verify_audit(experiment_id=str(args.experiment_id)))
 
 
 def _validate(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_validate", manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, candidate_id=str(args.candidate_id) if args.candidate_id else None, out_path=str(args.out) if args.out else None, mode=str(args.mode)))
+    from bithumb_bot.research.cli import cmd_research_validate
+
+    return int(cmd_research_validate(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, candidate_id=str(args.candidate_id) if args.candidate_id else None, out_path=str(args.out) if args.out else None, mode=str(args.mode)))
 
 
 def _readiness(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_readiness", manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, missing_classification_path=str(args.missing_classification) if args.missing_classification else None, as_json=bool(args.json)))
+    from bithumb_bot.research.readiness import cmd_research_readiness
+
+    return int(cmd_research_readiness(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, missing_classification_path=str(args.missing_classification) if args.missing_classification else None, as_json=bool(args.json)))
 
 
 def _walk_forward(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_walk_forward", manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None))
+    from bithumb_bot.research.cli import cmd_research_walk_forward
+
+    return int(cmd_research_walk_forward(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None))
 
 
 def _promote(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_promote_candidate", experiment_id=str(args.experiment_id), candidate_id=str(args.candidate_id), allow_legacy_lineage=bool(args.allow_legacy_lineage), validation_run_path=str(args.validation_run) if args.validation_run else None))
+    from bithumb_bot.research.cli import cmd_research_promote_candidate
+
+    return int(cmd_research_promote_candidate(experiment_id=str(args.experiment_id), candidate_id=str(args.candidate_id), allow_legacy_lineage=bool(args.allow_legacy_lineage), validation_run_path=str(args.validation_run) if args.validation_run else None))
 
 
 def _reproduce(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_reproduce", promotion_path=str(args.promotion)))
+    from bithumb_bot.research.cli import cmd_research_reproduce
+
+    return int(cmd_research_reproduce(promotion_path=str(args.promotion)))
 
 
 def _registry_inspect(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_registry_inspect", row_hash=str(args.row_hash)))
+    from bithumb_bot.research.cli import cmd_research_registry_inspect
+
+    return int(cmd_research_registry_inspect(row_hash=str(args.row_hash)))
 
 
 def _registry_validate(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_registry_validate", experiment_id=str(args.experiment_id)))
+    from bithumb_bot.research.cli import cmd_research_registry_validate
+
+    return int(cmd_research_registry_validate(experiment_id=str(args.experiment_id)))
 
 
 def _mark_aborted(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_mark_attempt_aborted", row_hash=str(args.row_hash), reason=str(args.reason)))
+    from bithumb_bot.research.cli import cmd_research_mark_attempt_aborted
+
+    return int(cmd_research_mark_attempt_aborted(row_hash=str(args.row_hash), reason=str(args.reason)))
 
 
 def _decision_equivalence(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_decision_equivalence", research_decisions_path=str(args.research_decisions), runtime_decisions_path=str(args.runtime_decisions), profile_hash=str(args.profile_hash), market=str(args.market), interval=str(args.interval), data_fingerprint=str(args.data_fingerprint)))
+    from bithumb_bot.profile_cli import cmd_decision_equivalence
+
+    return int(cmd_decision_equivalence(research_decisions_path=str(args.research_decisions), runtime_decisions_path=str(args.runtime_decisions), profile_hash=str(args.profile_hash), market=str(args.market), interval=str(args.interval), data_fingerprint=str(args.data_fingerprint)))
 
 
 def _candidate_regime(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_candidate_regime_policy_equivalence_evidence", backtest_report_path=str(args.backtest_report), candidate_id_value=str(args.candidate_id), decision_equivalence_report_path=str(args.decision_equivalence_report), out_path=str(args.out) if args.out is not None else None, bind=bool(args.bind)))
+    from bithumb_bot.profile_cli import cmd_candidate_regime_policy_equivalence_evidence
+
+    return int(cmd_candidate_regime_policy_equivalence_evidence(backtest_report_path=str(args.backtest_report), candidate_id_value=str(args.candidate_id), decision_equivalence_report_path=str(args.decision_equivalence_report), out_path=str(args.out) if args.out is not None else None, bind=bool(args.bind)))
 
 
 def _export_decisions(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_research_export_decisions", manifest_path=str(args.manifest), candidate_id_value=str(args.candidate_id), split=str(args.split), out_path=str(args.out), profile_path=str(args.profile) if args.profile is not None else None))
+    from bithumb_bot.profile_cli import cmd_research_export_decisions
+
+    return int(cmd_research_export_decisions(manifest_path=str(args.manifest), candidate_id_value=str(args.candidate_id), split=str(args.split), out_path=str(args.out), profile_path=str(args.profile) if args.profile is not None else None))
 
 
 def _runtime_replay(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_runtime_replay_decisions", profile_path=str(args.profile), db_path=str(args.db), through_ts_list_path=str(args.through_ts_list), out_path=str(args.out)))
+    from bithumb_bot.profile_cli import cmd_runtime_replay_decisions
+
+    return int(cmd_runtime_replay_decisions(profile_path=str(args.profile), db_path=str(args.db), through_ts_list_path=str(args.through_ts_list), out_path=str(args.out)))
 
 
 def _replay_decision(args: argparse.Namespace, _context) -> int:
-    return int(call_app_impl("cmd_replay_decision", db_path=str(args.db), strategy_name=str(args.strategy), candle_ts=int(args.candle_ts), readiness_json_path=None if getattr(args, "readiness_json", None) is None else str(args.readiness_json), as_json=bool(args.json)))
+    from bithumb_bot.profile_cli import cmd_replay_decision
+
+    return int(cmd_replay_decision(db_path=str(args.db), strategy_name=str(args.strategy), candle_ts=int(args.candle_ts), readiness_json_path=None if getattr(args, "readiness_json", None) is None else str(args.readiness_json), as_json=bool(args.json)))
 
 
 def command_specs() -> list[CommandSpec]:

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from bithumb_bot.app_impl import _load_recovery_report, main as app_main
+from bithumb_bot.operator_commands import _load_recovery_report, main as app_main
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
@@ -5259,7 +5259,7 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
 def test_canonical_open_exposure_clears_stale_risk_mismatch_and_resumes_position_management(
     recovery_db, monkeypatch, capsys
 ):
-    monkeypatch.setattr("bithumb_bot.app_impl.write_json_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.write_json_atomic", lambda *_args, **_kwargs: None)
     conn = ensure_db(str(recovery_db))
     try:
         _apply_fee_pending_buy(conn, client_order_id="ec2_carry_buy", fill_id="ec2-carry-fill")

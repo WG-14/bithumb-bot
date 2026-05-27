@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from bithumb_bot.app_impl import main
+from bithumb_bot.cli.main import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.decision_contract import BLOCK_LAYER_PRIORITY

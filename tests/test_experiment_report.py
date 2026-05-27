@@ -5,7 +5,7 @@ import json
 from bithumb_bot import runtime_state
 from bithumb_bot.config import PATH_MANAGER, settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.app_impl import main as app_main
+from bithumb_bot.cli.main import main as app_main
 from bithumb_bot.reporting import cmd_experiment_report, fetch_experiment_report_summary
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from bithumb_bot import app_impl as app_module
+from bithumb_bot.cli.main import main as cli_main
 from bithumb_bot.paths import PathManager
 from bithumb_bot.research import cli as research_cli
 from bithumb_bot.research.hashing import sha256_prefixed
@@ -126,9 +126,9 @@ def test_research_validate_cli_dispatches(monkeypatch):
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(app_module, "cmd_research_validate", fake_cmd)
+    monkeypatch.setattr(research_cli, "cmd_research_validate", fake_cmd)
 
-    status = app_module.main(
+    status = cli_main(
         [
             "research-validate",
             "--manifest",

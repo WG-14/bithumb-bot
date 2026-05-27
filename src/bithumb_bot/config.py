@@ -941,6 +941,12 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         validate_live_strategy_selection(cfg)
     except LiveModeValidationError as exc:
         issues.append(str(exc))
+    if (
+        not bool(cfg.LIVE_DRY_RUN)
+        and bool(cfg.LIVE_REAL_ORDER_ARMED)
+        and not str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
+    ):
+        issues.append("approved_profile_missing")
     try:
         live_path_manager = PathManager.from_env(PROJECT_ROOT)
         validate_runtime_root_separation(live_path_manager.config)

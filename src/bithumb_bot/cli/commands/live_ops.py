@@ -4,7 +4,7 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec
+from ._helpers import make_spec
 
 
 def _settings_default(name: str):
@@ -15,25 +15,35 @@ def _settings_default(name: str):
 
 def _simple(function_name: str):
     def _handler(_args: argparse.Namespace, _context) -> int | None:
-        return call_app_impl(function_name)
+        from bithumb_bot import operator_commands
+
+        return getattr(operator_commands, function_name)()
 
     return _handler
 
 
 def _target_delta_dry_run(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_target_delta_dry_run", args.short, args.long)
+    from bithumb_bot.operator_commands import cmd_target_delta_dry_run
+
+    cmd_target_delta_dry_run(args.short, args.long)
 
 
 def _resume(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_resume", force=bool(args.force))
+    from bithumb_bot.operator_commands import cmd_resume
+
+    cmd_resume(force=bool(args.force))
 
 
 def _flatten(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_flatten_position", dry_run=bool(args.dry_run))
+    from bithumb_bot.operator_commands import cmd_flatten_position
+
+    cmd_flatten_position(dry_run=bool(args.dry_run))
 
 
 def _panic(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_panic_stop", flatten=bool(args.flatten))
+    from bithumb_bot.operator_commands import cmd_panic_stop
+
+    cmd_panic_stop(flatten=bool(args.flatten))
 
 
 def _build_window_parser(parser: argparse.ArgumentParser) -> None:

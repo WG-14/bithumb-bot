@@ -6,24 +6,31 @@ from pathlib import Path
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec, parser_error
+from ._helpers import make_spec, parser_error
 
 
 def _report(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_report", max(1, int(args.days)))
+    from bithumb_bot.operator_commands import cmd_report
+
+    cmd_report(max(1, int(args.days)))
 
 
 def _ops(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_ops_report", limit=max(1, int(args.limit)))
+    from bithumb_bot.reporting import cmd_ops_report
+
+    cmd_ops_report(limit=max(1, int(args.limit)))
 
 
 def _risk(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_risk_report", limit=max(1, int(args.limit)), as_json=bool(args.json))
+    from bithumb_bot.reporting import cmd_risk_report
+
+    cmd_risk_report(limit=max(1, int(args.limit)), as_json=bool(args.json))
 
 
 def _fee_diagnostics(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_fee_diagnostics",
+    from bithumb_bot.reporting import cmd_fee_diagnostics
+
+    cmd_fee_diagnostics(
         fill_limit=max(1, int(args.fill_limit)),
         roundtrip_limit=max(1, int(args.roundtrip_limit)),
         estimated_fee_rate=args.estimated_fee_rate,
@@ -32,16 +39,21 @@ def _fee_diagnostics(args: argparse.Namespace, _context) -> None:
 
 
 def _cash_drift(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_cash_drift_report", recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))
+    from bithumb_bot.reporting import cmd_cash_drift_report
+
+    cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))
 
 
 def _decision_telemetry(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_decision_telemetry", limit=max(1, int(args.limit)))
+    from bithumb_bot.reporting import cmd_decision_telemetry
+
+    cmd_decision_telemetry(limit=max(1, int(args.limit)))
 
 
 def _execution_quality(args: argparse.Namespace, _context) -> None:
-    call_app_impl(
-        "cmd_execution_quality_report",
+    from bithumb_bot.operator_commands import cmd_execution_quality_report
+
+    cmd_execution_quality_report(
         limit=max(1, int(args.limit)),
         since=args.since,
         market=args.market,
@@ -66,8 +78,9 @@ def _strategy_report(args: argparse.Namespace, _context) -> None:
     if from_ts_ms is not None and to_ts_ms is not None and from_ts_ms > to_ts_ms:
         parser_error(args, "--from-date must be earlier than or equal to --to-date")
     group_by = tuple(part.strip() for part in str(args.group_by or "").split(",") if part.strip())
-    call_app_impl(
-        "cmd_strategy_report",
+    from bithumb_bot.reporting import cmd_strategy_report
+
+    cmd_strategy_report(
         strategy_name=args.strategy_name,
         exit_rule_name=args.exit_rule_name,
         pair=args.pair,
@@ -92,8 +105,9 @@ def _experiment_report(args: argparse.Namespace, _context) -> None:
         parser_error(args, "invalid date format for --from-date/--to-date; expected YYYY-MM-DD")
     if from_ts_ms is not None and to_ts_ms is not None and from_ts_ms > to_ts_ms:
         parser_error(args, "--from-date must be earlier than or equal to --to-date")
-    call_app_impl(
-        "cmd_experiment_report",
+    from bithumb_bot.reporting import cmd_experiment_report
+
+    cmd_experiment_report(
         strategy_name=args.strategy_name,
         pair=args.pair,
         from_ts_ms=from_ts_ms,

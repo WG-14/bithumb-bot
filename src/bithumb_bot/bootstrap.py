@@ -219,10 +219,14 @@ def bootstrap_argv(argv: list[str]) -> list[str]:
 def run_cli() -> None:
     sys.argv = bootstrap_argv(sys.argv[:])
 
+    from . import cli as cli_package
     from .observability import configure_runtime_logging
-    from .cli.main import main as cli_main
 
     configure_runtime_logging()
+    cli_main = getattr(cli_package, "main")
+    if not callable(cli_main):
+        from .cli.main import main as cli_main
+
     rc = cli_main()
     if rc is None:
         return

@@ -10,10 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from bithumb_bot import app_impl as app_module
+from bithumb_bot import operator_commands as app_module
+from bithumb_bot import config
 from bithumb_bot import runtime_state
-from bithumb_bot.app_impl import main as app_main
-from bithumb_bot.app_impl import (
+from bithumb_bot.operator_commands import main as app_main
+from bithumb_bot.operator_commands import (
     _load_recovery_report,
     cmd_cash_drift_report,
     cmd_broker_diagnose,
@@ -92,7 +93,7 @@ def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("MODE", "paper")
     object.__setattr__(settings, "MODE", "paper")
-    monkeypatch.setattr("bithumb_bot.app_impl.write_json_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.write_json_atomic", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("bithumb_bot.reporting.write_json_atomic", lambda *_args, **_kwargs: None)
 
     try:
@@ -608,9 +609,9 @@ def test_manual_flat_accounting_repair_refuses_when_lot_residue_remains(tmp_path
 
 def test_manual_flat_accounting_repair_converges_recovery_surfaces(tmp_path, monkeypatch, capsys):
     _seed_manual_flat_accounting_candidate(tmp_path, monkeypatch)
-    monkeypatch.setattr("bithumb_bot.app_impl._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
+    monkeypatch.setattr("bithumb_bot.operator_commands._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.build_broker_with_auth_diagnostics",
+        "bithumb_bot.operator_commands.build_broker_with_auth_diagnostics",
         lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
     )
 
@@ -774,9 +775,9 @@ def test_fee_gap_accounting_repair_refuses_when_manual_flat_is_still_pending(tmp
 
 def test_fee_gap_accounting_repair_converges_recovery_surfaces(tmp_path, monkeypatch, capsys):
     _seed_fee_gap_accounting_candidate(tmp_path, monkeypatch)
-    monkeypatch.setattr("bithumb_bot.app_impl._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
+    monkeypatch.setattr("bithumb_bot.operator_commands._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.build_broker_with_auth_diagnostics",
+        "bithumb_bot.operator_commands.build_broker_with_auth_diagnostics",
         lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
     )
 
@@ -1645,7 +1646,7 @@ def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(
     def _reconcile(_broker):
         calls["n"] += 1
 
-    monkeypatch.setattr("bithumb_bot.app_impl.reconcile_with_broker", _reconcile)
+    monkeypatch.setattr("bithumb_bot.operator_commands.reconcile_with_broker", _reconcile)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
 
     runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
@@ -1710,7 +1711,7 @@ def test_resume_refuses_when_reconcile_has_balance_split_mismatch(
         },
     )
 
-    monkeypatch.setattr("bithumb_bot.app_impl.reconcile_with_broker", lambda _broker: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.reconcile_with_broker", lambda _broker: None)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
 
     try:
@@ -1866,7 +1867,7 @@ def test_recovery_report_classifies_external_cash_adjustment_missing_blocker(
     original_mode = settings.MODE
     object.__setattr__(settings, "MODE", "live")
     monkeypatch.setattr(
-        "bithumb_bot.app_impl._safe_recent_broker_orders_snapshot",
+        "bithumb_bot.operator_commands._safe_recent_broker_orders_snapshot",
         lambda *, limit=100: ([], "stubbed broker snapshot"),
     )
     runtime_state.record_reconcile_result(
@@ -1980,7 +1981,7 @@ def test_resume_blocks_risk_halt_when_only_matched_dust_policy_review_remains(tm
             "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 classification=harmless_dust harmless_dust=1 broker_local_match=1 min_qty=0.00010000 submit_unknown_count=1 allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required",
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.reconcile_with_broker", lambda _broker: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.reconcile_with_broker", lambda _broker: None)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
 
     with pytest.raises(SystemExit) as exc:
@@ -2375,10 +2376,10 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path, capsys
     object.__setattr__(app_module.settings, "MODE", "live")
     object.__setattr__(app_module.settings, "LIVE_DRY_RUN", False)
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.cancel_open_orders_with_broker",
+        "bithumb_bot.operator_commands.cancel_open_orders_with_broker",
         lambda _broker: {
             "remote_open_count": 2,
             "cancel_accepted_count": 1,
@@ -2393,7 +2394,7 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path, capsys
     )
 
     try:
-        from bithumb_bot.app_impl import cmd_cancel_open_orders
+        from bithumb_bot.operator_commands import cmd_cancel_open_orders
 
         cmd_cancel_open_orders()
     finally:
@@ -2423,7 +2424,7 @@ def test_cancel_open_orders_refuses_in_live_dry_run(monkeypatch, tmp_path, capsy
     object.__setattr__(app_module.settings, "MODE", "live")
     object.__setattr__(app_module.settings, "LIVE_DRY_RUN", True)
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
     broker_created = {"called": False}
 
     def _broker_factory():
@@ -2458,7 +2459,7 @@ def test_cancel_open_orders_skips_stray_remote_orders_and_reports_resume_gate(
     object.__setattr__(app_module.settings, "MODE", "live")
     object.__setattr__(app_module.settings, "LIVE_DRY_RUN", False)
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     now_ms = int(time.time() * 1000)
     _insert_order(status="NEW", client_order_id="local_cancel_1", created_ts=now_ms - 10_000)
@@ -2589,7 +2590,7 @@ def test_panic_stop_blocks_new_orders_and_cancels_open_orders_without_flatten(mo
     original_live_dry_run = settings.LIVE_DRY_RUN
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     now_ms = int(time.time() * 1000)
     _insert_order(status="NEW", client_order_id="panic_open_1", created_ts=now_ms - 5_000, side="BUY", price=100.0)
@@ -2652,7 +2653,7 @@ def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monk
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.000001)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
     monkeypatch.setattr(
         "bithumb_bot.flatten.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
@@ -2717,7 +2718,7 @@ def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monk
 
     try:
         cmd_panic_stop(flatten=True)
-        monkeypatch.setattr("bithumb_bot.app_impl._run_live_reconcile", lambda **_kwargs: None)
+        monkeypatch.setattr("bithumb_bot.operator_commands._run_live_reconcile", lambda **_kwargs: None)
         with pytest.raises(SystemExit) as exc:
             cmd_resume(force=False)
     finally:
@@ -2780,9 +2781,9 @@ def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monk
 def test_panic_stop_cli_dispatches_to_command(monkeypatch):
     called = {"flatten": None}
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_mode_or_raise", lambda _mode: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_mode_or_raise", lambda _mode: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.cmd_panic_stop",
+        "bithumb_bot.operator_commands.cmd_panic_stop",
         lambda *, flatten=False: called.__setitem__("flatten", flatten),
     )
 
@@ -2828,7 +2829,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance(self):
@@ -2859,7 +2860,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: type(
             "_ResolvedRules",
             (),
@@ -2945,7 +2946,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
 
 def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
-    from bithumb_bot import app_impl as app_module
+    from bithumb_bot import operator_commands as app_module
 
     original_mode = settings.MODE
     original_live_dry_run = settings.LIVE_DRY_RUN
@@ -2955,7 +2956,7 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance(self):
@@ -2974,7 +2975,7 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: type(
             "_ResolvedRules",
             (),
@@ -3032,7 +3033,7 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
 
 def test_broker_diagnose_fails_market_only_buy_price_none(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
-    from bithumb_bot import app_impl as app_module
+    from bithumb_bot import operator_commands as app_module
 
     original_mode = settings.MODE
     original_live_dry_run = settings.LIVE_DRY_RUN
@@ -3041,7 +3042,7 @@ def test_broker_diagnose_fails_market_only_buy_price_none(monkeypatch, tmp_path,
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance(self):
@@ -3060,7 +3061,7 @@ def test_broker_diagnose_fails_market_only_buy_price_none(monkeypatch, tmp_path,
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.DerivedOrderConstraints(
                 min_qty=0.0001,
@@ -3112,7 +3113,7 @@ def test_broker_diagnose_fails_market_only_buy_price_none(monkeypatch, tmp_path,
 
 def test_broker_diagnose_fails_when_tracked_chance_contract_change_is_detected(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
-    from bithumb_bot import app_impl as app_module
+    from bithumb_bot import operator_commands as app_module
 
     original_mode = settings.MODE
     original_live_dry_run = settings.LIVE_DRY_RUN
@@ -3122,7 +3123,7 @@ def test_broker_diagnose_fails_when_tracked_chance_contract_change_is_detected(m
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance(self):
@@ -3141,7 +3142,7 @@ def test_broker_diagnose_fails_when_tracked_chance_contract_change_is_detected(m
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.DerivedOrderConstraints(
                 min_qty=0.0001,
@@ -3218,7 +3219,7 @@ def test_broker_diagnose_live_dry_run_separates_accounts_truth_from_static_cash(
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance_snapshot(self):
@@ -3255,7 +3256,7 @@ def test_broker_diagnose_live_dry_run_separates_accounts_truth_from_static_cash(
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.DerivedOrderConstraints(
                 min_qty=0.0001,
@@ -3337,7 +3338,7 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagPartialBroker:
         def get_balance(self):
@@ -3361,7 +3362,7 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
             return []
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagPartialBroker())
-    monkeypatch.setattr("bithumb_bot.app_impl.get_effective_order_rules", lambda _pair: (_ for _ in ()).throw(RuntimeError("rules api down")))
+    monkeypatch.setattr("bithumb_bot.operator_commands.get_effective_order_rules", lambda _pair: (_ for _ in ()).throw(RuntimeError("rules api down")))
 
     try:
         cmd_broker_diagnose()
@@ -3398,7 +3399,7 @@ def test_broker_diagnose_accounts_policy_context_is_operator_readable(monkeypatc
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance(self):
@@ -3426,7 +3427,7 @@ def test_broker_diagnose_accounts_policy_context_is_operator_readable(monkeypatc
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: (_ for _ in ()).throw(RuntimeError("skip rule detail")),
     )
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
@@ -3453,7 +3454,7 @@ def test_broker_diagnose_accounts_policy_context_shows_real_order_block(monkeypa
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance(self):
@@ -3481,7 +3482,7 @@ def test_broker_diagnose_accounts_policy_context_shows_real_order_block(monkeypa
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: (_ for _ in ()).throw(RuntimeError("skip rule detail")),
     )
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
@@ -3546,7 +3547,7 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
         ),
     )
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: type(
             "_ResolvedRules",
             (),
@@ -3713,7 +3714,7 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
     
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
     place_calls = {"n": 0}
 
     class _NoTradeBroker:
@@ -3743,7 +3744,7 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _NoTradeBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: type(
             "_ResolvedRules",
             (),
@@ -4212,9 +4213,9 @@ def test_recovery_report_includes_recent_order_lifecycle_block(tmp_path, capsys)
 
 def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: type(
             "_ResolvedRules",
             (),
@@ -4247,7 +4248,7 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
         )(),
     )
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_health_status",
+        "bithumb_bot.operator_commands.get_health_status",
         lambda: {
             "last_candle_age_sec": 2.0,
             "error_count": 0,
@@ -4272,7 +4273,7 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
             "startup_gate_reason": None,
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.evaluate_resume_eligibility", lambda: (False, []))
+    monkeypatch.setattr("bithumb_bot.operator_commands.evaluate_resume_eligibility", lambda: (False, []))
 
     cmd_health()
     out = capsys.readouterr().out
@@ -4303,9 +4304,9 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
 
 def test_health_reports_order_rule_fallback_risk_when_autosync_degrades(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_health_status",
+        "bithumb_bot.operator_commands.get_health_status",
         lambda: {
             "last_candle_age_sec": 2.0,
             "error_count": 0,
@@ -4330,9 +4331,9 @@ def test_health_reports_order_rule_fallback_risk_when_autosync_degrades(monkeypa
             "startup_gate_reason": None,
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr("bithumb_bot.operator_commands.evaluate_resume_eligibility", lambda: (True, []))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.DerivedOrderConstraints(
                 min_qty=0.0001,
@@ -4428,9 +4429,9 @@ def test_risk_report_prints_recent_evaluation_with_provenance(tmp_path, monkeypa
 
 def test_health_surfaces_supported_buy_price_none_resolution(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_health_status",
+        "bithumb_bot.operator_commands.get_health_status",
         lambda: {
             "last_candle_age_sec": 2.0,
             "last_candle_status": "ok",
@@ -4459,9 +4460,9 @@ def test_health_surfaces_supported_buy_price_none_resolution(monkeypatch, capsys
             "startup_gate_reason": None,
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr("bithumb_bot.operator_commands.evaluate_resume_eligibility", lambda: (True, []))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.DerivedOrderConstraints(
                 min_qty=0.0001,
@@ -4490,7 +4491,7 @@ def test_health_surfaces_supported_buy_price_none_resolution(monkeypatch, capsys
         ),
     )
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.build_broker_with_auth_diagnostics",
+        "bithumb_bot.operator_commands.build_broker_with_auth_diagnostics",
         lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
     )
 
@@ -4514,9 +4515,9 @@ def test_health_surfaces_supported_buy_price_none_resolution(monkeypatch, capsys
 
 def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_health_status",
+        "bithumb_bot.operator_commands.get_health_status",
         lambda: {
             "last_candle_age_sec": 2.0,
             "last_candle_status": "ok",
@@ -4545,9 +4546,9 @@ def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, 
             "startup_gate_reason": None,
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr("bithumb_bot.operator_commands.evaluate_resume_eligibility", lambda: (True, []))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_effective_order_rules",
+        "bithumb_bot.operator_commands.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.DerivedOrderConstraints(
                 min_qty=0.0001,
@@ -4576,7 +4577,7 @@ def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, 
         ),
     )
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.build_broker_with_auth_diagnostics",
+        "bithumb_bot.operator_commands.build_broker_with_auth_diagnostics",
         lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
     )
 
@@ -4603,9 +4604,9 @@ def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, 
 
 def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_health_status",
+        "bithumb_bot.operator_commands.get_health_status",
         lambda: {
             "last_candle_age_sec": None,
             "last_candle_status": "waiting_first_sync",
@@ -4634,7 +4635,7 @@ def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
             "startup_gate_reason": None,
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr("bithumb_bot.operator_commands.evaluate_resume_eligibility", lambda: (True, []))
 
     cmd_health()
     out = capsys.readouterr().out
@@ -4651,9 +4652,9 @@ def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
 
 def test_health_includes_balance_source_diagnostics(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_health_status",
+        "bithumb_bot.operator_commands.get_health_status",
         lambda: {
             "last_candle_age_sec": 1.0,
             "last_candle_status": "ok",
@@ -4682,9 +4683,9 @@ def test_health_includes_balance_source_diagnostics(monkeypatch, capsys, tmp_pat
             "startup_gate_reason": None,
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr("bithumb_bot.operator_commands.evaluate_resume_eligibility", lambda: (True, []))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.DEFAULT_BITHUMB_BROKER_CLASS",
+        "bithumb_bot.operator_commands.DEFAULT_BITHUMB_BROKER_CLASS",
         lambda: type(
             "_DiagBroker",
             (),
@@ -4730,9 +4731,9 @@ def test_health_shows_recent_external_cash_adjustment_summary(monkeypatch, capsy
     finally:
         conn.close()
 
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.build_broker_with_auth_diagnostics",
+        "bithumb_bot.operator_commands.build_broker_with_auth_diagnostics",
         lambda **kwargs: (
             type(
                 "_HealthDiagBroker",
@@ -4762,9 +4763,9 @@ def test_health_shows_recent_external_cash_adjustment_summary(monkeypatch, capsy
 
 def test_health_prints_accounts_preflight_outcome_context(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.get_health_status",
+        "bithumb_bot.operator_commands.get_health_status",
         lambda: {
             "last_candle_age_sec": 1.0,
             "last_candle_status": "ok",
@@ -4793,9 +4794,9 @@ def test_health_prints_accounts_preflight_outcome_context(monkeypatch, capsys, t
             "startup_gate_reason": None,
         },
     )
-    monkeypatch.setattr("bithumb_bot.app_impl.evaluate_resume_eligibility", lambda: (False, []))
+    monkeypatch.setattr("bithumb_bot.operator_commands.evaluate_resume_eligibility", lambda: (False, []))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.DEFAULT_BITHUMB_BROKER_CLASS",
+        "bithumb_bot.operator_commands.DEFAULT_BITHUMB_BROKER_CLASS",
         lambda: type(
             "_DiagBroker",
             (),
@@ -5796,9 +5797,9 @@ def test_authority_rebuild_then_fee_gap_progression_is_staged_not_deadlocked(tmp
 
 def test_open_position_fee_gap_debt_is_consistent_across_operator_surfaces(tmp_path, monkeypatch, capsys):
     test_authority_rebuild_then_fee_gap_progression_is_staged_not_deadlocked(tmp_path)
-    monkeypatch.setattr("bithumb_bot.app_impl._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
+    monkeypatch.setattr("bithumb_bot.operator_commands._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.build_broker_with_auth_diagnostics",
+        "bithumb_bot.operator_commands.build_broker_with_auth_diagnostics",
         lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
     )
 
@@ -6172,7 +6173,7 @@ def test_reconcile_live_updates_state_and_reports_contract(tmp_path, monkeypatch
     original_mode = settings.MODE
     object.__setattr__(settings, "MODE", "live")
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     broker = object()
     calls: list[object] = []
@@ -6842,12 +6843,12 @@ def test_halt_resume_flow_requires_manual_recover_order_before_resume(
 
 
 def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
-    from bithumb_bot.app_impl import cmd_run
+    from bithumb_bot.operator_commands import cmd_run
     from bithumb_bot.run_lock import RunLockError
 
     notifications: list[str] = []
     run_loop_calls = {"n": 0}
-    monkeypatch.setattr("bithumb_bot.app_impl.notify", lambda msg: notifications.append(msg))
+    monkeypatch.setattr("bithumb_bot.operator_commands.notify", lambda msg: notifications.append(msg))
     monkeypatch.setattr(
         "bithumb_bot.engine.run_loop",
         lambda *_args, **_kwargs: run_loop_calls.__setitem__(
@@ -6877,10 +6878,10 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
 
 
 def test_cmd_run_blocks_before_lock_when_live_preflight_fails(monkeypatch):
-    from bithumb_bot.app_impl import cmd_run
+    from bithumb_bot.operator_commands import cmd_run
 
     notifications: list[str] = []
-    monkeypatch.setattr("bithumb_bot.app_impl.notify", lambda msg: notifications.append(msg))
+    monkeypatch.setattr("bithumb_bot.operator_commands.notify", lambda msg: notifications.append(msg))
 
     def _raise_preflight(_cfg):
         raise app_module.LiveModeValidationError("live startup guard failed")
@@ -6888,7 +6889,7 @@ def test_cmd_run_blocks_before_lock_when_live_preflight_fails(monkeypatch):
     def _fail_lock(*_args, **_kwargs):
         raise AssertionError("run lock must not be acquired when live preflight fails")
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_run_startup_contract", _raise_preflight)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_run_startup_contract", _raise_preflight)
     monkeypatch.setattr("bithumb_bot.run_lock.acquire_run_lock", _fail_lock)
 
     with pytest.raises(SystemExit) as exc:
@@ -6901,18 +6902,19 @@ def test_cmd_run_blocks_before_lock_when_live_preflight_fails(monkeypatch):
 
 def test_main_pre_dispatch_blocks_live_run_without_startup_contract(monkeypatch, capsys):
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(config.settings, "MODE", "live")
     notifications: list[str] = []
     calls = {"startup": 0}
 
     def _raise_startup(_cfg):
         calls["startup"] += 1
-        raise app_module.LiveModeValidationError("central startup guard failed")
+        raise config.LiveModeValidationError("central startup guard failed")
 
     monkeypatch.setattr("bithumb_bot.config.validate_live_run_startup_contract", _raise_startup)
     monkeypatch.setattr("bithumb_bot.config.log_live_execution_contract", lambda *_args, **_kwargs: {})
     monkeypatch.setattr("bithumb_bot.notifier.notify", lambda msg: notifications.append(msg))
     monkeypatch.setattr(
-        "bithumb_bot.cli.commands.runtime.call_app_impl",
+        "bithumb_bot.operator_commands.cmd_run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cmd_run bypassed guard")),
     )
 
@@ -6928,16 +6930,17 @@ def test_main_pre_dispatch_blocks_live_run_without_startup_contract(monkeypatch,
 
 def test_main_pre_dispatch_blocks_live_write_command_without_preflight(monkeypatch, capsys):
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(config.settings, "MODE", "live")
     calls = {"preflight": 0}
 
     def _raise_preflight(_cfg):
         calls["preflight"] += 1
-        raise app_module.LiveModeValidationError("central preflight failed")
+        raise config.LiveModeValidationError("central preflight failed")
 
     monkeypatch.setattr("bithumb_bot.config.validate_live_mode_preflight", _raise_preflight)
     monkeypatch.setattr("bithumb_bot.config.log_live_execution_contract", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        "bithumb_bot.cli.commands.live_ops.call_app_impl",
+        "bithumb_bot.operator_commands.cmd_panic_stop",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("panic-stop bypassed guard")),
     )
 
@@ -7257,7 +7260,7 @@ def test_flatten_position_no_position_safe_noop(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     cmd_flatten_position(dry_run=False)
     out = capsys.readouterr().out
@@ -7277,7 +7280,7 @@ def test_flatten_position_dust_only_remainder_is_not_treated_as_executable_posit
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -7344,7 +7347,7 @@ def test_flatten_position_recorded_buy_below_effective_min_qty_is_normal_noop(
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     buy_qty = 0.00009629
     conn = ensure_db()
@@ -7430,7 +7433,7 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
     prev_max_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.000001)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -7531,7 +7534,7 @@ def test_flatten_position_qty_only_portfolio_does_not_restore_sell_authority(
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -7605,7 +7608,7 @@ def test_flatten_position_reserved_exit_qty_does_not_bypass_canonical_sell_autho
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -7682,7 +7685,7 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
     _stub_flatten_submit_rules(monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -7778,7 +7781,7 @@ def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -7851,7 +7854,7 @@ def test_flatten_position_blocks_on_invalid_best_quote(monkeypatch, tmp_path, ca
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -7921,7 +7924,7 @@ def test_flatten_position_blocks_on_live_preflight_failure(monkeypatch, tmp_path
     def _raise_preflight(_cfg):
         raise app_module.LiveModeValidationError("preflight boom")
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", _raise_preflight)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", _raise_preflight)
 
     class _BrokerFactory:
         def __call__(self):
@@ -7948,7 +7951,7 @@ def test_flatten_position_blocks_when_live_unarmed(monkeypatch, tmp_path, capsys
     def _armed_gate(_cfg):
         raise app_module.LiveModeValidationError("LIVE_REAL_ORDER_ARMED=true is required")
 
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", _armed_gate)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", _armed_gate)
 
     class _BrokerFactory:
         def __call__(self):
@@ -7968,7 +7971,7 @@ def test_flatten_position_blocks_when_unapplied_principal_pending(monkeypatch, t
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -8062,7 +8065,7 @@ def test_resume_blocked_when_emergency_flatten_unresolved(tmp_path, monkeypatch)
     )
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
-    monkeypatch.setattr("bithumb_bot.app_impl.reconcile_with_broker", lambda broker: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.reconcile_with_broker", lambda broker: None)
 
     with pytest.raises(SystemExit) as exc:
         cmd_resume(force=False)
@@ -8102,7 +8105,7 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
     object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
     runtime_state.enable_trading()
-    monkeypatch.setattr("bithumb_bot.app_impl.write_json_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.write_json_atomic", lambda *_args, **_kwargs: None)
 
     conn = ensure_db()
     try:
@@ -8216,7 +8219,7 @@ def test_fee_pending_history_is_diagnostic_only_across_operator_surfaces(tmp_pat
     object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
     object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
     runtime_state.enable_trading()
-    monkeypatch.setattr("bithumb_bot.app_impl.write_json_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.write_json_atomic", lambda *_args, **_kwargs: None)
 
     conn = ensure_db()
     try:
@@ -8301,7 +8304,7 @@ def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_
     _set_tmp_db(tmp_path)
     object.__setattr__(settings, "MODE", "live")
     runtime_state.enable_trading()
-    monkeypatch.setattr("bithumb_bot.app_impl.write_json_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.operator_commands.write_json_atomic", lambda *_args, **_kwargs: None)
 
     conn = ensure_db()
     try:

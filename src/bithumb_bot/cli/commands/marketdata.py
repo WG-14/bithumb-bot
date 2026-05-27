@@ -4,28 +4,36 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec
+from ._helpers import make_spec
 
 
 def _ticker(_args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_ticker")
+    from bithumb_bot.marketdata import cmd_ticker
+
+    cmd_ticker()
 
 
 def _candles(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_candles", args.limit)
+    from bithumb_bot.marketdata import cmd_candles
+
+    cmd_candles(args.limit)
 
 
 def _sync(_args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_sync")
+    from bithumb_bot.marketdata import cmd_sync
+
+    cmd_sync()
 
 
 def _sync_orderbook_top(args: argparse.Namespace, _context) -> None:
-    call_app_impl("cmd_sync_orderbook_top", pair=str(args.pair) if args.pair else None)
+    from bithumb_bot.marketdata import cmd_sync_orderbook_top
+
+    cmd_sync_orderbook_top(pair=str(args.pair) if args.pair else None)
 
 
 def _backfill_candles(args: argparse.Namespace, _context) -> int:
-    from bithumb_bot.app_impl import kst_str
     from bithumb_bot.historical_backfill import backfill_candles
+    from bithumb_bot.utils_time import kst_str
 
     def _print_progress(progress):
         oldest = kst_str(progress.oldest_ts) if progress.oldest_ts is not None else "none"

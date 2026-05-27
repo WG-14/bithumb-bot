@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from bithumb_bot.app_impl import main
+from bithumb_bot.operator_commands import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.market_regime import MARKET_REGIME_VERSION
@@ -320,7 +320,7 @@ def test_strategy_sweep_cli_live_requires_execution_boundary(
         called = True
 
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.app_impl.cmd_strategy_sweep", fail_if_called)
+    monkeypatch.setattr("bithumb_bot.operator_commands.cmd_strategy_sweep", fail_if_called)
 
     with pytest.raises(SystemExit):
         main(_sweep_args(as_json=True))
@@ -363,7 +363,7 @@ def test_strategy_sweep_cli_live_large_operations_fail_before_replay(
         raise AssertionError("sweep replay should not execute")
 
     monkeypatch.setattr(
-        "bithumb_bot.app_impl.run_sma_strategy_sweep_from_candles",
+        "bithumb_bot.operator_commands.run_sma_strategy_sweep_from_candles",
         fail_if_called,
     )
     args = _sweep_args(as_json=True) + ["--max-candles", "5000", "--max-operations", "9"]

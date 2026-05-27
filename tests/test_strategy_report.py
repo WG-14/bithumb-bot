@@ -14,7 +14,7 @@ from bithumb_bot.reporting import (
     fetch_lifecycle_close_summary,
     fetch_strategy_performance_stats,
 )
-from bithumb_bot.app_impl import main as app_main
+from bithumb_bot.cli.main import main as app_main
 
 def _insert_sell_decision(conn, *, decision_ts: int, strategy_name: str, rule: str) -> None:
     conn.execute(

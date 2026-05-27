@@ -4,7 +4,7 @@ import argparse
 
 from bithumb_bot.cli.registry import CommandSpec
 
-from ._helpers import call_app_impl, make_spec, parser_error
+from ._helpers import make_spec, parser_error
 
 
 def _strategy_sweep(args: argparse.Namespace, _context) -> None:
@@ -36,8 +36,9 @@ def _strategy_sweep(args: argparse.Namespace, _context) -> None:
             args,
             "strategy-sweep in live mode requires --from/--to/--through/--max-candles or --allow-full-history",
         )
-    call_app_impl(
-        "cmd_strategy_sweep",
+    from bithumb_bot.operator_commands import cmd_strategy_sweep
+
+    cmd_strategy_sweep(
         short_values=args.short,
         long_values=args.long,
         entry_edge_buffer_values=args.edge_buffer,
