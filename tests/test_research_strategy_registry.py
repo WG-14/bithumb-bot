@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import inspect
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -37,27 +38,27 @@ def test_research_strategy_registry_resolves_sma_with_filter() -> None:
     assert plugin.contract_payload()["runtime_replay_supported"] is True
     assert plugin.contract_payload()["runner_module"] == "bithumb_bot.research.strategy_registry"
     assert plugin.contract_payload()["runner_qualname"] == "_run_sma_with_filter"
-    assert plugin.contract_payload()["runtime_replay_builder_module"] == "bithumb_bot.research.strategy_registry"
-    assert plugin.contract_payload()["runtime_replay_builder_qualname"] == "_build_sma_runtime_replay_strategy"
+    assert plugin.contract_payload()["runtime_replay_builder_module"] == "bithumb_bot.research.sma_with_filter_plugin"
+    assert plugin.contract_payload()["runtime_replay_builder_qualname"] == "build_runtime_replay_strategy"
     assert plugin.contract_payload()["runtime_parameter_adapter_supported"] is True
     assert plugin.contract_payload()["runtime_parameter_env_keys"] == list(
         runtime_strategy_parameter_env_keys("sma_with_filter")
     )
     assert "SMA_SHORT" in runtime_strategy_parameter_env_keys("sma_with_filter")
-    assert plugin.contract_payload()["runtime_parameter_from_env_module"] == "bithumb_bot.research.strategy_registry"
-    assert plugin.contract_payload()["runtime_parameter_from_env_qualname"] == "_sma_runtime_parameters_from_env"
+    assert plugin.contract_payload()["runtime_parameter_from_env_module"] == "bithumb_bot.research.sma_with_filter_plugin"
+    assert plugin.contract_payload()["runtime_parameter_from_env_qualname"] == "runtime_parameters_from_env"
     assert (
         plugin.contract_payload()["runtime_parameter_from_settings_module"]
-        == "bithumb_bot.research.strategy_registry"
+        == "bithumb_bot.research.sma_with_filter_plugin"
     )
     assert (
         plugin.contract_payload()["runtime_parameter_from_settings_qualname"]
-        == "_sma_runtime_parameters_from_settings"
+        == "runtime_parameters_from_settings"
     )
     assert plugin.exit_rule_factory is not None
     assert plugin.contract_payload()["exit_rule_factory_supported"] is True
-    assert plugin.contract_payload()["exit_rule_factory_module"] == "bithumb_bot.research.strategy_registry"
-    assert plugin.contract_payload()["exit_rule_factory_qualname"] == "_sma_exit_rule_factory"
+    assert plugin.contract_payload()["exit_rule_factory_module"] == "bithumb_bot.research.sma_with_filter_plugin"
+    assert plugin.contract_payload()["exit_rule_factory_qualname"] == "exit_rule_factory"
     assert plugin.contract_hash() == resolve_research_strategy_plugin("sma_with_filter").contract_hash()
     assert plugin.contract_hash() == plugin.contract_hash()
     requirements = research_strategy_data_requirements("sma_with_filter")
@@ -219,10 +220,12 @@ def test_research_strategy_registry_rejects_unknown_strategy() -> None:
 
 
 def test_sma_export_normalizer_is_not_imported_from_profile_cli() -> None:
-    source = inspect.getsource(strategy_registry)
+    source = Path("src/bithumb_bot/research/sma_with_filter_plugin.py").read_text(encoding="utf-8")
+    registry_source = inspect.getsource(strategy_registry)
 
+    assert "from bithumb_bot.profile_cli" not in registry_source
     assert "from bithumb_bot.profile_cli" not in source
-    assert "_sma_promotion_grade_research_export_decisions" not in source
+    assert "_sma_promotion_grade_research_export_decisions" not in registry_source
     assert "sma_promotion_grade_research_export_decisions" in source
 
 

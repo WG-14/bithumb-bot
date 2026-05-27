@@ -145,35 +145,12 @@ class _BacktestAccumulator:
         raw_signal = str(payload.get("raw_signal") or "").upper()
         if raw_signal in {"BUY", "SELL"}:
             self.signal_count += 1
-        raw_filter_would_block = bool(
-            payload.get("raw_filter_would_block", payload.get("entry_filter_blocked"))
-        )
-        entry_blocked = bool(payload.get("entry_blocked"))
-        sellable_qty = float(payload.get("sellable_qty") or 0.0)
-        if raw_signal == "BUY" and entry_blocked:
-            self._increment_diagnostic("raw_buy_filter_blocked_count")
-        if raw_signal == "SELL" and raw_filter_would_block and sellable_qty > 1e-12:
-            self._increment_diagnostic("raw_sell_filter_blocked_while_in_position_count")
-        if bool(payload.get("exit_filter_suppression_prevented")):
-            self._increment_diagnostic("exit_filter_suppression_prevented_count")
-        for evaluation in payload.get("exit_evaluations") or []:
-            if not isinstance(evaluation, dict):
-                continue
-            context = evaluation.get("context") if isinstance(evaluation.get("context"), dict) else {}
-            rule = str(evaluation.get("rule") or context.get("rule") or "")
-            if rule == "opposite_cross":
-                if bool(context.get("opposite_cross_triggered")):
-                    self._increment_diagnostic("opposite_cross_triggered_count")
-                if bool(context.get("filter_applied")):
-                    zone = str(context.get("filter_zone") or "")
-                    if zone == "small_loss":
-                        self._increment_diagnostic("opposite_cross_deferred_small_loss_count")
-                    elif zone == "small_gain":
-                        self._increment_diagnostic("opposite_cross_deferred_small_gain_count")
-            elif rule == "stop_loss" and bool(evaluation.get("triggered")):
-                self._increment_diagnostic("stop_loss_exit_count")
-            elif rule == "max_holding_time" and bool(evaluation.get("triggered")):
-                self._increment_diagnostic("max_holding_exit_count")
+        for key, value in _diagnostic_count_defaults(payload).items():
+            self.strategy_diagnostic_counts.setdefault(key, int(value))
+        for key, value in _diagnostic_count_increments(payload).items():
+            self.strategy_diagnostic_counts[key] = (
+                int(self.strategy_diagnostic_counts.get(key, 0)) + int(value)
+            )
         self.decision_hash_material.append(str(payload.get("replay_fingerprint_hash") or ""))
         self.behavior_hash_material.append(
             {
@@ -340,32 +317,15 @@ class _BacktestAccumulator:
         }
 
     def strategy_diagnostics(self, *, trades: list[dict[str, object]]) -> dict[str, object]:
-        return _strategy_diagnostics_from_trades(
+        payload = _strategy_diagnostics_from_trades(
             namespace=self.diagnostics_namespace,
             trades=trades,
-            **{
-                "raw_sell_filter_blocked_while_in_position_count": int(
-                    self.strategy_diagnostic_counts.get("raw_sell_filter_blocked_while_in_position_count", 0)
-                ),
-                "raw_buy_filter_blocked_count": int(
-                    self.strategy_diagnostic_counts.get("raw_buy_filter_blocked_count", 0)
-                ),
-                "opposite_cross_triggered_count": int(
-                    self.strategy_diagnostic_counts.get("opposite_cross_triggered_count", 0)
-                ),
-                "opposite_cross_deferred_small_loss_count": int(
-                    self.strategy_diagnostic_counts.get("opposite_cross_deferred_small_loss_count", 0)
-                ),
-                "opposite_cross_deferred_small_gain_count": int(
-                    self.strategy_diagnostic_counts.get("opposite_cross_deferred_small_gain_count", 0)
-                ),
-                "stop_loss_exit_count": int(self.strategy_diagnostic_counts.get("stop_loss_exit_count", 0)),
-                "max_holding_exit_count": int(self.strategy_diagnostic_counts.get("max_holding_exit_count", 0)),
-                "exit_filter_suppression_prevented_count": int(
-                    self.strategy_diagnostic_counts.get("exit_filter_suppression_prevented_count", 0)
-                ),
-            },
         )
+        for key in sorted(self.strategy_diagnostic_counts):
+            payload[key] = int(self.strategy_diagnostic_counts[key])
+        strategy_specific = dict(payload)
+        payload["strategy_specific_diagnostics"] = {self.diagnostics_namespace: strategy_specific}
+        return payload
 
 
 @dataclass
@@ -2044,18 +2004,38 @@ def execution_event_summary(trades: Any) -> dict[str, object]:
     }
 
 
+def _diagnostic_count_defaults(payload: dict[str, object]) -> dict[str, int]:
+    defaults = payload.get("strategy_diagnostic_count_defaults")
+    if not isinstance(defaults, dict):
+        return {}
+    return {
+        str(key): int(value)
+        for key, value in defaults.items()
+        if _diagnostic_key_is_public(str(key))
+    }
+
+
+def _diagnostic_count_increments(payload: dict[str, object]) -> dict[str, int]:
+    counts = payload.get("strategy_diagnostic_counts")
+    if not isinstance(counts, dict):
+        return {}
+    increments: dict[str, int] = {}
+    for key, value in counts.items():
+        normalized = str(key)
+        if not _diagnostic_key_is_public(normalized):
+            continue
+        increments[normalized] = increments.get(normalized, 0) + int(value)
+    return increments
+
+
+def _diagnostic_key_is_public(key: str) -> bool:
+    return bool(key) and not key.startswith("_")
+
+
 def _strategy_diagnostics_from_trades(
     *,
     namespace: str = "sma_with_filter",
     trades: list[dict[str, object]],
-    raw_sell_filter_blocked_while_in_position_count: int,
-    raw_buy_filter_blocked_count: int,
-    opposite_cross_triggered_count: int,
-    opposite_cross_deferred_small_loss_count: int,
-    opposite_cross_deferred_small_gain_count: int,
-    stop_loss_exit_count: int,
-    max_holding_exit_count: int,
-    exit_filter_suppression_prevented_count: int,
 ) -> dict[str, object]:
     closed = [
         trade
@@ -2080,14 +2060,6 @@ def _strategy_diagnostics_from_trades(
             loss_holding_minutes.append(float(trade.get("holding_minutes") or 0.0))
     payload = {
         "schema_version": 1,
-        "raw_sell_filter_blocked_while_in_position_count": int(raw_sell_filter_blocked_while_in_position_count),
-        "raw_buy_filter_blocked_count": int(raw_buy_filter_blocked_count),
-        "opposite_cross_triggered_count": int(opposite_cross_triggered_count),
-        "opposite_cross_deferred_small_loss_count": int(opposite_cross_deferred_small_loss_count),
-        "opposite_cross_deferred_small_gain_count": int(opposite_cross_deferred_small_gain_count),
-        "stop_loss_exit_count": int(stop_loss_exit_count),
-        "max_holding_exit_count": int(max_holding_exit_count),
-        "exit_filter_suppression_prevented_count": int(exit_filter_suppression_prevented_count),
         "exit_reason_distribution": dict(sorted(exit_reason_distribution.items())),
         "mae_pct_by_trade": mae_pct_by_trade,
         "mfe_pct_by_trade": mfe_pct_by_trade,
@@ -2409,3 +2381,30 @@ def _max_consecutive_losses(values: list[float]) -> int:
         else:
             current = 0
     return longest
+
+
+closed_trade_diagnostics = _closed_trade_diagnostics
+complete_audit_trace = _complete_audit_trace
+create_exit_rules = _create_exit_rules
+depth_request_fields = _depth_request_fields
+apply_pending_fills = _apply_pending_fills
+empty_metrics = _empty_metrics
+empty_metrics_v2 = _empty_metrics_v2
+execution_reference_warnings = _execution_reference_warnings
+failed_fill = _failed_fill
+fill_applies_to_mark = _fill_applies_to_mark
+fill_effective_ts = _fill_effective_ts
+mark_pending_fills_at_end = _mark_pending_fills_at_end
+metrics = _metrics
+metrics_v2_ledgers_from_trades = _metrics_v2_ledgers_from_trades
+model_latency_ms = _model_latency_ms
+pending_trade_from_fill = _pending_trade_from_fill
+record_equity_mark = _record_equity_mark
+research_decision_payload = _research_decision_payload
+retained_detail_summary = _retained_detail_summary
+timing_request_fields = _timing_request_fields
+trace_decision = _trace_decision
+trace_equity_mark = _trace_equity_mark
+trace_execution = _trace_execution
+trade_from_fill = _trade_from_fill
+trade_hash_payload = _trade_hash_payload
