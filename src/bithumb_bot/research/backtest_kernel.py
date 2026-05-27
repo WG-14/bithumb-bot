@@ -872,6 +872,11 @@ def _run_decision_event_backtest_impl(
             raw_filter_would_block = bool(policy_decision.trace.get("raw_filter_would_block"))
             entry_filter_blocked = bool(policy_decision.trace.get("entry_blocked"))
             entry_signal = str(policy_decision.entry_signal or raw_signal).upper()
+            exit_signal = str(policy_decision.exit_signal or raw_signal).upper()
+            blocked_filters = list(policy_decision.blocked_filters)
+        else:
+            exit_signal = str(event.exit_signal or event.raw_signal or "HOLD").upper()
+            blocked_filters = list(event.blocked_filters)
         market_regime_decision = (
             dict(getattr(entry_decision, "candidate_regime_decision"))
             if entry_decision is not None
@@ -1061,7 +1066,7 @@ def _run_decision_event_backtest_impl(
             decision_ts=decision_boundary_ts,
             raw_signal=raw_signal,
             entry_signal=entry_signal,
-            exit_signal=event.exit_signal or event.raw_signal,
+            exit_signal=exit_signal,
             final_signal=action,
             raw_reason=raw_reason,
             blocked=bool(blocked or (raw_signal in {"BUY", "SELL"} and action == "HOLD")),
@@ -1069,7 +1074,7 @@ def _run_decision_event_backtest_impl(
             entry_blocked=entry_blocked,
             protective_exit_overrode_entry=protective_exit_overrode_entry,
             exit_filter_suppression_prevented=exit_filter_suppression_prevented,
-            blocked_filters=list(event.blocked_filters),
+            blocked_filters=blocked_filters,
             feature_snapshot=dict(event.feature_snapshot),
             regime_snapshot=regime_snapshot,
             entry_reason=block_reason,

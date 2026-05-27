@@ -22,6 +22,7 @@ from bithumb_bot.market_regime import MARKET_REGIME_VERSION
 from bithumb_bot.research.backtest_engine import SmaWithFilterDecisionAdapter
 from bithumb_bot.research.backtest_engine import run_sma_backtest
 from bithumb_bot.research import backtest_kernel
+from bithumb_bot.research import sma_with_filter_plugin
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.decision_event import ResearchDecisionEvent
 from bithumb_bot.research.experiment_manifest import (
@@ -565,14 +566,36 @@ def test_live_wrapper_and_research_adapter_share_policy_entry_boundary() -> None
         timing_policy=ExecutionTimingPolicy(),
     ).build_events(_dataset_from_closes(closes))
     research_event = events[-1]
+    research_decision = sma_with_filter_plugin.research_policy_decision_builder(
+        event=research_event,
+        dataset=_dataset_from_closes(closes),
+        candle_index=len(closes) - 1,
+        position=_flat_position(),
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_WINDOW": 3,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_LOOKBACK": 1,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        active_exit_policy={"rules": ()},
+        buy_fraction=0.99,
+    )
 
     assert runtime_decision is not None
-    assert runtime_decision.context["raw_signal"] == research_event.raw_signal == "BUY"
-    assert runtime_decision.context["entry_signal"] == research_event.entry_signal == "BUY"
-    assert runtime_decision.context["final_signal"] == research_event.final_signal == "BUY"
-    assert tuple(runtime_decision.context["blocked_filters"]) == research_event.blocked_filters == ()
+    assert research_decision is not None
+    assert runtime_decision.context["raw_signal"] == research_decision.raw_signal == "BUY"
+    assert runtime_decision.context["entry_signal"] == research_decision.entry_signal == "BUY"
+    assert runtime_decision.context["final_signal"] == research_decision.final_signal == "BUY"
+    assert tuple(runtime_decision.context["blocked_filters"]) == research_decision.blocked_filters == ()
     assert runtime_decision.context["pure_policy_hash"].startswith("sha256:")
-    assert research_event.extra_payload["pure_policy_hash"].startswith("sha256:")
+    assert "pure_policy_hash" not in research_event.extra_payload
 
 
 def test_runtime_db_and_research_adapter_policy_input_hashes_are_non_comparable_without_live_constraints() -> None:
@@ -620,10 +643,32 @@ def test_runtime_db_and_research_adapter_policy_input_hashes_are_non_comparable_
         timing_policy=ExecutionTimingPolicy(),
     ).build_events(_dataset_from_closes(closes))
     research_event = events[-1]
+    research_decision = sma_with_filter_plugin.research_policy_decision_builder(
+        event=research_event,
+        dataset=_dataset_from_closes(closes),
+        candle_index=len(closes) - 1,
+        position=_flat_position(),
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_WINDOW": 3,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_LOOKBACK": 1,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        active_exit_policy={"rules": ()},
+        buy_fraction=0.99,
+    )
 
     assert runtime_decision is not None
+    assert research_decision is not None
     runtime_trace = runtime_decision.context["pure_policy_trace"]
-    research_trace = research_event.extra_payload["pure_policy_trace"]
+    research_trace = research_decision.as_trace()
     assert runtime_trace["market"]["pair"] == research_trace["market"]["pair"] == "BTC_KRW"
     assert runtime_trace["market"]["interval"] == research_trace["market"]["interval"] == "1m"
     assert runtime_trace["market"]["candle_ts"] == research_trace["market"]["candle_ts"]
@@ -632,15 +677,15 @@ def test_runtime_db_and_research_adapter_policy_input_hashes_are_non_comparable_
     assert runtime_trace["final_reason"] == research_trace["final_reason"]
     assert runtime_decision.context["policy_input_hash"].startswith("sha256:")
     assert runtime_decision.context["policy_decision_hash"].startswith("sha256:")
-    assert research_event.extra_payload.get("policy_input_hash") is None
-    assert research_event.extra_payload.get("policy_decision_hash") is None
-    assert runtime_trace["execution_constraints"]["order_rules"] != (
+    assert research_decision.policy_input_hash.startswith("sha256:")
+    assert research_decision.policy_decision_hash.startswith("sha256:")
+    assert runtime_trace["execution_constraints"]["order_rules"] == (
         research_trace["execution_constraints"]["order_rules"]
     )
-    assert runtime_trace["execution_constraints"]["fee_authority"] != (
+    assert runtime_trace["execution_constraints"]["fee_authority"] == (
         research_trace["execution_constraints"]["fee_authority"]
     )
-    assert research_trace["position"]["terminal_state"] == "research_event_adapter_position_deferred_to_kernel"
+    assert research_trace["position"]["terminal_state"] == "flat"
 
 
 def test_research_adapter_does_not_override_policy_first_cross_when_prev_above_unknown() -> None:
@@ -661,14 +706,35 @@ def test_research_adapter_does_not_override_policy_first_cross_when_prev_above_u
     ).build_events(_dataset_from_closes(closes))
 
     first = events[0]
-    policy_trace = first.extra_payload["pure_policy_trace"]
+    decision = sma_with_filter_plugin.research_policy_decision_builder(
+        event=first,
+        dataset=_dataset_from_closes(closes),
+        candle_index=3,
+        position=_flat_position(),
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_WINDOW": 3,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_LOOKBACK": 1,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        active_exit_policy={"rules": ()},
+        buy_fraction=0.99,
+    )
+    assert decision is not None
+    policy_trace = decision.as_trace()
     assert first.extra_payload["prev_above"] is None
     assert policy_trace["market"]["previous_cross_state"] == "unknown"
     assert policy_trace["market"]["allow_initial_cross"] is False
-    assert first.raw_signal == policy_trace["raw_signal"] == "HOLD"
-    assert first.entry_signal == policy_trace["entry_signal"] == "HOLD"
-    assert first.final_signal == policy_trace["final_signal"] == "HOLD"
-    assert first.reason == policy_trace["final_reason"]
+    assert policy_trace["raw_signal"] == "HOLD"
+    assert policy_trace["entry_signal"] == "HOLD"
+    assert policy_trace["final_signal"] == "HOLD"
 
 
 def test_policy_can_allow_initial_cross_when_configured() -> None:
@@ -842,7 +908,7 @@ def test_runtime_decide_is_read_only_and_normalization_boundary_is_explicit() ->
     assert "conn.commit()" in normalizer_source
     assert "readonly_decision_context(" in builder_source
     assert "_load_position_context(" in builder_impl_source
-    assert "evaluate_sma_final_decision(" in builder_impl_source
+    assert "strategy.decide_snapshot(" in builder_impl_source
     assert "normalize_and_persist(" not in orchestration_source
     assert "normalize_and_persist(" in runtime_normalization_source
     assert "strategy.decide(" not in orchestration_source
@@ -909,6 +975,194 @@ def test_strategy_sma_is_compatibility_facade_not_implementation_authority() -> 
     assert SmaWithFilterStrategy.__module__ == "bithumb_bot.strategy.sma_policy_strategy"
     assert "evaluate_sma_final_decision(" in inspect.getsource(SmaWithFilterStrategy.decide_snapshot)
     assert "evaluate_sma_policy(" in inspect.getsource(SmaWithFilterStrategy.decide_entry_snapshot)
+
+
+def _called_function_names(module: object) -> set[str]:
+    tree = ast.parse(inspect.getsource(module))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            names.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            names.add(node.func.attr)
+    return names
+
+
+def test_environment_adapters_do_not_call_final_sma_assembler_directly() -> None:
+    forbidden = "evaluate_sma_final_decision"
+    assert forbidden not in _called_function_names(runtime_sma)
+    assert forbidden not in _called_function_names(sma_with_filter_plugin)
+    assert forbidden not in _called_function_names(backtest_kernel)
+
+
+def test_research_event_adapter_is_non_authoritative_source_boundary() -> None:
+    source = inspect.getsource(SmaWithFilterDecisionAdapter.build_events)
+    calls = _called_function_names(SmaWithFilterDecisionAdapter)
+    events = SmaWithFilterDecisionAdapter(
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        timing_policy=ExecutionTimingPolicy(),
+    ).build_events(_dataset_from_closes([10.0, 10.0, 10.0, 10.0, 11.0]))
+
+    assert "evaluate_sma_policy" not in calls
+    assert "evaluate_sma_final_decision" not in calls
+    assert "pure_policy_trace" not in source
+    assert events
+    event = events[-1]
+    assert event.raw_signal == "HOLD"
+    assert event.final_signal == "HOLD"
+    assert event.reason == "research_event_adapter_non_authoritative"
+    assert "entry_decision" not in event.extra_payload
+    assert "pure_policy_trace" not in event.extra_payload
+    assert "pure_policy_hash" not in event.extra_payload
+
+
+def test_live_and_research_policy_paths_call_same_strategy_entrypoint(monkeypatch) -> None:
+    calls: list[str] = []
+    original = SmaWithFilterStrategy.decide_snapshot
+
+    def _counting_decide_snapshot(self, *args, **kwargs):
+        calls.append(str(getattr(self, "name", "")))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(SmaWithFilterStrategy, "decide_snapshot", _counting_decide_snapshot)
+    closes = [10.0, 10.0, 10.0, 10.0, 11.0]
+    strategy = create_sma_with_filter_strategy(
+        short_n=2,
+        long_n=3,
+        pair="BTC_KRW",
+        interval="1m",
+        min_gap_ratio=0.0,
+        volatility_window=3,
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        slippage_bps=0.0,
+        live_fee_rate_estimate=0.0,
+        entry_edge_buffer_ratio=0.0,
+        cost_edge_enabled=False,
+        market_regime_enabled=False,
+        candidate_regime_policy=_allowing_policy(),
+    )
+    conn = _build_candle_db(closes)
+    try:
+        runtime_result = runtime_sma.build_sma_with_filter_runtime_decision_from_normalized_db(
+            conn,
+            strategy,
+            through_ts_ms=1_700_000_240_000,
+        )
+    finally:
+        conn.close()
+    events = SmaWithFilterDecisionAdapter(
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_WINDOW": 3,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_LOOKBACK": 1,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        timing_policy=ExecutionTimingPolicy(),
+    ).build_events(_dataset_from_closes(closes))
+    research_result = sma_with_filter_plugin.research_policy_decision_builder(
+        event=events[-1],
+        dataset=_dataset_from_closes(closes),
+        candle_index=len(closes) - 1,
+        position=_flat_position(),
+        parameter_values={
+            "SMA_SHORT": 2,
+            "SMA_LONG": 3,
+            "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+            "SMA_FILTER_VOL_WINDOW": 3,
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            "SMA_FILTER_OVEREXT_LOOKBACK": 1,
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.0,
+            "SMA_COST_EDGE_ENABLED": False,
+            "SMA_MARKET_REGIME_ENABLED": False,
+        },
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        active_exit_policy={"rules": ()},
+        buy_fraction=0.99,
+    )
+
+    assert runtime_result is not None
+    assert research_result is not None
+    assert calls == ["sma_with_filter", "sma_with_filter"]
+
+
+def test_live_research_equivalence_under_identical_policy_snapshots() -> None:
+    strategy = create_sma_with_filter_strategy(
+        short_n=2,
+        long_n=3,
+        pair="BTC_KRW",
+        interval="1m",
+        min_gap_ratio=0.0,
+        volatility_window=3,
+        min_volatility_ratio=0.0,
+        overextended_lookback=1,
+        overextended_max_return_ratio=0.0,
+        slippage_bps=0.0,
+        live_fee_rate_estimate=0.0,
+        entry_edge_buffer_ratio=0.0,
+        cost_edge_enabled=False,
+        market_regime_enabled=False,
+        exit_rule_names=["stop_loss", "opposite_cross"],
+    )
+    live_position = _open_position(unrealized_pnl=-1.0, unrealized_pnl_ratio=-0.1)
+    research_position = replace(
+        live_position,
+        terminal_state="research_simulated_open_exposure",
+    )
+    config = _policy_config()
+    execution_context = ExecutionConstraintSnapshot(
+        fee_rate_for_decision=0.0,
+        fee_authority={"fee_source": "fixture", "taker_bid_fee_rate": 0.0},
+        order_rules={"source": "fixture", "min_total": 5_000},
+    )
+    exit_config = _exit_policy_config(rule_names=("stop_loss", "opposite_cross"))
+
+    live_decision = strategy.decide_snapshot(
+        market=_market_window(),
+        position=live_position,
+        config=config,
+        execution_context=execution_context,
+        exit_policy_config=exit_config,
+    )
+    research_decision = strategy.decide_snapshot(
+        market=_market_window(),
+        position=research_position,
+        config=config,
+        execution_context=execution_context,
+        exit_policy_config=exit_config,
+    )
+
+    assert research_decision.final_signal == live_decision.final_signal
+    assert research_decision.raw_signal == live_decision.raw_signal
+    assert research_decision.entry_signal == live_decision.entry_signal
+    assert research_decision.exit_signal == live_decision.exit_signal
+    assert research_decision.exit_rule == live_decision.exit_rule
+    assert research_decision.execution_intent == live_decision.execution_intent
+    assert research_decision.policy_input_hash == live_decision.policy_input_hash
+    assert research_decision.policy_decision_hash == live_decision.policy_decision_hash
+    assert research_decision.policy_contract_hash == live_decision.policy_contract_hash
+    assert research_decision.exit_evaluations == live_decision.exit_evaluations
 
 
 class _CommitCountingConnection:
@@ -1980,5 +2234,7 @@ def test_research_adapter_placeholder_is_not_full_position_equivalence() -> None
         timing_policy=ExecutionTimingPolicy(),
     ).build_events(_dataset_from_closes([10.0, 10.0, 10.0, 10.0, 11.0]))
 
-    placeholder_state = events[-1].extra_payload["pure_policy_trace"]["position"]["terminal_state"]
-    assert placeholder_state == "research_event_adapter_position_deferred_to_kernel"
+    assert events[-1].extra_payload["non_authoritative_event_adapter"] is True
+    assert "entry_decision" not in events[-1].extra_payload
+    assert "pure_policy_hash" not in events[-1].extra_payload
+    assert "pure_policy_trace" not in events[-1].extra_payload

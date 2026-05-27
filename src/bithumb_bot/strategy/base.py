@@ -93,4 +93,6 @@ class StrategyPolicy(Protocol):
         position: PositionSnapshot,
         config: object,
         execution_context: ExecutionConstraintSnapshot,
+        exit_policy_config: object | None = None,
+        rule_sources: dict[str, str] | None = None,
     ) -> StrategyDecisionV2: ...

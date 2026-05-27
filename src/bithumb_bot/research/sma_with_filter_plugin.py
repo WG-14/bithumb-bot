@@ -281,11 +281,16 @@ def research_policy_decision_builder(
     )
     from bithumb_bot.canonical_decision import order_rules_snapshot_payload
     from bithumb_bot.strategy.exit_rules import ExitPolicyConfig
-    from bithumb_bot.strategy.sma_decision_assembler import evaluate_sma_final_decision
+    from bithumb_bot.strategy.sma_policy_strategy import create_sma_with_filter_strategy
 
     event_extra = event.extra_payload if isinstance(getattr(event, "extra_payload", None), dict) else {}
-    entry_decision = event_extra.get("entry_decision")
-    if entry_decision is None:
+    feature_snapshot = (
+        event.feature_snapshot if isinstance(getattr(event, "feature_snapshot", None), dict) else {}
+    )
+    required_event_fields = ("prev_s", "prev_l", "curr_s", "curr_l", "prev_above")
+    if any(key not in event_extra for key in required_event_fields):
+        return None
+    if "gap_ratio" not in feature_snapshot or "range_ratio" not in feature_snapshot:
         return None
     candles = dataset.candles[: candle_index + 1]
     prev_above = event_extra.get("prev_above")
@@ -299,11 +304,10 @@ def research_policy_decision_builder(
         prev_l=float(event_extra.get("prev_l", 0.0) or 0.0),
         curr_s=float(event_extra.get("curr_s", 0.0) or 0.0),
         curr_l=float(event_extra.get("curr_l", 0.0) or 0.0),
-        gap_ratio=float(getattr(entry_decision, "gap_ratio", 0.0) or 0.0),
-        volatility_ratio=float(getattr(entry_decision, "volatility_ratio", 0.0) or 0.0),
-        overextended_ratio=float(getattr(entry_decision, "overextended_ratio", 0.0) or 0.0),
+        gap_ratio=float(feature_snapshot.get("gap_ratio", 0.0) or 0.0),
+        volatility_ratio=float(feature_snapshot.get("range_ratio", 0.0) or 0.0),
+        overextended_ratio=float(event_extra.get("overextended_ratio", 0.0) or 0.0),
         market_regime_snapshot=dict(event_extra.get("regime_snapshot") or {}),
-        entry_decision=entry_decision,
         through_ts_ms=int(event.candle_ts),
         previous_cross_state=previous_cross_state,
         allow_initial_cross=False,
@@ -353,7 +357,32 @@ def research_policy_decision_builder(
         for name in active_exit_policy.get("rules") or ()
     }
     fee = float(parameter_values.get("LIVE_FEE_RATE_ESTIMATE") or fee_rate)
-    return evaluate_sma_final_decision(
+    strategy = create_sma_with_filter_strategy(
+        short_n=int(parameter_values.get("SMA_SHORT") or 0),
+        long_n=int(parameter_values.get("SMA_LONG") or 0),
+        pair=dataset.market,
+        interval=dataset.interval,
+        min_gap_ratio=float(parameter_values.get("SMA_FILTER_GAP_MIN_RATIO") or 0.0),
+        volatility_window=int(parameter_values.get("SMA_FILTER_VOL_WINDOW") or 1),
+        min_volatility_ratio=float(parameter_values.get("SMA_FILTER_VOL_MIN_RANGE_RATIO") or 0.0),
+        overextended_lookback=int(parameter_values.get("SMA_FILTER_OVEREXT_LOOKBACK") or 1),
+        overextended_max_return_ratio=float(
+            parameter_values.get("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO") or 0.0
+        ),
+        slippage_bps=float(parameter_values.get("STRATEGY_ENTRY_SLIPPAGE_BPS", slippage_bps) or 0.0),
+        live_fee_rate_estimate=float(parameter_values.get("LIVE_FEE_RATE_ESTIMATE") or fee_rate),
+        entry_edge_buffer_ratio=float(parameter_values.get("ENTRY_EDGE_BUFFER_RATIO") or 0.0),
+        cost_edge_enabled=bool(parameter_values.get("SMA_COST_EDGE_ENABLED", True)),
+        cost_edge_min_ratio=float(parameter_values.get("SMA_COST_EDGE_MIN_RATIO") or 0.0),
+        market_regime_enabled=bool(parameter_values.get("SMA_MARKET_REGIME_ENABLED", True)),
+        candidate_regime_policy=None,
+        exit_rule_names=list(active_exit_policy.get("rules") or ()),
+        exit_stop_loss_ratio=float(active_exit_policy.get("stop_loss", {}).get("stop_loss_ratio", 0.0)),
+        exit_max_holding_min=int(active_exit_policy.get("max_holding_time", {}).get("max_holding_min", 0.0)),
+        exit_min_take_profit_ratio=float(strategy_specific_policy.get("min_take_profit_ratio", 0.0)),
+        exit_small_loss_tolerance_ratio=float(strategy_specific_policy.get("small_loss_tolerance_ratio", 0.0)),
+    )
+    return strategy.decide_snapshot(
         market=market,
         position=position,
         config=config,

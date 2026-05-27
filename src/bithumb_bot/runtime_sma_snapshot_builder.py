@@ -41,7 +41,6 @@ from .runtime_sma_context import (
 )
 from .strategy.base import PositionContext, StrategyDecision
 from .strategy.exit_rules import ExitPolicyConfig
-from .strategy.sma_decision_assembler import evaluate_sma_final_decision
 
 
 @dataclass(frozen=True)
@@ -564,7 +563,7 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
         small_loss_tolerance_ratio=float(strategy.exit_small_loss_tolerance_ratio),
         stop_loss_ratio=float(strategy.exit_stop_loss_ratio),
     )
-    final_policy_decision = evaluate_sma_final_decision(
+    final_policy_decision = strategy.decide_snapshot(
         market=market_snapshot,
         position=position_snapshot,
         config=policy_config,

@@ -75,13 +75,18 @@ class SmaWithFilterStrategy:
         position: PositionSnapshot,
         config: SmaPolicyConfig,
         execution_context: ExecutionConstraintSnapshot,
+        exit_policy_config: ExitPolicyConfig | None = None,
+        rule_sources: dict[str, str] | None = None,
     ) -> StrategyDecisionV2:
         return evaluate_sma_final_decision(
             market=market,
             position=position,
             config=config,
             execution_context=execution_context,
-            exit_policy_config=self.exit_policy_config(),
+            exit_policy_config=(
+                self.exit_policy_config() if exit_policy_config is None else exit_policy_config
+            ),
+            rule_sources=rule_sources,
         )
 
     def decide_runtime_snapshot(

@@ -2510,7 +2510,7 @@ def test_feature_based_sma_entry_decision_matches_legacy_filter_cases() -> None:
     )
 
 
-def test_sma_backtest_hot_loop_uses_precomputed_feature_path(monkeypatch) -> None:
+def test_sma_backtest_event_adapter_does_not_precompute_policy_authority(monkeypatch) -> None:
     snapshot = _snapshot_from_closes([100, 99, 98, 97, 99, 102, 105, 104, 103, 100, 98, 96])
 
     def fail_sma(*args, **kwargs):
@@ -2535,7 +2535,11 @@ def test_sma_backtest_hot_loop_uses_precomputed_feature_path(monkeypatch) -> Non
     )
 
     assert result.decisions
-    assert calls == len(snapshot.candles) - 4
+    assert calls == 0
+    assert all(
+        decision["research_policy_recomputed_with_simulated_position"] is True
+        for decision in result.decisions
+    )
 
 
 def test_sma_decision_adapter_emits_deterministic_strategy_events() -> None:
@@ -2564,24 +2568,23 @@ def test_sma_decision_adapter_emits_deterministic_strategy_events() -> None:
     assert {event.strategy_version for event in first} == {
         strategy_spec_for_name("sma_with_filter").strategy_version
     }
-    assert any(event.raw_signal == "BUY" for event in first)
-    assert any(event.raw_signal == "SELL" for event in first)
-    buy = next(event for event in first if event.raw_signal == "BUY")
-    assert buy.order_intent == {"side": "BUY", "sizing": "portfolio_policy_fractional_cash"}
-    assert buy.exit_intent == {
+    assert all(event.raw_signal == "HOLD" for event in first)
+    assert all(event.final_signal == "HOLD" for event in first)
+    assert all(event.reason == "research_event_adapter_non_authoritative" for event in first)
+    event = first[0]
+    assert event.order_intent is None
+    assert event.exit_intent == {
         "mode": "evaluate_exit_policy",
-        "base_signal": "BUY",
-        "base_reason": "sma golden cross",
+        "base_signal": "HOLD",
+        "base_reason": "research_event_adapter_non_authoritative",
     }
-    assert buy.feature_snapshot["short_sma"] > buy.feature_snapshot["long_sma"]
-    assert buy.strategy_diagnostics["adapter"] == "SmaWithFilterDecisionAdapter"
-    assert buy.extra_payload["adapter"] == "SmaWithFilterDecisionAdapter"
-    sell = next(event for event in first if event.raw_signal == "SELL")
-    assert sell.exit_intent == {
-        "mode": "evaluate_exit_policy",
-        "base_signal": "SELL",
-        "base_reason": "sma dead cross",
-    }
+    assert event.strategy_diagnostics["adapter"] == "SmaWithFilterDecisionAdapter"
+    assert event.strategy_diagnostics["authority"] == "historical_feature_serialization_only"
+    assert event.extra_payload["adapter"] == "SmaWithFilterDecisionAdapter"
+    assert event.extra_payload["non_authoritative_event_adapter"] is True
+    assert "entry_decision" not in event.extra_payload
+    assert "pure_policy_hash" not in event.extra_payload
+    assert "pure_policy_trace" not in event.extra_payload
 
 
 def test_sma_backtest_consumes_sma_decision_adapter_events(monkeypatch) -> None:
