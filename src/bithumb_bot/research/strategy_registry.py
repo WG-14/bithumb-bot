@@ -32,6 +32,10 @@ ResearchStrategyRunner = Callable[
     BacktestRun,
 ]
 RuntimeReplayBuilder = Callable[[dict[str, Any], dict[str, Any] | None], Any]
+SingleReplayBundleBuilder = Callable[
+    [Any, Any, int, dict[str, object] | None],
+    dict[str, Any] | None,
+]
 RuntimeEnvParameterExtractor = Callable[[dict[str, str]], dict[str, Any]]
 RuntimeSettingsParameterExtractor = Callable[[object], dict[str, Any]]
 DecisionPayloadAdapter = Callable[[dict[str, object], Any], dict[str, object]]
@@ -58,6 +62,31 @@ ResearchExportNormalizer = Callable[
 
 class ResearchStrategyRegistryError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class RuntimeReplayStrategyAdapter:
+    strategy: Any
+    runtime_decision_builder: Callable[..., Any]
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self.strategy, "name", ""))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.strategy, name)
+
+    def decide_runtime_snapshot(
+        self,
+        conn: Any,
+        *,
+        through_ts_ms: int | None = None,
+    ) -> Any:
+        return self.runtime_decision_builder(
+            conn,
+            self.strategy,
+            through_ts_ms=through_ts_ms,
+        )
 
 
 @dataclass(frozen=True)
@@ -163,6 +192,8 @@ class ResearchStrategyPlugin:
     exit_signal_context_builder: ExitSignalContextBuilder | None = None
     exit_rule_factory: ExitRuleFactory | None = None
     research_export_normalizer: ResearchExportNormalizer | None = None
+    runtime_decision_adapter_factory: Callable[[], Any] | None = None
+    single_replay_bundle_builder: SingleReplayBundleBuilder | None = None
 
     def contract_payload(self) -> dict[str, Any]:
         data_requirements = ResearchStrategyDataRequirements(
@@ -246,6 +277,28 @@ class ResearchStrategyPlugin:
                 if self.research_export_normalizer is not None
                 else None
             ),
+            "runtime_decision_adapter_supported": self.runtime_decision_adapter_factory is not None,
+            "runtime_decision_adapter_module": (
+                self.runtime_decision_adapter_factory.__module__
+                if self.runtime_decision_adapter_factory is not None
+                else None
+            ),
+            "runtime_decision_adapter_qualname": (
+                self.runtime_decision_adapter_factory.__qualname__
+                if self.runtime_decision_adapter_factory is not None
+                else None
+            ),
+            "single_replay_bundle_supported": self.single_replay_bundle_builder is not None,
+            "single_replay_bundle_builder_module": (
+                self.single_replay_bundle_builder.__module__
+                if self.single_replay_bundle_builder is not None
+                else None
+            ),
+            "single_replay_bundle_builder_qualname": (
+                self.single_replay_bundle_builder.__qualname__
+                if self.single_replay_bundle_builder is not None
+                else None
+            ),
         }
 
     def contract_hash(self) -> str:
@@ -299,7 +352,7 @@ def _build_sma_runtime_replay_strategy(
 
     params = profile.get("strategy_parameters") if isinstance(profile.get("strategy_parameters"), dict) else {}
     cost = profile.get("cost_model") if isinstance(profile.get("cost_model"), dict) else {}
-    return create_sma_with_filter_strategy(
+    strategy = create_sma_with_filter_strategy(
         short_n=int(params.get("SMA_SHORT", settings.SMA_SHORT)),
         long_n=int(params.get("SMA_LONG", settings.SMA_LONG)),
         pair=str(profile.get("market") or settings.PAIR),
@@ -337,6 +390,12 @@ def _build_sma_runtime_replay_strategy(
             )
         ),
         candidate_regime_policy=candidate_regime_policy,
+    )
+    from bithumb_bot.runtime_sma_snapshot import decide_sma_with_filter_runtime_snapshot_from_db
+
+    return RuntimeReplayStrategyAdapter(
+        strategy=strategy,
+        runtime_decision_builder=decide_sma_with_filter_runtime_snapshot_from_db,
     )
 
 
@@ -514,6 +573,28 @@ def _sma_exit_rule_factory(
     )
 
 
+def _sma_runtime_decision_adapter_factory() -> Any:
+    from bithumb_bot.runtime_adapters.sma_with_filter import SmaWithFilterRuntimeDecisionAdapter
+
+    return SmaWithFilterRuntimeDecisionAdapter()
+
+
+def _sma_single_replay_bundle_builder(
+    conn: Any,
+    strategy: Any,
+    through_ts_ms: int,
+    readiness_payload: dict[str, object] | None,
+) -> dict[str, Any] | None:
+    from bithumb_bot.runtime_sma_snapshot import build_sma_with_filter_replay_bundle
+
+    return build_sma_with_filter_replay_bundle(
+        conn,
+        strategy,
+        through_ts_ms=int(through_ts_ms),
+        readiness_payload=readiness_payload,
+    )
+
+
 def runtime_strategy_parameters_from_env(strategy_name: str, env: dict[str, str]) -> dict[str, Any]:
     plugin = resolve_research_strategy_plugin(strategy_name)
     if plugin.runtime_parameter_adapter is None:
@@ -668,6 +749,8 @@ _SMA_WITH_FILTER_PLUGIN = ResearchStrategyPlugin(
     exit_signal_context_builder=_sma_exit_signal_context,
     exit_rule_factory=_sma_exit_rule_factory,
     research_export_normalizer=_sma_research_export_normalizer,
+    runtime_decision_adapter_factory=_sma_runtime_decision_adapter_factory,
+    single_replay_bundle_builder=_sma_single_replay_bundle_builder,
 )
 
 _NOOP_BASELINE_PLUGIN = ResearchStrategyPlugin(
@@ -702,3 +785,24 @@ _RESEARCH_STRATEGY_PLUGINS: dict[str, ResearchStrategyPlugin] = {
     _NOOP_BASELINE_PLUGIN.name: _NOOP_BASELINE_PLUGIN,
     _BUY_AND_HOLD_BASELINE_PLUGIN.name: _BUY_AND_HOLD_BASELINE_PLUGIN,
 }
+
+
+def register_research_strategy_plugin(plugin: ResearchStrategyPlugin) -> None:
+    key = str(plugin.name or "").strip().lower()
+    if not key:
+        raise ResearchStrategyRegistryError("research strategy plugin name must be non-empty")
+    _RESEARCH_STRATEGY_PLUGINS[key] = plugin
+
+
+def list_research_strategy_plugins() -> tuple[ResearchStrategyPlugin, ...]:
+    return tuple(_RESEARCH_STRATEGY_PLUGINS[name] for name in sorted(_RESEARCH_STRATEGY_PLUGINS))
+
+
+def _load_external_strategy_plugins() -> None:
+    from bithumb_bot.strategy_plugins import iter_builtin_strategy_plugins
+
+    for plugin in iter_builtin_strategy_plugins():
+        register_research_strategy_plugin(plugin)
+
+
+_load_external_strategy_plugins()

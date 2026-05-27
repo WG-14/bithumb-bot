@@ -1748,8 +1748,6 @@ def run_loop(short_n: int, long_n: int) -> None:
                     "signal": typed_runtime_decision.decision.final_signal,
                     "reason": typed_runtime_decision.decision.final_reason,
                     "strategy": typed_runtime_decision.decision.strategy_name,
-                    "curr_s": typed_runtime_decision.base_context.get("curr_s"),
-                    "curr_l": typed_runtime_decision.base_context.get("curr_l"),
                 }
             else:
                 typed_runtime_failure_reason = _typed_runtime_handoff_failure_reason(
@@ -1789,8 +1787,8 @@ def run_loop(short_n: int, long_n: int) -> None:
                 last_processed_candle_ts=last_processed_candle_ts_ms,
                 close=f"{r['last_close']:,.0f}",
                 signal=r["signal"],
-                sma_short=f"SMA{short_n}={r['curr_s']:.2f}",
-                sma_long=f"SMA{long_n}={r['curr_l']:.2f}",
+                strategy=r["strategy"],
+                reason=r["reason"],
             )
             runtime_state.mark_processed_candle(candle_ts_ms=int(r["ts"]), now_epoch_sec=now)
 

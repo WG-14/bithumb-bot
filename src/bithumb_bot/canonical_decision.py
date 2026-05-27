@@ -444,17 +444,21 @@ def runtime_decision_to_canonical_event(
         "block_reason": block_reason if blocked else "",
         "blocked_filters": blocked_filters,
         "feature_snapshot": context.get("feature_snapshot") or context.get("features") or {},
-        "strategy_specific_payload": _legacy_sma_strategy_payload(
-            {
-                "prev_s": context.get("prev_s"),
-                "prev_l": context.get("prev_l"),
-                "curr_s": context.get("curr_s"),
-                "curr_l": context.get("curr_l"),
-                "gap_ratio": context.get("gap_ratio"),
-                "range_ratio": _range_ratio_from_filters(filters),
-                "expected_edge_ratio": cost_edge.get("value"),
-                "required_edge_ratio": cost_edge.get("threshold"),
-            }
+        "strategy_specific_payload": (
+            dict(context.get("strategy_specific_payload"))
+            if isinstance(context.get("strategy_specific_payload"), dict)
+            else _legacy_sma_strategy_payload(
+                {
+                    "prev_s": context.get("prev_s"),
+                    "prev_l": context.get("prev_l"),
+                    "curr_s": context.get("curr_s"),
+                    "curr_l": context.get("curr_l"),
+                    "gap_ratio": context.get("gap_ratio"),
+                    "range_ratio": _range_ratio_from_filters(filters),
+                    "expected_edge_ratio": cost_edge.get("value"),
+                    "required_edge_ratio": cost_edge.get("threshold"),
+                }
+            )
         ),
         "strategy_diagnostics_namespace": str(context.get("strategy") or ""),
         "strategy_diagnostics": context.get("strategy_diagnostics") if isinstance(context.get("strategy_diagnostics"), dict) else {},
@@ -943,42 +947,46 @@ def export_runtime_replay_decisions(
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for through_ts_ms in through_ts_list:
-        if str(getattr(strategy, "name", "")).strip().lower() == "sma_with_filter":
-            from bithumb_bot.runtime_sma_snapshot import (
-                decide_sma_with_filter_runtime_snapshot_from_db,
-                decide_sma_with_filter_snapshot_from_db,
+        if hasattr(strategy, "decide_runtime_snapshot"):
+            runtime_result = strategy.decide_runtime_snapshot(
+                conn,
+                through_ts_ms=int(through_ts_ms),
             )
-
-            if hasattr(strategy, "interval"):
-                runtime_result = decide_sma_with_filter_runtime_snapshot_from_db(
-                    conn,
-                    strategy,
-                    through_ts_ms=int(through_ts_ms),
-                )
-                if runtime_result is None:
-                    continue
-                execution_plan_bundle = build_runtime_replay_execution_plan_bundle(
-                    conn,
-                    runtime_result,
-                    readiness_payload_builder=replay_readiness_builder,
-                )
+            if runtime_result is None:
+                continue
+            execution_plan_bundle = build_runtime_replay_execution_plan_bundle(
+                conn,
+                runtime_result,
+                readiness_payload_builder=replay_readiness_builder,
+            )
+            if hasattr(runtime_result, "legacy_strategy_decision"):
                 decision = runtime_result.legacy_strategy_decision()
-                replay_signal_candidates = {
-                    str(runtime_result.decision.raw_signal or "").upper(),
-                    str(runtime_result.decision.final_signal or "").upper(),
-                }
-                if execution_plan_bundle.persistence_context and replay_signal_candidates & {"BUY", "SELL"}:
-                    decision = replace(decision, context=dict(execution_plan_bundle.persistence_context))
-                    runtime_replay_planning_error = str(execution_plan_bundle.planning_error or "")
-                else:
-                    execution_plan_bundle = None
-                    runtime_replay_planning_error = ""
             else:
-                decision = decide_sma_with_filter_snapshot_from_db(
-                    conn,
-                    strategy,
-                    through_ts_ms=int(through_ts_ms),
+                from bithumb_bot.strategy.base import StrategyDecision
+
+                legacy_payload = runtime_result.as_legacy_dict()
+                decision = StrategyDecision(
+                    signal=str(legacy_payload.get("final_signal") or legacy_payload.get("signal") or "HOLD"),
+                    reason=str(legacy_payload.get("final_reason") or legacy_payload.get("reason") or ""),
+                    context=legacy_payload,
                 )
+            replay_signal_candidates = {
+                str(runtime_result.decision.raw_signal or "").upper(),
+                str(runtime_result.decision.final_signal or "").upper(),
+            }
+            include_hold_execution_context = bool(
+                getattr(strategy, "include_hold_execution_context_in_replay", False)
+            )
+            if execution_plan_bundle.persistence_context and replay_signal_candidates & {"BUY", "SELL"}:
+                decision = replace(decision, context=dict(execution_plan_bundle.persistence_context))
+                runtime_replay_planning_error = str(execution_plan_bundle.planning_error or "")
+            elif execution_plan_bundle.persistence_context and include_hold_execution_context:
+                decision = replace(
+                    decision,
+                    context={**dict(decision.context), **dict(execution_plan_bundle.persistence_context)},
+                )
+                runtime_replay_planning_error = str(execution_plan_bundle.planning_error or "")
+            else:
                 execution_plan_bundle = None
                 runtime_replay_planning_error = ""
         else:

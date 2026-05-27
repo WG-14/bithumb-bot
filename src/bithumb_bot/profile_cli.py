@@ -9,8 +9,6 @@ from .canonical_decision import (
     export_runtime_replay_decisions,
     order_rules_snapshot_payload,
 )
-from .runtime_sma_snapshot import build_sma_with_filter_replay_bundle
-from .strategy import create_strategy_policy
 from .approved_profile import (
     ApprovedProfileError,
     build_approved_profile,
@@ -640,14 +638,23 @@ def cmd_replay_decision(
 ) -> int:
     try:
         selected_strategy = str(strategy_name or "").strip().lower()
-        if selected_strategy != "sma_with_filter":
+        plugin = resolve_research_strategy_plugin(selected_strategy)
+        if plugin.runtime_replay_builder is None or plugin.single_replay_bundle_builder is None:
             raise ValueError(f"replay_decision_unsupported_strategy:{selected_strategy or 'missing'}")
-        strategy = create_strategy_policy(
-            selected_strategy,
-            short_n=int(settings.SMA_SHORT),
-            long_n=int(settings.SMA_LONG),
-            pair=str(settings.PAIR),
-            interval=str(settings.INTERVAL),
+        strategy = plugin.runtime_replay_builder(
+            {
+                "strategy_name": selected_strategy,
+                "market": str(settings.PAIR),
+                "interval": str(settings.INTERVAL),
+                "strategy_parameters": plugin.runtime_parameter_adapter.from_settings(settings)
+                if plugin.runtime_parameter_adapter is not None
+                else {},
+                "cost_model": {
+                    "fee_rate": float(settings.LIVE_FEE_RATE_ESTIMATE),
+                    "slippage_bps": float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+                },
+            },
+            None,
         )
         resolved_db_path = Path(db_path).expanduser().resolve()
         readiness_payload = None
@@ -659,11 +666,11 @@ def cmd_replay_decision(
             readiness_payload = dict(raw_readiness)
         conn = sqlite3.connect(f"file:{resolved_db_path}?mode=ro", uri=True)
         try:
-            bundle = build_sma_with_filter_replay_bundle(
+            bundle = plugin.single_replay_bundle_builder(
                 conn,
                 strategy,
-                through_ts_ms=int(candle_ts),
-                readiness_payload=readiness_payload,
+                int(candle_ts),
+                readiness_payload,
             )
         finally:
             conn.close()

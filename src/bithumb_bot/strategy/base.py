@@ -8,7 +8,6 @@ from bithumb_bot.core.sma_policy import (
     ExecutionConstraintSnapshot,
     MarketWindow,
     PositionSnapshot,
-    SmaPolicyConfig,
     StrategyDecisionV2,
 )
 
@@ -93,6 +92,6 @@ class StrategyPolicy(Protocol):
         *,
         market: MarketWindow,
         position: PositionSnapshot,
-        config: SmaPolicyConfig,
+        config: object,
         execution_context: ExecutionConstraintSnapshot,
     ) -> StrategyDecisionV2: ...
