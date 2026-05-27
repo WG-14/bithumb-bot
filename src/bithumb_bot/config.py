@@ -471,6 +471,8 @@ class Settings:
     # ?댁쁺 湲곕낯 ?꾨왂? ?꾪꽣 ?ы븿 sma_with_filter瑜?沅뚯옣.
     # STRATEGY_NAME ?섍꼍蹂?섎줈 ?꾨왂 ?대쫫??紐낆떆?곸쑝濡??좏깮?쒕떎.
     STRATEGY_NAME: str = resolve_strategy_name_from_env()
+    ACTIVE_STRATEGIES: str = os.getenv("ACTIVE_STRATEGIES", "").strip()
+    RUNTIME_STRATEGY_SET_JSON: str = os.getenv("RUNTIME_STRATEGY_SET_JSON", "").strip()
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))

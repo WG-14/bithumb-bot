@@ -17,6 +17,7 @@ class StrategyContribution:
     weight: float
     preference_hash: str
     desired_exposure_krw: float | None
+    risk_budget_krw: float | None
     reason: str
     schema_version: int = 1
 
@@ -30,6 +31,7 @@ class StrategyContribution:
             "weight": float(self.weight),
             "preference_hash": self.preference_hash,
             "desired_exposure_krw": self.desired_exposure_krw,
+            "risk_budget_krw": self.risk_budget_krw,
             "reason": self.reason,
         }
 
@@ -43,6 +45,7 @@ class PortfolioAllocatorConfig:
     policy_version: str = "1"
     target_exposure_krw: float = 0.0
     hold_policy: str = "maintain_previous_target"
+    mixed_hold_policy: str = "active_signal_over_hold"
     conflict_policy: str = "fail_closed_equal_priority"
     strategy_priorities: Mapping[str, int] = field(default_factory=dict)
     strategy_weights: Mapping[str, float] = field(default_factory=dict)
@@ -68,6 +71,7 @@ class PortfolioAllocatorConfig:
             "policy_version": self.policy_version,
             "target_exposure_krw": float(self.target_exposure_krw),
             "hold_policy": self.hold_policy,
+            "mixed_hold_policy": self.mixed_hold_policy,
             "conflict_policy": self.conflict_policy,
             "strategy_priorities": dict(sorted(self.strategy_priorities.items())),
             "strategy_weights": dict(sorted(self.strategy_weights.items())),
@@ -234,6 +238,7 @@ class PortfolioAllocator:
             weight=float(self.config.strategy_weights.get(name, preference.desired_weight or 1.0)),
             preference_hash=preference.content_hash(),
             desired_exposure_krw=preference.desired_exposure_krw,
+            risk_budget_krw=preference.risk_budget_krw,
             reason=preference.reason,
         )
 
@@ -256,6 +261,7 @@ class PortfolioAllocator:
         conflict_count = 1 if {"BUY", "SELL"}.issubset(top_signals) else 0
         conflict_resolution = {
             "policy": self.config.conflict_policy,
+            "mixed_hold_policy": self.config.mixed_hold_policy,
             "selected_priority": best_priority,
             "selected_strategies": [item.strategy_name for item in top],
             "selected_signals": sorted(top_signals),
@@ -270,17 +276,13 @@ class PortfolioAllocator:
                 "conflicting_equal_priority_signals",
                 conflict_resolution=conflict_resolution,
             )
-        selected_signal = sorted(top_signals)[0] if top_signals else "HOLD"
+        active_top_signals = sorted(signal for signal in top_signals if signal != "HOLD")
+        selected_signal = active_top_signals[0] if active_top_signals else "HOLD"
+        conflict_resolution["selected_signal"] = selected_signal
         if selected_signal == "BUY":
-            explicit_targets = [
-                item.desired_exposure_krw for item in top if item.desired_exposure_krw is not None
-            ]
-            target_exposure = (
-                max(float(value) for value in explicit_targets)
-                if explicit_targets
-                else max(0.0, float(self.config.target_exposure_krw))
-            )
-            reason = "buy_target_from_allocator"
+            buy_contributions = tuple(item for item in top if item.signal_direction == "BUY")
+            target_exposure = self._buy_target_exposure(buy_contributions)
+            reason = "buy_weighted_target_from_allocator"
         elif selected_signal == "SELL":
             target_exposure = 0.0
             reason = "sell_target_zero_exposure"
@@ -324,6 +326,30 @@ class PortfolioAllocator:
             authoritative=True,
             fail_closed_reason="none",
         )
+
+    def _buy_target_exposure(self, contributions: tuple[StrategyContribution, ...]) -> float:
+        if not contributions:
+            return max(0.0, float(self.config.target_exposure_krw))
+        weighted_total = 0.0
+        weight_total = 0.0
+        risk_budget_total = 0.0
+        risk_budget_present = False
+        for item in contributions:
+            weight = max(0.0, float(item.weight))
+            exposure = (
+                float(item.desired_exposure_krw)
+                if item.desired_exposure_krw is not None
+                else max(0.0, float(self.config.target_exposure_krw))
+            )
+            weighted_total += exposure * weight
+            weight_total += weight
+            if item.risk_budget_krw is not None:
+                risk_budget_present = True
+                risk_budget_total += max(0.0, float(item.risk_budget_krw))
+        target = weighted_total / weight_total if weight_total > 0.0 else 0.0
+        if risk_budget_present:
+            target = min(target, risk_budget_total)
+        return max(0.0, float(target))
 
     def _blocked_decision(
         self,

@@ -24,6 +24,7 @@ from .portfolio_allocation import (
 )
 from .strategy_preference import strategy_decision_to_preference
 from .runtime_readiness import compute_runtime_readiness_snapshot
+from .runtime_strategy_set import RuntimeStrategyDecisionResultBundle, RuntimeStrategySet
 from .strategy_policy_contract import StrategyDecisionV2
 from .strategy_performance import evaluate_strategy_performance_gate
 from .target_position import (
@@ -209,6 +210,11 @@ def _allocator_target_exposure_krw() -> float:
 def _allocation_context_fields(decision) -> dict[str, object]:
     target = decision.target_for_pair(str(settings.PAIR))
     target_payload = None if target is None else target.as_dict()
+    target_conflict = {}
+    if target_payload is not None:
+        raw_conflict = target_payload.get("conflict_resolution")
+        if isinstance(raw_conflict, dict):
+            target_conflict = raw_conflict
     return {
         "portfolio_target_present": target is not None,
         "portfolio_target_authoritative": False if target is None else bool(target.authoritative),
@@ -224,9 +230,29 @@ def _allocation_context_fields(decision) -> dict[str, object]:
         "allocator_reason": decision.reason,
         "allocation_conflict_count": int(decision.conflict_resolution.get("conflict_count") or 0),
         "allocation_primary_block_reason": decision.primary_block_reason,
+        "allocation_selected_priority": target_conflict.get("selected_priority"),
+        "allocation_selected_strategies": list(target_conflict.get("selected_strategies") or []),
+        "allocation_selected_signals": list(target_conflict.get("selected_signals") or []),
+        "allocation_selected_signal": str(target_conflict.get("selected_signal") or ""),
         "allocation_contributions": [item.as_dict() for item in decision.contributions],
         "portfolio_target": target_payload,
         "portfolio_allocation_decision": decision.as_dict(),
+    }
+
+
+def _runtime_strategy_set_context_fields(strategy_set: RuntimeStrategySet | None) -> dict[str, object]:
+    if strategy_set is None:
+        return {
+            "runtime_strategy_set_present": False,
+            "runtime_multi_strategy_enabled": False,
+            "active_strategy_set": [],
+        }
+    return {
+        "runtime_strategy_set_present": True,
+        "runtime_multi_strategy_enabled": strategy_set.multi_strategy_enabled,
+        "runtime_strategy_set_source": strategy_set.source,
+        "active_strategy_set": [item.as_dict() for item in strategy_set.active_strategies],
+        "active_strategy_count": len(strategy_set.active_strategies),
     }
 
 
@@ -400,6 +426,49 @@ class ExecutionPlanner:
         context["execution_plan_bundle_hash"] = bundle.content_hash()
         return bundle
 
+    def plan_runtime_strategy_results(
+        self,
+        conn,
+        result_bundle: RuntimeStrategyDecisionResultBundle,
+        *,
+        updated_ts: int,
+    ) -> ExecutionPlanBundle:
+        representative = result_bundle.results[0]
+        envelope = DecisionEnvelope.from_runtime_result(representative)
+        planning_input = ExecutionPlanningInput.from_envelope(envelope)
+        planning = self._plan_typed_input(
+            conn,
+            planning_input=planning_input,
+            updated_ts=int(updated_ts),
+            runtime_result_bundle=result_bundle,
+        )
+        submit_plan = _primary_submit_plan(planning.execution_decision_summary)
+        context = dict(planning.context)
+        context.update(
+            {
+                "decision_authority_source": "PortfolioAllocator.portfolio_target",
+                "representative_strategy_decision_authority": "non_authoritative_observability_only",
+                "decision_envelope_present": True,
+                "execution_plan_bundle_present": True,
+                "submit_plan_source": None if submit_plan is None else submit_plan.source,
+                "submit_plan_authority": None if submit_plan is None else submit_plan.authority,
+                "persistence_context_authoritative": 0,
+                "non_authoritative_observability_payload": True,
+            }
+        )
+        bundle = ExecutionPlanBundle(
+            summary=planning.execution_decision_summary,
+            submit_plan=submit_plan,
+            persistence_context=context,
+            readiness_payload=planning.readiness_payload,
+            target_policy_metadata=planning.target_policy_metadata,
+            planning_error=planning.planning_error,
+            status=_plan_status(planning),
+        )
+        context["execution_plan_bundle"] = bundle.as_dict()
+        context["execution_plan_bundle_hash"] = bundle.content_hash()
+        return bundle
+
     def _planning_context_from_envelope_input(
         self,
         planning_input: ExecutionPlanningInput,
@@ -446,9 +515,12 @@ class ExecutionPlanner:
         *,
         planning_input: ExecutionPlanningInput,
         updated_ts: int,
+        runtime_result_bundle: RuntimeStrategyDecisionResultBundle | None = None,
     ) -> ExecutionPlanningResult:
         context = self._planning_context_from_envelope_input(planning_input)
         try:
+            strategy_set = None if runtime_result_bundle is None else runtime_result_bundle.strategy_set
+            context.update(_runtime_strategy_set_context_fields(strategy_set))
             readiness_payload = self.readiness_snapshot_builder(conn).as_dict()
             strategy_performance_gate = None
             if _live_real_target_delta_performance_gate_applies():
@@ -469,13 +541,51 @@ class ExecutionPlanner:
             target_policy_metadata = dict(target_resolution.get("target_policy_metadata", {}))
             allocation_config = PortfolioAllocatorConfig(
                 target_exposure_krw=_allocator_target_exposure_krw(),
+                strategy_priorities=(
+                    {}
+                    if strategy_set is None
+                    else {item.strategy_name: item.priority for item in strategy_set.active_strategies}
+                ),
+                strategy_weights=(
+                    {}
+                    if strategy_set is None
+                    else {item.strategy_name: item.weight for item in strategy_set.active_strategies}
+                ),
             )
-            strategy_preference = strategy_decision_to_preference(
-                planning_input.strategy_decision,
-                pair=str(settings.PAIR),
-                desired_exposure_krw=_allocator_target_exposure_krw(),
-            )
-            preference_set = SignalAggregator().aggregate((strategy_preference,))
+            if runtime_result_bundle is None:
+                strategy_preference = strategy_decision_to_preference(
+                    planning_input.strategy_decision,
+                    pair=str(settings.PAIR),
+                    desired_exposure_krw=_allocator_target_exposure_krw(),
+                )
+                preferences = (strategy_preference,)
+            else:
+                preference_list = []
+                for result in runtime_result_bundle.results:
+                    spec = runtime_result_bundle.strategy_set.spec_for_strategy(
+                        result.decision.strategy_name
+                    )
+                    if spec is None:
+                        raise ValueError(
+                            f"runtime_strategy_spec_missing:{result.decision.strategy_name}"
+                        )
+                    preference_list.append(
+                        strategy_decision_to_preference(
+                            result.decision,
+                            pair=str(spec.pair),
+                            desired_exposure_krw=spec.desired_exposure_krw,
+                            desired_weight=spec.weight,
+                            risk_budget_krw=spec.risk_budget_krw,
+                            metadata={
+                                "runtime_strategy_priority": spec.priority,
+                                "runtime_strategy_set_source": runtime_result_bundle.strategy_set.source,
+                            },
+                        )
+                    )
+                preferences = tuple(preference_list)
+            context["strategy_preference_count"] = len(preferences)
+            context["strategy_preferences"] = [item.as_dict() for item in preferences]
+            preference_set = SignalAggregator().aggregate(preferences)
             allocation_input = PortfolioAllocationInput(
                 preference_set=preference_set,
                 allocator_config=allocation_config,

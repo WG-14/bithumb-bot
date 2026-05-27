@@ -28,6 +28,10 @@ from .runtime_decision_service import (
     promotion_grade_typed_runtime_decision_required,
     typed_runtime_handoff_failure_reason,
 )
+from .runtime_strategy_set import (
+    RuntimeStrategyDecisionResultBundle,
+    collect_runtime_strategy_decisions,
+)
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import (
@@ -1695,38 +1699,48 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             conn = ensure_db()
             typed_runtime_decision: RuntimeStrategyDecisionResult | None = None
+            typed_runtime_decision_bundle: RuntimeStrategyDecisionResultBundle | None = None
             signal_handoff_fn = (
                 compute_signal_runtime_handoff
                 if compute_signal is _ORIGINAL_COMPUTE_SIGNAL
                 else compute_signal
             )
             try:
-                try:
-                    signal_handoff = signal_handoff_fn(
+                if signal_handoff_fn is compute_signal_runtime_handoff:
+                    typed_runtime_decision_bundle = collect_runtime_strategy_decisions(
                         conn,
-                        short_n,
-                        long_n,
+                        short_n=short_n,
+                        long_n=long_n,
                         through_ts_ms=closed_candle_ts_ms,
-                        strategy_name=settings.STRATEGY_NAME,
                     )
-                except TypeError as exc:
-                    err = str(exc)
-                    if ("through_ts_ms" not in err) and ("strategy_name" not in err):
-                        raise
+                    signal_handoff = None if typed_runtime_decision_bundle is None else typed_runtime_decision_bundle.results[0]
+                else:
                     try:
                         signal_handoff = signal_handoff_fn(
                             conn,
                             short_n,
                             long_n,
                             through_ts_ms=closed_candle_ts_ms,
+                            strategy_name=settings.STRATEGY_NAME,
                         )
-                    except TypeError as compat_exc:
-                        compat_err = str(compat_exc)
-                        if "through_ts_ms" not in compat_err:
+                    except TypeError as exc:
+                        err = str(exc)
+                        if ("through_ts_ms" not in err) and ("strategy_name" not in err):
                             raise
-                        # Compatibility path for tests/mocks still patching the older
-                        # compute_signal(conn, short_n, long_n) signature.
-                        signal_handoff = compute_signal(conn, short_n, long_n)
+                        try:
+                            signal_handoff = signal_handoff_fn(
+                                conn,
+                                short_n,
+                                long_n,
+                                through_ts_ms=closed_candle_ts_ms,
+                            )
+                        except TypeError as compat_exc:
+                            compat_err = str(compat_exc)
+                            if "through_ts_ms" not in compat_err:
+                                raise
+                            # Compatibility path for tests/mocks still patching the older
+                            # compute_signal(conn, short_n, long_n) signature.
+                            signal_handoff = compute_signal(conn, short_n, long_n)
             finally:
                 conn.close()
 
@@ -1743,12 +1757,24 @@ def run_loop(short_n: int, long_n: int) -> None:
                 continue
             if is_runtime_strategy_decision_result(signal_handoff):
                 typed_runtime_decision = signal_handoff
+                if typed_runtime_decision_bundle is None:
+                    from .runtime_strategy_set import RuntimeStrategySetResolver
+
+                    resolved_set = RuntimeStrategySetResolver().resolve()
+                    typed_runtime_decision_bundle = RuntimeStrategyDecisionResultBundle(
+                        strategy_set=resolved_set,
+                        results=(typed_runtime_decision,),
+                    )
                 r = {
                     "ts": typed_runtime_decision.candle_ts,
                     "last_close": typed_runtime_decision.market_price,
                     "signal": typed_runtime_decision.decision.final_signal,
                     "reason": typed_runtime_decision.decision.final_reason,
-                    "strategy": typed_runtime_decision.decision.strategy_name,
+                    "strategy": (
+                        "multi_strategy"
+                        if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled
+                        else typed_runtime_decision.decision.strategy_name
+                    ),
                 }
             else:
                 typed_runtime_failure_reason = _typed_runtime_handoff_failure_reason(
@@ -1805,18 +1831,39 @@ def run_loop(short_n: int, long_n: int) -> None:
                 decision_envelope = DecisionEnvelope.from_runtime_result(
                     typed_runtime_decision
                 )
-                strategy_name = typed_runtime_decision.decision.strategy_name
+                assert typed_runtime_decision_bundle is not None
+                strategy_name = (
+                    "multi_strategy"
+                    if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled
+                    else typed_runtime_decision.decision.strategy_name
+                )
                 signal = typed_runtime_decision.decision.final_signal
                 reason = typed_runtime_decision.decision.final_reason
-                planning_bundle = run_loop_execution_planner(
+                planner = run_loop_execution_planner(
                     target_state_resolver=_resolve_target_position_state_for_run_loop,
                     persistence_context_builder=prepare_strategy_decision_persistence_context,
-                ).plan_envelope(
-                    conn,
-                    decision_envelope,
-                    updated_ts=int(now * 1000),
+                )
+                planning_bundle = (
+                    planner.plan_runtime_strategy_results(
+                        conn,
+                        typed_runtime_decision_bundle,
+                        updated_ts=int(now * 1000),
+                    )
+                    if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled
+                    else planner.plan_envelope(
+                        conn,
+                        decision_envelope,
+                        updated_ts=int(now * 1000),
+                    )
                 )
                 context = planning_bundle.persistence_context
+                if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled:
+                    target_payload = context.get("portfolio_target")
+                    if isinstance(target_payload, dict):
+                        target_conflict = target_payload.get("conflict_resolution")
+                        if isinstance(target_conflict, dict):
+                            signal = str(target_conflict.get("selected_signal") or signal)
+                    reason = str(context.get("allocator_reason") or reason)
                 decision_context_for_trade = context
                 execution_decision_summary_for_trade = planning_bundle.summary
                 execution_plan_bundle_for_trade = planning_bundle

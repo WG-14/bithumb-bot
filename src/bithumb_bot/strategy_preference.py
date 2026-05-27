@@ -135,7 +135,11 @@ def strategy_decision_to_preference(
     *,
     pair: str,
     desired_exposure_krw: float | None = None,
+    desired_weight: float | None = None,
+    risk_budget_krw: float | None = None,
+    horizon: str = "",
     confidence: float | None = None,
+    metadata: Mapping[str, object] | None = None,
 ) -> StrategyPreference:
     if not isinstance(decision, StrategyDecisionV2):
         raise TypeError("strategy_decision_to_preference_requires_strategy_decision_v2")
@@ -154,6 +158,9 @@ def strategy_decision_to_preference(
         final_signal=decision.final_signal,
         reason=decision.final_reason,
         desired_exposure_krw=desired_exposure_krw,
+        desired_weight=desired_weight,
+        risk_budget_krw=risk_budget_krw,
+        horizon=horizon,
         confidence=confidence,
         policy_hash=decision.policy_hash,
         policy_contract_hash=decision.policy_contract_hash,
@@ -169,5 +176,6 @@ def strategy_decision_to_preference(
             "entry_block_reason": decision.entry_block_reason,
             "exit_rule": decision.exit_rule,
             "blocked_filters": list(decision.blocked_filters),
+            **dict(metadata or {}),
         },
     )
