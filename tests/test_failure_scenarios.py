@@ -108,8 +108,18 @@ class _CancelThenLateFillBroker(_NoopBroker):
 def _patch_single_tick_live_loop(monkeypatch) -> None:
     monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
     monkeypatch.setattr("bithumb_bot.engine.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.engine.validate_runtime_strategy_set_selection", lambda _cfg: None)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.normalized_runtime_strategy_set_manifest",
+        lambda **_kwargs: {"runtime_strategy_set_manifest_hash": "sha256:unit-runtime-strategy-set"},
+    )
     monkeypatch.setattr("bithumb_bot.engine.validate_market_runtime", lambda _cfg: None)
-    _set_live_runtime_paths(monkeypatch, base_dir=Path(settings.DB_PATH).resolve().parent)
+    current_db_path = Path(settings.DB_PATH).resolve()
+    _set_live_runtime_paths(
+        monkeypatch,
+        base_dir=current_db_path.parent / "live-runtime",
+        db_path=current_db_path,
+    )
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "KILL_SWITCH", False)
     object.__setattr__(settings, "INTERVAL", "1m")
@@ -138,6 +148,7 @@ def _patch_single_tick_live_loop(monkeypatch) -> None:
             "curr_l": 0.5,
             "signal": "BUY",
         },
+        raising=False,
     )
     monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: object())
     monkeypatch.setattr("bithumb_bot.engine.evaluate_daily_loss_breach", lambda *_args, **_kwargs: (False, "ok"))

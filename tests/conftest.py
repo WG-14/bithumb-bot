@@ -169,6 +169,9 @@ def _restore_global_settings_state(tmp_path: Path):
     keys = [
         "MODE",
         "DB_PATH",
+        "STRATEGY_NAME",
+        "SMA_SHORT",
+        "SMA_LONG",
         "START_CASH_KRW",
         "BUY_FRACTION",
         "MAX_ORDER_KRW",

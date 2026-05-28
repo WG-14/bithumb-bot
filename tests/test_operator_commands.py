@@ -3625,8 +3625,8 @@ def test_target_delta_dry_run_prints_submit_plan_without_real_order_arming(
 
         monkeypatch.setattr(
             app_module,
-            "compute_signal",
-            lambda _conn, **_kwargs: {
+            "compute_legacy_signal_for_diagnostics",
+            lambda _conn, *_args, **_kwargs: {
                 "ts": 9000,
                 "last_close": 100_000_000.0,
                 "curr_s": 1.0,
@@ -6866,7 +6866,7 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
     monkeypatch.setattr("bithumb_bot.run_lock.acquire_run_lock", lambda *_args, **_kwargs: _RaiseOnEnter())
 
     with pytest.raises(SystemExit) as exc:
-        cmd_run(5, 20)
+        cmd_run()
 
     assert exc.value.code == 1
     assert run_loop_calls["n"] == 0
@@ -6893,7 +6893,7 @@ def test_cmd_run_blocks_before_lock_when_live_preflight_fails(monkeypatch):
     monkeypatch.setattr("bithumb_bot.run_lock.acquire_run_lock", _fail_lock)
 
     with pytest.raises(SystemExit) as exc:
-        cmd_run(5, 20)
+        cmd_run()
 
     assert exc.value.code == 1
     assert any("event=startup_gate_blocked" in n for n in notifications)
@@ -8786,7 +8786,7 @@ def _patch_live_dry_run_dependencies(
     )
     monkeypatch.setattr(
         app_module,
-        "compute_signal",
+        "compute_legacy_signal_for_diagnostics",
         lambda *_args, **_kwargs: {
             "ts": 1_710_000_000_000,
             "last_close": 100_000_000.0,
@@ -8923,7 +8923,7 @@ def test_live_dry_run_records_strategy_decision_and_never_creates_lifecycle_rows
 
     monkeypatch.setattr(app_module, "DEFAULT_BITHUMB_BROKER_CLASS", SubmitDetectingBroker)
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
     out = capsys.readouterr().out
 
     conn = ensure_db()
@@ -8968,7 +8968,7 @@ def test_live_dry_run_missing_base_row_becomes_known_zero_broker_qty(tmp_path, m
         preflight_outcome="pass_no_position_allowed",
     )
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
 
     conn = ensure_db()
     try:
@@ -9042,7 +9042,7 @@ def test_live_dry_run_command_uses_accounts_snapshot_not_dry_run_static(tmp_path
 
     monkeypatch.setattr(app_module, "DEFAULT_BITHUMB_BROKER_CLASS", AccountsPreferredBroker)
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
 
     conn = ensure_db()
     try:
@@ -9075,7 +9075,7 @@ def test_live_dry_run_present_base_row_records_known_qty(
         preflight_outcome="pass",
     )
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
 
     conn = ensure_db()
     try:
@@ -9098,7 +9098,7 @@ def test_live_dry_run_accounts_transport_failure_remains_broker_qty_unknown(tmp_
 
     monkeypatch.setattr(app_module, "DEFAULT_BITHUMB_BROKER_CLASS", FailingAccountsBroker)
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
 
     conn = ensure_db()
     try:
@@ -9133,7 +9133,7 @@ def test_missing_base_row_with_local_position_does_not_become_known_zero(tmp_pat
         preflight_outcome="pass_no_position_allowed",
     )
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
 
     conn = ensure_db()
     try:
@@ -9204,7 +9204,7 @@ def test_live_dry_run_performance_gate_visible_and_submit_expected_false(tmp_pat
         ),
     )
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
 
     conn = ensure_db()
     try:
@@ -9235,7 +9235,7 @@ def test_decision_telemetry_shows_live_dry_run_target_delta_plan(tmp_path, monke
         preflight_outcome="pass_no_position_allowed",
     )
 
-    app_module.cmd_live_dry_run(7, 30)
+    app_module.cmd_live_dry_run()
     capsys.readouterr()
 
     app_module.cmd_decision_telemetry(limit=20)

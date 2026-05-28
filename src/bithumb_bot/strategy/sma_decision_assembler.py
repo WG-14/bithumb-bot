@@ -84,6 +84,10 @@ def evaluate_sma_final_decision(
         final_signal = "HOLD"
         final_reason = str(position.entry_block_reason or "entry_blocked_by_position_state")
         exit_reason = resolved_exit_reason
+    elif entry_decision.raw_signal == "SELL" and not position.in_position:
+        final_signal = "HOLD"
+        final_reason = str(position.exit_block_reason or "no_position")
+        exit_reason = final_reason
     else:
         exit_reason = resolved_exit_reason
 

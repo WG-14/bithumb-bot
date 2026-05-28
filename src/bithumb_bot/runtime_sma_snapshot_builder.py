@@ -516,6 +516,12 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
         slippage_bps=float(strategy.slippage_bps),
         entry_edge_buffer_ratio=float(strategy.entry_edge_buffer_ratio),
     )
+    if float(prev_s) > float(prev_l):
+        previous_cross_state = "above"
+    elif float(prev_s) < float(prev_l):
+        previous_cross_state = "below"
+    else:
+        previous_cross_state = "unknown"
     market_snapshot = assembly.build_market_snapshot(
         pair=strategy.pair,
         interval=strategy.interval,
@@ -526,10 +532,8 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
         curr_s=float(curr_s),
         curr_l=float(curr_l),
         through_ts_ms=signal_through_ts_ms,
-        previous_cross_state=(
-            "above" if float(prev_s) > float(prev_l) else "below"
-        ),
-        allow_initial_cross=False,
+        previous_cross_state=previous_cross_state,
+        allow_initial_cross=previous_cross_state == "unknown",
     )
     position_snapshot = _policy_position_snapshot(position=position, exposure=exposure)
     policy_config = assembly.build_policy_config(
@@ -547,7 +551,17 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
         materialized,
         fee_rate_for_decision=fee_rate_for_decision,
     )
-    final_policy_decision = strategy.decide_snapshot(
+    policy_strategy = (
+        strategy
+        if isinstance(strategy, SmaWithFilterStrategy)
+        else assembly.build_strategy(
+            materialized,
+            pair=strategy.pair,
+            interval=strategy.interval,
+            candidate_regime_policy=strategy.candidate_regime_policy,
+        )
+    )
+    final_policy_decision = policy_strategy.decide_snapshot(
         market=market_snapshot,
         position=position_snapshot,
         config=policy_config,

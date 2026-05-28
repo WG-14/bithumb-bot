@@ -1074,8 +1074,10 @@ def test_runtime_strategy_set_preflight_rejects_pair_mismatch() -> None:
         ),
     )
 
-    with pytest.raises(LiveModeValidationError, match="runtime_strategy_pair_mismatch"):
+    with pytest.raises(Exception) as exc:
         validate_runtime_strategy_set_selection(cfg)
+    assert exc.type.__name__ == "LiveModeValidationError"
+    assert "runtime_strategy_pair_mismatch" in str(exc.value)
 
 
 def test_normalized_runtime_strategy_set_manifest_materializes_active_instances() -> None:
@@ -1181,5 +1183,7 @@ def test_runtime_strategy_set_lint_cli_fails_on_pair_mismatch(
     )
     cfg = replace(settings, MODE="paper", PAIR="KRW-BTC", RUNTIME_STRATEGY_SET_JSON=os.environ["RUNTIME_STRATEGY_SET_JSON"])
 
-    with pytest.raises(LiveModeValidationError, match="runtime_strategy_pair_mismatch"):
+    with pytest.raises(Exception) as exc:
         cli_main(["runtime-strategy-set-lint"], context=argparse.Namespace(settings=cfg, printer=print, env_summary=None))
+    assert exc.type.__name__ == "LiveModeValidationError"
+    assert "runtime_strategy_pair_mismatch" in str(exc.value)

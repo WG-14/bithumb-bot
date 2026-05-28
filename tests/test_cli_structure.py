@@ -78,6 +78,8 @@ EXPECTED_COMMANDS = {
     "research-mark-attempt-aborted",
     "research-export-decisions",
     "runtime-replay-decisions",
+    "runtime-strategy-set-dump",
+    "runtime-strategy-set-lint",
     "replay-decision",
     "decision-equivalence",
     "candidate-regime-policy-equivalence-evidence",
@@ -141,8 +143,6 @@ def test_command_registration_contains_expected_major_groups() -> None:
     ("command", "options"),
     [
         ("strategy-sweep", ["--short", "--long", "--edge-buffer", "--min-expected-edge", "--slippage-bps", "--json"]),
-        ("run", ["--short", "--long"]),
-        ("live-dry-run", ["--short", "--long"]),
         ("recover-order", ["--client-order-id", "--exchange-order-id", "--dry-run", "--yes"]),
         ("fee-gap-accounting-repair", ["--apply", "--yes", "--note"]),
         ("recovery-report", ["--json"]),

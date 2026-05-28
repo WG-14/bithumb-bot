@@ -977,7 +977,10 @@ def test_profile_runtime_execution_contract_mismatch_is_reason_coded() -> None:
     profile_contract = _contract()
     runtime_contract = _contract(fill_reference_policy="latency_adjusted_orderbook")
     strategy_plugin = resolve_research_strategy_plugin("sma_with_filter")
-    strategy_parameters = materialize_strategy_parameters("sma_with_filter", {})
+    strategy_parameters = materialize_strategy_parameters(
+        "sma_with_filter",
+        {"SMA_SHORT": 7, "SMA_LONG": 30},
+    )
     exit_policy = exit_policy_from_parameters("sma_with_filter", strategy_parameters)
     profile = {
         "profile_schema_version": 1,
@@ -994,7 +997,10 @@ def test_profile_runtime_execution_contract_mismatch_is_reason_coded() -> None:
         "strategy_parameters": strategy_parameters,
         "effective_strategy_parameters": strategy_parameters,
         "effective_strategy_parameters_hash": materialized_strategy_parameters_hash(strategy_parameters),
-        "strategy_parameter_source_map": strategy_parameter_source_map("sma_with_filter", {}),
+            "strategy_parameter_source_map": strategy_parameter_source_map(
+                "sma_with_filter",
+                {"SMA_SHORT": 7, "SMA_LONG": 30},
+            ),
         "exit_policy": exit_policy,
         "exit_policy_hash": sha256_prefixed(exit_policy),
         "cost_model": {},

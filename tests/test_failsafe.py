@@ -109,7 +109,12 @@ def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
     return db_path
 
 
-def _set_live_runtime_paths(monkeypatch: pytest.MonkeyPatch, *, base_dir: Path) -> None:
+def _set_live_runtime_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    base_dir: Path,
+    db_path: Path | None = None,
+) -> None:
     roots = {
         "ENV_ROOT": (base_dir / "env").resolve(),
         "RUN_ROOT": (base_dir / "run").resolve(),
@@ -120,6 +125,13 @@ def _set_live_runtime_paths(monkeypatch: pytest.MonkeyPatch, *, base_dir: Path) 
     for key, value in roots.items():
         monkeypatch.setenv(key, str(value))
     monkeypatch.setenv("RUN_LOCK_PATH", str((roots["RUN_ROOT"] / "live" / "bithumb-bot.lock").resolve()))
+    live_db_path = (
+        db_path.resolve()
+        if db_path is not None
+        else (roots["DATA_ROOT"] / "live" / "trades" / "live.sqlite").resolve()
+    )
+    monkeypatch.setenv("DB_PATH", str(live_db_path))
+    object.__setattr__(settings, "DB_PATH", str(live_db_path))
 
 
 def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None:
@@ -461,11 +473,23 @@ class _RuntimeDecisionBundle:
 def _install_runtime_gateway(monkeypatch, result_factory) -> None:
     class _Gateway:
         def decide_bundle(self, conn, *, strategy_set=None, through_ts_ms=None):
+            from bithumb_bot.runtime_strategy_set import derive_strategy_instance_id
+
             result = result_factory(conn, through_ts_ms=through_ts_ms)
+            spec = (
+                None
+                if strategy_set is None
+                else strategy_set.spec_for_strategy(result.decision.strategy_name)
+            )
+            strategy_instance_id = (
+                derive_strategy_instance_id(spec)
+                if spec is not None
+                else str(result.decision.strategy_name)
+            )
             result.base_context.update(
                 {
                     "runtime_decision_request_hash": "sha256:unit-runtime-request",
-                    "strategy_instance_id": str(result.decision.strategy_name),
+                    "strategy_instance_id": strategy_instance_id,
                     "strategy_parameters_hash": "sha256:unit-parameters",
                     "approved_profile_hash": None,
                     "runtime_contract_hash": "sha256:unit-runtime-contract",
@@ -476,7 +500,7 @@ def _install_runtime_gateway(monkeypatch, result_factory) -> None:
             result.replay_fingerprint.update(
                 {
                     "runtime_decision_request_hash": "sha256:unit-runtime-request",
-                    "strategy_instance_id": str(result.decision.strategy_name),
+                    "strategy_instance_id": strategy_instance_id,
                     "strategy_parameters_hash": "sha256:unit-parameters",
                     "approved_profile_hash": None,
                     "runtime_contract_hash": "sha256:unit-runtime-contract",
@@ -544,7 +568,13 @@ def _prepare_run_loop(
     resolved_db_path = str(Path(settings.DB_PATH).resolve())
     monkeypatch.setenv("DB_PATH", resolved_db_path)
     object.__setattr__(settings, "DB_PATH", resolved_db_path)
-    _set_live_runtime_paths(monkeypatch, base_dir=Path(resolved_db_path).parent)
+    resolved_db = Path(resolved_db_path).resolve()
+    seeded_live_safe_db = None if "paper" in resolved_db.parts else resolved_db
+    _set_live_runtime_paths(
+        monkeypatch,
+        base_dir=resolved_db.parent / "live-runtime",
+        db_path=seeded_live_safe_db,
+    )
 
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
@@ -570,6 +600,10 @@ def _prepare_run_loop(
     monkeypatch.setattr(
         "bithumb_bot.engine.normalized_runtime_strategy_set_manifest",
         lambda **_kwargs: {"runtime_strategy_set_manifest_hash": "sha256:unit-runtime-strategy-set"},
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.run_loop_execution_planner.runtime_strategy_set_manifest_hash",
+        lambda _strategy_set: "sha256:unit-runtime-strategy-set",
     )
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
