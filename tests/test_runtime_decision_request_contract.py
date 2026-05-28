@@ -79,6 +79,23 @@ class _RuntimeResult:
         return dict(self.base_context)
 
 
+def _attach_unit_request_metadata(result: _RuntimeResult, request: RuntimeDecisionRequest) -> _RuntimeResult:
+    fields = request.observability_fields()
+    result.base_context.update(fields)
+    result.replay_fingerprint.update(
+        {
+            "runtime_decision_request_hash": request.request_hash,
+            "strategy_instance_id": request.strategy_instance_id,
+            "strategy_parameters_hash": request.strategy_parameters_hash,
+            "approved_profile_hash": request.approved_profile_hash,
+            "runtime_contract_hash": request.runtime_contract_hash,
+            "plugin_contract_hash": request.plugin_contract_hash,
+            "through_ts_ms": request.through_ts_ms,
+        }
+    )
+    return result
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -139,9 +156,10 @@ def test_common_runtime_adapter_protocol_is_request_shaped() -> None:
             if isinstance(node, ast.FunctionDef) and node.name in {
                 "decide_snapshot",
                 "compute_strategy_decision_snapshot",
-                "compute_signal_runtime_handoff",
+                "compute_strategy_decision_for_diagnostics",
                 "collect",
                 "collect_runtime_strategy_decisions",
+                "decide_bundle",
                 "run_loop",
             }:
                 names = {arg.arg for arg in [*node.args.args, *node.args.kwonlyargs]}
@@ -180,6 +198,30 @@ def test_collector_passes_runtime_decision_request(monkeypatch: pytest.MonkeyPat
     assert bundle is not None
     assert len(received) == 1
     assert isinstance(received[0], RuntimeDecisionRequest)
+
+
+def test_collector_rejects_dict_returning_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Adapter:
+        strategy_name = "canary_non_sma"
+
+        def decide(self, conn: Any, request: RuntimeDecisionRequest):
+            del conn, request
+            return {"signal": "BUY", "reason": "legacy dict"}
+
+        def typed_authority_required(self) -> bool:
+            return True
+
+    from bithumb_bot import runtime_strategy_decision
+
+    runtime_strategy_decision.list_runtime_decision_adapters()
+    monkeypatch.setitem(runtime_strategy_decision._RUNTIME_DECISION_ADAPTERS, "canary_non_sma", _Adapter)
+
+    with pytest.raises(TypeError, match="typed_runtime_decision_required:canary_non_sma"):
+        RuntimeStrategyDecisionCollector().collect(
+            _conn(),
+            RuntimeStrategySet(source="unit", strategies=(RuntimeStrategySpec("canary_non_sma"),)),
+            through_ts_ms=1_700_000_180_000,
+        )
 
 
 def test_non_sma_adapters_work_without_sma_parameters() -> None:
@@ -302,10 +344,8 @@ def test_same_strategy_name_different_instances_do_not_collide() -> None:
         through_ts_ms=1_700_000_180_000,
     )
 
-    left = _RuntimeResult("canary_non_sma")
-    right = _RuntimeResult("canary_non_sma")
-    left.base_context["strategy_instance_id"] = left_request.strategy_instance_id
-    right.base_context["strategy_instance_id"] = right_request.strategy_instance_id
+    left = _attach_unit_request_metadata(_RuntimeResult("canary_non_sma"), left_request)
+    right = _attach_unit_request_metadata(_RuntimeResult("canary_non_sma"), right_request)
 
     bundle = RuntimeStrategyDecisionResultBundle(strategy_set=strategy_set, results=(right, left))
 
@@ -314,6 +354,80 @@ def test_same_strategy_name_different_instances_do_not_collide() -> None:
     assert [item.base_context["strategy_instance_id"] for item in bundle.results] == sorted(
         [left_request.strategy_instance_id, right_request.strategy_instance_id]
     )
+
+
+def test_runtime_result_bundle_rejects_missing_request_metadata() -> None:
+    spec = RuntimeStrategySpec(
+        "canary_non_sma",
+        parameters={
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "BUY",
+            "CANARY_ORDER_REASON": "unit",
+        },
+    )
+    result = _RuntimeResult("canary_non_sma")
+
+    with pytest.raises(ValueError, match="runtime_decision_request_metadata_missing"):
+        RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit", strategies=(spec,)),
+            results=(result,),
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("strategy_instance_id", "wrong-instance"),
+        ("strategy_parameters_hash", "sha256:wrong-parameters"),
+        ("approved_profile_hash", "sha256:wrong-profile"),
+        ("runtime_contract_hash", "sha256:wrong-runtime-contract"),
+        ("plugin_contract_hash", "sha256:wrong-plugin-contract"),
+    ),
+)
+def test_runtime_result_bundle_rejects_mismatched_request_metadata(
+    field: str,
+    value: object,
+) -> None:
+    spec = RuntimeStrategySpec(
+        "canary_non_sma",
+        parameters={
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "BUY",
+            "CANARY_ORDER_REASON": "unit",
+        },
+    )
+    request = RuntimeDecisionRequestBuilder().build_for_spec(spec, through_ts_ms=1_700_000_180_000)
+    result = _attach_unit_request_metadata(_RuntimeResult("canary_non_sma"), request)
+    result.base_context[field] = value
+    result.replay_fingerprint[field] = value
+
+    with pytest.raises(ValueError, match=f"runtime_decision_request_metadata_mismatch:{field}"):
+        RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit", strategies=(spec,)),
+            results=(result,),
+        )
+
+
+def test_runtime_result_bundle_rejects_candle_mismatch() -> None:
+    spec = RuntimeStrategySpec(
+        "canary_non_sma",
+        parameters={
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "BUY",
+            "CANARY_ORDER_REASON": "unit",
+        },
+    )
+    request = RuntimeDecisionRequestBuilder().build_for_spec(spec, through_ts_ms=1_700_000_180_000)
+    result = _attach_unit_request_metadata(
+        _RuntimeResult("canary_non_sma", candle_ts=1_700_000_240_000),
+        request,
+    )
+
+    with pytest.raises(ValueError, match="runtime_strategy_candle_mismatch:canary_non_sma"):
+        RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit", strategies=(spec,)),
+            results=(result,),
+        )
 
 
 def test_approved_profile_mismatch_fails_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -700,9 +814,16 @@ def test_persisted_decision_context_contains_request_metadata() -> None:
         from bithumb_bot.runtime_strategy_decision import _attach_runtime_request_metadata
 
         _attach_runtime_request_metadata(result, request)
-        bundle = ExecutionPlanner().plan_envelope(
+        result_bundle = RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(
+                source="unit",
+                strategies=(RuntimeStrategySpec("canary_non_sma"),),
+            ),
+            results=(result,),
+        )
+        bundle = ExecutionPlanner().plan_runtime_strategy_results(
             conn,
-            DecisionEnvelope.from_runtime_result(result),
+            result_bundle,
             updated_ts=1_700_000_240_000,
         )
         context = bundle.persistence_context
@@ -715,6 +836,14 @@ def test_persisted_decision_context_contains_request_metadata() -> None:
         assert context["runtime_contract_hash"]
         assert context["through_ts_ms"] == 1_700_000_180_000
         assert context["plugin_contract_hash"]
+        assert context["runtime_strategy_set_manifest_hash"]
+        assert context["runtime_strategy_result_bundle_hash"]
+        assert context["execution_plan_bundle_hash"]
+        assert context["runtime_decision_request_hashes"] == [request.request_hash]
+        assert context["runtime_strategy_instance_ids"] == [request.strategy_instance_id]
+        assert context["runtime_approved_profile_hashes"] == [request.approved_profile_hash]
+        assert context["runtime_strategy_parameter_hashes"] == [request.strategy_parameters_hash]
+        assert context["runtime_plugin_contract_hashes"] == [request.plugin_contract_hash]
     finally:
         conn.close()
 

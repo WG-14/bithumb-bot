@@ -201,18 +201,10 @@ def production_runtime_strategy_missing_error(selected_strategy_name: str) -> Ru
 def promotion_grade_typed_runtime_decision_required(
     *,
     selected_strategy_name: str,
-    compute_signal_fn: object | None = None,
-    original_compute_signal_fn: object | None = None,
 ) -> bool:
     adapter = get_runtime_decision_adapter(selected_strategy_name)
     if adapter is None:
         return _production_missing_adapter_requires_typed_handoff()
-    if (
-        compute_signal_fn is not None
-        and original_compute_signal_fn is not None
-        and compute_signal_fn is not original_compute_signal_fn
-    ):
-        return False
     return adapter.typed_authority_required()
 
 
@@ -220,13 +212,9 @@ def typed_runtime_handoff_failure_reason(
     signal_handoff: object,
     *,
     selected_strategy_name: str,
-    compute_signal_fn: object | None = None,
-    original_compute_signal_fn: object | None = None,
 ) -> str | None:
     if not promotion_grade_typed_runtime_decision_required(
         selected_strategy_name=selected_strategy_name,
-        compute_signal_fn=compute_signal_fn,
-        original_compute_signal_fn=original_compute_signal_fn,
     ):
         return None
     if is_runtime_strategy_decision_result(signal_handoff):
@@ -330,7 +318,7 @@ def compute_strategy_decision_snapshot(
     )
 
 
-def compute_signal_runtime_handoff(
+def compute_strategy_decision_for_diagnostics(
     conn,
     *diagnostic_sma_windows: int,
     through_ts_ms: int | None = None,
@@ -344,12 +332,17 @@ def compute_signal_runtime_handoff(
     )
 
 
-def compute_signal(
+def compute_legacy_signal_for_diagnostics(
     conn,
     *diagnostic_sma_windows: int,
     through_ts_ms: int | None = None,
     strategy_name: str | None = None,
 ):
+    """Return a legacy dict for explicit CLI/diagnostic callers only.
+
+    Production runtime authority must use RuntimeDecisionGateway and never this
+    compatibility serialization.
+    """
     if diagnostic_sma_windows:
         selected_strategy_name = str(strategy_name or settings.STRATEGY_NAME or "").strip().lower()
         if selected_strategy_name != "sma_with_filter":
@@ -364,7 +357,7 @@ def compute_signal(
             *diagnostic_sma_windows,
             through_ts_ms=through_ts_ms,
         )
-    result = compute_signal_runtime_handoff(
+    result = compute_strategy_decision_for_diagnostics(
         conn,
         through_ts_ms=through_ts_ms,
         strategy_name=strategy_name,
@@ -403,6 +396,3 @@ def _attach_runtime_request_metadata(
                 "strategy_parameters_hash": request.strategy_parameters_hash,
             }
         )
-
-
-ORIGINAL_COMPUTE_SIGNAL = compute_signal

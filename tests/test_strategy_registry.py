@@ -14,7 +14,10 @@ from bithumb_bot import engine as engine_module
 from bithumb_bot import profile_cli
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.engine import compute_signal
+from bithumb_bot.runtime_decision_service import (
+    DecisionRunner,
+    compute_legacy_signal_for_diagnostics as compute_signal,
+)
 from bithumb_bot.profile_cli import cmd_replay_decision
 from bithumb_bot import runtime_strategy_decision
 from bithumb_bot.runtime_adapters import sma_with_filter as runtime_sma_adapter
@@ -314,7 +317,7 @@ def test_decision_runner_exposes_typed_strategy_decision_boundary(
     runtime_strategy_decision.list_runtime_decision_adapters()
     monkeypatch.setitem(runtime_strategy_decision._RUNTIME_DECISION_ADAPTERS, "canary_non_sma", _UnitAdapter)
 
-    runner = engine_module.DecisionRunner(strategy_name="canary_non_sma")
+    runner = DecisionRunner(strategy_name="canary_non_sma")
     with sqlite3.connect(":memory:") as conn:
         result = runner.decide_snapshot(conn, through_ts_ms=123)
 

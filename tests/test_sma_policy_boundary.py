@@ -38,6 +38,10 @@ from bithumb_bot.research.experiment_manifest import (
     PositionSizingPolicy,
 )
 from bithumb_bot import engine
+from bithumb_bot.runtime_decision_service import (
+    compute_legacy_signal_for_diagnostics,
+    compute_strategy_decision_for_diagnostics,
+)
 from bithumb_bot import runtime_position_state_normalizer
 from bithumb_bot import runtime_sma_snapshot
 from bithumb_bot import runtime_sma_snapshot_builder as runtime_sma
@@ -2102,7 +2106,7 @@ def test_compute_signal_uses_direct_sma_with_filter_snapshot_path(monkeypatch) -
     try:
         object.__setattr__(engine.settings, "PAIR", "BTC_KRW")
         object.__setattr__(engine.settings, "INTERVAL", "1m")
-        payload = engine.compute_signal(conn, 2, 3, strategy_name="sma_with_filter")
+        payload = compute_legacy_signal_for_diagnostics(conn, 2, 3, strategy_name="sma_with_filter")
     finally:
         object.__setattr__(engine.settings, "PAIR", old_pair)
         object.__setattr__(engine.settings, "INTERVAL", old_interval)
@@ -2128,7 +2132,7 @@ def test_live_sma_handoff_does_not_serialize_legacy_dict_before_execution_summar
     try:
         object.__setattr__(engine.settings, "PAIR", "BTC_KRW")
         object.__setattr__(engine.settings, "INTERVAL", "1m")
-        handoff = engine.compute_signal_runtime_handoff(
+        handoff = compute_strategy_decision_for_diagnostics(
             conn,
             2,
             3,

@@ -20,21 +20,15 @@ from .config import (
 )
 from .marketdata import cmd_sync
 from .runtime_decision_service import (
-    ORIGINAL_COMPUTE_SIGNAL as _ORIGINAL_COMPUTE_SIGNAL,
-    DecisionRunner,
     RuntimeStrategyDecisionResult,
-    compute_signal,
-    compute_signal_runtime_handoff,
+    RuntimeDecisionGateway,
     compute_strategy_decision_snapshot,
-    is_runtime_strategy_decision_result,
+    get_runtime_decision_adapter,
     legacy_db_strategy_fallback_allowed,
-    promotion_grade_typed_runtime_decision_required,
-    typed_runtime_handoff_failure_reason,
 )
 from .runtime_strategy_set import (
     RuntimeStrategyDecisionResultBundle,
     active_runtime_strategy_set,
-    collect_runtime_strategy_decisions,
     normalized_runtime_strategy_set_manifest,
 )
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
@@ -44,7 +38,6 @@ from .db_core import (
     upsert_target_position_state,
 )
 from .db_core import record_strategy_decision
-from .decision_envelope import DecisionEnvelope
 from .execution_service import build_execution_decision_summary
 from .runtime_data_access import (
     count_open_orders as _count_open_orders,
@@ -293,11 +286,7 @@ def get_stale_risk_state_mismatch_halt_diagnostics(
         startup_gate_reason=gate_reason,
     )
 def _promotion_grade_typed_runtime_decision_required(*, selected_strategy_name: str) -> bool:
-    return promotion_grade_typed_runtime_decision_required(
-        selected_strategy_name=selected_strategy_name,
-        compute_signal_fn=compute_signal,
-        original_compute_signal_fn=_ORIGINAL_COMPUTE_SIGNAL,
-    )
+    return True
 
 
 def _typed_runtime_handoff_failure_reason(
@@ -305,12 +294,10 @@ def _typed_runtime_handoff_failure_reason(
     *,
     selected_strategy_name: str,
 ) -> str | None:
-    return typed_runtime_handoff_failure_reason(
-        signal_handoff,
-        selected_strategy_name=selected_strategy_name,
-        compute_signal_fn=compute_signal,
-        original_compute_signal_fn=_ORIGINAL_COMPUTE_SIGNAL,
-    )
+    del signal_handoff
+    if get_runtime_decision_adapter(selected_strategy_name) is None:
+        return "runtime_decision_adapter_not_registered"
+    return "typed_runtime_decision_required"
 
 
 def _legacy_db_strategy_fallback_allowed(*, selected_strategy_name: str) -> bool:
@@ -1759,44 +1746,16 @@ def run_loop() -> None:
             conn = ensure_db()
             typed_runtime_decision: RuntimeStrategyDecisionResult | None = None
             typed_runtime_decision_bundle: RuntimeStrategyDecisionResultBundle | None = None
-            signal_handoff_fn = (
-                compute_signal_runtime_handoff
-                if compute_signal is _ORIGINAL_COMPUTE_SIGNAL
-                else compute_signal
-            )
             try:
-                if signal_handoff_fn is compute_signal_runtime_handoff:
-                    typed_runtime_decision_bundle = collect_runtime_strategy_decisions(
-                        conn,
-                        through_ts_ms=closed_candle_ts_ms,
-                        strategy_set=runtime_strategy_set,
-                    )
-                    signal_handoff = None if typed_runtime_decision_bundle is None else typed_runtime_decision_bundle.results[0]
-                else:
-                    try:
-                        signal_handoff = signal_handoff_fn(
-                            conn,
-                            through_ts_ms=closed_candle_ts_ms,
-                            strategy_name=settings.STRATEGY_NAME,
-                        )
-                    except TypeError as exc:
-                        err = str(exc)
-                        if ("through_ts_ms" not in err) and ("strategy_name" not in err):
-                            raise
-                        try:
-                            signal_handoff = signal_handoff_fn(
-                                conn,
-                                through_ts_ms=closed_candle_ts_ms,
-                            )
-                        except TypeError as compat_exc:
-                            compat_err = str(compat_exc)
-                            if "through_ts_ms" not in compat_err:
-                                raise
-                            raise
+                typed_runtime_decision_bundle = RuntimeDecisionGateway().decide_bundle(
+                    conn,
+                    strategy_set=runtime_strategy_set,
+                    through_ts_ms=closed_candle_ts_ms,
+                )
             finally:
                 conn.close()
 
-            if signal_handoff is None:
+            if typed_runtime_decision_bundle is None:
                 _log_loop_event(
                     logging.INFO,
                     "[RUN] signal_skipped",
@@ -1807,55 +1766,18 @@ def run_loop() -> None:
                     reason="insufficient candle history; signal will be recalculated after more syncs",
                 )
                 continue
-            if is_runtime_strategy_decision_result(signal_handoff):
-                typed_runtime_decision = signal_handoff
-                if typed_runtime_decision_bundle is None:
-                    from .runtime_strategy_set import RuntimeStrategySetResolver
-
-                    resolved_set = RuntimeStrategySetResolver().resolve()
-                    typed_runtime_decision_bundle = RuntimeStrategyDecisionResultBundle(
-                        strategy_set=resolved_set,
-                        results=(typed_runtime_decision,),
-                    )
-                r = {
-                    "ts": typed_runtime_decision.candle_ts,
-                    "last_close": typed_runtime_decision.market_price,
-                    "signal": typed_runtime_decision.decision.final_signal,
-                    "reason": typed_runtime_decision.decision.final_reason,
-                    "strategy": (
-                        "multi_strategy"
-                        if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled
-                        else typed_runtime_decision.decision.strategy_name
-                    ),
-                }
-            else:
-                typed_runtime_failure_reason = _typed_runtime_handoff_failure_reason(
-                    signal_handoff,
-                    selected_strategy_name=str(settings.STRATEGY_NAME),
-                )
-                if typed_runtime_failure_reason is not None:
-                    _log_loop_event(
-                        logging.WARNING,
-                        "[ORDER_SKIP] typed runtime decision required",
-                        symbol=settings.PAIR,
-                        interval=settings.INTERVAL,
-                        candle_ts=closed_candle_ts_ms,
-                        reason=typed_runtime_failure_reason,
-                        strategy=str(settings.STRATEGY_NAME),
-                        handoff_type=type(signal_handoff).__name__,
-                    )
-                    continue
-                _log_loop_event(
-                    logging.WARNING,
-                    "[ORDER_SKIP] typed runtime decision required",
-                    symbol=settings.PAIR,
-                    interval=settings.INTERVAL,
-                    candle_ts=closed_candle_ts_ms,
-                    reason="legacy_dict_runtime_handoff_not_execution_authority",
-                    strategy=str(settings.STRATEGY_NAME),
-                    handoff_type=type(signal_handoff).__name__,
-                )
-                continue
+            typed_runtime_decision = typed_runtime_decision_bundle.results[0]
+            r = {
+                "ts": typed_runtime_decision.candle_ts,
+                "last_close": typed_runtime_decision.market_price,
+                "signal": typed_runtime_decision.decision.final_signal,
+                "reason": typed_runtime_decision.decision.final_reason,
+                "strategy": (
+                    "multi_strategy"
+                    if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled
+                    else typed_runtime_decision.decision.strategy_name
+                ),
+            }
 
             _log_loop_event(
                 logging.INFO,
@@ -1879,9 +1801,6 @@ def run_loop() -> None:
             execution_decision_summary_for_trade = None
             execution_plan_bundle_for_trade = None
             try:
-                decision_envelope = DecisionEnvelope.from_runtime_result(
-                    typed_runtime_decision
-                )
                 assert typed_runtime_decision_bundle is not None
                 strategy_name = (
                     "multi_strategy"
@@ -1894,18 +1813,10 @@ def run_loop() -> None:
                     target_state_resolver=_resolve_target_position_state_for_run_loop,
                     persistence_context_builder=prepare_strategy_decision_persistence_context,
                 )
-                planning_bundle = (
-                    planner.plan_runtime_strategy_results(
-                        conn,
-                        typed_runtime_decision_bundle,
-                        updated_ts=int(now * 1000),
-                    )
-                    if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled
-                    else planner.plan_envelope(
-                        conn,
-                        decision_envelope,
-                        updated_ts=int(now * 1000),
-                    )
+                planning_bundle = planner.plan_runtime_strategy_results(
+                    conn,
+                    typed_runtime_decision_bundle,
+                    updated_ts=int(now * 1000),
                 )
                 context = planning_bundle.persistence_context
                 if typed_runtime_decision_bundle.strategy_set.multi_strategy_enabled:

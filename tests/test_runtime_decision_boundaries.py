@@ -804,6 +804,20 @@ def test_run_loop_does_not_unconditionally_enable_legacy_context_planning() -> N
     assert "_plan_legacy_run_loop_context_for_compatibility" not in run_loop_source
 
 
+def test_run_loop_uses_only_runtime_decision_gateway_for_decisions() -> None:
+    source = Path("src/bithumb_bot/engine.py").read_text(encoding="utf-8-sig")
+    tree = ast.parse(source)
+    run_loop = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run_loop")
+    run_loop_source = ast.get_source_segment(source, run_loop) or ""
+
+    assert "RuntimeDecisionGateway().decide_bundle(" in run_loop_source
+    assert "compute_signal" not in run_loop_source
+    assert "_ORIGINAL_COMPUTE_SIGNAL" not in run_loop_source
+    assert "signal_handoff_fn" not in run_loop_source
+    assert "TypeError" not in run_loop_source
+    assert "legacy_dict_runtime_handoff" not in run_loop_source
+
+
 def test_run_loop_compatibility_planning_is_not_live_real_order_authority() -> None:
     original = {
         "MODE": settings.MODE,
@@ -818,7 +832,7 @@ def test_run_loop_compatibility_planning_is_not_live_real_order_authority() -> N
         assert (
             legacy_context_planning_allowed_for_compatibility(
                 signal_handoff_fn=lambda *_args, **_kwargs: {"signal": "BUY"},
-                runtime_handoff_fn=engine.compute_signal_runtime_handoff,
+                runtime_handoff_fn=object(),
             )
             is False
         )

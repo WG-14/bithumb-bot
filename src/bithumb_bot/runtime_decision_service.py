@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from .runtime_adapter_bootstrap import ensure_runtime_decision_adapters_registered
 from .runtime_strategy_decision import (
-    ORIGINAL_COMPUTE_SIGNAL,
     DecisionRunner,
     RuntimeDecisionRequest,
     RuntimeDecisionAdapter,
     RuntimeStrategyDecisionResult,
-    compute_signal,
-    compute_signal_runtime_handoff,
+    compute_legacy_signal_for_diagnostics,
+    compute_strategy_decision_for_diagnostics,
     compute_strategy_decision_snapshot,
     get_runtime_decision_adapter,
     is_runtime_strategy_decision_result,
@@ -17,6 +16,7 @@ from .runtime_strategy_decision import (
     promotion_grade_typed_runtime_decision_required,
     typed_runtime_handoff_failure_reason,
 )
+from .runtime_strategy_set import RuntimeDecisionGateway
 from .runtime_decision_contract import (
     RuntimeDecisionContext,
     RuntimeReplayFingerprint,
@@ -26,16 +26,16 @@ from .runtime_decision_contract import (
 ensure_runtime_decision_adapters_registered()
 
 __all__ = [
-    "ORIGINAL_COMPUTE_SIGNAL",
     "DecisionRunner",
+    "RuntimeDecisionGateway",
     "RuntimeDecisionRequest",
     "RuntimeDecisionAdapter",
     "RuntimeStrategyDecisionResult",
     "RuntimeStrategyPolicyHashes",
     "RuntimeReplayFingerprint",
     "RuntimeDecisionContext",
-    "compute_signal",
-    "compute_signal_runtime_handoff",
+    "compute_legacy_signal_for_diagnostics",
+    "compute_strategy_decision_for_diagnostics",
     "compute_strategy_decision_snapshot",
     "get_runtime_decision_adapter",
     "is_runtime_strategy_decision_result",

@@ -28,6 +28,7 @@ from .runtime_strategy_set import (
     RuntimeStrategyDecisionResultBundle,
     RuntimeStrategySet,
     derive_strategy_instance_id,
+    runtime_strategy_set_manifest_hash,
 )
 from .strategy_policy_contract import StrategyDecisionV2
 from .strategy_performance import evaluate_strategy_performance_gate
@@ -258,8 +259,54 @@ def _runtime_strategy_set_context_fields(strategy_set: RuntimeStrategySet | None
         "runtime_strategy_set_present": True,
         "runtime_multi_strategy_enabled": strategy_set.multi_strategy_enabled,
         "runtime_strategy_set_source": strategy_set.source,
+        "runtime_strategy_set_manifest_hash": runtime_strategy_set_manifest_hash(strategy_set),
         "active_strategy_set": [item.as_dict() for item in strategy_set.active_strategies],
         "active_strategy_count": len(strategy_set.active_strategies),
+    }
+
+
+def _runtime_result_bundle_context_fields(
+    result_bundle: RuntimeStrategyDecisionResultBundle | None,
+) -> dict[str, object]:
+    if result_bundle is None:
+        return {}
+    result_metadata = []
+    for result in result_bundle.results:
+        context = getattr(result, "base_context", {})
+        payload = dict(context) if isinstance(context, Mapping) else {}
+        result_metadata.append(
+            {
+                "strategy_name": str(getattr(result.decision, "strategy_name", "")).strip().lower(),
+                "strategy_instance_id": payload.get("strategy_instance_id"),
+                "runtime_decision_request_hash": payload.get("runtime_decision_request_hash"),
+                "strategy_parameters_hash": payload.get("strategy_parameters_hash"),
+                "approved_profile_hash": payload.get("approved_profile_hash"),
+                "plugin_contract_hash": payload.get("plugin_contract_hash"),
+                "runtime_contract_hash": payload.get("runtime_contract_hash"),
+                "through_ts_ms": payload.get("through_ts_ms"),
+            }
+        )
+    return {
+        "runtime_strategy_result_bundle": result_bundle.as_dict(),
+        "runtime_strategy_result_bundle_hash": result_bundle.content_hash(),
+        "runtime_decision_request_hashes": [
+            str(item.get("runtime_decision_request_hash") or "") for item in result_metadata
+        ],
+        "runtime_strategy_instance_ids": [
+            str(item.get("strategy_instance_id") or "") for item in result_metadata
+        ],
+        "runtime_approved_profile_hashes": [
+            item.get("approved_profile_hash") for item in result_metadata
+        ],
+        "runtime_strategy_parameter_hashes": [
+            str(item.get("strategy_parameters_hash") or "") for item in result_metadata
+        ],
+        "runtime_plugin_contract_hashes": [
+            item.get("plugin_contract_hash") for item in result_metadata
+        ],
+        "runtime_contract_hashes": [
+            item.get("runtime_contract_hash") for item in result_metadata
+        ],
     }
 
 
@@ -529,6 +576,7 @@ class ExecutionPlanner:
         try:
             strategy_set = None if runtime_result_bundle is None else runtime_result_bundle.strategy_set
             context.update(_runtime_strategy_set_context_fields(strategy_set))
+            context.update(_runtime_result_bundle_context_fields(runtime_result_bundle))
             readiness_payload = self.readiness_snapshot_builder(conn).as_dict()
             strategy_performance_gate = None
             if _live_real_target_delta_performance_gate_applies():

@@ -658,6 +658,21 @@ class RuntimeStrategyDecisionResultBundle:
                 spec = self.strategy_set.spec_for_strategy(result_name)
             if spec is None:
                 raise ValueError(f"runtime_strategy_result_set_mismatch:extra={result_name}")
+            try:
+                base_context = getattr(result, "base_context", {})
+                through_ts = (
+                    base_context.get("through_ts_ms")
+                    if isinstance(base_context, Mapping) and "through_ts_ms" in base_context
+                    else int(result.candle_ts)
+                )
+                request = RuntimeDecisionRequestBuilder().build_for_spec(
+                    spec,
+                    through_ts_ms=None if through_ts is None else int(through_ts),
+                )
+            except ResearchStrategyRegistryError:
+                validate_runtime_decision_result_bundle_provenance(result, spec)
+            else:
+                validate_runtime_decision_result_provenance(result, request)
         candle_ts_values = {int(result.candle_ts) for result in self.results}
         if len(candle_ts_values) != 1:
             raise ValueError("runtime_strategy_results_must_share_candle")
@@ -682,6 +697,22 @@ class RuntimeStrategyDecisionResultBundle:
         spec = self.strategy_set.spec_for_strategy(explicit)
         return derive_strategy_instance_id(spec) if spec is not None else explicit
 
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": int(self.schema_version),
+            "authority_label": "RuntimeStrategyDecisionResultBundle",
+            "strategy_set": self.strategy_set.as_dict(),
+            "runtime_strategy_set_manifest_hash": runtime_strategy_set_manifest_hash(self.strategy_set),
+            "result_count": len(self.results),
+            "results": [
+                _runtime_result_replay_metadata(result)
+                for result in self.results
+            ],
+        }
+
+    def content_hash(self) -> str:
+        return sha256_prefixed(self.as_dict())
+
 
 def _result_strategy_instance_id(result: RuntimeStrategyDecisionResult) -> str:
     base_context = getattr(result, "base_context", {})
@@ -695,6 +726,119 @@ def _result_strategy_instance_id(result: RuntimeStrategyDecisionResult) -> str:
         if value:
             return value
     return str(getattr(result.decision, "strategy_name", "")).strip().lower()
+
+
+_REQUIRED_REQUEST_METADATA_FIELDS = (
+    "runtime_decision_request_hash",
+    "strategy_instance_id",
+    "strategy_parameters_hash",
+    "approved_profile_hash",
+    "runtime_contract_hash",
+    "plugin_contract_hash",
+    "through_ts_ms",
+)
+
+
+def _runtime_result_replay_metadata(result: RuntimeStrategyDecisionResult) -> dict[str, object]:
+    context = getattr(result, "base_context", {})
+    replay = getattr(result, "replay_fingerprint", {})
+    base = dict(context) if isinstance(context, Mapping) else {}
+    replay_payload = dict(replay) if isinstance(replay, Mapping) else {}
+    return {
+        "strategy_name": str(getattr(result.decision, "strategy_name", "")).strip().lower(),
+        "candle_ts": int(result.candle_ts),
+        "runtime_decision_request_hash": base.get("runtime_decision_request_hash"),
+        "strategy_instance_id": base.get("strategy_instance_id"),
+        "strategy_parameters_hash": base.get("strategy_parameters_hash"),
+        "approved_profile_hash": base.get("approved_profile_hash"),
+        "runtime_contract_hash": base.get("runtime_contract_hash"),
+        "plugin_contract_hash": base.get("plugin_contract_hash"),
+        "through_ts_ms": base.get("through_ts_ms"),
+        "replay_fingerprint_hash": sha256_prefixed(replay_payload),
+    }
+
+
+def runtime_strategy_set_manifest_hash(strategy_set: RuntimeStrategySet) -> str:
+    try:
+        return str(
+            normalized_runtime_strategy_set_manifest(strategy_set=strategy_set)[
+                "runtime_strategy_set_manifest_hash"
+            ]
+        )
+    except ResearchStrategyRegistryError:
+        return sha256_prefixed(
+            {
+                "schema_version": 1,
+                "authority_label": "RuntimeStrategySetManifest",
+                "authority_scope": "operator_reproducibility_manifest",
+                "fallback": "unmaterialized_strategy_set",
+                "strategy_set": strategy_set.as_dict(),
+            }
+        )
+
+
+def _metadata_value(payload: Mapping[str, object], field: str) -> object:
+    if field == "runtime_decision_request_hash":
+        return payload.get(field) or payload.get("request_hash")
+    return payload.get(field)
+
+
+def validate_runtime_decision_result_provenance(
+    result: RuntimeStrategyDecisionResult,
+    request: RuntimeDecisionRequest,
+) -> None:
+    if not is_runtime_strategy_decision_result(result):
+        raise TypeError(f"typed_runtime_decision_required:{request.strategy_name}")
+    result_name = str(getattr(result.decision, "strategy_name", "")).strip().lower()
+    if result_name != request.strategy_name:
+        raise ValueError("runtime_strategy_result_set_mismatch:strategy_name")
+    if request.through_ts_ms is not None and int(result.candle_ts) != int(request.through_ts_ms):
+        raise ValueError(f"runtime_strategy_candle_mismatch:{request.strategy_name}")
+
+    base_context = getattr(result, "base_context", {})
+    if not isinstance(base_context, Mapping):
+        raise ValueError("runtime_decision_request_metadata_missing:base_context")
+    expected = request.observability_fields()
+    for field in _REQUIRED_REQUEST_METADATA_FIELDS:
+        if field not in base_context:
+            raise ValueError(f"runtime_decision_request_metadata_missing:{field}")
+        if _metadata_value(base_context, field) != expected.get(field):
+            raise ValueError(f"runtime_decision_request_metadata_mismatch:{field}")
+
+    replay = getattr(result, "replay_fingerprint", {})
+    if not isinstance(replay, Mapping):
+        raise ValueError("runtime_decision_request_metadata_missing:replay_fingerprint")
+    for field in _REQUIRED_REQUEST_METADATA_FIELDS:
+        if field not in replay:
+            raise ValueError(f"runtime_decision_request_metadata_missing:replay_fingerprint.{field}")
+        if _metadata_value(replay, field) != expected.get(field):
+            raise ValueError(f"runtime_decision_request_metadata_mismatch:replay_fingerprint.{field}")
+    replay_candle_ts = replay.get("candle_ts")
+    if replay_candle_ts is not None and int(replay_candle_ts) != int(result.candle_ts):
+        raise ValueError(f"runtime_strategy_candle_mismatch:{request.strategy_name}")
+
+
+def validate_runtime_decision_result_bundle_provenance(
+    result: RuntimeStrategyDecisionResult,
+    spec: RuntimeStrategySpec,
+) -> None:
+    if not is_runtime_strategy_decision_result(result):
+        raise TypeError(f"typed_runtime_decision_required:{spec.strategy_name}")
+    result_name = str(getattr(result.decision, "strategy_name", "")).strip().lower()
+    if result_name != spec.strategy_name:
+        raise ValueError("runtime_strategy_result_set_mismatch:strategy_name")
+    base_context = getattr(result, "base_context", {})
+    if not isinstance(base_context, Mapping):
+        raise ValueError("runtime_decision_request_metadata_missing:base_context")
+    for field in _REQUIRED_REQUEST_METADATA_FIELDS:
+        if field not in base_context:
+            raise ValueError(f"runtime_decision_request_metadata_missing:{field}")
+    instance_id = str(base_context.get("strategy_instance_id") or "").strip()
+    if instance_id != derive_strategy_instance_id(spec):
+        raise ValueError("runtime_decision_request_metadata_mismatch:strategy_instance_id")
+    through_ts_ms = base_context.get("through_ts_ms")
+    if through_ts_ms is not None and int(through_ts_ms) != int(result.candle_ts):
+        raise ValueError(f"runtime_strategy_candle_mismatch:{spec.strategy_name}")
 
 
 class RuntimeStrategyDecisionCollector:
@@ -720,10 +864,29 @@ class RuntimeStrategyDecisionCollector:
             if not is_runtime_strategy_decision_result(result):
                 raise TypeError(f"typed_runtime_decision_required:{spec.strategy_name}")
             _attach_runtime_request_metadata(result, request)
-            if int(result.candle_ts) != int(through_ts_ms or result.candle_ts):
-                raise ValueError(f"runtime_strategy_candle_mismatch:{spec.strategy_name}")
+            validate_runtime_decision_result_provenance(result, request)
             results.append(result)
         return RuntimeStrategyDecisionResultBundle(strategy_set=strategy_set, results=tuple(results))
+
+
+@dataclass(frozen=True)
+class RuntimeDecisionGateway:
+    resolver: RuntimeStrategySetResolver = RuntimeStrategySetResolver()
+    collector: RuntimeStrategyDecisionCollector = RuntimeStrategyDecisionCollector()
+
+    def decide_bundle(
+        self,
+        conn,
+        *,
+        strategy_set: RuntimeStrategySet | None = None,
+        through_ts_ms: int | None,
+    ) -> RuntimeStrategyDecisionResultBundle | None:
+        resolved = strategy_set or self.resolver.resolve()
+        return self.collector.collect(
+            conn,
+            resolved,
+            through_ts_ms=through_ts_ms,
+        )
 
 
 def active_runtime_strategy_set() -> RuntimeStrategySet:
@@ -736,10 +899,9 @@ def collect_runtime_strategy_decisions(
     through_ts_ms: int | None,
     strategy_set: RuntimeStrategySet | None = None,
 ) -> RuntimeStrategyDecisionResultBundle | None:
-    resolved = strategy_set or active_runtime_strategy_set()
-    return RuntimeStrategyDecisionCollector().collect(
+    return RuntimeDecisionGateway().decide_bundle(
         conn,
-        resolved,
+        strategy_set=strategy_set,
         through_ts_ms=through_ts_ms,
     )
 

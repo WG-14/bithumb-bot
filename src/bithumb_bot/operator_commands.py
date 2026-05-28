@@ -52,7 +52,6 @@ from .db_core import (
 from .utils_time import kst_str, parse_interval_sec
 from .engine import (
     build_resume_guidance,
-    compute_signal,
     evaluate_restart_readiness,
     evaluate_resume_eligibility,
     evaluate_startup_safety_gate,
@@ -61,6 +60,7 @@ from .engine import (
     maybe_clear_stale_initial_reconcile_halt,
     perform_panic_stop_cleanup,
 )
+from .runtime_decision_service import compute_legacy_signal_for_diagnostics
 from .recovery import (
     backfill_broker_order_with_exchange_id,
     cancel_open_orders_with_broker,
@@ -301,7 +301,7 @@ def sma(values, n: int):
 
 def cmd_signal(short_n: int, long_n: int):
     conn = conn = ensure_db()
-    r = compute_signal(conn, short_n, long_n)
+    r = compute_legacy_signal_for_diagnostics(conn, short_n, long_n)
     conn.close()
     if r is None:
         print(f"[SIGNAL] ?????????? ???????繹먮끍???????????????????嫄????? ???????곗뿨????癲ル슢???? sync?????????????????")
@@ -333,7 +333,7 @@ def cmd_explain(short_n: int, long_n: int):
         print(f"  {kst_str(int(ts))}  close={float(close):.2f}")
 
     conn = ensure_db()
-    r = compute_signal(conn, short_n, long_n)
+    r = compute_legacy_signal_for_diagnostics(conn, short_n, long_n)
     conn.close()
     print("")
     print("????????????????????")
@@ -1230,7 +1230,7 @@ def cmd_live_dry_run() -> None:
     conn = ensure_db()
     try:
         try:
-            signal_result = compute_signal(
+            signal_result = compute_legacy_signal_for_diagnostics(
                 conn,
                 strategy_name=settings.STRATEGY_NAME,
             )
@@ -3138,7 +3138,7 @@ def cmd_target_delta_dry_run(short_n: int, long_n: int) -> None:
     conn = ensure_db()
     try:
         try:
-            signal_result = compute_signal(
+            signal_result = compute_legacy_signal_for_diagnostics(
                 conn,
                 short_n,
                 long_n,
@@ -3147,7 +3147,7 @@ def cmd_target_delta_dry_run(short_n: int, long_n: int) -> None:
         except TypeError as exc:
             if "strategy_name" not in str(exc):
                 raise
-            signal_result = compute_signal(conn, short_n, long_n)
+            signal_result = compute_legacy_signal_for_diagnostics(conn, short_n, long_n)
         if signal_result is None:
             print("[TARGET-DELTA-DRY-RUN] failed: insufficient candle history for one decision cycle")
             raise SystemExit(1)

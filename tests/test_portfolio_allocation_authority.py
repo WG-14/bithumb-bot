@@ -33,6 +33,7 @@ from bithumb_bot.runtime_strategy_decision import (
 )
 from bithumb_bot.runtime_adapter_bootstrap import reset_runtime_decision_adapter_bootstrap_for_tests
 from bithumb_bot.runtime_strategy_set import (
+    derive_strategy_instance_id,
     RuntimeStrategyDecisionCollector,
     RuntimeStrategyDecisionResultBundle,
     RuntimeStrategySet,
@@ -146,8 +147,16 @@ def _decision(*, final_signal: str = "BUY", strategy_name: str = "sma_with_filte
     )
 
 
-def _runtime_result(signal: str, name: str, *, candle_ts: int = 123) -> _RuntimeResult:
+def _runtime_result(
+    signal: str,
+    name: str,
+    *,
+    candle_ts: int = 123,
+    strategy_instance_id: str | None = None,
+) -> _RuntimeResult:
     decision = _decision(final_signal=signal, strategy_name=name)
+    instance_id = strategy_instance_id or derive_strategy_instance_id(RuntimeStrategySpec(name))
+    request_hash = f"sha256:request-{instance_id}"
     return _RuntimeResult(
         decision=decision,
         base_context={
@@ -155,6 +164,13 @@ def _runtime_result(signal: str, name: str, *, candle_ts: int = 123) -> _Runtime
             "signal": signal,
             "reason": decision.final_reason,
             "market_price": 100_000_000.0,
+            "runtime_decision_request_hash": request_hash,
+            "strategy_instance_id": instance_id,
+            "strategy_parameters_hash": "sha256:parameters",
+            "approved_profile_hash": None,
+            "runtime_contract_hash": "sha256:runtime-contract",
+            "plugin_contract_hash": "sha256:plugin-contract",
+            "through_ts_ms": candle_ts,
         },
         candle_ts=candle_ts,
         market_price=100_000_000.0,
@@ -163,7 +179,17 @@ def _runtime_result(signal: str, name: str, *, candle_ts: int = 123) -> _Runtime
             "policy_input_hash": decision.policy_input_hash,
             "policy_decision_hash": decision.policy_decision_hash,
         },
-        replay_fingerprint={"candle_ts": candle_ts, "strategy_name": name},
+        replay_fingerprint={
+            "candle_ts": candle_ts,
+            "strategy_name": name,
+            "runtime_decision_request_hash": request_hash,
+            "strategy_instance_id": instance_id,
+            "strategy_parameters_hash": "sha256:parameters",
+            "approved_profile_hash": None,
+            "runtime_contract_hash": "sha256:runtime-contract",
+            "plugin_contract_hash": "sha256:plugin-contract",
+            "through_ts_ms": candle_ts,
+        },
         boundary={"phase": "unit"},
     )
 
@@ -639,8 +665,8 @@ def test_run_loop_multi_strategy_allocator_signal_overrides_representative_hold(
         bundle = RuntimeStrategyDecisionResultBundle(
             strategy_set=strategy_set,
             results=(
-                _runtime_result("HOLD", "strategy_hold"),
-                _runtime_result("BUY", "strategy_buy"),
+                _runtime_result("HOLD", "strategy_hold", strategy_instance_id="aaa_strategy_hold"),
+                _runtime_result("BUY", "strategy_buy", strategy_instance_id="zzz_strategy_buy"),
             ),
         )
         result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
