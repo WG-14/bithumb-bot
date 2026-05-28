@@ -11,6 +11,7 @@ from bithumb_bot.runtime_sma_snapshot_builder import (
     _resolve_signal_through_ts_ms,
 )
 from bithumb_bot.runtime_strategy_decision import RuntimeStrategyDecisionResult
+from bithumb_bot.research.strategy_spec import materialize_strategy_parameters
 from bithumb_bot.strategy.sma_policy_strategy import SmaWithFilterStrategy, create_sma_with_filter_strategy
 
 
@@ -104,6 +105,96 @@ def compute_strategy_decision_after_normalization(
 
 
 @dataclass(frozen=True)
+class SmaWithFilterRuntimeConfig:
+    pair: str
+    interval: str
+    short_n: int
+    long_n: int
+    min_gap_ratio: float
+    volatility_window: int
+    min_volatility_ratio: float
+    overextended_lookback: int
+    overextended_max_return_ratio: float
+    cost_edge_enabled: bool
+    cost_edge_min_ratio: float
+    market_regime_enabled: bool
+    entry_edge_buffer_ratio: float
+    slippage_bps: float
+    live_fee_rate_estimate: float
+    exit_rule_names: tuple[str, ...]
+    exit_stop_loss_ratio: float
+    exit_max_holding_min: int
+    exit_min_take_profit_ratio: float
+    exit_small_loss_tolerance_ratio: float
+
+    @classmethod
+    def from_runtime_request(cls, request) -> "SmaWithFilterRuntimeConfig":
+        pair = str(getattr(request, "pair", "") or "").strip()
+        interval = str(getattr(request, "interval", "") or "").strip()
+        if not pair:
+            raise RuntimeError("sma_runtime_request_pair_missing")
+        if not interval:
+            raise RuntimeError("sma_runtime_request_interval_missing")
+        params = materialize_strategy_parameters("sma_with_filter", dict(request.parameters or {}))
+        return cls(
+            pair=pair,
+            interval=interval,
+            short_n=int(params["SMA_SHORT"]),
+            long_n=int(params["SMA_LONG"]),
+            min_gap_ratio=float(params["SMA_FILTER_GAP_MIN_RATIO"]),
+            volatility_window=int(params["SMA_FILTER_VOL_WINDOW"]),
+            min_volatility_ratio=float(params["SMA_FILTER_VOL_MIN_RANGE_RATIO"]),
+            overextended_lookback=int(params["SMA_FILTER_OVEREXT_LOOKBACK"]),
+            overextended_max_return_ratio=float(params["SMA_FILTER_OVEREXT_MAX_RETURN_RATIO"]),
+            cost_edge_enabled=_coerce_bool(params["SMA_COST_EDGE_ENABLED"]),
+            cost_edge_min_ratio=float(params["SMA_COST_EDGE_MIN_RATIO"]),
+            market_regime_enabled=_coerce_bool(params["SMA_MARKET_REGIME_ENABLED"]),
+            entry_edge_buffer_ratio=float(params["ENTRY_EDGE_BUFFER_RATIO"]),
+            slippage_bps=float(params["STRATEGY_ENTRY_SLIPPAGE_BPS"]),
+            live_fee_rate_estimate=float(params["LIVE_FEE_RATE_ESTIMATE"]),
+            exit_rule_names=tuple(
+                token.strip()
+                for token in str(params["STRATEGY_EXIT_RULES"]).split(",")
+                if token.strip()
+            ),
+            exit_stop_loss_ratio=float(params["STRATEGY_EXIT_STOP_LOSS_RATIO"]),
+            exit_max_holding_min=int(params["STRATEGY_EXIT_MAX_HOLDING_MIN"]),
+            exit_min_take_profit_ratio=float(params["STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO"]),
+            exit_small_loss_tolerance_ratio=float(params["STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO"]),
+        )
+
+    def build_strategy(self) -> SmaWithFilterStrategy:
+        return create_sma_with_filter_strategy(
+            short_n=self.short_n,
+            long_n=self.long_n,
+            pair=self.pair,
+            interval=self.interval,
+            min_gap_ratio=self.min_gap_ratio,
+            volatility_window=self.volatility_window,
+            min_volatility_ratio=self.min_volatility_ratio,
+            overextended_lookback=self.overextended_lookback,
+            overextended_max_return_ratio=self.overextended_max_return_ratio,
+            cost_edge_enabled=self.cost_edge_enabled,
+            cost_edge_min_ratio=self.cost_edge_min_ratio,
+            market_regime_enabled=self.market_regime_enabled,
+            entry_edge_buffer_ratio=self.entry_edge_buffer_ratio,
+            slippage_bps=self.slippage_bps,
+            live_fee_rate_estimate=self.live_fee_rate_estimate,
+            exit_rule_names=list(self.exit_rule_names),
+            exit_stop_loss_ratio=self.exit_stop_loss_ratio,
+            exit_max_holding_min=self.exit_max_holding_min,
+            exit_min_take_profit_ratio=self.exit_min_take_profit_ratio,
+            exit_small_loss_tolerance_ratio=self.exit_small_loss_tolerance_ratio,
+        )
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
 class SmaWithFilterRuntimeDecisionAdapter:
     strategy_name: str = "sma_with_filter"
 
@@ -112,14 +203,7 @@ class SmaWithFilterRuntimeDecisionAdapter:
         conn,
         request,
     ) -> RuntimeStrategyDecisionResult | None:
-        short_n = int(request.parameters["SMA_SHORT"])
-        long_n = int(request.parameters["SMA_LONG"])
-        strategy = create_sma_with_filter_strategy(
-            short_n=short_n,
-            long_n=long_n,
-            pair=request.pair or settings.PAIR,
-            interval=request.interval or settings.INTERVAL,
-        )
+        strategy = SmaWithFilterRuntimeConfig.from_runtime_request(request).build_strategy()
         if not isinstance(strategy, SmaWithFilterStrategy):
             raise RuntimeError(f"strategy_policy_invalid:{self.strategy_name}")
         boundary_telemetry = normalize_position_state_for_runtime_decision(

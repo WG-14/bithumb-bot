@@ -12,40 +12,47 @@ from bithumb_bot.research.strategy_registry import (
 )
 from bithumb_bot.research.strategy_spec import StrategySpec, materialize_strategy_parameters
 from bithumb_bot.runtime_decision_contract import RuntimeStrategyPolicyHashes
-from bithumb_bot.strategy_policy_contract import PositionSnapshot, StrategyDecisionV2
+from bithumb_bot.strategy_policy_contract import EntryExecutionIntent, PositionSnapshot, StrategyDecisionV2
 
 
 CANARY_NON_SMA_STRATEGY_NAME = "canary_non_sma"
-CANARY_NON_SMA_POLICY_CONTRACT_VERSION = "canary_non_sma.no_order_policy.v1"
-
-
-def _settings() -> Any:
-    from bithumb_bot.config import settings
-
-    return settings
+CANARY_NON_SMA_POLICY_CONTRACT_VERSION = "canary_non_sma.order_intent_policy.v1"
+CANARY_DEFAULT_REASON = "canary_non_sma_order_contract"
 
 
 CANARY_NON_SMA_SPEC = StrategySpec(
     strategy_name=CANARY_NON_SMA_STRATEGY_NAME,
-    strategy_version="canary_non_sma.promotion_contract.v1",
-    accepted_parameter_names=("CANARY_DECISION_START_INDEX", "CANARY_REASON"),
+    strategy_version="canary_non_sma.promotion_contract.v2",
+    accepted_parameter_names=(
+        "CANARY_ORDER_START_INDEX",
+        "CANARY_ORDER_SIDE",
+        "CANARY_ORDER_REASON",
+        "CANARY_DECISION_START_INDEX",
+        "CANARY_REASON",
+    ),
     required_parameter_names=(),
-    behavior_affecting_parameter_names=("CANARY_DECISION_START_INDEX", "CANARY_REASON"),
+    behavior_affecting_parameter_names=(
+        "CANARY_ORDER_START_INDEX",
+        "CANARY_ORDER_SIDE",
+        "CANARY_ORDER_REASON",
+    ),
     metadata_only_parameter_names=(),
-    research_only_parameter_names=(),
+    research_only_parameter_names=("CANARY_DECISION_START_INDEX", "CANARY_REASON"),
     default_parameters={
-        "CANARY_DECISION_START_INDEX": 0,
-        "CANARY_REASON": "canary_non_sma_no_order_contract",
+        "CANARY_ORDER_START_INDEX": 0,
+        "CANARY_ORDER_SIDE": "BUY",
+        "CANARY_ORDER_REASON": CANARY_DEFAULT_REASON,
     },
-    decision_contract_version="research_canary_non_sma_decision_contract.v1",
+    decision_contract_version="research_canary_non_sma_decision_contract.v2",
     required_data=("candles",),
     optional_data=(),
     exit_policy_schema={
         "schema_version": 1,
         "rules": (),
-        "no_order_capability_contract": {
-            "can_submit_orders": False,
-            "reason": "architecture canary proves promotion-grade replay without order authority",
+        "order_intent_capability_contract": {
+            "can_emit_order_intent": True,
+            "live_real_order_allowed": False,
+            "reason": "architecture canary proves promotion-grade replay without live real-order authority",
         },
     },
 )
@@ -98,10 +105,34 @@ class CanaryNonSmaRuntimeDecisionResult:
         return payload
 
 
-def _latest_runtime_candle(conn: Any, *, through_ts_ms: int | None) -> tuple[int, float] | None:
-    cfg = _settings()
+def _normalize_canary_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    start_index = parameters.get(
+        "CANARY_ORDER_START_INDEX",
+        parameters.get("CANARY_DECISION_START_INDEX", 0),
+    )
+    reason = parameters.get(
+        "CANARY_ORDER_REASON",
+        parameters.get("CANARY_REASON", CANARY_DEFAULT_REASON),
+    )
+    side = str(parameters.get("CANARY_ORDER_SIDE") or "BUY").strip().upper()
+    if side not in {"BUY", "SELL", "HOLD"}:
+        raise ValueError(f"canary_order_side_unsupported:{side or 'missing'}")
+    return {
+        "CANARY_ORDER_START_INDEX": max(0, int(start_index or 0)),
+        "CANARY_ORDER_SIDE": side,
+        "CANARY_ORDER_REASON": str(reason or CANARY_DEFAULT_REASON),
+    }
+
+
+def _latest_runtime_candle(
+    conn: Any,
+    *,
+    pair: str,
+    interval: str,
+    through_ts_ms: int | None,
+) -> tuple[int, float, int] | None:
     query = "SELECT ts, close FROM candles WHERE pair=? AND interval=?"
-    params: list[object] = [cfg.PAIR, cfg.INTERVAL]
+    params: list[object] = [pair, interval]
     if through_ts_ms is not None:
         query += " AND ts<=?"
         params.append(int(through_ts_ms))
@@ -111,31 +142,64 @@ def _latest_runtime_candle(conn: Any, *, through_ts_ms: int | None) -> tuple[int
         return None
     candle_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
     close = float(row["close"]) if hasattr(row, "keys") else float(row[1])
-    return candle_ts, close
+    count_row = conn.execute(
+        "SELECT COUNT(*) FROM candles WHERE pair=? AND interval=? AND ts<=?",
+        (pair, interval, candle_ts),
+    ).fetchone()
+    candle_index = int(count_row[0]) - 1 if count_row is not None else 0
+    return candle_ts, close, max(0, candle_index)
 
 
-def _canary_result(*, candle_ts: int, market_price: float) -> CanaryNonSmaRuntimeDecisionResult:
-    cfg = _settings()
+def _canary_result(
+    *,
+    pair: str,
+    interval: str,
+    candle_ts: int,
+    market_price: float,
+    candle_index: int,
+    parameters: dict[str, Any],
+) -> CanaryNonSmaRuntimeDecisionResult:
+    resolved = _normalize_canary_parameters(parameters)
+    side = str(resolved["CANARY_ORDER_SIDE"])
+    reason = str(resolved["CANARY_ORDER_REASON"])
+    start_index = int(resolved["CANARY_ORDER_START_INDEX"])
+    final_signal = side if candle_index >= start_index else "HOLD"
+    final_reason = reason if final_signal in {"BUY", "SELL"} else "canary_before_order_start_index"
+    execution_intent = (
+        EntryExecutionIntent(
+            side="BUY",
+            intent="enter_strategy_position",
+            pair=pair,
+            requires_execution_sizing=True,
+            budget_fraction_of_cash=0.01,
+            max_budget_krw=10_000.0,
+        )
+        if final_signal == "BUY"
+        else None
+    )
     policy_contract = {
         "schema_version": 1,
         "strategy_name": CANARY_NON_SMA_STRATEGY_NAME,
         "policy_contract_version": CANARY_NON_SMA_POLICY_CONTRACT_VERSION,
-        "can_submit_orders": False,
+        "can_emit_order_intent": True,
+        "live_real_order_allowed": False,
     }
     policy_input = {
         "schema_version": 1,
         "strategy_name": CANARY_NON_SMA_STRATEGY_NAME,
-        "pair": str(cfg.PAIR),
-        "interval": str(cfg.INTERVAL),
+        "pair": pair,
+        "interval": interval,
         "candle_ts": int(candle_ts),
+        "candle_index": int(candle_index),
         "market_price": float(market_price),
+        "parameters": dict(resolved),
     }
     policy_decision = {
         "schema_version": 1,
-        "raw_signal": "HOLD",
-        "final_signal": "HOLD",
-        "final_reason": "canary_non_sma_no_order_contract",
-        "execution_intent": None,
+        "raw_signal": final_signal,
+        "final_signal": final_signal,
+        "final_reason": final_reason,
+        "execution_intent": execution_intent.as_dict() if execution_intent is not None else None,
     }
     policy_hash = sha256_prefixed(
         {
@@ -155,13 +219,15 @@ def _canary_result(*, candle_ts: int, market_price: float) -> CanaryNonSmaRuntim
         "policy_input_hash": policy_input_hash,
         "policy_decision_hash": policy_decision_hash,
         "candle_ts": int(candle_ts),
+        "candle_index": int(candle_index),
         "market_price": float(market_price),
+        "parameters": dict(resolved),
     }
     boundary = {
         "schema_version": 1,
         "decision_boundary_phase": "canary_non_sma_runtime_decision",
         "typed_authority": "StrategyDecisionV2",
-        "order_submission_possible": False,
+        "order_submission_possible": final_signal in {"BUY", "SELL"},
         "read_only_replay_safe": True,
     }
     feature_snapshot = {
@@ -171,18 +237,20 @@ def _canary_result(*, candle_ts: int, market_price: float) -> CanaryNonSmaRuntim
     }
     strategy_specific_payload = {
         "policy_contract_version": CANARY_NON_SMA_POLICY_CONTRACT_VERSION,
-        "can_submit_orders": False,
+        "can_emit_order_intent": True,
+        "live_real_order_allowed": False,
+        "parameters": dict(resolved),
     }
     decision = StrategyDecisionV2(
         strategy_name=CANARY_NON_SMA_STRATEGY_NAME,
-        raw_signal="HOLD",
-        raw_reason="canary_non_sma_no_order_contract",
-        entry_signal="HOLD",
-        entry_reason="canary_non_sma_no_order_contract",
+        raw_signal=final_signal,
+        raw_reason=final_reason,
+        entry_signal=final_signal if final_signal == "BUY" else "HOLD",
+        entry_reason=final_reason,
         exit_signal="HOLD",
-        exit_reason="canary_non_sma_no_order_contract",
-        final_signal="HOLD",
-        final_reason="canary_non_sma_no_order_contract",
+        exit_reason=final_reason,
+        final_signal=final_signal,
+        final_reason=final_reason,
         blocked_filters=(),
         entry_blocked=False,
         entry_block_reason=None,
@@ -191,12 +259,12 @@ def _canary_result(*, candle_ts: int, market_price: float) -> CanaryNonSmaRuntim
         protective_exit_overrode_entry=False,
         exit_filter_suppression_prevented=False,
         position_snapshot=PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False),
-        execution_intent=None,
+        execution_intent=execution_intent,
         entry_decision=object(),  # type: ignore[arg-type]
         trace={
             "strategy_name": CANARY_NON_SMA_STRATEGY_NAME,
-            "final_signal": "HOLD",
-            "final_reason": "canary_non_sma_no_order_contract",
+            "final_signal": final_signal,
+            "final_reason": final_reason,
             "strategy_specific_payload": dict(strategy_specific_payload),
         },
         policy_hash=policy_hash,
@@ -208,12 +276,13 @@ def _canary_result(*, candle_ts: int, market_price: float) -> CanaryNonSmaRuntim
         "market_price": float(market_price),
         "last_close": float(market_price),
         "strategy": CANARY_NON_SMA_STRATEGY_NAME,
-        "signal": "HOLD",
-        "reason": "canary_non_sma_no_order_contract",
-        "raw_signal": "HOLD",
-        "raw_reason": "canary_non_sma_no_order_contract",
-        "final_signal": "HOLD",
-        "final_reason": "canary_non_sma_no_order_contract",
+        "signal": final_signal,
+        "reason": final_reason,
+        "raw_signal": final_signal,
+        "raw_reason": final_reason,
+        "final_signal": final_signal,
+        "final_reason": final_reason,
+        "execution_intent": execution_intent.as_dict() if execution_intent is not None else None,
         "feature_snapshot": feature_snapshot,
         "strategy_specific_payload": strategy_specific_payload,
         "strategy_diagnostics": {
@@ -233,11 +302,11 @@ def _canary_result(*, candle_ts: int, market_price: float) -> CanaryNonSmaRuntim
         "fee_authority": {
             "bid_fee": 0.0,
             "ask_fee": 0.0,
-            "fee_source": "canary_no_order_contract",
+            "fee_source": "canary_order_intent_contract",
             "degraded": False,
             "degraded_reason": "none",
         },
-        "order_rules": {"canary_no_order": True},
+        "order_rules": {"canary_order_intent": True},
         "position_lot_interpretation_costs": {"strategy": CANARY_NON_SMA_STRATEGY_NAME},
         "observability_context_authoritative": 0,
         "non_authoritative_observability_payload": True,
@@ -271,11 +340,29 @@ class CanaryNonSmaRuntimeDecisionAdapter:
         conn: Any,
         request: Any,
     ) -> Any | None:
-        candle = _latest_runtime_candle(conn, through_ts_ms=request.through_ts_ms)
+        pair = str(getattr(request, "pair", "") or "").strip()
+        interval = str(getattr(request, "interval", "") or "").strip()
+        if not pair:
+            raise ValueError("canary_runtime_request_pair_missing")
+        if not interval:
+            raise ValueError("canary_runtime_request_interval_missing")
+        candle = _latest_runtime_candle(
+            conn,
+            pair=pair,
+            interval=interval,
+            through_ts_ms=request.through_ts_ms,
+        )
         if candle is None:
             return None
-        candle_ts, market_price = candle
-        return _canary_result(candle_ts=candle_ts, market_price=market_price)
+        candle_ts, market_price, candle_index = candle
+        return _canary_result(
+            pair=pair,
+            interval=interval,
+            candle_ts=candle_ts,
+            market_price=market_price,
+            candle_index=candle_index,
+            parameters=dict(getattr(request, "parameters", {}) or {}),
+        )
 
     def typed_authority_required(self) -> bool:
         return True
@@ -284,6 +371,9 @@ class CanaryNonSmaRuntimeDecisionAdapter:
 @dataclass(frozen=True)
 class CanaryNonSmaRuntimeReplayStrategy:
     name: str = CANARY_NON_SMA_STRATEGY_NAME
+    pair: str = ""
+    interval: str = ""
+    parameters: dict[str, Any] | None = None
     include_hold_execution_context_in_replay: bool = True
 
     def decide_runtime_snapshot(
@@ -295,7 +385,13 @@ class CanaryNonSmaRuntimeReplayStrategy:
         from bithumb_bot.runtime_strategy_set import RuntimeDecisionRequestBuilder, RuntimeStrategySpec
 
         request = RuntimeDecisionRequestBuilder().build_for_spec(
-            RuntimeStrategySpec(strategy_name=CANARY_NON_SMA_STRATEGY_NAME),
+            RuntimeStrategySpec(
+                strategy_name=CANARY_NON_SMA_STRATEGY_NAME,
+                pair=self.pair or None,
+                interval=self.interval or None,
+                parameters=dict(self.parameters or {}),
+                parameter_source="approved_profile_strategy_parameters",
+            ),
             through_ts_ms=through_ts_ms,
         )
         return CanaryNonSmaRuntimeDecisionAdapter().decide(
@@ -343,8 +439,13 @@ def _build_canary_runtime_replay_strategy(
     profile: dict[str, Any],
     candidate_regime_policy: dict[str, Any] | None = None,
 ) -> CanaryNonSmaRuntimeReplayStrategy:
-    del profile, candidate_regime_policy
-    return CanaryNonSmaRuntimeReplayStrategy()
+    del candidate_regime_policy
+    params = profile.get("strategy_parameters") if isinstance(profile.get("strategy_parameters"), dict) else {}
+    return CanaryNonSmaRuntimeReplayStrategy(
+        pair=str(profile.get("market") or ""),
+        interval=str(profile.get("interval") or ""),
+        parameters=_normalize_canary_parameters(dict(params)),
+    )
 
 
 def _canary_single_replay_bundle_builder(
@@ -363,17 +464,19 @@ def _canary_single_replay_bundle_builder(
 
 
 def _canary_runtime_parameters_from_env(env: dict[str, str]) -> dict[str, Any]:
-    return {
-        "CANARY_DECISION_START_INDEX": int(env.get("CANARY_DECISION_START_INDEX") or 0),
-        "CANARY_REASON": env.get("CANARY_REASON") or "canary_non_sma_no_order_contract",
-    }
+    return _normalize_canary_parameters(
+        {
+            "CANARY_ORDER_START_INDEX": env.get("CANARY_ORDER_START_INDEX"),
+            "CANARY_ORDER_SIDE": env.get("CANARY_ORDER_SIDE"),
+            "CANARY_ORDER_REASON": env.get("CANARY_ORDER_REASON"),
+            "CANARY_DECISION_START_INDEX": env.get("CANARY_DECISION_START_INDEX"),
+            "CANARY_REASON": env.get("CANARY_REASON"),
+        }
+    )
 
 
 def _canary_runtime_parameters_from_settings(_cfg: object) -> dict[str, Any]:
-    return {
-        "CANARY_DECISION_START_INDEX": 0,
-        "CANARY_REASON": "canary_non_sma_no_order_contract",
-    }
+    return _normalize_canary_parameters({})
 
 
 def run_canary_non_sma_backtest(
@@ -399,8 +502,10 @@ def run_canary_non_sma_backtest(
         fee_rate=fee_rate,
         slippage_bps=slippage_bps,
     )
-    start_index = max(0, int(effective_parameters.get("CANARY_DECISION_START_INDEX", 0)))
-    reason = str(effective_parameters.get("CANARY_REASON") or "canary_non_sma_no_order_contract")
+    canary_parameters = _normalize_canary_parameters(effective_parameters)
+    start_index = max(0, int(canary_parameters["CANARY_ORDER_START_INDEX"]))
+    side = str(canary_parameters["CANARY_ORDER_SIDE"])
+    reason = str(canary_parameters["CANARY_ORDER_REASON"])
     timing_policy = execution_timing_policy or ExecutionTimingPolicy()
     events: list[ResearchDecisionEvent] = []
     for index, candle in enumerate(dataset.candles):
@@ -412,28 +517,32 @@ def run_canary_non_sma_backtest(
             "close": float(candle.close),
             "feature_family": "canary_close_only",
         }
+        action = side if index >= start_index else "HOLD"
         strategy_specific_payload = {
             "policy_contract_version": CANARY_NON_SMA_POLICY_CONTRACT_VERSION,
-            "can_submit_orders": False,
+            "can_emit_order_intent": True,
+            "live_real_order_allowed": False,
+            "parameters": dict(canary_parameters),
         }
         policy_contract_hash = sha256_prefixed(
             {
                 "strategy_name": CANARY_NON_SMA_STRATEGY_NAME,
                 "policy_contract_version": CANARY_NON_SMA_POLICY_CONTRACT_VERSION,
-                "can_submit_orders": False,
+                "can_emit_order_intent": True,
+                "live_real_order_allowed": False,
             }
         )
         policy_input_hash = sha256_prefixed(feature_snapshot)
-        policy_decision_hash = sha256_prefixed({"final_signal": "HOLD", "reason": reason})
+        policy_decision_hash = sha256_prefixed({"final_signal": action, "reason": reason})
         events.append(
             ResearchDecisionEvent(
                 candle_ts=int(candle.ts),
                 decision_ts=int(decision_ts),
                 strategy_name=CANARY_NON_SMA_STRATEGY_NAME,
                 strategy_version=CANARY_NON_SMA_SPEC.strategy_version,
-                raw_signal="HOLD",
-                final_signal="HOLD",
-                reason=reason,
+                raw_signal=action,
+                final_signal=action,
+                reason=reason if action in {"BUY", "SELL"} else "canary_before_order_start_index",
                 feature_snapshot=feature_snapshot,
                 strategy_diagnostics={
                     "schema_version": 1,
@@ -441,8 +550,17 @@ def run_canary_non_sma_backtest(
                         CANARY_NON_SMA_STRATEGY_NAME: dict(strategy_specific_payload)
                     },
                 },
-                entry_signal="HOLD",
-                exit_signal="HOLD",
+                entry_signal=action if action == "BUY" else "HOLD",
+                exit_signal=action if action == "SELL" else "HOLD",
+                order_intent=(
+                    {
+                        "side": "BUY",
+                        "intent": "enter_strategy_position",
+                        "requires_execution_sizing": True,
+                    }
+                    if action == "BUY"
+                    else None
+                ),
                 extra_payload={
                     "strategy_specific_payload": strategy_specific_payload,
                     "policy_contract_hash": policy_contract_hash,
@@ -483,7 +601,8 @@ def _canary_decision_payload_adapter(
         if isinstance(extra.get("strategy_specific_payload"), dict)
         else {
             "policy_contract_version": CANARY_NON_SMA_POLICY_CONTRACT_VERSION,
-            "can_submit_orders": False,
+            "can_emit_order_intent": True,
+            "live_real_order_allowed": False,
         }
     )
     payload["strategy_specific_payload"] = strategy_specific_payload
@@ -520,7 +639,7 @@ CANARY_NON_SMA_PLUGIN = ResearchStrategyPlugin(
     runtime_parameter_adapter=RuntimeParameterAdapter(
         from_env=_canary_runtime_parameters_from_env,
         from_settings=_canary_runtime_parameters_from_settings,
-        env_keys=("CANARY_DECISION_START_INDEX", "CANARY_REASON"),
+        env_keys=("CANARY_ORDER_START_INDEX", "CANARY_ORDER_SIDE", "CANARY_ORDER_REASON"),
     ),
     decision_contract_version=CANARY_NON_SMA_SPEC.decision_contract_version,
     diagnostics_namespace=CANARY_NON_SMA_STRATEGY_NAME,

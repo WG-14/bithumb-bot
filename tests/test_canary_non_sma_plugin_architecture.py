@@ -93,7 +93,8 @@ def test_canary_non_sma_plugin_runtime_envelope_and_planner(tmp_path: Path) -> N
         assert runtime_strategy_decision.is_runtime_strategy_decision_result(result)
         assert result is not None
         assert result.decision.strategy_name == "canary_non_sma"
-        assert result.decision.final_signal == "HOLD"
+        assert result.decision.final_signal == "BUY"
+        assert result.decision.execution_intent is not None
         assert "curr_s" not in result.base_context
         assert "curr_l" not in result.base_context
         assert result.policy_hashes.as_dict()["policy_contract_hash"].startswith("sha256:")
@@ -228,7 +229,11 @@ def test_canary_non_sma_research_export_command_uses_generic_plugin_normalizatio
         strategy_name="canary_non_sma",
         market="KRW-BTC",
         interval="1m",
-        parameter_space={"CANARY_DECISION_START_INDEX": [0], "CANARY_REASON": ["canary_non_sma_no_order_contract"]},
+        parameter_space={
+            "CANARY_ORDER_START_INDEX": [0],
+            "CANARY_ORDER_SIDE": ["BUY"],
+            "CANARY_ORDER_REASON": ["canary_non_sma_order_contract"],
+        },
         execution_model=SimpleNamespace(scenarios=[SimpleNamespace(fee_rate=0.0, slippage_bps=0.0)]),
         execution_timing=None,
     )
@@ -238,8 +243,9 @@ def test_canary_non_sma_research_export_command_uses_generic_plugin_normalizatio
         profile_cli,
         "_candidate_params_from_manifest",
         lambda _manifest, _candidate_id: {
-            "CANARY_DECISION_START_INDEX": 0,
-            "CANARY_REASON": "canary_non_sma_no_order_contract",
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "BUY",
+            "CANARY_ORDER_REASON": "canary_non_sma_order_contract",
         },
     )
     monkeypatch.setattr(profile_cli, "_research_export_profile_hash", lambda **_kwargs: "sha256:profile")
@@ -250,8 +256,9 @@ def test_canary_non_sma_research_export_command_uses_generic_plugin_normalizatio
             "profile_content_hash": "sha256:profile",
             "candidate_profile_hash": "sha256:candidate",
             "strategy_parameters": {
-                "CANARY_DECISION_START_INDEX": 0,
-                "CANARY_REASON": "canary_non_sma_no_order_contract",
+                "CANARY_ORDER_START_INDEX": 0,
+                "CANARY_ORDER_SIDE": "BUY",
+                "CANARY_ORDER_REASON": "canary_non_sma_order_contract",
             },
             "cost_model": {"fee_rate": 0.0, "slippage_bps": 0.0},
         },
@@ -274,6 +281,7 @@ def test_canary_non_sma_research_export_command_uses_generic_plugin_normalizatio
     assert payload["strategy_plugin_contract_hash"].startswith("sha256:")
     assert payload["decisions"]
     assert payload["decisions"][0]["strategy_name"] == "canary_non_sma"
+    assert payload["decisions"][0]["final_signal"] == "BUY"
     assert payload["decisions"][0]["policy_contract_hash"].startswith("sha256:")
     assert "curr_s" not in payload["decisions"][0]
     assert "curr_l" not in payload["decisions"][0]

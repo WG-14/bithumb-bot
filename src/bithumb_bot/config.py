@@ -473,6 +473,7 @@ class Settings:
     STRATEGY_NAME: str = resolve_strategy_name_from_env()
     ACTIVE_STRATEGIES: str = os.getenv("ACTIVE_STRATEGIES", "").strip()
     RUNTIME_STRATEGY_SET_JSON: str = os.getenv("RUNTIME_STRATEGY_SET_JSON", "").strip()
+    STRATEGY_PARAMETERS_JSON: str = os.getenv("STRATEGY_PARAMETERS_JSON", "").strip()
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))

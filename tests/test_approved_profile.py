@@ -22,6 +22,8 @@ from bithumb_bot.approved_profile import (
     runtime_contract_from_env_values,
     runtime_contract_from_settings,
     sha256_prefixed,
+    strategy_parameter_env_keys_for_env,
+    strategy_parameter_env_keys_for_profile,
     validate_approved_profile,
     verify_profile_source_artifact,
     verify_promotion_artifact,
@@ -3219,6 +3221,53 @@ def test_runtime_contract_settings_supports_approved_profile_alias_with_canonica
     assert runtime_contract_from_settings(Cfg)["profile_selector"] == str(canonical)
     Cfg.APPROVED_STRATEGY_PROFILE_PATH = ""
     assert runtime_contract_from_settings(Cfg)["profile_selector"] == str(alias)
+
+
+def test_strategy_parameter_env_keys_are_selected_by_strategy_name() -> None:
+    env_keys = strategy_parameter_env_keys_for_env({"STRATEGY_NAME": "canary_non_sma"})
+    profile_keys = strategy_parameter_env_keys_for_profile({"strategy_name": "canary_non_sma"})
+
+    assert env_keys == ("CANARY_ORDER_START_INDEX", "CANARY_ORDER_SIDE", "CANARY_ORDER_REASON")
+    assert profile_keys == env_keys
+    assert not any(key.startswith("SMA_") for key in env_keys)
+
+
+def test_live_like_strategy_parameter_env_keys_require_strategy_name() -> None:
+    with pytest.raises(ApprovedProfileError, match="runtime_strategy_name_required_for_live_like_mode"):
+        strategy_parameter_env_keys_for_env(
+            {
+                "MODE": "live",
+                "LIVE_DRY_RUN": "true",
+                "LIVE_REAL_ORDER_ARMED": "false",
+            }
+        )
+
+
+def test_runtime_contract_from_settings_uses_generic_strategy_parameters_json() -> None:
+    class Cfg:
+        MODE = "paper"
+        LIVE_DRY_RUN = True
+        LIVE_REAL_ORDER_ARMED = False
+        APPROVED_STRATEGY_PROFILE_PATH = ""
+        STRATEGY_APPROVED_PROFILE_PATH = ""
+        STRATEGY_NAME = "canary_non_sma"
+        PAIR = "KRW-BTC"
+        INTERVAL = "1m"
+        STRATEGY_PARAMETERS_JSON = json.dumps(
+            {
+                "CANARY_ORDER_START_INDEX": 2,
+                "CANARY_ORDER_SIDE": "BUY",
+                "CANARY_ORDER_REASON": "json_contract",
+            }
+        )
+        LIVE_FEE_RATE_ESTIMATE = 0.0004
+        STRATEGY_ENTRY_SLIPPAGE_BPS = 0
+
+    runtime = runtime_contract_from_settings(Cfg)
+
+    assert runtime["strategy_name"] == "canary_non_sma"
+    assert runtime["strategy_parameters"]["CANARY_ORDER_REASON"] == "json_contract"
+    assert not any(key.startswith("SMA_") for key in runtime["strategy_parameters"])
 
 
 def test_changing_evidence_content_changes_child_profile_hash(tmp_path: Path) -> None:

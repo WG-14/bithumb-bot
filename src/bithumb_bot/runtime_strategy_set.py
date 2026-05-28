@@ -46,6 +46,7 @@ class RuntimeStrategySpec:
     strategy_name: str
     enabled: bool = True
     pair: str | None = None
+    interval: str | None = None
     priority: int = 100
     weight: float = 1.0
     desired_exposure_krw: float | None = None
@@ -65,6 +66,9 @@ class RuntimeStrategySpec:
         pair = str(self.pair or settings.PAIR).strip()
         if not pair:
             raise ValueError("runtime_strategy_pair_missing")
+        interval = str(self.interval or settings.INTERVAL).strip()
+        if not interval:
+            raise ValueError("runtime_strategy_interval_missing")
         weight = float(self.weight)
         if weight <= 0.0:
             raise ValueError("runtime_strategy_weight_must_be_positive")
@@ -76,6 +80,7 @@ class RuntimeStrategySpec:
             raise ValueError("runtime_strategy_desired_exposure_must_be_non_negative")
         object.__setattr__(self, "strategy_name", name)
         object.__setattr__(self, "pair", pair)
+        object.__setattr__(self, "interval", interval)
         object.__setattr__(self, "priority", int(self.priority))
         object.__setattr__(self, "weight", weight)
         object.__setattr__(self, "desired_exposure_krw", desired_exposure)
@@ -102,6 +107,7 @@ class RuntimeStrategySpec:
             "strategy_name": self.strategy_name,
             "enabled": bool(self.enabled),
             "pair": self.pair,
+            "interval": self.interval,
             "priority": int(self.priority),
             "weight": float(self.weight),
             "desired_exposure_krw": self.desired_exposure_krw,
@@ -220,6 +226,7 @@ class RuntimeStrategySetResolver:
         return RuntimeStrategySpec(
             strategy_name=strategy_name,
             pair=str(getattr(self._settings, "PAIR", "")),
+            interval=str(getattr(self._settings, "INTERVAL", "")),
             desired_exposure_krw=_optional_float(target),
         )
 
@@ -231,6 +238,7 @@ class RuntimeStrategySetResolver:
             strategy_name=str(payload.get("strategy_name", default.strategy_name)),
             enabled=bool(payload.get("enabled", default.enabled)),
             pair=str(payload.get("pair", default.pair)),
+            interval=str(payload.get("interval", default.interval)),
             priority=int(payload.get("priority", default.priority)),
             weight=float(payload.get("weight", default.weight)),
             desired_exposure_krw=payload.get("desired_exposure_krw", default.desired_exposure_krw),
@@ -288,13 +296,13 @@ class RuntimeDecisionRequestBuilder:
                 "mode": str(getattr(cfg, "MODE", "")),
                 "strategy_name": spec.strategy_name,
                 "market": str(spec.pair or getattr(cfg, "PAIR", "")),
-                "interval": str(getattr(cfg, "INTERVAL", "")),
+                "interval": str(spec.interval or getattr(cfg, "INTERVAL", "")),
                 "strategy_parameters": {},
             }
         runtime_contract = dict(runtime_contract)
         runtime_contract["strategy_name"] = spec.strategy_name
         runtime_contract["market"] = str(spec.pair or getattr(cfg, "PAIR", ""))
-        runtime_contract["interval"] = str(getattr(cfg, "INTERVAL", ""))
+        runtime_contract["interval"] = str(spec.interval or getattr(cfg, "INTERVAL", ""))
         runtime_contract["strategy_parameters"] = dict(parameters)
         if spec.strategy_name == "safe_hold":
             runtime_contract["exit_policy"] = {"schema_version": 1, "rules": (), "strategy_name": "safe_hold"}
@@ -321,7 +329,7 @@ class RuntimeDecisionRequestBuilder:
             "schema_version": 1,
             "strategy_name": spec.strategy_name,
             "pair": spec.pair,
-            "interval": str(getattr(cfg, "INTERVAL", "")),
+            "interval": str(spec.interval or getattr(cfg, "INTERVAL", "")),
             "through_ts_ms": through_ts_ms,
             "parameters": dict(parameters),
             "strategy_parameters_hash": strategy_parameters_hash,
@@ -337,7 +345,7 @@ class RuntimeDecisionRequestBuilder:
         return RuntimeDecisionRequest(
             strategy_name=spec.strategy_name,
             pair=str(spec.pair),
-            interval=str(getattr(cfg, "INTERVAL", "")),
+            interval=str(spec.interval or getattr(cfg, "INTERVAL", "")),
             through_ts_ms=through_ts_ms,
             parameters=parameters,
             strategy_parameters_hash=strategy_parameters_hash,

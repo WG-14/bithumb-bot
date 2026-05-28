@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -15,7 +16,13 @@ from .dataset_snapshot import DatasetSnapshot
 from .execution_model import ExecutionModel
 from .experiment_manifest import ExecutionTimingPolicy, PortfolioPolicy
 from .hashing import sha256_prefixed
-from .strategy_spec import BUY_AND_HOLD_BASELINE_SPEC, NOOP_BASELINE_SPEC, SMA_WITH_FILTER_SPEC, StrategySpec
+from .strategy_spec import (
+    BUY_AND_HOLD_BASELINE_SPEC,
+    NOOP_BASELINE_SPEC,
+    SMA_WITH_FILTER_SPEC,
+    StrategySpec,
+    materialize_strategy_parameters,
+)
 
 
 ResearchStrategyRunner = Callable[
@@ -477,6 +484,11 @@ from . import sma_with_filter_plugin
 
 def runtime_strategy_parameters_from_env(strategy_name: str, env: dict[str, str]) -> dict[str, Any]:
     plugin = resolve_research_strategy_plugin(strategy_name)
+    generic = _strategy_parameters_json_from_env(env)
+    if generic is not None:
+        parameters = materialize_strategy_parameters(plugin.name, generic)
+        _assert_runtime_parameters_accepted(plugin=plugin, parameters=parameters)
+        return parameters
     if plugin.runtime_parameter_adapter is None:
         raise ResearchStrategyRegistryError(f"runtime parameter extraction unsupported: {plugin.name}")
     parameters = plugin.runtime_parameter_adapter.from_env(env)
@@ -486,6 +498,11 @@ def runtime_strategy_parameters_from_env(strategy_name: str, env: dict[str, str]
 
 def runtime_strategy_parameters_from_settings(strategy_name: str, cfg: object) -> dict[str, Any]:
     plugin = resolve_research_strategy_plugin(strategy_name)
+    generic = _strategy_parameters_json_from_settings(cfg)
+    if generic is not None:
+        parameters = materialize_strategy_parameters(plugin.name, generic)
+        _assert_runtime_parameters_accepted(plugin=plugin, parameters=parameters)
+        return parameters
     if plugin.runtime_parameter_adapter is None:
         raise ResearchStrategyRegistryError(f"runtime parameter extraction unsupported: {plugin.name}")
     parameters = plugin.runtime_parameter_adapter.from_settings(cfg)
@@ -498,6 +515,26 @@ def runtime_strategy_parameter_env_keys(strategy_name: str) -> tuple[str, ...]:
     if plugin.runtime_parameter_adapter is None:
         return ()
     return tuple(plugin.runtime_parameter_adapter.env_keys)
+
+
+def _strategy_parameters_json_from_env(env: dict[str, str]) -> dict[str, Any] | None:
+    raw = str(env.get("STRATEGY_PARAMETERS_JSON") or "").strip()
+    return _parse_strategy_parameters_json(raw) if raw else None
+
+
+def _strategy_parameters_json_from_settings(cfg: object) -> dict[str, Any] | None:
+    raw = str(getattr(cfg, "STRATEGY_PARAMETERS_JSON", "") or "").strip()
+    return _parse_strategy_parameters_json(raw) if raw else None
+
+
+def _parse_strategy_parameters_json(raw: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResearchStrategyRegistryError(f"strategy_parameters_json_invalid:{exc}") from exc
+    if not isinstance(payload, dict):
+        raise ResearchStrategyRegistryError("strategy_parameters_json_must_be_object")
+    return {str(key): value for key, value in payload.items()}
 
 
 def _assert_runtime_parameters_accepted(

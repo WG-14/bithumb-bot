@@ -56,7 +56,30 @@ SUPPORTED_DECISION_EQUIVALENCE_CONTRACTS = frozenset(
     {"canonical_decision_v1", "canonical_decision_v2"}
 )
 
-STRATEGY_PARAMETER_ENV_KEYS = runtime_strategy_parameter_env_keys("sma_with_filter")
+def strategy_parameter_env_keys_for_profile(profile: dict[str, Any]) -> tuple[str, ...]:
+    strategy_name = str(profile.get("strategy_name") or "").strip()
+    if not strategy_name:
+        raise ApprovedProfileError("profile_strategy_name_required_for_strategy_parameter_env_keys")
+    return runtime_strategy_parameter_env_keys(strategy_name)
+
+
+def strategy_parameter_env_keys_for_env(env: dict[str, str]) -> tuple[str, ...]:
+    strategy_name = str(env.get("STRATEGY_NAME") or "").strip()
+    mode = str(env.get("MODE") or "paper").strip() or "paper"
+    live_dry_run = str(env.get("LIVE_DRY_RUN") or "true").strip() or "true"
+    live_real_order_armed = str(env.get("LIVE_REAL_ORDER_ARMED") or "false").strip() or "false"
+    if not strategy_name and _live_like_runtime_requires_explicit_strategy(
+        mode=mode,
+        live_dry_run=live_dry_run,
+        live_real_order_armed=live_real_order_armed,
+    ):
+        raise ApprovedProfileError("runtime_strategy_name_required_for_live_like_mode")
+    if not strategy_name:
+        strategy_name = "sma_with_filter"
+    return runtime_strategy_parameter_env_keys(strategy_name)
+
+
+STRATEGY_PARAMETER_ENV_KEYS = strategy_parameter_env_keys_for_env({"STRATEGY_NAME": "sma_with_filter"})
 COST_MODEL_ENV_KEYS = (
     "LIVE_FEE_RATE_ESTIMATE",
     "PAPER_FEE_RATE",
