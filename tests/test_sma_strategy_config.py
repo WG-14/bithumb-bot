@@ -17,7 +17,7 @@ from bithumb_bot.research.strategy_spec import (
     strategy_spec_for_name,
     validate_parameter_space_against_strategy_spec,
 )
-from bithumb_bot.strategy.sma import SmaCrossStrategy, create_sma_strategy
+from bithumb_bot.compat.sma_legacy_adapter import SmaCrossStrategy, create_sma_strategy
 from bithumb_bot.strategy_config import (
     normalize_exit_rule_names,
     sma_strategy_config_from_settings,

@@ -16,7 +16,7 @@ from bithumb_bot.strategy.exit_rules import (
     create_sma_exit_rules,
     merge_exit_rules,
 )
-from bithumb_bot.strategy.sma import (
+from bithumb_bot.compat.sma_legacy_adapter import (
     create_legacy_sma_with_filter_db_adapter,
     create_sma_strategy,
 )

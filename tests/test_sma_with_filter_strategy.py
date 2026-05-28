@@ -12,7 +12,7 @@ from bithumb_bot.market_regime import MARKET_REGIME_VERSION
 from bithumb_bot.research.backtest_engine import run_sma_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.experiment_manifest import DateRange, PortfolioPolicy, PositionSizingPolicy
-from bithumb_bot.strategy.sma import (
+from bithumb_bot.compat.sma_legacy_adapter import (
     create_legacy_sma_with_filter_db_adapter,
     create_sma_strategy,
 )

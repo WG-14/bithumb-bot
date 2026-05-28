@@ -1189,6 +1189,8 @@ def _run_decision_event_backtest_impl(
 
         if action in {"BUY", "SELL"}:
             if submit_plan is None:
+                if promotion_grade_policy_required:
+                    raise ValueError("research_submit_plan_missing")
                 warnings.append("research_submit_plan_missing")
                 continue
             side = action

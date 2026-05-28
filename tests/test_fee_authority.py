@@ -11,7 +11,7 @@ from bithumb_bot.fee_authority import (
     build_fee_authority_snapshot,
 )
 from bithumb_bot.order_sizing import build_buy_execution_sizing
-from bithumb_bot.strategy.sma import _evaluate_entry_edge_filter
+from bithumb_bot.compat.sma_legacy_adapter import _evaluate_entry_edge_filter
 
 
 pytestmark = pytest.mark.fast_regression

@@ -4,6 +4,8 @@ import inspect
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from bithumb_bot.canonical_decision import canonical_payload_hash
 from bithumb_bot.research import backtest_engine, backtest_kernel, backtest_support
 import bithumb_bot.research.strategy_registry as strategy_registry
@@ -136,6 +138,230 @@ def test_decision_event_backtest_uses_typed_execution_service_boundary(monkeypat
     assert result.decisions[0]["typed_execution_boundary"] == "SignalExecutionRequest"
     loop_source = inspect.getsource(backtest_kernel._run_decision_event_backtest_impl)
     assert ".simulate_submit_plan(" not in loop_source
+
+
+def test_promotion_grade_backtest_final_consumer_rejects_missing_submit_plan(monkeypatch) -> None:
+    strategy_name = "unit_missing_submit_plan_guard"
+    spec = StrategySpec(
+        strategy_name=strategy_name,
+        strategy_version="unit_missing_submit_plan_guard.research_contract.v1",
+        accepted_parameter_names=("UNIT_BUY_FRACTION",),
+        required_parameter_names=(),
+        behavior_affecting_parameter_names=("UNIT_BUY_FRACTION",),
+        metadata_only_parameter_names=(),
+        research_only_parameter_names=(),
+        default_parameters={"UNIT_BUY_FRACTION": 0.5},
+        decision_contract_version="unit_missing_submit_plan_guard_decision.v1",
+        required_data=("candles",),
+        optional_data=(),
+        exit_policy_schema={"schema_version": 1, "rules": ()},
+    )
+
+    def _runner(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("test plugin runner is not used by this kernel test")
+
+    def _policy_builder(
+        *,
+        event,
+        dataset,
+        candle_index,
+        position,
+        parameter_values,
+        fee_rate,
+        slippage_bps,
+        active_exit_policy,
+        buy_fraction=0.0,
+    ):
+        del dataset, fee_rate, slippage_bps, active_exit_policy
+        fraction = float(parameter_values.get("UNIT_BUY_FRACTION") or buy_fraction or 0.5)
+        execution_intent = EntryExecutionIntent(
+            side="BUY",
+            intent="enter_unit_missing_submit_plan_guard",
+            pair="KRW-BTC",
+            requires_execution_sizing=True,
+            budget_fraction_of_cash=fraction,
+            max_budget_krw=0.0,
+        )
+        policy_input = {
+            "event_ts": int(event.candle_ts),
+            "position": position.terminal_state,
+            "candle_index": int(candle_index),
+            "parameters": {"UNIT_BUY_FRACTION": fraction},
+        }
+        policy_decision = {
+            "final_signal": "BUY",
+            "final_reason": "unit_missing_submit_plan_buy",
+            "execution_intent": execution_intent.as_dict(),
+        }
+        return StrategyDecisionV2(
+            strategy_name=strategy_name,
+            raw_signal="BUY",
+            raw_reason="unit_missing_submit_plan_buy",
+            entry_signal="BUY",
+            entry_reason="unit_missing_submit_plan_buy",
+            exit_signal="HOLD",
+            exit_reason="no_exit",
+            final_signal="BUY",
+            final_reason="unit_missing_submit_plan_buy",
+            blocked_filters=(),
+            entry_blocked=False,
+            entry_block_reason=None,
+            exit_rule=None,
+            exit_evaluations=(),
+            protective_exit_overrode_entry=False,
+            exit_filter_suppression_prevented=False,
+            position_snapshot=position,
+            execution_intent=execution_intent,
+            entry_decision=object(),
+            trace={
+                "schema_version": 1,
+                "raw_filter_would_block": False,
+                "entry_blocked": False,
+            },
+            policy_hash=canonical_payload_hash(
+                {"policy_input": policy_input, "policy_decision": policy_decision}
+            ),
+            policy_contract_hash=canonical_payload_hash(
+                {"strategy_name": strategy_name, "contract": "missing_submit_plan_guard"}
+            ),
+            policy_input_hash=canonical_payload_hash(policy_input),
+            policy_decision_hash=canonical_payload_hash(policy_decision),
+        )
+
+    plugin = ResearchStrategyPlugin(
+        name=strategy_name,
+        version=spec.strategy_version,
+        spec=spec,
+        required_data=spec.required_data,
+        optional_data=spec.optional_data,
+        runner=_runner,
+        research_event_builder=lambda **_: (),
+        runtime_replay_builder=None,
+        runtime_parameter_adapter=None,
+        decision_contract_version=spec.decision_contract_version,
+        diagnostics_namespace=strategy_name,
+        research_policy_decision_builder=_policy_builder,
+        runtime_capabilities=StrategyRuntimeCapabilities(
+            promotion_runtime_decisions_supported=False,
+            runtime_replay_supported=False,
+            research_only=True,
+            baseline_only=False,
+            live_dry_run_allowed=False,
+            live_real_order_allowed=False,
+            approved_profile_required=False,
+            fail_closed_reason="unit_missing_submit_plan_guard_runtime_unsupported",
+        ),
+    )
+    monkeypatch.setitem(strategy_registry._RESEARCH_STRATEGY_PLUGINS, strategy_name, plugin)
+
+    dataset = DatasetSnapshot(
+        snapshot_id="unit_missing_submit_plan_guard",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=tuple(
+            Candle(index * 60_000, 100.0 + index, 100.0 + index, 100.0 + index, 100.0 + index, 1.0)
+            for index in range(3)
+        ),
+    )
+    event = ResearchDecisionEvent(
+        candle_ts=dataset.candles[1].ts,
+        decision_ts=dataset.candles[1].ts + 60_000,
+        strategy_name=strategy_name,
+        strategy_version=spec.strategy_version,
+        raw_signal="BUY",
+        final_signal="BUY",
+        reason="unit_missing_submit_plan_buy",
+        feature_snapshot={"candle_index": 1},
+        strategy_diagnostics={"schema_version": 1},
+        entry_signal="BUY",
+        exit_signal="HOLD",
+    )
+
+    def _missing_submit_plan_bundle(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["side"] == "BUY"
+        return backtest_kernel.ResearchExecutionPlanBundle(
+            submit_plan=None,
+            summary=None,
+            source="unit_test",
+            authority="unit_test_missing_submit_plan",
+            execution_engine="research_virtual",
+            status="BLOCKED",
+            reason_code="unit_forced_missing_submit_plan",
+        )
+
+    monkeypatch.setattr(backtest_kernel, "_research_execution_plan_bundle", _missing_submit_plan_bundle)
+
+    with pytest.raises(ValueError, match="research_submit_plan_missing"):
+        run_decision_event_backtest(
+            dataset=dataset,
+            strategy_name=strategy_name,
+            parameter_values={"UNIT_BUY_FRACTION": 0.5},
+            fee_rate=0.001,
+            slippage_bps=2.0,
+            decision_events=(event,),
+            context=BacktestRunContext(
+                report_detail="full",
+                policy_materialization_mode="research_promotion",
+            ),
+        )
+
+
+def test_exploratory_backtest_final_consumer_can_warn_on_missing_submit_plan(monkeypatch) -> None:
+    dataset = DatasetSnapshot(
+        snapshot_id="kernel_exploratory_missing_submit_plan",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=tuple(
+            Candle(index * 60_000, 100.0 + index, 100.0 + index, 100.0 + index, 100.0 + index, 1.0)
+            for index in range(3)
+        ),
+    )
+    event = ResearchDecisionEvent(
+        candle_ts=dataset.candles[1].ts,
+        decision_ts=dataset.candles[1].ts + 60_000,
+        strategy_name="buy_and_hold_baseline",
+        strategy_version="buy_and_hold_baseline.research_contract.v1",
+        raw_signal="BUY",
+        final_signal="BUY",
+        reason="kernel_contract_buy",
+        feature_snapshot={"candle_index": 1},
+        strategy_diagnostics={"schema_version": 1},
+        entry_signal="BUY",
+        order_intent={"side": "BUY"},
+    )
+
+    def _missing_submit_plan_bundle(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["side"] == "BUY"
+        return backtest_kernel.ResearchExecutionPlanBundle(
+            submit_plan=None,
+            summary=None,
+            source="unit_test",
+            authority="unit_test_missing_submit_plan",
+            execution_engine="research_virtual",
+            status="BLOCKED",
+            reason_code="unit_forced_missing_submit_plan",
+        )
+
+    monkeypatch.setattr(backtest_kernel, "_research_execution_plan_bundle", _missing_submit_plan_bundle)
+
+    result = run_decision_event_backtest(
+        dataset=dataset,
+        strategy_name="buy_and_hold_baseline",
+        parameter_values={"BUY_HOLD_BUY_INDEX": 1, "BUY_HOLD_DECISION_REASON": "kernel_contract_buy"},
+        fee_rate=0.001,
+        slippage_bps=2.0,
+        decision_events=(event,),
+        context=BacktestRunContext(report_detail="full"),
+    )
+
+    assert "research_submit_plan_missing" in result.warnings
+    assert result.trades == ()
 
 
 def test_decision_event_backtest_kernel_executes_sell_without_sma_fields() -> None:

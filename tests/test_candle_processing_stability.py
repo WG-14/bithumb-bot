@@ -12,7 +12,7 @@ from bithumb_bot.engine import _close_guard_ms, _is_closed_candle, _select_lates
 from bithumb_bot.execution_service import ExecutionDecisionSummary, ExecutionSubmitPlan
 from bithumb_bot.run_loop_execution_planner import ExecutionPlanBundle
 from bithumb_bot.strategy_policy_contract import EntryExecutionIntent, PositionSnapshot, StrategyDecisionV2
-from bithumb_bot.strategy.sma import compute_signal
+from bithumb_bot.compat.sma_legacy_adapter import compute_signal
 
 
 @pytest.fixture(autouse=True)
@@ -350,7 +350,7 @@ def test_compute_signal_ignores_open_candle_tail_when_bounded(monkeypatch) -> No
 
     # Force the strategy's default closed-only cutoff to land before the open tail.
     monkeypatch.setattr(
-        "bithumb_bot.strategy.sma.time.time",
+        "bithumb_bot.compat.sma_legacy_adapter.time.time",
         lambda: (base_ts + 5 * 60_000 + 3_100) / 1000,
     )
 

@@ -73,7 +73,7 @@ def test_top_level_strategy_api_does_not_export_legacy_db_strategy_surface() -> 
 
 
 def test_legacy_sma_adapter_has_explicit_non_policy_name() -> None:
-    import bithumb_bot.strategy.sma_legacy_adapter as legacy_adapter
+    import bithumb_bot.compat.sma_legacy_adapter as legacy_adapter
 
     assert "class SmaWithFilterStrategy" not in inspect.getsource(legacy_adapter)
     legacy = create_legacy_sma_with_filter_db_adapter(short_n=2, long_n=3)

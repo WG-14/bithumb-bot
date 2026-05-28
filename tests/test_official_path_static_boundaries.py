@@ -45,7 +45,6 @@ FORBIDDEN_MARKERS = (
 
 EXPLICIT_COMPATIBILITY_PATHS = {
     "src/bithumb_bot/strategy/registry.py",
-    "src/bithumb_bot/strategy/sma_legacy_adapter.py",
 }
 
 
@@ -95,6 +94,50 @@ def test_official_paths_do_not_cross_smoke_or_legacy_authority_boundaries() -> N
                     failures.append(f"{relative}:{line_no}: forbidden marker {marker!r}")
 
     assert failures == []
+
+
+def test_legacy_sma_db_bound_implementation_is_owned_by_compat_namespace() -> None:
+    compat_source = (REPO / "src/bithumb_bot/compat/sma_legacy_adapter.py").read_text(encoding="utf-8")
+    strategy_shim_source = (REPO / "src/bithumb_bot/strategy/sma_legacy_adapter.py").read_text(
+        encoding="utf-8"
+    )
+    strategy_sma_source = (REPO / "src/bithumb_bot/strategy/sma.py").read_text(encoding="utf-8")
+
+    for marker in (
+        "class SmaCrossStrategy",
+        "class LegacySmaWithFilterDbAdapter",
+        "def create_sma_strategy",
+        "def create_legacy_sma_with_filter_db_adapter",
+        "LEGACY_DB_BOUND_STRATEGY_STATUS",
+    ):
+        assert marker in compat_source
+    for marker in (
+        "class SmaCrossStrategy",
+        "class LegacySmaWithFilterDbAdapter",
+        "def create_sma_strategy",
+        "def create_legacy_sma_with_filter_db_adapter",
+    ):
+        assert marker not in strategy_shim_source
+        assert marker not in strategy_sma_source
+    assert "from bithumb_bot.compat.sma_legacy_adapter import" in strategy_shim_source
+    assert "__all__" in strategy_sma_source
+    assert "SmaCrossStrategy" not in strategy_sma_source
+    assert "LegacySmaWithFilterDbAdapter" not in strategy_sma_source
+
+
+def test_runtime_source_does_not_import_strategy_sma_legacy_adapter() -> None:
+    violations: list[str] = []
+    for path in (REPO / "src/bithumb_bot").rglob("*.py"):
+        relative = path.relative_to(REPO).as_posix()
+        if relative == "src/bithumb_bot/strategy/sma_legacy_adapter.py":
+            continue
+        source = path.read_text(encoding="utf-8-sig")
+        if "bithumb_bot.strategy.sma_legacy_adapter" in source:
+            violations.append(relative)
+        if "from .sma_legacy_adapter" in source or "from ..strategy.sma_legacy_adapter" in source:
+            violations.append(relative)
+
+    assert violations == []
 
 
 def test_promotion_runtime_adapters_use_strategy_decision_service_boundary() -> None:
