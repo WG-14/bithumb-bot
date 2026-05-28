@@ -432,7 +432,7 @@ def strategy_runtime_capability_issues(
     if bool(live_real_order_armed) and not capabilities.live_real_order_allowed:
         issues.append(f"live_real_order_not_allowed_for_strategy:{plugin.name}:{capabilities.fail_closed_reason}")
     if (
-        bool(live_real_order_armed)
+        (bool(live_dry_run) or bool(live_real_order_armed))
         and capabilities.approved_profile_required
         and not str(approved_profile_path or "").strip()
     ):

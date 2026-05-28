@@ -32,6 +32,7 @@ from .research.deployment_policy import deployment_tier_for_profile_mode, valida
 from .research.strategy_spec import (
     exit_policy_from_parameters,
     materialized_strategy_parameters_hash,
+    runtime_bound_behavior_parameter_names,
     strategy_parameter_source_map,
     strategy_spec_for_name,
 )
@@ -477,6 +478,15 @@ def _runtime_bound_strategy_parameters(strategy_name: str, parameters: dict[str,
     return {key: value for key, value in parameters.items() if key not in research_only}
 
 
+def _missing_runtime_bound_behavior_parameters(
+    *,
+    strategy_name: str,
+    parameters: dict[str, Any],
+) -> tuple[str, ...]:
+    required = runtime_bound_behavior_parameter_names(strategy_name)
+    return tuple(sorted(key for key in required if key not in parameters))
+
+
 def _cost_model_from_promotion(payload: dict[str, Any]) -> dict[str, object]:
     profile = payload.get("candidate_profile") if isinstance(payload.get("candidate_profile"), dict) else {}
     cost_model = profile.get("cost_model")
@@ -726,6 +736,24 @@ def validate_approved_profile(profile: dict[str, Any]) -> dict[str, Any]:
         raise ApprovedProfileError("strategy_parameters_missing")
     if not isinstance(profile.get("effective_strategy_parameters"), dict):
         raise ApprovedProfileError("effective_strategy_parameters_missing")
+    strategy_name = str(profile.get("strategy_name") or "").strip()
+    missing_strategy = _missing_runtime_bound_behavior_parameters(
+        strategy_name=strategy_name,
+        parameters=dict(profile["strategy_parameters"]),
+    )
+    if missing_strategy:
+        raise ApprovedProfileError(
+            "profile_missing_required_runtime_bound_parameter:" + ",".join(missing_strategy)
+        )
+    missing_effective = _missing_runtime_bound_behavior_parameters(
+        strategy_name=strategy_name,
+        parameters=dict(profile["effective_strategy_parameters"]),
+    )
+    if missing_effective:
+        raise ApprovedProfileError(
+            "effective_profile_missing_required_runtime_bound_parameter:"
+            + ",".join(missing_effective)
+        )
     expected = profile.get(PROFILE_HASH_FIELD)
     if (
         isinstance(expected, str)
@@ -1561,8 +1589,7 @@ def _compare_behavior_parameter_coverage(
     runtime_params: dict[str, Any],
 ) -> None:
     strategy_name = str(profile.get("strategy_name") or runtime.get("strategy_name") or "sma_with_filter")
-    spec = strategy_spec_for_name(strategy_name)
-    required = sorted(set(spec.behavior_affecting_parameter_names) - set(spec.research_only_parameter_names))
+    required = sorted(runtime_bound_behavior_parameter_names(strategy_name))
     for key in required:
         if key not in profile_params:
             mismatches.append(

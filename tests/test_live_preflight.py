@@ -467,7 +467,32 @@ def test_live_armed_preflight_requires_approved_small_live_profile(monkeypatch: 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
-    assert "approved_profile_missing" in str(exc.value)
+    assert "approved_profile_required_for_strategy:sma_with_filter" in str(exc.value)
+
+
+def test_live_dry_run_preflight_requires_approved_live_dry_run_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "approved_profile_required_for_strategy:sma_with_filter" in str(exc.value)
+
+
+def test_live_dry_run_preflight_rejects_small_live_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="small_live")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "profile_mode_mismatch" in str(exc.value)
 
 
 def test_live_armed_preflight_rejects_profile_env_mismatch(
@@ -529,7 +554,7 @@ def test_live_dry_run_startup_requires_approved_live_dry_run_profile(
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_dry_run_loop_startup_contract(settings)
 
-    assert "approved_profile_missing" in str(exc.value)
+    assert "approved_profile_required_for_strategy:sma_with_filter" in str(exc.value)
 
 
 def test_live_dry_run_startup_rejects_small_live_profile(

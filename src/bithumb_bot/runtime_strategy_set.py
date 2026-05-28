@@ -11,6 +11,7 @@ from .approved_profile import (
     PROFILE_HASH_FIELD,
     approved_profile_path_from_env,
     diff_profile_to_runtime,
+    expected_profile_modes_for_runtime,
     load_approved_profile,
     runtime_contract_from_settings,
 )
@@ -283,15 +284,28 @@ class RuntimeDecisionRequestBuilder:
             if spec.strategy_name != "safe_hold":
                 raise
             plugin = None
-        parameters, parameter_source = self._parameters_for_spec(spec)
-        strategy_parameters_hash = materialized_strategy_parameters_hash(parameters)
         cfg = replace(self.settings_obj, STRATEGY_NAME=spec.strategy_name)
+        approved_profile_path = spec.approved_profile_path or approved_profile_path_from_env() or None
+        profile = None
+        if approved_profile_path:
+            profile = load_approved_profile(approved_profile_path)
+            profile_hash = str(profile.get(PROFILE_HASH_FIELD) or "")
+            if spec.approved_profile_hash and spec.approved_profile_hash != profile_hash:
+                raise RuntimeError(f"approved_profile_hash_mismatch_for_runtime_strategy:{spec.strategy_name}")
+            approved_profile_hash = profile_hash
+            parameters = dict(profile["strategy_parameters"])
+            parameter_source = "strict_profile"
+        else:
+            self._require_profile_for_live_compatible_runtime(spec)
+            approved_profile_hash = spec.approved_profile_hash
+            parameters, parameter_source = self._parameters_for_spec(spec)
+        strategy_parameters_hash = materialized_strategy_parameters_hash(parameters)
         try:
-            runtime_contract = runtime_contract_from_settings(cfg)
+            settings_runtime_contract = runtime_contract_from_settings(cfg)
         except (ResearchStrategyRegistryError, ApprovedProfileError):
             if spec.strategy_name != "safe_hold":
                 raise
-            runtime_contract = {
+            settings_runtime_contract = {
                 "schema_version": 1,
                 "mode": str(getattr(cfg, "MODE", "")),
                 "strategy_name": spec.strategy_name,
@@ -299,6 +313,32 @@ class RuntimeDecisionRequestBuilder:
                 "interval": str(spec.interval or getattr(cfg, "INTERVAL", "")),
                 "strategy_parameters": {},
             }
+        settings_runtime_contract = dict(settings_runtime_contract)
+        settings_runtime_contract["strategy_name"] = spec.strategy_name
+        settings_runtime_contract["market"] = str(spec.pair or getattr(cfg, "PAIR", ""))
+        settings_runtime_contract["interval"] = str(spec.interval or getattr(cfg, "INTERVAL", ""))
+        if approved_profile_path and not str(settings_runtime_contract.get("profile_selector") or "").strip():
+            settings_runtime_contract["profile_selector"] = approved_profile_path
+        if profile is not None:
+            expected_modes, mode_reason = expected_profile_modes_for_runtime(settings_runtime_contract)
+            if expected_modes is not None and len(expected_modes) == 0:
+                raise RuntimeError(
+                    f"approved_profile_runtime_mode_invalid:{spec.strategy_name}:{mode_reason or 'unknown'}"
+                )
+            if expected_modes is not None and str(profile.get("profile_mode") or "") not in expected_modes:
+                raise RuntimeError(
+                    "approved_profile_runtime_parameter_mismatch:"
+                    f"{spec.strategy_name}:profile_mode"
+                )
+            mismatches = diff_profile_to_runtime(
+                profile,
+                settings_runtime_contract,
+                profile_path=approved_profile_path,
+            )
+            if mismatches:
+                fields = ",".join(str(item.get("field") or "unknown") for item in mismatches)
+                raise RuntimeError(f"approved_profile_runtime_parameter_mismatch:{spec.strategy_name}:{fields}")
+        runtime_contract = dict(settings_runtime_contract)
         runtime_contract = dict(runtime_contract)
         runtime_contract["strategy_name"] = spec.strategy_name
         runtime_contract["market"] = str(spec.pair or getattr(cfg, "PAIR", ""))
@@ -310,19 +350,6 @@ class RuntimeDecisionRequestBuilder:
             runtime_contract["exit_policy"] = exit_policy_from_parameters(spec.strategy_name, dict(parameters))
         runtime_contract["exit_policy_hash"] = sha256_prefixed(runtime_contract["exit_policy"])
         runtime_contract_hash = spec.runtime_contract_hash or sha256_prefixed(runtime_contract)
-        approved_profile_path = spec.approved_profile_path or approved_profile_path_from_env() or None
-        approved_profile_hash = spec.approved_profile_hash
-        if approved_profile_path:
-            profile = load_approved_profile(approved_profile_path)
-            approved_profile_hash = str(profile.get(PROFILE_HASH_FIELD) or approved_profile_hash or "")
-            mismatches = diff_profile_to_runtime(
-                profile,
-                runtime_contract,
-                profile_path=approved_profile_path,
-            )
-            if mismatches:
-                fields = ",".join(str(item.get("field") or "unknown") for item in mismatches)
-                raise RuntimeError(f"approved_profile_runtime_parameter_mismatch:{spec.strategy_name}:{fields}")
         plugin_contract_hash = plugin.contract_hash() if hasattr(plugin, "contract_hash") else None
         strategy_version = spec.strategy_version or getattr(plugin, "version", None)
         request_payload = {
@@ -366,8 +393,19 @@ class RuntimeDecisionRequestBuilder:
             return {}, spec.parameter_source or "runtime_builtin_no_parameters"
         return (
             runtime_strategy_parameters_from_settings(spec.strategy_name, self.settings_obj),
-            spec.parameter_source or "runtime_parameter_adapter:settings",
+            spec.parameter_source or "settings_compat",
         )
+
+    def _require_profile_for_live_compatible_runtime(self, spec: RuntimeStrategySpec) -> None:
+        mode = str(getattr(self.settings_obj, "MODE", "") or "").strip().lower()
+        if mode != "live":
+            return
+        live_dry_run = bool(getattr(self.settings_obj, "LIVE_DRY_RUN", False))
+        live_real_order_armed = bool(getattr(self.settings_obj, "LIVE_REAL_ORDER_ARMED", False))
+        if live_dry_run or live_real_order_armed:
+            raise RuntimeError(
+                f"approved_profile_required_for_live_compatible_runtime_strategy:{spec.strategy_name}"
+            )
 
 
 @dataclass(frozen=True)

@@ -282,7 +282,19 @@ def test_approved_profile_mismatch_fails_before_adapter(monkeypatch: pytest.Monk
     from bithumb_bot import runtime_strategy_decision, runtime_strategy_set
 
     monkeypatch.setitem(runtime_strategy_decision._RUNTIME_DECISION_ADAPTERS, "canary_non_sma", _Adapter)
-    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: {"profile_content_hash": "sha256:unit"})
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "load_approved_profile",
+        lambda path: {
+            "profile_mode": "paper",
+            "profile_content_hash": "sha256:unit",
+            "strategy_parameters": {
+                "CANARY_ORDER_START_INDEX": 0,
+                "CANARY_ORDER_SIDE": "BUY",
+                "CANARY_ORDER_REASON": "profile",
+            },
+        },
+    )
     monkeypatch.setattr(
         runtime_strategy_set,
         "diff_profile_to_runtime",
@@ -297,6 +309,233 @@ def test_approved_profile_mismatch_fails_before_adapter(monkeypatch: pytest.Monk
         RuntimeStrategyDecisionCollector().collect(_conn(), strategy_set, through_ts_ms=1_700_000_180_000)
 
     assert called is False
+
+
+def test_request_builder_uses_strict_profile_parameters_when_profile_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_params = _complete_sma_parameters(SMA_SHORT=3, SMA_LONG=8)
+    settings_params = _complete_sma_parameters(SMA_SHORT=99, SMA_LONG=199)
+    profile = {
+        "profile_mode": "paper",
+        "profile_content_hash": "sha256:profile",
+        "strategy_parameters": dict(profile_params),
+    }
+
+    from bithumb_bot import runtime_strategy_set
+
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profile)
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "runtime_contract_from_settings",
+        lambda cfg: {
+            "mode": "paper",
+            "live_dry_run": True,
+            "live_real_order_armed": False,
+            "profile_selector": "",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "strategy_parameters": dict(settings_params),
+        },
+    )
+
+    def _diff(profile_payload: dict[str, object], runtime: dict[str, object], profile_path: str | None = None):
+        assert profile_payload is profile
+        assert runtime["strategy_parameters"] == settings_params
+        assert profile_path == "/tmp/profile.json"
+        return ()
+
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", _diff)
+
+    request = RuntimeDecisionRequestBuilder().build_for_spec(
+        RuntimeStrategySpec(
+            "sma_with_filter",
+            pair="KRW-BTC",
+            interval="1m",
+            approved_profile_path="/tmp/profile.json",
+            approved_profile_hash="sha256:profile",
+        ),
+        through_ts_ms=1_700_000_180_000,
+    )
+
+    assert dict(request.parameters) == profile_params
+    assert request.parameter_source == "strict_profile"
+    assert request.approved_profile_hash == "sha256:profile"
+    assert request.observability_fields()["parameter_source"] == "strict_profile"
+
+
+def test_request_builder_rejects_explicit_profile_hash_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = {
+        "profile_mode": "paper",
+        "profile_content_hash": "sha256:actual",
+        "strategy_parameters": _complete_sma_parameters(),
+    }
+    from bithumb_bot import runtime_strategy_set
+
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profile)
+
+    with pytest.raises(RuntimeError, match="approved_profile_hash_mismatch_for_runtime_strategy:sma_with_filter"):
+        RuntimeDecisionRequestBuilder().build_for_spec(
+            RuntimeStrategySpec(
+                "sma_with_filter",
+                pair="KRW-BTC",
+                interval="1m",
+                approved_profile_path="/tmp/profile.json",
+                approved_profile_hash="sha256:expected",
+            ),
+            through_ts_ms=1_700_000_180_000,
+        )
+
+
+def test_request_builder_rejects_settings_drift_in_strict_profile_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = {
+        "profile_mode": "paper",
+        "profile_content_hash": "sha256:profile",
+        "strategy_parameters": _complete_sma_parameters(),
+    }
+    from bithumb_bot import runtime_strategy_set
+
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profile)
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "runtime_contract_from_settings",
+        lambda cfg: {
+            "mode": "paper",
+            "live_dry_run": True,
+            "live_real_order_armed": False,
+            "profile_selector": "/tmp/profile.json",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "strategy_parameters": _complete_sma_parameters(SMA_SHORT=99),
+        },
+    )
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "diff_profile_to_runtime",
+        lambda profile_payload, runtime, profile_path=None: (
+            {"field": "strategy_parameters.SMA_SHORT"},
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="approved_profile_runtime_parameter_mismatch:sma_with_filter"):
+        RuntimeDecisionRequestBuilder().build_for_spec(
+            RuntimeStrategySpec(
+                "sma_with_filter",
+                pair="KRW-BTC",
+                interval="1m",
+                approved_profile_path="/tmp/profile.json",
+            ),
+            through_ts_ms=1_700_000_180_000,
+        )
+
+
+def test_live_compatible_request_builder_requires_approved_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = {
+        "MODE": settings.MODE,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "APPROVED_STRATEGY_PROFILE_PATH": settings.APPROVED_STRATEGY_PROFILE_PATH,
+    }
+    try:
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_DRY_RUN", True)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+        object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+        monkeypatch.delenv("APPROVED_STRATEGY_PROFILE_PATH", raising=False)
+        with pytest.raises(
+            RuntimeError,
+            match="approved_profile_required_for_live_compatible_runtime_strategy:sma_with_filter",
+        ):
+            RuntimeDecisionRequestBuilder().build_for_spec(
+                RuntimeStrategySpec("sma_with_filter", pair="KRW-BTC", interval="1m"),
+                through_ts_ms=1_700_000_180_000,
+            )
+
+        object.__setattr__(settings, "LIVE_DRY_RUN", False)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+        with pytest.raises(
+            RuntimeError,
+            match="approved_profile_required_for_live_compatible_runtime_strategy:sma_with_filter",
+        ):
+            RuntimeDecisionRequestBuilder().build_for_spec(
+                RuntimeStrategySpec("sma_with_filter", pair="KRW-BTC", interval="1m"),
+                through_ts_ms=1_700_000_180_000,
+            )
+    finally:
+        for key, value in original.items():
+            object.__setattr__(settings, key, value)
+
+
+def test_live_compatible_request_builder_enforces_profile_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = {
+        "MODE": settings.MODE,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+    }
+    profile = {
+        "profile_mode": "small_live",
+        "profile_content_hash": "sha256:profile",
+        "strategy_parameters": _complete_sma_parameters(),
+    }
+    from bithumb_bot import runtime_strategy_set
+
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profile)
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "runtime_contract_from_settings",
+        lambda cfg: {
+            "mode": "live",
+            "live_dry_run": bool(settings.LIVE_DRY_RUN),
+            "live_real_order_armed": bool(settings.LIVE_REAL_ORDER_ARMED),
+            "profile_selector": "/tmp/profile.json",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "strategy_parameters": dict(profile["strategy_parameters"]),
+        },
+    )
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", lambda *args, **kwargs: ())
+    try:
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_DRY_RUN", True)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+        with pytest.raises(RuntimeError, match="approved_profile_runtime_parameter_mismatch:sma_with_filter:profile_mode"):
+            RuntimeDecisionRequestBuilder().build_for_spec(
+                RuntimeStrategySpec(
+                    "sma_with_filter",
+                    pair="KRW-BTC",
+                    interval="1m",
+                    approved_profile_path="/tmp/profile.json",
+                ),
+                through_ts_ms=1_700_000_180_000,
+            )
+
+        profile["profile_mode"] = "live_dry_run"
+        object.__setattr__(settings, "LIVE_DRY_RUN", False)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+        with pytest.raises(RuntimeError, match="approved_profile_runtime_parameter_mismatch:sma_with_filter:profile_mode"):
+            RuntimeDecisionRequestBuilder().build_for_spec(
+                RuntimeStrategySpec(
+                    "sma_with_filter",
+                    pair="KRW-BTC",
+                    interval="1m",
+                    approved_profile_path="/tmp/profile.json",
+                ),
+                through_ts_ms=1_700_000_180_000,
+            )
+    finally:
+        for key, value in original.items():
+            object.__setattr__(settings, key, value)
 
 
 def test_sma_parameters_are_isolated_to_sma_specific_files() -> None:
@@ -416,6 +655,30 @@ def test_sma_runtime_config_missing_behavior_parameter_fails_closed() -> None:
 
     with pytest.raises(RuntimeError, match="sma_runtime_request_behavior_parameter_missing"):
         SmaWithFilterRuntimeConfig.from_runtime_request(request)
+
+
+def test_sma_runtime_replay_strategy_fails_closed_for_incomplete_profile() -> None:
+    from bithumb_bot.research.sma_with_filter_plugin import build_runtime_replay_strategy
+
+    profile = {
+        "market": "KRW-BTC",
+        "interval": "1m",
+        "strategy_parameters": _complete_sma_parameters(),
+    }
+    profile["strategy_parameters"].pop("SMA_FILTER_OVEREXT_LOOKBACK")
+
+    with pytest.raises(RuntimeError, match="sma_runtime_request_behavior_parameter_missing"):
+        build_runtime_replay_strategy(profile)
+
+
+def test_settings_compat_parameter_source_is_explicit() -> None:
+    request = RuntimeDecisionRequestBuilder().build_for_spec(
+        RuntimeStrategySpec("canary_non_sma", pair="KRW-BTC", interval="1m"),
+        through_ts_ms=1_700_000_180_000,
+    )
+
+    assert request.parameter_source == "settings_compat"
+    assert request.observability_fields()["parameter_source"] == "settings_compat"
 
 
 def test_promotion_runtime_paths_do_not_import_legacy_sma_settings_config() -> None:

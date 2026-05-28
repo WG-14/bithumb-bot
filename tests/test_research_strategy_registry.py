@@ -74,6 +74,17 @@ def test_research_strategy_registry_resolves_sma_with_filter() -> None:
     ]
 
 
+def test_live_dry_run_capability_requires_approved_profile_for_profile_bound_strategy() -> None:
+    issues = strategy_registry.strategy_runtime_capability_issues(
+        "sma_with_filter",
+        live_dry_run=True,
+        live_real_order_armed=False,
+        approved_profile_path="",
+    )
+
+    assert "approved_profile_required_for_strategy:sma_with_filter" in issues
+
+
 def test_data_capability_requirement_contract_supports_required_optional_and_coverage() -> None:
     requirements = ResearchStrategyDataRequirements(
         required_data=("candles",),

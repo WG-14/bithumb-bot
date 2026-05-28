@@ -1182,12 +1182,12 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             issues.append(str(exc))
 
     if not issues:
-        profile_required = bool(not cfg.LIVE_DRY_RUN and cfg.LIVE_REAL_ORDER_ARMED)
+        profile_required = bool(cfg.LIVE_DRY_RUN or cfg.LIVE_REAL_ORDER_ARMED)
         runtime_contract = runtime_contract_from_settings(cfg)
         configured_profile_path = str(runtime_contract.get("profile_selector") or "").strip()
         if profile_required or configured_profile_path:
             expected_profile_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
-            if profile_required:
+            if profile_required and not cfg.LIVE_DRY_RUN:
                 expected_profile_modes = {"small_live"}
                 mode_reason = None
             profile_result = verify_profile_against_runtime(

@@ -197,6 +197,16 @@ def strategy_spec_for_name(strategy_name: str) -> StrategySpec:
         raise StrategySpecError(f"unsupported research strategy: {strategy_name}") from exc
 
 
+def runtime_bound_behavior_parameter_names(strategy_name: str) -> tuple[str, ...]:
+    spec = strategy_spec_for_name(strategy_name)
+    research_only = set(spec.research_only_parameter_names)
+    return tuple(
+        name
+        for name in spec.behavior_affecting_parameter_names
+        if name not in research_only
+    )
+
+
 def validate_parameter_space_against_strategy_spec(
     *,
     strategy_name: str,
@@ -224,9 +234,7 @@ def validate_parameter_space_against_strategy_spec(
             + ",".join(research_only)
         )
     if is_production_bound_target(deployment_tier):
-        runtime_bound_behavior = sorted(
-            set(spec.behavior_affecting_parameter_names) - set(spec.research_only_parameter_names)
-        )
+        runtime_bound_behavior = sorted(runtime_bound_behavior_parameter_names(strategy_name))
         missing_behavior = [key for key in runtime_bound_behavior if key not in parameter_space]
         if missing_behavior:
             raise StrategySpecError(

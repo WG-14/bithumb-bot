@@ -11,7 +11,7 @@ from bithumb_bot.runtime_sma_snapshot_builder import (
     _resolve_signal_through_ts_ms,
 )
 from bithumb_bot.runtime_strategy_decision import RuntimeStrategyDecisionResult
-from bithumb_bot.research.strategy_spec import materialize_strategy_parameters, strategy_spec_for_name
+from bithumb_bot.research.strategy_spec import materialize_strategy_parameters, runtime_bound_behavior_parameter_names
 from bithumb_bot.strategy.sma_policy_strategy import SmaWithFilterStrategy, create_sma_with_filter_strategy
 
 
@@ -158,12 +158,7 @@ class SmaWithFilterRuntimeConfig:
         parameters: dict[str, object],
     ) -> "SmaWithFilterRuntimeConfig":
         raw_params = dict(parameters or {})
-        spec = strategy_spec_for_name("sma_with_filter")
-        runtime_bound = tuple(
-            name
-            for name in spec.behavior_affecting_parameter_names
-            if name not in set(spec.research_only_parameter_names)
-        )
+        runtime_bound = runtime_bound_behavior_parameter_names("sma_with_filter")
         missing = tuple(name for name in runtime_bound if name not in raw_params)
         if missing:
             raise RuntimeError(
