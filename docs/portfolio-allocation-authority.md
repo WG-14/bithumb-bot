@@ -36,10 +36,12 @@ The runtime strategy set is resolved before decision collection.
 Configuration contract:
 
 - If `RUNTIME_STRATEGY_SET_JSON` is set, it must be a JSON list or an object with a `strategies` list.
-- Each strategy object supports `strategy_name` or `name`, `enabled`, `pair`, `priority`, `weight`, `desired_exposure_krw`, and `risk_budget_krw`.
-- If `RUNTIME_STRATEGY_SET_JSON` is unset and `ACTIVE_STRATEGIES` is set, `ACTIVE_STRATEGIES` is parsed as a comma-separated strategy-name list and all other fields use safe defaults.
+- Each strategy object supports `strategy_name` or `name`, `enabled`, `pair`, `interval`, `parameters`, `runtime_adapter_config`, `approved_profile_path`, `approved_profile_hash`, `priority`, `weight`, `desired_exposure_krw`, and `risk_budget_krw`.
+- If `RUNTIME_STRATEGY_SET_JSON` is unset and `ACTIVE_STRATEGIES` is set, `ACTIVE_STRATEGIES` is parsed only as a compatibility/diagnostic strategy-name list and all other fields use safe defaults. It does not carry per-instance parameters, approved profiles, priority, weight, or risk authority. In `MODE=live`, multiple `ACTIVE_STRATEGIES` fail closed unless a structured runtime strategy-set contract is provided.
 - If neither multi-strategy variable is set, the resolver returns exactly one enabled strategy from `STRATEGY_NAME`.
 - `pair` defaults to `settings.PAIR`, `priority` defaults to `100`, `weight` defaults to `1.0`, and desired exposure defaults to `TARGET_EXPOSURE_KRW` when set or `MAX_ORDER_KRW`.
+- The current run loop is explicitly single-pair. Every active strategy spec must use `settings.PAIR`; pair mismatches fail during startup validation before adapter execution in paper, live dry-run, and live real-order paths.
+- Operators can validate and inspect the materialized active set without placing orders with `uv run bithumb-bot runtime-strategy-set-lint` and `uv run bithumb-bot runtime-strategy-set-dump`.
 
 The collector executes every active strategy's registered `RuntimeDecisionAdapter` for the same closed candle timestamp. Live/promotion-grade execution requires typed `RuntimeStrategyDecisionResult` values containing `StrategyDecisionV2`. Missing adapters, legacy dict-only handoffs, invalid typed results, or mixed candle timestamps fail closed instead of continuing with a partial strategy set.
 

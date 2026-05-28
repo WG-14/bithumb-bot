@@ -4,6 +4,7 @@ import ast
 import argparse
 import inspect
 import json
+import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +25,7 @@ from bithumb_bot.runtime_strategy_set import (
     RuntimeStrategyDecisionResultBundle,
     RuntimeStrategySet,
     RuntimeStrategySpec,
+    normalized_runtime_strategy_set_manifest,
 )
 from bithumb_bot.strategy_plugins.canary_non_sma import CanaryNonSmaRuntimeDecisionAdapter
 from bithumb_bot.runtime_adapters.sma_with_filter import SmaWithFilterRuntimeConfig
@@ -931,3 +933,110 @@ def test_runtime_strategy_set_preflight_rejects_pair_mismatch() -> None:
 
     with pytest.raises(LiveModeValidationError, match="runtime_strategy_pair_mismatch"):
         validate_runtime_strategy_set_selection(cfg)
+
+
+def test_normalized_runtime_strategy_set_manifest_materializes_active_instances() -> None:
+    left = RuntimeStrategySpec(
+        "canary_non_sma",
+        priority=5,
+        weight=2.0,
+        desired_exposure_krw=50_000.0,
+        risk_budget_krw=20_000.0,
+        parameters={
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "BUY",
+            "CANARY_ORDER_REASON": "left",
+        },
+    )
+    right = RuntimeStrategySpec(
+        "canary_non_sma",
+        priority=10,
+        weight=1.0,
+        desired_exposure_krw=10_000.0,
+        risk_budget_krw=5_000.0,
+        parameters={
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "HOLD",
+            "CANARY_ORDER_REASON": "right",
+        },
+    )
+    manifest = normalized_runtime_strategy_set_manifest(
+        strategy_set=RuntimeStrategySet(source="unit", strategies=(left, right)),
+    )
+
+    assert manifest["single_pair_runtime_enforced"] is True
+    assert manifest["active_strategy_count"] == 2
+    assert str(manifest["runtime_strategy_set_manifest_hash"]).startswith("sha256:")
+    instances = manifest["active_instances"]
+    assert isinstance(instances, list)
+    assert {item["strategy_instance_id"] for item in instances} == {
+        RuntimeDecisionRequestBuilder().build_for_spec(left, through_ts_ms=123).strategy_instance_id,
+        RuntimeDecisionRequestBuilder().build_for_spec(right, through_ts_ms=123).strategy_instance_id,
+    }
+    for item in instances:
+        for key in (
+            "strategy_instance_id",
+            "strategy_name",
+            "pair",
+            "interval",
+            "priority",
+            "weight",
+            "desired_exposure_krw",
+            "risk_budget_krw",
+            "approved_profile_path",
+            "approved_profile_hash",
+            "parameter_source",
+            "parameters_raw",
+            "parameters_materialized",
+            "strategy_parameters_hash",
+            "runtime_contract_hash",
+            "plugin_contract_hash",
+            "strategy_version",
+            "runtime_adapter_config",
+        ):
+            assert key in item
+
+
+def test_runtime_strategy_set_dump_cli_validates_and_prints_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from bithumb_bot.cli.main import main as cli_main
+
+    monkeypatch.setenv(
+        "RUNTIME_STRATEGY_SET_JSON",
+        json.dumps(
+            {
+                "strategies": [
+                    {
+                        "strategy_name": "safe_hold",
+                        "pair": "KRW-BTC",
+                        "interval": "1m",
+                    }
+                ]
+            }
+        ),
+    )
+    cfg = replace(settings, MODE="paper", PAIR="KRW-BTC", RUNTIME_STRATEGY_SET_JSON=os.environ["RUNTIME_STRATEGY_SET_JSON"])
+
+    assert cli_main(["runtime-strategy-set-dump"], context=argparse.Namespace(settings=cfg, printer=print, env_summary=None)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["source"] == "RUNTIME_STRATEGY_SET_JSON"
+    assert payload["active_strategy_count"] == 1
+    assert payload["active_instances"][0]["strategy_name"] == "safe_hold"
+
+
+def test_runtime_strategy_set_lint_cli_fails_on_pair_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bithumb_bot.cli.main import main as cli_main
+
+    monkeypatch.setenv(
+        "RUNTIME_STRATEGY_SET_JSON",
+        json.dumps({"strategies": [{"strategy_name": "safe_hold", "pair": "KRW-ETH"}]}),
+    )
+    cfg = replace(settings, MODE="paper", PAIR="KRW-BTC", RUNTIME_STRATEGY_SET_JSON=os.environ["RUNTIME_STRATEGY_SET_JSON"])
+
+    with pytest.raises(LiveModeValidationError, match="runtime_strategy_pair_mismatch"):
+        cli_main(["runtime-strategy-set-lint"], context=argparse.Namespace(settings=cfg, printer=print, env_summary=None))

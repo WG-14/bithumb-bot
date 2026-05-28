@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from bithumb_bot.cli.registry import CommandSpec
 
@@ -78,6 +79,31 @@ def _live_dry_run(args: argparse.Namespace, _context) -> None:
     cmd_live_dry_run()
 
 
+def _runtime_strategy_set_lint(_args: argparse.Namespace, context) -> int:
+    from bithumb_bot.config import validate_runtime_strategy_set_selection
+    from bithumb_bot.runtime_strategy_set import normalized_runtime_strategy_set_manifest
+
+    validate_runtime_strategy_set_selection(context.settings)
+    manifest = normalized_runtime_strategy_set_manifest(settings_obj=context.settings)
+    context.printer(
+        "runtime_strategy_set_lint_ok "
+        f"manifest_hash={manifest['runtime_strategy_set_manifest_hash']} "
+        f"active_strategy_count={manifest['active_strategy_count']} "
+        f"source={manifest['source']}"
+    )
+    return 0
+
+
+def _runtime_strategy_set_dump(args: argparse.Namespace, context) -> int:
+    from bithumb_bot.config import validate_runtime_strategy_set_selection
+    from bithumb_bot.runtime_strategy_set import normalized_runtime_strategy_set_manifest
+
+    validate_runtime_strategy_set_selection(context.settings)
+    manifest = normalized_runtime_strategy_set_manifest(settings_obj=context.settings)
+    context.printer(json.dumps(manifest, indent=2 if args.pretty else None, sort_keys=True))
+    return 0
+
+
 def _build_window_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--short", type=int, default=_settings_default("SMA_SHORT"))
     parser.add_argument("--long", type=int, default=_settings_default("SMA_LONG"))
@@ -145,5 +171,21 @@ def command_specs() -> list[CommandSpec]:
             guard_policy="live_dry_run_loop",
             writes_db=True,
             uses_broker=True,
+        ),
+        make_spec(
+            "runtime-strategy-set-lint",
+            domain="runtime",
+            handler=_runtime_strategy_set_lint,
+            help="validate the active runtime strategy set without placing orders",
+            description="Validate and materialize the active runtime strategy set using startup validation.",
+        ),
+        make_spec(
+            "runtime-strategy-set-dump",
+            domain="runtime",
+            handler=_runtime_strategy_set_dump,
+            help="print the normalized active runtime strategy-set manifest",
+            description="Validate and print the materialized active runtime strategy set without placing orders.",
+            build=lambda p: p.add_argument("--pretty", action="store_true"),
+            json_output_supported=True,
         ),
     ]

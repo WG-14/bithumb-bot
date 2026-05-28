@@ -573,6 +573,7 @@ class ExecutionPlanner:
                 preferences = (strategy_preference,)
             else:
                 preference_list = []
+                runtime_result_contexts = []
                 for result in runtime_result_bundle.results:
                     result_context = getattr(result, "base_context", {})
                     result_instance_id = (
@@ -590,6 +591,31 @@ class ExecutionPlanner:
                             f"runtime_strategy_spec_missing:{result.decision.strategy_name}"
                         )
                     strategy_instance_id = derive_strategy_instance_id(spec)
+                    result_metadata = {
+                        "strategy_instance_id": strategy_instance_id,
+                        "runtime_strategy_priority": spec.priority,
+                        "runtime_strategy_set_source": runtime_result_bundle.strategy_set.source,
+                    }
+                    if isinstance(result_context, Mapping):
+                        result_metadata.update(
+                            {
+                                key: result_context.get(key)
+                                for key in (
+                                    "strategy_parameters",
+                                    "strategy_parameters_raw",
+                                    "strategy_parameters_materialized",
+                                    "strategy_parameters_hash",
+                                    "approved_profile_path",
+                                    "approved_profile_hash",
+                                    "runtime_contract_hash",
+                                    "plugin_contract_hash",
+                                    "runtime_decision_request_hash",
+                                    "parameter_source",
+                                )
+                                if key in result_context
+                            }
+                        )
+                    runtime_result_contexts.append(result_metadata)
                     preference_list.append(
                         strategy_decision_to_preference(
                             result.decision,
@@ -598,13 +624,10 @@ class ExecutionPlanner:
                             desired_exposure_krw=spec.desired_exposure_krw,
                             desired_weight=spec.weight,
                             risk_budget_krw=spec.risk_budget_krw,
-                            metadata={
-                                "strategy_instance_id": strategy_instance_id,
-                                "runtime_strategy_priority": spec.priority,
-                                "runtime_strategy_set_source": runtime_result_bundle.strategy_set.source,
-                            },
+                            metadata=result_metadata,
                         )
                     )
+                context["runtime_strategy_result_contexts"] = runtime_result_contexts
                 preferences = tuple(preference_list)
             context["strategy_preference_count"] = len(preferences)
             context["strategy_preferences"] = [item.as_dict() for item in preferences]

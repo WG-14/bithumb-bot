@@ -16,6 +16,7 @@ from .config import (
     validate_live_mode_preflight,
     validate_market_preflight,
     validate_market_runtime,
+    validate_runtime_strategy_set_selection,
 )
 from .marketdata import cmd_sync
 from .runtime_decision_service import (
@@ -34,8 +35,8 @@ from .runtime_strategy_set import (
     RuntimeStrategyDecisionResultBundle,
     active_runtime_strategy_set,
     collect_runtime_strategy_decisions,
+    normalized_runtime_strategy_set_manifest,
 )
-from .decision_equivalence import sha256_prefixed
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import (
@@ -1234,6 +1235,7 @@ def run_loop() -> None:
                 reason=f"market preflight failed: {exc}",
             )
             raise
+    validate_runtime_strategy_set_selection(settings)
     validate_live_mode_preflight(settings)
 
     maybe_clear_stale_initial_reconcile_halt()
@@ -1348,7 +1350,11 @@ def run_loop() -> None:
 
     sec = parse_interval_sec(settings.INTERVAL)
     runtime_strategy_set = active_runtime_strategy_set()
-    runtime_strategy_set_hash = sha256_prefixed(runtime_strategy_set.as_dict())
+    runtime_strategy_set_manifest = normalized_runtime_strategy_set_manifest(
+        strategy_set=runtime_strategy_set,
+        settings_obj=settings,
+    )
+    runtime_strategy_set_hash = str(runtime_strategy_set_manifest["runtime_strategy_set_manifest_hash"])
     _log_loop_event(
         logging.INFO,
         "[RUN] loop_start",
@@ -1364,6 +1370,7 @@ def run_loop() -> None:
         runtime_strategy_set_source=runtime_strategy_set.source,
         runtime_strategy_set_hash=runtime_strategy_set_hash,
         active_strategy_count=len(runtime_strategy_set.active_strategies),
+        runtime_strategy_set_manifest=json.dumps(runtime_strategy_set_manifest, sort_keys=True),
     )
     _log_loop_event(logging.INFO, "[RUN] operator_hint", action="Ctrl+C to stop")
     fail_count = 0

@@ -109,6 +109,8 @@ uv run bithumb-bot candidate-regime-policy-equivalence-evidence --backtest-repor
 uv run bithumb-bot profile-diff --profile <profile.json> --target-env <env-file> --json
 uv run bithumb-bot profile-verify --profile <profile.json> --env <env-file>
 uv run bithumb-bot config-dump --masked
+uv run bithumb-bot runtime-strategy-set-lint
+uv run bithumb-bot runtime-strategy-set-dump
 uv run bithumb-bot live-dry-run
 uv run bithumb-bot cash-drift-report --recent-limit 5
 uv run bithumb-bot experiment-report --sample-threshold 30 --top-n 3
@@ -141,7 +143,7 @@ Live broker submission requires the final validated serialization from `Executio
 
 Portfolio target authority is documented in [`docs/portfolio-allocation-authority.md`](/docs/portfolio-allocation-authority.md). Strategy output becomes a typed non-authoritative `StrategyPreference`; `SignalAggregator` and `PortfolioAllocator` produce the authoritative `PortfolioTarget`; target-delta planning consumes that target before producing `ExecutionSubmitPlan`. Single-strategy runtime uses the same allocator path as the degenerate multi-strategy case. Missing or malformed portfolio target authority fails closed.
 
-Multi-strategy runtime orchestration is configured with `RUNTIME_STRATEGY_SET_JSON` or `ACTIVE_STRATEGIES`. When neither is set, runtime resolves exactly one active strategy from `STRATEGY_NAME`. Active strategies are collected on the same closed candle, converted to typed `StrategyPreference`s, and allocated into one authoritative `PortfolioTarget` per pair before execution planning.
+Multi-strategy runtime orchestration is configured with `RUNTIME_STRATEGY_SET_JSON`. `ACTIVE_STRATEGIES` remains a compatibility/diagnostic name-list shortcut only; it does not carry per-instance parameter, approved-profile, priority, weight, or risk authority, and live mode rejects multiple `ACTIVE_STRATEGIES` unless a structured strategy-set contract is provided. When neither is set, runtime resolves exactly one active strategy from `STRATEGY_NAME`. Active strategies are collected on the same closed candle, converted to typed `StrategyPreference`s, and allocated into one authoritative `PortfolioTarget` for the configured `settings.PAIR` before execution planning. The current run loop enforces a single-pair invariant at startup across paper, live dry-run, and live real-order paths.
 
 Current equivalence evidence is submit-plan scoped by default. `src/bithumb_bot/decision_equivalence.py` emits `claim_scope=submit_plan_equivalence_only`, `submit_plan_equivalence_supported=true`, and `full_lifecycle_equivalence_supported=false` unless explicit typed/hash-bound lifecycle evidence is supplied and validated. Full lifecycle equivalence requires research simulated fill events, paper submit/fill events, live submit responses, accounting replay outputs, and position lifecycle snapshots. Promotion-grade gates fail closed if a report attempts to claim full lifecycle equivalence without that evidence. For submit-plan-only reports, the operator next action is to keep using manifest-backed validation and add lifecycle evidence fixtures before making any lifecycle-equivalence claim.
 

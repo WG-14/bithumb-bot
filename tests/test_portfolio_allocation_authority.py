@@ -599,6 +599,60 @@ def test_run_loop_multi_strategy_path_sends_multiple_preferences_to_allocator() 
     ]
     assert result.persistence_context["allocation_conflict_count"] == 0
     assert result.persistence_context["allocation_primary_block_reason"] == "none"
+    assert len(result.persistence_context["runtime_strategy_result_contexts"]) == 2
+    assert all(
+        item["strategy_instance_id"]
+        for item in result.persistence_context["runtime_strategy_result_contexts"]
+    )
+
+
+def test_run_loop_multi_strategy_allocator_signal_overrides_representative_hold() -> None:
+    from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
+
+    old_engine = settings.EXECUTION_ENGINE
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        planner = ExecutionPlanner(
+            readiness_snapshot_builder=lambda _conn: _Readiness(_readiness(broker_qty=0.0)),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+        )
+        strategy_set = RuntimeStrategySet(
+            source="unit",
+            strategies=(
+                RuntimeStrategySpec(
+                    "strategy_hold",
+                    strategy_instance_id="aaa_strategy_hold",
+                    priority=10,
+                    desired_exposure_krw=60_000.0,
+                ),
+                RuntimeStrategySpec(
+                    "strategy_buy",
+                    strategy_instance_id="zzz_strategy_buy",
+                    priority=10,
+                    desired_exposure_krw=60_000.0,
+                ),
+            ),
+        )
+        bundle = RuntimeStrategyDecisionResultBundle(
+            strategy_set=strategy_set,
+            results=(
+                _runtime_result("HOLD", "strategy_hold"),
+                _runtime_result("BUY", "strategy_buy"),
+            ),
+        )
+        result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+
+    assert bundle.results[0].decision.final_signal == "HOLD"
+    assert result.persistence_context["authoritative_execution_signal"] == "BUY"
+    assert result.persistence_context["signal"] == "BUY"
+    assert result.submit_plan is not None
+    assert result.submit_plan.side == "BUY"
+    assert result.submit_plan.submit_expected is True
 
 
 def test_run_loop_multi_strategy_conflict_fails_closed_without_submit() -> None:

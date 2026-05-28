@@ -742,3 +742,32 @@ def collect_runtime_strategy_decisions(
         resolved,
         through_ts_ms=through_ts_ms,
     )
+
+
+def normalized_runtime_strategy_set_manifest(
+    *,
+    strategy_set: RuntimeStrategySet | None = None,
+    settings_obj: object = settings,
+) -> dict[str, object]:
+    """Return the materialized active strategy-set manifest used by startup linting.
+
+    This is an operator/reporting payload only. It does not create runtime
+    artifacts and it does not replace typed request, allocation, or submit-plan
+    authority.
+    """
+    resolved = strategy_set or RuntimeStrategySetResolver(settings_obj=settings_obj).resolve()
+    builder = RuntimeDecisionRequestBuilder(settings_obj=settings_obj)
+    active_instances = tuple(builder.materialize_instance(spec) for spec in resolved.active_strategies)
+    payload = {
+        "schema_version": 1,
+        "authority_label": "RuntimeStrategySetManifest",
+        "authority_scope": "operator_reproducibility_manifest",
+        "source": resolved.source,
+        "runtime_pair": str(getattr(settings_obj, "PAIR", "")),
+        "single_pair_runtime_enforced": True,
+        "multi_strategy_enabled": resolved.multi_strategy_enabled,
+        "active_strategy_count": len(active_instances),
+        "active_instances": [instance.as_dict() for instance in active_instances],
+    }
+    payload["runtime_strategy_set_manifest_hash"] = sha256_prefixed(payload)
+    return payload

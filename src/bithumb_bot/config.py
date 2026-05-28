@@ -378,6 +378,10 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
 
     issues: list[str] = []
     live_like = str(cfg.MODE or "").strip().lower() == "live"
+    if live_like and strategy_set.source == "ACTIVE_STRATEGIES" and strategy_set.multi_strategy_enabled:
+        issues.append(
+            "ACTIVE_STRATEGIES:live_multi_strategy_requires_runtime_strategy_set_json"
+        )
     active_instance_ids: set[str] = set()
     request_builder = RuntimeDecisionRequestBuilder(settings_obj=cfg)
     for spec in strategy_set.active_strategies:
@@ -424,6 +428,8 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
                 issues.append(
                     f"{spec.strategy_name}:runtime_strategy_parameters_missing_required:{','.join(missing)}"
                 )
+        elif spec.strategy_name == "safe_hold":
+            pass
         else:
             try:
                 runtime_strategy_parameters_from_settings(spec.strategy_name, cfg)
