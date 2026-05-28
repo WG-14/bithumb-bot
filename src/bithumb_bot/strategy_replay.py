@@ -14,7 +14,7 @@ from .decision_attribution import (
 )
 from .decision_contract import apply_decision_contract, build_replay_fingerprint
 from .market_regime import evaluate_live_regime_policy
-from .strategy.sma import (
+from .compat.sma_legacy_adapter import (
     _base_signal,
     _compute_gap_ratio,
     _evaluate_entry_edge_filter,

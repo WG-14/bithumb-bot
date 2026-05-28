@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import ast
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -93,4 +94,53 @@ def test_official_paths_do_not_cross_smoke_or_legacy_authority_boundaries() -> N
                 if _line_has_marker(line, marker) and not _marker_allowed(relative, line, marker):
                     failures.append(f"{relative}:{line_no}: forbidden marker {marker!r}")
 
+    assert failures == []
+
+
+def test_promotion_runtime_adapters_use_strategy_decision_service_boundary() -> None:
+    adapter_paths = (
+        REPO / "src/bithumb_bot/runtime_adapters/sma_with_filter.py",
+        REPO / "src/bithumb_bot/runtime_adapters/safe_hold.py",
+        REPO / "src/bithumb_bot/strategy_plugins/canary_non_sma.py",
+    )
+    failures: list[str] = []
+    for path in adapter_paths:
+        source = path.read_text(encoding="utf-8-sig")
+        if path.name == "sma_with_filter.py" and "compute_strategy_decision_after_normalization" in source:
+            continue
+        if "StrategyDecisionService" not in source or "StrategyEvaluationRequest" not in source:
+            failures.append(path.relative_to(REPO).as_posix())
+    assert failures == []
+
+
+def test_promotion_runtime_adapters_do_not_construct_strategy_decision_v2_outside_policy_classes() -> None:
+    allowed_class_suffix = ("Policy", "Strategy")
+    failures: list[str] = []
+    for path in (REPO / "src/bithumb_bot").rglob("*.py"):
+        relative = path.relative_to(REPO).as_posix()
+        if relative.startswith("src/bithumb_bot/compat/") or "/tests/" in relative:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=relative)
+        parents: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = ""
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name != "StrategyDecisionV2":
+                continue
+            owner = parents.get(node)
+            while owner is not None and not isinstance(owner, ast.ClassDef):
+                owner = parents.get(owner)
+            if isinstance(owner, ast.ClassDef) and owner.name.endswith(allowed_class_suffix):
+                continue
+            if relative == "src/bithumb_bot/core/sma_policy.py":
+                continue
+            failures.append(f"{relative}:{node.lineno}")
     assert failures == []

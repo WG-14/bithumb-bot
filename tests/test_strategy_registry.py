@@ -30,12 +30,13 @@ from bithumb_bot.research.strategy_registry import (
 import bithumb_bot.strategy.base as strategy_base
 import bithumb_bot.strategy.registry as strategy_registry
 from bithumb_bot.strategy.sma import SmaWithFilterStrategy
-from bithumb_bot.strategy.sma_legacy_adapter import (
+from bithumb_bot.compat.sma_legacy_adapter import (
     LEGACY_DB_BOUND_STRATEGY_STATUS,
     LegacySmaWithFilterDbAdapter,
     create_legacy_sma_with_filter_db_adapter,
 )
 from bithumb_bot.compat.strategy import (
+    LegacyDbStrategy,
     create_legacy_db_strategy,
     list_legacy_db_strategies,
 )
@@ -90,12 +91,12 @@ def test_live_policy_registry_cannot_instantiate_legacy_sma_with_filter_adapter(
 
 
 def test_db_bound_strategy_protocol_is_explicitly_legacy() -> None:
-    legacy_source = inspect.getsource(strategy_base.LegacyDbStrategy)
+    legacy_source = inspect.getsource(LegacyDbStrategy)
     policy_source = inspect.getsource(strategy_base.StrategyPolicy)
 
     assert "Deprecated DB-bound strategy facade" in legacy_source
-    assert "compatibility-only" in legacy_source
     assert "decide(" in legacy_source
+    assert not hasattr(strategy_base, "LegacyDbStrategy")
     assert not hasattr(strategy_base, "Strategy")
     assert "Promotion-grade snapshot strategy interface" in policy_source
     assert "decide_snapshot(" in policy_source
@@ -103,11 +104,10 @@ def test_db_bound_strategy_protocol_is_explicitly_legacy() -> None:
 
 def test_registry_has_separate_policy_and_legacy_creation_paths() -> None:
     policy_annotations = strategy_registry.create_smoke_strategy_policy.__annotations__
-    legacy_annotations = strategy_registry.create_legacy_db_strategy.__annotations__
 
     assert "StrategyPolicy" in str(policy_annotations.get("return"))
-    assert "LegacyDbStrategy" in str(legacy_annotations.get("return"))
-    assert "StrategyPolicy" not in str(legacy_annotations.get("return"))
+    assert not hasattr(strategy_registry, "create_legacy_db_strategy")
+    assert not hasattr(strategy_registry, "create_strategy")
     assert LEGACY_DB_BOUND_STRATEGY_STATUS.endswith("not_promotion_grade")
 
 

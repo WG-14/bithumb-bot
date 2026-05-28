@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-"""Compatibility registry for smoke and legacy strategy construction only.
+"""Smoke-only registry for snapshot strategy policies.
 
-Promotion-grade research/runtime lifecycle behavior is declared by
+Production runtime strategy lifecycle behavior is declared by
 ``ResearchStrategyPlugin`` in ``bithumb_bot.research.strategy_registry``.
-Runtime decision paths must use plugin manifests and plugin-bootstrapped
-runtime adapters, not this registry.
+Legacy DB-bound registries are isolated under ``bithumb_bot.compat``.
 """
 
 from typing import Callable
 
-from .base import LegacyDbStrategy, StrategyPolicy
+from .base import StrategyPolicy
 
 StrategyPolicyFactory = Callable[..., StrategyPolicy]
-LegacyStrategyFactory = Callable[..., LegacyDbStrategy]
-StrategyFactory = Callable[..., LegacyDbStrategy]
 
 _POLICY_REGISTRY: dict[str, StrategyPolicyFactory] = {}
-_LEGACY_REGISTRY: dict[str, LegacyStrategyFactory] = {}
 
 
 def _normalize_name(name: str) -> str:
@@ -60,50 +56,3 @@ def create_strategy_policy(name: str, **kwargs) -> StrategyPolicy:
 def list_strategy_policies() -> tuple[str, ...]:
     """Deprecated compatibility alias for smoke strategy policies only."""
     return list_smoke_strategy_policies()
-
-
-def register_legacy_db_strategy(name: str, factory: LegacyStrategyFactory) -> None:
-    _LEGACY_REGISTRY[_normalize_name(name)] = factory
-
-
-def create_legacy_db_strategy(name: str, **kwargs) -> LegacyDbStrategy:
-    key = _normalize_name(name)
-    factory = _LEGACY_REGISTRY.get(key)
-    if factory is None:
-        available = ", ".join(sorted(_LEGACY_REGISTRY)) or "<none>"
-        raise ValueError(f"legacy_db_strategy_not_registered:{key}; available: {available}")
-    return factory(**kwargs)
-
-
-def list_legacy_db_strategies() -> tuple[str, ...]:
-    return tuple(sorted(_LEGACY_REGISTRY))
-
-
-def register_legacy_strategy(name: str, factory: LegacyStrategyFactory) -> None:
-    """Deprecated compatibility alias for DB-bound smoke strategies only."""
-    register_legacy_db_strategy(name, factory)
-
-
-def create_legacy_strategy(name: str, **kwargs) -> LegacyDbStrategy:
-    """Deprecated compatibility alias for DB-bound smoke strategies only."""
-    return create_legacy_db_strategy(name, **kwargs)
-
-
-def list_legacy_strategies() -> tuple[str, ...]:
-    """Deprecated compatibility alias for DB-bound smoke strategies only."""
-    return list_legacy_db_strategies()
-
-
-def register_strategy(name: str, factory: StrategyFactory) -> None:
-    """Deprecated compatibility alias for DB-bound smoke strategies only."""
-    register_legacy_db_strategy(name, factory)
-
-
-def create_strategy(name: str, **kwargs) -> LegacyDbStrategy:
-    """Deprecated compatibility alias for DB-bound smoke strategies only."""
-    return create_legacy_db_strategy(name, **kwargs)
-
-
-def list_strategies() -> tuple[str, ...]:
-    """Deprecated compatibility alias for DB-bound smoke strategies only."""
-    return list_legacy_db_strategies()

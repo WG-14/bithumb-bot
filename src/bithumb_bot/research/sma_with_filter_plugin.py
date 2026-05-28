@@ -9,6 +9,7 @@ from bithumb_bot.strategy_plugins.sma_with_filter_assembly import (
     SmaWithFilterPolicyAssembly,
 )
 from bithumb_bot.strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
+from bithumb_bot.research.strategy_spec import materialized_strategy_parameters_hash
 
 
 @dataclass(frozen=True)
@@ -320,10 +321,16 @@ def research_policy_decision_builder(
         for name in active_exit_policy.get("rules") or ()
     }
     fee = float(materialized.values.get("LIVE_FEE_RATE_ESTIMATE") or fee_rate)
+    strategy_parameters_hash = materialized_strategy_parameters_hash(dict(materialized.values))
+    approved_profile_hash = (
+        candidate_regime_policy.get("strategy_profile_hash")
+        if isinstance(candidate_regime_policy, dict)
+        else None
+    )
     result = StrategyDecisionService().evaluate(
         StrategyEvaluationRequest(
             strategy_name=strategy.name,
-            strategy_instance_id=None,
+            strategy_instance_id=f"{strategy.name}:research_promotion",
             mode=str(
                 materialization_mode.value
                 if isinstance(materialization_mode, MaterializationMode)
@@ -340,11 +347,7 @@ def research_policy_decision_builder(
             ),
             exit_policy_config=exit_policy_config,
             rule_sources=rule_sources,
-            approved_profile_hash=(
-                candidate_regime_policy.get("strategy_profile_hash")
-                if isinstance(candidate_regime_policy, dict)
-                else None
-            ),
+            approved_profile_hash=approved_profile_hash,
             runtime_contract_hash=None,
             plugin_contract_hash=None,
             request_hash=None,
@@ -352,9 +355,22 @@ def research_policy_decision_builder(
                 "decision_boundary": "StrategyDecisionService.evaluate",
                 "snapshot_builder": "research.sma_with_filter_plugin",
                 "candle_ts": int(event.candle_ts),
+                "strategy_parameters_hash": strategy_parameters_hash,
+                "approved_profile_hash_unavailable_reason": "research_candidate_profile_not_supplied"
+                if not approved_profile_hash
+                else "",
+                "plugin_contract_hash_unavailable_reason": "research_policy_decision_builder_no_plugin_contract",
+                "runtime_contract_hash_unavailable_reason": "research_policy_decision_builder_no_runtime_contract",
+                "runtime_decision_request_hash_unavailable_reason": "research_policy_decision_builder_no_runtime_request",
+                "code_provenance": {
+                    "policy_module": strategy.__class__.__module__,
+                    "policy_class": strategy.__class__.__name__,
+                },
             },
         )
     )
+    result.decision.trace["strategy_evaluation_provenance"] = dict(result.provenance)
+    result.decision.trace["replay_fingerprint_hash"] = result.replay_fingerprint_hash
     return result.decision
 
 

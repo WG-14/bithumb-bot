@@ -187,7 +187,20 @@ class SmaWithFilterRuntimeDecisionAdapter:
         conn,
         request,
     ) -> RuntimeStrategyDecisionResult | None:
-        strategy = SmaWithFilterRuntimeConfig.from_runtime_request(request).build_strategy()
+        runtime_instance = getattr(request, "runtime_strategy_spec", None)
+        runtime_adapter_config = (
+            dict(getattr(runtime_instance, "runtime_adapter_config", {}) or {})
+            if runtime_instance is not None
+            else {}
+        )
+        candidate_regime_policy = (
+            dict(runtime_adapter_config.get("candidate_regime_policy"))
+            if isinstance(runtime_adapter_config.get("candidate_regime_policy"), dict)
+            else None
+        )
+        strategy = SmaWithFilterRuntimeConfig.from_runtime_request(request).build_strategy(
+            candidate_regime_policy=candidate_regime_policy,
+        )
         if not isinstance(strategy, SmaWithFilterStrategy):
             raise RuntimeError(f"strategy_policy_invalid:{self.strategy_name}")
         boundary_telemetry = normalize_position_state_for_runtime_decision(
@@ -195,6 +208,8 @@ class SmaWithFilterRuntimeDecisionAdapter:
             strategy,
             through_ts_ms=request.through_ts_ms,
         )
+        if hasattr(request, "observability_fields"):
+            boundary_telemetry.update(request.observability_fields())
         return compute_strategy_decision_after_normalization(
             conn,
             strategy,

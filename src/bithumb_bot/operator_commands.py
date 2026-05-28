@@ -79,7 +79,7 @@ from .approved_profile import (
     profile_runtime_cost_match_status,
 )
 from .fee_authority import build_fee_authority_snapshot
-from .strategy.sma_legacy_adapter import _compute_required_entry_edge_ratio
+from .compat.sma_legacy_adapter import _compute_required_entry_edge_ratio
 from .broker.order_rules import (
     build_buy_price_none_diagnostic_fields,
     get_cached_order_rule_snapshot,

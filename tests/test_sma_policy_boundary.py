@@ -27,6 +27,8 @@ from bithumb_bot.strategy_plugins.sma_with_filter_events import (
 from bithumb_bot.research.backtest_engine import run_sma_backtest
 from bithumb_bot.research import backtest_kernel
 from bithumb_bot.research import sma_with_filter_plugin
+from bithumb_bot.research.backtest_runner import run_plugin_backtest
+from bithumb_bot.research.backtest_types import BacktestRunContext
 from bithumb_bot.strategy_plugins.sma_with_filter_assembly import (
     MaterializationMode,
     SmaWithFilterPolicyAssembly,
@@ -50,12 +52,18 @@ from bithumb_bot import runtime_sma_snapshot
 from bithumb_bot import runtime_sma_snapshot_builder as runtime_sma
 from bithumb_bot import runtime_strategy_decision
 from bithumb_bot.runtime_adapters import sma_with_filter as runtime_sma_adapter
+from bithumb_bot.runtime_strategy_set import (
+    RuntimeDecisionGateway,
+    RuntimeStrategySet,
+    RuntimeStrategySpec,
+)
+from bithumb_bot.strategy_plugins.sma_with_filter_plugin import SMA_WITH_FILTER_PLUGIN
 from bithumb_bot.strategy import sma as strategy_sma
 from bithumb_bot.strategy.sma import (
-    SmaCrossStrategy,
     SmaWithFilterStrategy,
     create_sma_with_filter_strategy,
 )
+from bithumb_bot.compat.sma_legacy_adapter import SmaCrossStrategy
 from bithumb_bot.strategy.exit_rules import ExitPolicyConfig, evaluate_sma_exit_policy
 from bithumb_bot.strategy.sma_decision_assembler import evaluate_sma_final_decision
 
@@ -144,6 +152,8 @@ def _allowing_policy() -> dict[str, object]:
             "uptrend_high_vol_unknown",
             "uptrend_normal_vol_unknown",
             "uptrend_low_vol_unknown",
+            "uptrend_high_vol_volume_normal",
+            "trend_up",
         ],
         "blocked_regimes": [],
         "regime_evidence": {},
@@ -1173,8 +1183,9 @@ def test_plugin_owned_sma_event_builder_matches_runtime_replay_decision_hash_wit
         "below",
         "runtime_db_replay_does_not_derive_previous_cross_state_from_plugin_event_history",
     )
+    assert runtime_context.get("replay_fingerprint_hash")
     assert non_comparable_scope["replay_fingerprint_hash"] == (
-        None,
+        runtime_context.get("replay_fingerprint_hash"),
         "research_kernel_only_decision_field",
         "runtime_snapshot_builder_exposes_replay_fingerprint_payload_without_top_level_hash",
     )
@@ -1183,6 +1194,94 @@ def test_plugin_owned_sma_event_builder_matches_runtime_replay_decision_hash_wit
         "research_kernel_only_decision_field",
         "runtime_snapshot_replay_lacks_live_readiness_context_for_submit_plan_reconstruction",
     )
+
+
+def test_sma_research_promotion_backtest_and_runtime_gateway_paths_share_canonical_hashes() -> None:
+    closes = [12.0, 11.0, 10.0, 10.0, 12.0]
+    parameters = _runtime_bound_sma_parameters(
+        STRATEGY_EXIT_STOP_LOSS_RATIO=0.0,
+        STRATEGY_EXIT_MAX_HOLDING_MIN=0,
+    )
+    parameters.pop("BUY_FRACTION", None)
+    parameters.pop("MAX_ORDER_KRW", None)
+    candidate_regime_policy = _allowing_policy()
+    dataset = _dataset_from_closes(closes)
+    run = run_plugin_backtest(
+        plugin=SMA_WITH_FILTER_PLUGIN,
+        dataset=dataset,
+        parameter_values=parameters,
+        fee_rate=0.0,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(),
+        context=BacktestRunContext(
+            report_detail="full",
+            policy_materialization_mode="research_promotion",
+            candidate_regime_policy=candidate_regime_policy,
+            candidate_regime_policy_drives_research_execution=True,
+        ),
+    )
+    target_ts = 1_700_000_240_000
+    research = next(item for item in run.decisions if int(item["candle_ts"]) == target_ts)
+
+    conn = _build_candle_db(closes)
+    runtime_parameters = dict(parameters)
+    try:
+        bundle = RuntimeDecisionGateway().decide_bundle(
+            conn,
+            strategy_set=RuntimeStrategySet(
+                strategies=(
+                    RuntimeStrategySpec(
+                            strategy_name="sma_with_filter",
+                            pair="BTC_KRW",
+                            interval="1m",
+                            parameters=runtime_parameters,
+                            runtime_adapter_config={
+                                "candidate_regime_policy": candidate_regime_policy,
+                            },
+                            parameter_source="path_level_golden_fixture",
+                    ),
+                ),
+                source="path_level_golden_fixture",
+            ),
+            through_ts_ms=target_ts,
+        )
+    finally:
+        conn.close()
+
+    assert bundle is not None
+    runtime_result = bundle.results[0]
+    runtime_context = runtime_result.base_context
+    runtime_trace = runtime_context["pure_policy_trace"]
+
+    comparable = {
+        "policy_input_hash": (research["policy_input_hash"], runtime_context["policy_input_hash"]),
+        "policy_decision_hash": (research["policy_decision_hash"], runtime_context["policy_decision_hash"]),
+        "policy_contract_hash": (research["policy_contract_hash"], runtime_context["policy_contract_hash"]),
+        "final_signal": (research["final_signal"], runtime_trace["final_signal"]),
+        "final_reason": (research["pure_policy_trace"]["final_reason"], runtime_trace["final_reason"]),
+        "execution_intent": (research["execution_intent_v2"], runtime_trace["execution_intent"]),
+        "exit_rule": (research["exit_rule"] or None, runtime_result.decision.exit_rule),
+        "strategy_evaluation_mode": (
+            "research_promotion",
+            research["strategy_evaluation_provenance"]["strategy_evaluation_mode"],
+        ),
+        "runtime_strategy_evaluation_mode": (
+            "runtime_replay",
+            runtime_context["strategy_evaluation_provenance"]["strategy_evaluation_mode"],
+        ),
+        "decision_boundary": (
+            "StrategyDecisionService.evaluate",
+            runtime_context["strategy_evaluation_provenance"]["decision_boundary"],
+        ),
+    }
+    mismatches = {
+        key: values
+        for key, values in comparable.items()
+        if values[0] != values[1]
+    }
+    assert mismatches == {}
+    assert research["execution_submit_plan_hash"]
+    assert runtime_context["replay_fingerprint_hash"]
 
 
 def test_research_adapter_does_not_override_policy_first_cross_when_prev_above_unknown() -> None:
@@ -1466,7 +1565,7 @@ def test_runtime_context_owns_sma_legacy_serialization_helpers() -> None:
 def test_strategy_sma_is_compatibility_facade_not_implementation_authority() -> None:
     module_source = inspect.getsource(strategy_sma)
 
-    assert "Compatibility facade" in module_source
+    assert "Production-facing SMA strategy facade" in module_source
     assert "import sqlite3" not in module_source
     assert "class SmaWithFilterStrategy" not in module_source
     assert "class SmaCrossStrategy" not in module_source

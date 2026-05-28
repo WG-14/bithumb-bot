@@ -59,10 +59,9 @@ def test_runtime_production_modules_do_not_import_legacy_db_strategies() -> None
     }
     allowed = {
         "src/bithumb_bot/compat/strategy.py",
+        "src/bithumb_bot/compat/strategy_registry.py",
+        "src/bithumb_bot/compat/sma_legacy_adapter.py",
         "src/bithumb_bot/run_loop_compatibility.py",
-        "src/bithumb_bot/strategy/base.py",
-        "src/bithumb_bot/strategy/registry.py",
-        "src/bithumb_bot/strategy/sma.py",
         "src/bithumb_bot/strategy/sma_legacy_adapter.py",
     }
     violations: list[str] = []

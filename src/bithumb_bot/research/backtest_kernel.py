@@ -339,6 +339,8 @@ def _research_execution_plan_bundle(
                 reference_price=reference_price,
                 policy_decision=policy_decision,
             )
+        if promotion_grade_required and normalized_side in {"BUY", "SELL"} and submit_plan is None:
+            raise ValueError("research_submit_plan_missing")
         if promotion_grade_required and bool(summary.submit_expected) and submit_plan is None:
             raise ValueError(summary.block_reason or "research_typed_submit_plan_missing")
         return ResearchExecutionPlanBundle(
@@ -1153,6 +1155,10 @@ def _run_decision_event_backtest_impl(
             decision_payload["policy_input_hash"] = policy_decision.policy_input_hash
             decision_payload["policy_decision_hash"] = policy_decision.policy_decision_hash
             decision_payload["pure_policy_trace"] = policy_decision.as_trace()
+            trace = policy_decision.as_trace()
+            service_provenance = trace.get("strategy_evaluation_provenance")
+            if isinstance(service_provenance, dict):
+                decision_payload["strategy_evaluation_provenance"] = dict(service_provenance)
             decision_payload["execution_intent_v2"] = (
                 policy_decision.execution_intent.as_dict()
                 if policy_decision.execution_intent is not None

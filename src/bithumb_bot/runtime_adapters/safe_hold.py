@@ -6,7 +6,12 @@ from bithumb_bot.config import settings
 from bithumb_bot.decision_equivalence import sha256_prefixed
 from bithumb_bot.runtime_decision_contract import RuntimeStrategyPolicyHashes
 from bithumb_bot.runtime_strategy_decision import RuntimeStrategyDecisionResult
-from bithumb_bot.strategy_policy_contract import PositionSnapshot, StrategyDecisionV2
+from bithumb_bot.strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
+from bithumb_bot.strategy_policy_contract import (
+    ExecutionConstraintSnapshot,
+    PositionSnapshot,
+    StrategyDecisionV2,
+)
 
 
 SAFE_HOLD_STRATEGY_NAME = "safe_hold"
@@ -71,6 +76,66 @@ def _latest_runtime_candle(conn, *, through_ts_ms: int | None) -> tuple[int, flo
 
 
 def _safe_hold_decision(*, candle_ts: int, market_price: float) -> SafeHoldRuntimeDecisionResult:
+    return _evaluate_safe_hold_decision(
+        candle_ts=candle_ts,
+        market_price=market_price,
+        request=None,
+    )
+
+
+@dataclass(frozen=True)
+class SafeHoldPolicy:
+    name: str = SAFE_HOLD_STRATEGY_NAME
+
+    def decide_snapshot(
+        self,
+        *,
+        market: object,
+        position: PositionSnapshot,
+        config: object,
+        execution_context: ExecutionConstraintSnapshot,
+        exit_policy_config: object | None = None,
+        rule_sources: dict[str, str] | None = None,
+    ) -> StrategyDecisionV2:
+        del position, config, execution_context, exit_policy_config, rule_sources
+        market_payload = dict(market) if isinstance(market, dict) else {}
+        candle_ts = int(market_payload.get("candle_ts") or 0)
+        market_price = float(market_payload.get("market_price") or 0.0)
+        hashes = _safe_hold_policy_hash_material(candle_ts=candle_ts, market_price=market_price)
+        return StrategyDecisionV2(
+            strategy_name=SAFE_HOLD_STRATEGY_NAME,
+            raw_signal="HOLD",
+            raw_reason="safe_hold_no_order_policy",
+            entry_signal="HOLD",
+            entry_reason="safe_hold_no_order_policy",
+            exit_signal="HOLD",
+            exit_reason="safe_hold_no_order_policy",
+            final_signal="HOLD",
+            final_reason="safe_hold_no_order_policy",
+            blocked_filters=(),
+            entry_blocked=False,
+            entry_block_reason=None,
+            exit_rule=None,
+            exit_evaluations=(),
+            protective_exit_overrode_entry=False,
+            exit_filter_suppression_prevented=False,
+            position_snapshot=PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False),
+            execution_intent=None,
+            entry_decision=object(),  # type: ignore[arg-type]
+            trace={
+                "strategy_name": SAFE_HOLD_STRATEGY_NAME,
+                "final_signal": "HOLD",
+                "final_reason": "safe_hold_no_order_policy",
+                "order_submission_possible": False,
+            },
+            policy_hash=str(hashes["policy_hash"]),
+            policy_contract_hash=str(hashes["policy_contract_hash"]),
+            policy_input_hash=str(hashes["policy_input_hash"]),
+            policy_decision_hash=str(hashes["policy_decision_hash"]),
+        )
+
+
+def _safe_hold_policy_hash_material(*, candle_ts: int, market_price: float) -> dict[str, object]:
     policy_input = {
         "schema_version": 1,
         "strategy_name": SAFE_HOLD_STRATEGY_NAME,
@@ -101,6 +166,27 @@ def _safe_hold_decision(*, candle_ts: int, market_price: float) -> SafeHoldRunti
     policy_contract_hash = sha256_prefixed(policy_contract)
     policy_input_hash = sha256_prefixed(policy_input)
     policy_decision_hash = sha256_prefixed(policy_decision)
+    return {
+        "policy_input": policy_input,
+        "policy_contract": policy_contract,
+        "policy_decision": policy_decision,
+        "policy_hash": policy_hash,
+        "policy_contract_hash": policy_contract_hash,
+        "policy_input_hash": policy_input_hash,
+        "policy_decision_hash": policy_decision_hash,
+    }
+
+
+def _evaluate_safe_hold_decision(
+    *,
+    candle_ts: int,
+    market_price: float,
+    request: object | None,
+) -> SafeHoldRuntimeDecisionResult:
+    hashes = _safe_hold_policy_hash_material(candle_ts=candle_ts, market_price=market_price)
+    policy_contract_hash = str(hashes["policy_contract_hash"])
+    policy_input_hash = str(hashes["policy_input_hash"])
+    policy_decision_hash = str(hashes["policy_decision_hash"])
     replay_fingerprint = {
         "schema_version": 1,
         "strategy_name": SAFE_HOLD_STRATEGY_NAME,
@@ -111,43 +197,87 @@ def _safe_hold_decision(*, candle_ts: int, market_price: float) -> SafeHoldRunti
         "candle_ts": int(candle_ts),
         "market_price": float(market_price),
     }
+    request_fields = (
+        request.observability_fields()
+        if request is not None and hasattr(request, "observability_fields")
+        else {}
+    )
+    if isinstance(request_fields, dict):
+        replay_fingerprint.update(
+            {
+                key: value
+                for key, value in request_fields.items()
+                if key
+                in {
+                    "runtime_decision_request_hash",
+                    "strategy_instance_id",
+                    "strategy_parameters_hash",
+                    "approved_profile_hash",
+                    "runtime_contract_hash",
+                    "plugin_contract_hash",
+                    "through_ts_ms",
+                }
+            }
+        )
     boundary = {
         "schema_version": 1,
-        "decision_boundary_phase": "safe_hold_runtime_decision",
+        "decision_boundary_phase": "StrategyDecisionService.evaluate",
         "typed_authority": "StrategyDecisionV2",
         "order_submission_possible": False,
     }
-    decision = StrategyDecisionV2(
-        strategy_name=SAFE_HOLD_STRATEGY_NAME,
-        raw_signal="HOLD",
-        raw_reason="safe_hold_no_order_policy",
-        entry_signal="HOLD",
-        entry_reason="safe_hold_no_order_policy",
-        exit_signal="HOLD",
-        exit_reason="safe_hold_no_order_policy",
-        final_signal="HOLD",
-        final_reason="safe_hold_no_order_policy",
-        blocked_filters=(),
-        entry_blocked=False,
-        entry_block_reason=None,
-        exit_rule=None,
-        exit_evaluations=(),
-        protective_exit_overrode_entry=False,
-        exit_filter_suppression_prevented=False,
-        position_snapshot=PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False),
-        execution_intent=None,
-        entry_decision=object(),  # type: ignore[arg-type]
-        trace={
-            "strategy_name": SAFE_HOLD_STRATEGY_NAME,
-            "final_signal": "HOLD",
-            "final_reason": "safe_hold_no_order_policy",
-            "order_submission_possible": False,
+    provenance = {
+        **request_fields,
+        "decision_boundary": "StrategyDecisionService.evaluate",
+        "snapshot_builder": "runtime_adapters.safe_hold",
+        "replay_fingerprint": replay_fingerprint,
+        "strategy_parameters_hash": request_fields.get("strategy_parameters_hash") or sha256_prefixed({}),
+        "approved_profile_hash_unavailable_reason": "safe_hold_approved_profile_not_required",
+        "plugin_contract_hash_unavailable_reason": "safe_hold_direct_compatibility_call"
+        if not request_fields.get("plugin_contract_hash")
+        else "",
+        "runtime_contract_hash_unavailable_reason": "safe_hold_direct_compatibility_call"
+        if not request_fields.get("runtime_contract_hash")
+        else "",
+        "runtime_decision_request_hash_unavailable_reason": "safe_hold_direct_compatibility_call"
+        if not request_fields.get("runtime_decision_request_hash")
+        else "",
+        "code_provenance": {
+            "policy_module": "bithumb_bot.runtime_adapters.safe_hold",
+            "policy_class": "SafeHoldPolicy",
         },
-        policy_hash=policy_hash,
-        policy_contract_hash=policy_contract_hash,
-        policy_input_hash=policy_input_hash,
-        policy_decision_hash=policy_decision_hash,
+    }
+    result = StrategyDecisionService().evaluate(
+        StrategyEvaluationRequest(
+            strategy_name=SAFE_HOLD_STRATEGY_NAME,
+            strategy_instance_id=(
+                str(request_fields.get("strategy_instance_id") or SAFE_HOLD_STRATEGY_NAME)
+            ),
+            mode="runtime_replay",
+            strategy_policy=SafeHoldPolicy(),
+            market_snapshot={"candle_ts": int(candle_ts), "market_price": float(market_price)},
+            position_snapshot=PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False),
+            strategy_config={},
+            execution_constraints=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+            exit_policy_config=None,
+            rule_sources={},
+            approved_profile_hash=(
+                str(request_fields.get("approved_profile_hash") or "") or None
+            ),
+            runtime_contract_hash=(
+                str(request_fields.get("runtime_contract_hash") or "") or None
+            ),
+            plugin_contract_hash=(
+                str(request_fields.get("plugin_contract_hash") or "") or None
+            ),
+            request_hash=(
+                str(request_fields.get("runtime_decision_request_hash") or "") or None
+            ),
+            provenance=provenance,
+        )
     )
+    result.decision.trace["strategy_evaluation_provenance"] = dict(result.provenance)
+    result.decision.trace["replay_fingerprint_hash"] = result.replay_fingerprint_hash
+    replay_fingerprint = dict(result.replay_fingerprint)
     base_context = {
         "market_price": float(market_price),
         "last_close": float(market_price),
@@ -160,9 +290,11 @@ def _safe_hold_decision(*, candle_ts: int, market_price: float) -> SafeHoldRunti
         "non_authoritative_observability_payload": True,
         "boundary": dict(boundary),
         "replay_fingerprint": dict(replay_fingerprint),
+        "strategy_evaluation_provenance": dict(result.provenance),
+        **request_fields,
     }
     return SafeHoldRuntimeDecisionResult(
-        decision=decision,
+        decision=result.decision,
         base_context=base_context,
         candle_ts=int(candle_ts),
         market_price=float(market_price),
@@ -170,7 +302,7 @@ def _safe_hold_decision(*, candle_ts: int, market_price: float) -> SafeHoldRunti
         boundary=boundary,
         policy_hashes=RuntimeStrategyPolicyHashes(
             {
-                "pure_policy_hash": policy_hash,
+                "pure_policy_hash": str(hashes["policy_hash"]),
                 "policy_contract_hash": policy_contract_hash,
                 "policy_input_hash": policy_input_hash,
                 "policy_decision_hash": policy_decision_hash,
@@ -192,7 +324,11 @@ class SafeHoldRuntimeDecisionAdapter:
         if candle is None:
             return None
         candle_ts, market_price = candle
-        return _safe_hold_decision(candle_ts=candle_ts, market_price=market_price)
+        return _evaluate_safe_hold_decision(
+            candle_ts=candle_ts,
+            market_price=market_price,
+            request=request,
+        )
 
     def typed_authority_required(self) -> bool:
         return True

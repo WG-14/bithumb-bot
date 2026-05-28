@@ -23,6 +23,7 @@ from .strategy_plugins.sma_with_filter_assembly import (
     SmaWithFilterPolicyAssembly,
 )
 from .strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
+from .research.strategy_spec import materialized_strategy_parameters_hash
 from .runtime_position_state_normalizer import (
     load_last_reconcile_metadata,
 )
@@ -562,10 +563,27 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
             candidate_regime_policy=strategy.candidate_regime_policy,
         )
     )
+    request_metadata = dict(boundary_telemetry or {})
+    strategy_parameters_hash = str(
+        request_metadata.get("strategy_parameters_hash")
+        or materialized_strategy_parameters_hash(dict(materialized.values))
+    )
+    approved_profile_hash = (
+        str(request_metadata.get("approved_profile_hash") or "")
+        or (
+            strategy.candidate_regime_policy.get("strategy_profile_hash")
+            if isinstance(strategy.candidate_regime_policy, dict)
+            else ""
+        )
+        or None
+    )
     final_policy_result = StrategyDecisionService().evaluate(
         StrategyEvaluationRequest(
             strategy_name=strategy.name,
-            strategy_instance_id=None,
+            strategy_instance_id=(
+                str(request_metadata.get("strategy_instance_id") or "")
+                or f"{strategy.name}:runtime_replay"
+            ),
             mode="runtime_replay",
             strategy_policy=policy_strategy,
             market_snapshot=market_snapshot,
@@ -574,17 +592,31 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
             execution_constraints=execution_snapshot,
             exit_policy_config=exit_policy_config,
             rule_sources={},
-            approved_profile_hash=(
-                strategy.candidate_regime_policy.get("strategy_profile_hash")
-                if isinstance(strategy.candidate_regime_policy, dict)
-                else None
-            ),
-            runtime_contract_hash=None,
-            plugin_contract_hash=None,
-            request_hash=None,
+            approved_profile_hash=approved_profile_hash,
+            runtime_contract_hash=str(request_metadata.get("runtime_contract_hash") or "") or None,
+            plugin_contract_hash=str(request_metadata.get("plugin_contract_hash") or "") or None,
+            request_hash=str(request_metadata.get("runtime_decision_request_hash") or "") or None,
             provenance={
+                **request_metadata,
                 "decision_boundary": "StrategyDecisionService.evaluate",
                 "snapshot_builder": "runtime_sma_snapshot_builder",
+                "strategy_parameters_hash": strategy_parameters_hash,
+                "approved_profile_hash_unavailable_reason": "runtime_snapshot_no_approved_profile_hash"
+                if not approved_profile_hash
+                else "",
+                "plugin_contract_hash_unavailable_reason": "runtime_snapshot_direct_call"
+                if not request_metadata.get("plugin_contract_hash")
+                else "",
+                "runtime_contract_hash_unavailable_reason": "runtime_snapshot_direct_call"
+                if not request_metadata.get("runtime_contract_hash")
+                else "",
+                "runtime_decision_request_hash_unavailable_reason": "runtime_snapshot_direct_call"
+                if not request_metadata.get("runtime_decision_request_hash")
+                else "",
+                "code_provenance": {
+                    "policy_module": policy_strategy.__class__.__module__,
+                    "policy_class": policy_strategy.__class__.__name__,
+                },
             },
         )
     )
@@ -793,6 +825,8 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
         "policy_contract_hash": final_policy_decision.policy_contract_hash,
         "policy_input_hash": final_policy_decision.policy_input_hash,
         "policy_decision_hash": final_policy_decision.policy_decision_hash,
+        "strategy_evaluation_provenance": dict(final_policy_result.provenance),
+        "replay_fingerprint_hash": final_policy_result.replay_fingerprint_hash,
         "prev_s": prev_s,
         "prev_l": prev_l,
         "curr_s": curr_s,

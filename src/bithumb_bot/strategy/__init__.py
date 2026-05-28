@@ -12,7 +12,6 @@ from .registry import (
     list_smoke_strategy_policies,
     register_smoke_strategy_policy,
 )
-from .sma import build_sma_with_filter_decision_from_normalized_db, decide_sma_with_filter_snapshot_from_db
 from .sma_policy_strategy import SmaWithFilterStrategy, create_sma_with_filter_strategy
 
 register_smoke_strategy_policy("sma_with_filter", create_sma_with_filter_strategy)
@@ -23,8 +22,6 @@ __all__ = [
     "PositionContext",
     "SmaWithFilterStrategy",
     "create_sma_with_filter_strategy",
-    "build_sma_with_filter_decision_from_normalized_db",
-    "decide_sma_with_filter_snapshot_from_db",
     "register_smoke_strategy_policy",
     "create_smoke_strategy_policy",
     "list_smoke_strategy_policies",
