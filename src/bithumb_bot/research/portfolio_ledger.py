@@ -10,6 +10,31 @@ from .execution_model import ExecutionFill
 from .metrics_contract import EquityPoint
 
 
+@dataclass(frozen=True)
+class LedgerTickState:
+    mark_cash: float
+    mark_qty: float
+    pending_buy_qty: float
+    pending_sell_qty: float
+    sellable_qty: float
+
+    def portfolio_snapshot(self) -> dict[str, object]:
+        return {
+            "qty": self.mark_qty,
+            "pending_buy_qty": self.pending_buy_qty,
+            "pending_sell_qty": self.pending_sell_qty,
+            "sellable_qty": self.sellable_qty,
+        }
+
+
+@dataclass(frozen=True)
+class LedgerExecutionApplication:
+    fill_applied_to_mark: bool
+    mark_cash: float
+    mark_qty: float
+    trade_recorded: bool
+
+
 @dataclass
 class PortfolioLedger:
     starting_cash: float
@@ -80,6 +105,32 @@ class PortfolioLedger:
 
     def sellable_qty(self) -> float:
         return max(0.0, self.qty - self.pending_qty("SELL"))
+
+    def begin_tick(self, *, mark_boundary_ts: int, decision_boundary_ts: int, candle_ts: int, close: float) -> LedgerTickState:
+        self.apply_pending_fills(int(mark_boundary_ts))
+        mark_cash = float(self.cash)
+        mark_qty = float(self.qty)
+        self.apply_pending_fills(int(decision_boundary_ts))
+        self.record_open_trade_mark(ts=int(candle_ts), close=float(close))
+        return LedgerTickState(
+            mark_cash=mark_cash,
+            mark_qty=mark_qty,
+            pending_buy_qty=self.pending_qty("BUY"),
+            pending_sell_qty=self.pending_qty("SELL"),
+            sellable_qty=self.sellable_qty(),
+        )
+
+    def portfolio_snapshot(self, tick_state: LedgerTickState | None = None) -> dict[str, object]:
+        if tick_state is not None:
+            return tick_state.portfolio_snapshot()
+        return {
+            "qty": float(self.qty),
+            "cash": float(self.cash),
+            "pending_buy_qty": self.pending_qty("BUY"),
+            "pending_sell_qty": self.pending_qty("SELL"),
+            "sellable_qty": self.sellable_qty(),
+            "entry_price": self.entry_price,
+        }
 
     def record_open_trade_mark(self, *, ts: int, close: float) -> None:
         if self.qty <= 1e-12 or self.entry_price is None:
@@ -187,6 +238,35 @@ class PortfolioLedger:
     def record_failed_fill(self, fill: ExecutionFill) -> None:
         self.trade_ledger.append(support.trade_from_fill(fill, cash=self.cash, asset_qty=self.qty, pnl=None))
 
+    def apply_execution_outcome(
+        self,
+        outcome: object,
+        *,
+        mark_boundary_ts: int,
+        mark_cash: float,
+        mark_qty: float,
+    ) -> LedgerExecutionApplication:
+        fill = getattr(outcome, "fill", None)
+        pending_fill = getattr(outcome, "pending_fill", None)
+        trade = getattr(outcome, "trade", None)
+        if fill is not None and pending_fill is None and trade is not None:
+            self.record_failed_fill(fill)
+            return LedgerExecutionApplication(False, float(mark_cash), float(mark_qty), True)
+        if pending_fill is None or trade is None:
+            return LedgerExecutionApplication(False, float(mark_cash), float(mark_qty), False)
+        self.record_pending_fill(pending_fill, trade)
+        adjusted_cash = float(mark_cash)
+        adjusted_qty = float(mark_qty)
+        fill_applies = support.fill_applies_to_mark(
+            fill=pending_fill.fill,
+            effective_ts=pending_fill.effective_ts,
+            mark_boundary_ts=int(mark_boundary_ts),
+        )
+        if fill_applies:
+            adjusted_cash += float(getattr(outcome, "mark_cash_delta", 0.0))
+            adjusted_qty = max(0.0, adjusted_qty + float(getattr(outcome, "mark_qty_delta", 0.0)))
+        return LedgerExecutionApplication(fill_applies, adjusted_cash, adjusted_qty, True)
+
     def mark_equity(self, *, ts: int, mark_price: float, cash: float | None = None, qty: float | None = None) -> None:
         mark_cash = self.cash if cash is None else float(cash)
         mark_qty = self.qty if qty is None else float(qty)
@@ -199,6 +279,24 @@ class PortfolioLedger:
             peak=float(self.peak if self.peak is not None else self.starting_cash),
             max_drawdown=float(self.max_drawdown),
             retain=True,
+        )
+
+    def mark_tick_equity(
+        self,
+        *,
+        ts: int,
+        mark_price: float,
+        tick_state: LedgerTickState | LedgerExecutionApplication | None = None,
+        cash: float | None = None,
+        qty: float | None = None,
+    ) -> None:
+        mark_cash = float(cash) if cash is not None else float(getattr(tick_state, "mark_cash"))
+        mark_qty = float(qty) if qty is not None else float(getattr(tick_state, "mark_qty"))
+        self.mark_equity(
+            ts=int(ts),
+            mark_price=float(mark_price),
+            cash=mark_cash,
+            qty=mark_qty,
         )
 
     def finalize(self, *, last_mark_ts: int, last_price: float) -> None:

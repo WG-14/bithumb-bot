@@ -21,6 +21,7 @@ from .db_core import (
 from .lifecycle import summarize_position_lots
 from .observability import format_log_kv
 from .oms import evaluate_unresolved_order_gate
+from .reason_codes import POSITION_LOSS_LIMIT
 from .recovery import CASH_SPLIT_ABS_TOL
 
 KST = timezone(timedelta(hours=9))
@@ -48,6 +49,81 @@ class DailyLossEvaluation:
     mark_price: float
     mark_price_source: str
     details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PureRiskInput:
+    """Broker-free risk inputs shared by runtime and research tests."""
+
+    evaluation_ts_ms: int
+    current_equity: float | None = None
+    baseline_equity: float | None = None
+    loss_today: float | None = None
+    max_daily_loss_krw: float = 0.0
+    mark_price: float = 0.0
+    current_cash_krw: float | None = None
+    current_asset_qty: float | None = None
+    position_entry_price: float | None = None
+    max_position_loss_pct: float = 0.0
+    broker_local_mismatch: bool = False
+    recovery_risk_mismatch_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PureRiskEvaluation:
+    blocked: bool
+    reason_code: str
+    reason: str
+    daily_loss: float | None = None
+    position_loss_pct: float | None = None
+
+
+def evaluate_pure_risk(input: PureRiskInput) -> PureRiskEvaluation:
+    """Deterministic runtime risk taxonomy without DB or broker I/O."""
+
+    mismatch_reason = str(input.recovery_risk_mismatch_reason or "").strip()
+    if input.broker_local_mismatch or mismatch_reason:
+        detail = mismatch_reason or "broker/local portfolio mismatch"
+        return PureRiskEvaluation(
+            blocked=True,
+            reason_code=RISK_STATE_MISMATCH,
+            reason=f"risk state mismatch ({detail})",
+        )
+
+    max_daily_loss = float(input.max_daily_loss_krw)
+    if max_daily_loss > 0.0:
+        if input.loss_today is not None:
+            loss_today = max(0.0, float(input.loss_today))
+        elif input.baseline_equity is not None and input.current_equity is not None:
+            loss_today = max(0.0, float(input.baseline_equity) - float(input.current_equity))
+        else:
+            loss_today = None
+        if loss_today is not None and loss_today >= max_daily_loss:
+            return PureRiskEvaluation(
+                blocked=True,
+                reason_code=DAILY_LOSS_LIMIT_REASON_CODE,
+                reason=f"daily loss limit exceeded ({loss_today:,.0f}/{max_daily_loss:,.0f} KRW)",
+                daily_loss=loss_today,
+            )
+
+    qty = float(input.current_asset_qty or 0.0)
+    entry_price = float(input.position_entry_price or 0.0)
+    mark_price = float(input.mark_price or 0.0)
+    threshold_pct = float(input.max_position_loss_pct or 0.0)
+    if threshold_pct > 0.0 and qty > POSITION_EPSILON and entry_price > 0.0 and mark_price > 0.0:
+        loss_pct = max(0.0, ((entry_price - mark_price) / entry_price) * 100.0)
+        if loss_pct >= threshold_pct:
+            return PureRiskEvaluation(
+                blocked=True,
+                reason_code=POSITION_LOSS_LIMIT,
+                reason=(
+                    "position loss threshold breached "
+                    f"({loss_pct:.2f}%/{threshold_pct:.2f}%, entry={entry_price:,.0f}, mark={mark_price:,.0f})"
+                ),
+                position_loss_pct=loss_pct,
+            )
+
+    return PureRiskEvaluation(blocked=False, reason_code="OK", reason="ok")
 
 
 def _day_kst(ts_ms: int) -> str:

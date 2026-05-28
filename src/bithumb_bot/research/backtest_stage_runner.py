@@ -6,7 +6,10 @@ from typing import Any
 from bithumb_bot.market_regime import aggregate_regime_coverage, aggregate_regime_performance
 
 from . import backtest_support as support
-from .backtest_stages import ReplayTick
+from bithumb_bot.canonical_decision import canonical_payload_hash
+
+from .backtest_stages import ReplayTick, StageTrace
+from .execution_simulator_stage import blocked_execution_evidence
 from .execution_model import FixedBpsExecutionModel
 from .execution_timing import candle_close_ts
 from .experiment_manifest import ExecutionTimingPolicy, legacy_research_portfolio_policy
@@ -99,6 +102,7 @@ def run_stage_owned_decision_event_backtest(
 
     dataset_content_hash = dataset.content_hash()
     decisions: list[dict[str, object]] = []
+    stage_traces: list[StageTrace] = []
     warnings: list[str] = []
     regime_snapshots: list[dict[str, object]] = []
     regime_coverage_accumulator = support.RegimeCoverageAccumulator()
@@ -124,14 +128,15 @@ def run_stage_owned_decision_event_backtest(
         candle = tick.candle
         mark_boundary_ts = candle_close_ts(candle, interval=dataset.interval)
         decision_boundary_ts = int(event.decision_ts)
-        ledger.apply_pending_fills(mark_boundary_ts)
-        mark_cash = ledger.cash
-        mark_qty = ledger.qty
-        ledger.apply_pending_fills(decision_boundary_ts)
-        ledger.record_open_trade_mark(ts=int(candle.ts), close=float(candle.close))
-        pending_buy_qty = ledger.pending_qty("BUY")
-        pending_sell_qty = ledger.pending_qty("SELL")
-        sellable_qty = ledger.sellable_qty()
+        tick_state = ledger.begin_tick(
+            mark_boundary_ts=mark_boundary_ts,
+            decision_boundary_ts=decision_boundary_ts,
+            candle_ts=int(candle.ts),
+            close=float(candle.close),
+        )
+        mark_cash = tick_state.mark_cash
+        mark_qty = tick_state.mark_qty
+        sellable_qty = tick_state.sellable_qty
         event_extra = event.extra_payload if isinstance(event.extra_payload, dict) else {}
         regime_snapshot = dict(
             event_extra.get("regime_snapshot")
@@ -144,6 +149,18 @@ def run_stage_owned_decision_event_backtest(
         policy_position = ledger.snapshot_for_policy(
             candle_ts=int(candle.ts),
             market_price=float(candle.close),
+        )
+        replay_tick_hash = canonical_payload_hash(
+            {
+                "candle_ts": int(tick.candle_ts),
+                "decision_ts": int(tick.decision_ts),
+                "raw_signal": event.raw_signal,
+                "final_signal": event.final_signal,
+                "reason": event.reason,
+            }
+        )
+        position_snapshot_hash = canonical_payload_hash(
+            policy_position.as_dict() if hasattr(policy_position, "as_dict") else vars(policy_position)
         )
         strategy_envelope = strategy_evaluator.evaluate(
             tick,
@@ -159,6 +176,35 @@ def run_stage_owned_decision_event_backtest(
                 "run_context": run_context,
             },
         )
+        strategy_decision_hash = canonical_payload_hash(
+            {
+                "replay_fingerprint_hash": strategy_envelope.replay_fingerprint_hash,
+                "compatibility_fallback": strategy_envelope.compatibility_fallback,
+                "unsupported_reason": strategy_envelope.unsupported_reason,
+                "decision_hash": (
+                    getattr(strategy_envelope.decision, "policy_decision_hash", "")
+                    if strategy_envelope.decision is not None
+                    else ""
+                ),
+            }
+        )
+        stage_traces.append(
+            StageTrace(
+                stage_id="strategy",
+                input_hash=canonical_payload_hash(
+                    {"replay_tick_hash": replay_tick_hash, "position_snapshot_hash": position_snapshot_hash}
+                ),
+                output_hash=strategy_decision_hash,
+                reason_code=str(strategy_envelope.unsupported_reason or "OK"),
+                payload={
+                    "replay_tick_hash": replay_tick_hash,
+                    "position_snapshot_hash": position_snapshot_hash,
+                    "strategy_decision_hash": strategy_decision_hash,
+                    "compatibility_fallback": bool(strategy_envelope.compatibility_fallback),
+                    "recommended_next_action": strategy_envelope.recommended_next_action,
+                },
+            )
+        )
         policy_decision = strategy_envelope.decision
         risk_decision = risk_gate.evaluate(
             policy_decision,
@@ -169,9 +215,7 @@ def run_stage_owned_decision_event_backtest(
             },
             {
                 "qty": ledger.qty,
-                "pending_buy_qty": pending_buy_qty,
-                "pending_sell_qty": pending_sell_qty,
-                "sellable_qty": sellable_qty,
+                **ledger.portfolio_snapshot(tick_state),
             },
             {
                 "strategy_plugin": strategy_plugin,
@@ -181,6 +225,16 @@ def run_stage_owned_decision_event_backtest(
                 "fee_rate": fee_rate,
                 "strategy_envelope": strategy_envelope,
             },
+        )
+        risk_gate_hash = risk_decision.evidence_hash
+        stage_traces.append(
+            StageTrace(
+                stage_id="risk",
+                input_hash=strategy_decision_hash,
+                output_hash=risk_gate_hash,
+                reason_code=risk_decision.reason_code,
+                payload={"risk_gate_hash": risk_gate_hash},
+            )
         )
         action = risk_decision.final_signal
         raw_signal = str(strategy_envelope.provenance.get("raw_signal") or "HOLD").upper()
@@ -363,36 +417,35 @@ def run_stage_owned_decision_event_backtest(
             )
             decision_payload.update(dict(outcome.evidence))
             warnings.extend(outcome.warnings)
-            if outcome.fill is not None and outcome.pending_fill is None and outcome.trade is not None:
-                ledger.record_failed_fill(outcome.fill)
-                support.trace_execution(run_context, ledger.trade_ledger[-1])
-            elif outcome.pending_fill is not None and outcome.trade is not None:
-                ledger.record_pending_fill(outcome.pending_fill, outcome.trade)
-                support.trace_execution(run_context, ledger.trade_ledger[-1])
-                if support.fill_applies_to_mark(
-                    fill=outcome.pending_fill.fill,
-                    effective_ts=outcome.pending_fill.effective_ts,
-                    mark_boundary_ts=mark_boundary_ts,
-                ):
-                    mark_cash += outcome.mark_cash_delta
-                    mark_qty = max(0.0, mark_qty + outcome.mark_qty_delta)
-                ledger.apply_pending_fills(decision_boundary_ts)
-        else:
-            from .backtest_loop import _execution_plan_evidence, ResearchExecutionPlanBundle
-
-            decision_payload.update(
-                _execution_plan_evidence(
-                    ResearchExecutionPlanBundle(
-                        submit_plan=None,
-                        summary=None,
-                        source="research_backtest",
-                        authority="research_virtual_execution_planner",
-                        execution_engine="research_virtual",
-                        status="BLOCKED",
-                        reason_code=risk_decision.reason_code,
-                    )
-                )
+            application = ledger.apply_execution_outcome(
+                outcome,
+                mark_boundary_ts=mark_boundary_ts,
+                mark_cash=mark_cash,
+                mark_qty=mark_qty,
             )
+            mark_cash = application.mark_cash
+            mark_qty = application.mark_qty
+            if application.trade_recorded:
+                support.trace_execution(run_context, ledger.trade_ledger[-1])
+                ledger.apply_pending_fills(decision_boundary_ts)
+            execution_plan_hash = canonical_payload_hash(dict(outcome.evidence))
+            fill_hash = canonical_payload_hash(
+                outcome.fill.as_dict() if outcome.fill is not None and hasattr(outcome.fill, "as_dict") else {}
+            )
+        else:
+            blocked_evidence = blocked_execution_evidence(risk_decision.reason_code)
+            decision_payload.update(blocked_evidence)
+            execution_plan_hash = canonical_payload_hash(blocked_evidence)
+            fill_hash = canonical_payload_hash({})
+        stage_traces.append(
+            StageTrace(
+                stage_id="execution",
+                input_hash=risk_gate_hash,
+                output_hash=execution_plan_hash,
+                reason_code=str(decision_payload.get("execution_plan_reason_code") or risk_decision.reason_code),
+                payload={"execution_plan_hash": execution_plan_hash, "fill_hash": fill_hash},
+            )
+        )
         retain_decision = accumulator.retain_decision()
         if retain_decision:
             decisions.append(decision_payload)
@@ -400,11 +453,38 @@ def run_stage_owned_decision_event_backtest(
         support.trace_decision(run_context, decision_payload)
 
         retain_equity = accumulator.retain_equity_point()
-        ledger.mark_equity(
+        ledger.mark_tick_equity(
             ts=mark_boundary_ts,
             mark_price=float(candle.close),
             cash=mark_cash,
             qty=mark_qty,
+        )
+        ledger_hash = canonical_payload_hash(ledger.portfolio_snapshot())
+        equity_hash = canonical_payload_hash(
+            {
+                "ts": int(mark_boundary_ts),
+                "cash": round(float(mark_cash), 12),
+                "asset_qty": round(float(mark_qty), 12),
+                "mark_price": round(float(candle.close), 12),
+            }
+        )
+        stage_traces.append(
+            StageTrace(
+                stage_id="ledger",
+                input_hash=execution_plan_hash,
+                output_hash=ledger_hash,
+                reason_code="OK",
+                payload={"ledger_hash": ledger_hash},
+            )
+        )
+        stage_traces.append(
+            StageTrace(
+                stage_id="equity",
+                input_hash=ledger_hash,
+                output_hash=equity_hash,
+                reason_code="OK",
+                payload={"equity_hash": equity_hash},
+            )
         )
         if not retain_equity and ledger.equity_curve:
             ledger.equity_curve.pop()
@@ -418,20 +498,15 @@ def run_stage_owned_decision_event_backtest(
         )
         if metrics_collector is not None:
             metrics_collector.record(
-                "tick",
+                "stage_trace",
                 {
-                    "input_hash": strategy_envelope.replay_fingerprint_hash,
-                    "output_hash": risk_decision.evidence_hash,
-                    "reason_code": risk_decision.reason_code,
+                    "event_number": event_number,
+                    "stage_traces": [trace.as_dict() for trace in stage_traces[-5:]],
                 },
             )
         if experiment_recorder is not None:
-            experiment_recorder.record_stage(
-                stage_id="tick",
-                input_hash=str(strategy_envelope.replay_fingerprint_hash),
-                output_hash=str(risk_decision.evidence_hash),
-                reason_code=str(risk_decision.reason_code),
-            )
+            for trace in stage_traces[-5:]:
+                experiment_recorder.record_stage(**trace.as_dict())
         accumulator.maybe_emit_heartbeat(event_number)
         accumulator.check_limits(candles_processed=event_number, trades=ledger.trade_ledger)
 
@@ -521,6 +596,8 @@ def run_stage_owned_decision_event_backtest(
     strategy_diagnostics = accumulator.strategy_diagnostics(trades=ledger.trade_ledger)
     resource_usage = accumulator.resource_usage(candles_processed=len(decision_events))
     resource_usage["strategy_diagnostics"] = strategy_diagnostics
+    resource_usage["stage_trace"] = [trace.as_dict() for trace in stage_traces]
+    resource_usage["stage_trace_hash"] = canonical_payload_hash(resource_usage["stage_trace"])
     return support.BacktestRun(
         metrics=metrics,
         metrics_v2=metrics_v2,

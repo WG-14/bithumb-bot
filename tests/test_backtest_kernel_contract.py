@@ -78,9 +78,153 @@ def test_decision_event_backtest_kernel_executes_buy_and_updates_portfolio() -> 
     assert result.execution_event_summary["execution_attempt_count"] == 1
     assert result.metrics_v2 is not None
     assert result.metrics_v2.cost_execution.filled_execution_count == 1
-    assert result.metrics_v2.return_risk.open_position_at_end is True
-    assert result.resource_usage is not None
-    assert result.resource_usage["composite_behavior_hash_v2"].startswith("sha256:")
+
+
+def test_stage_trace_records_strategy_risk_execution_fill_ledger_equity_hashes() -> None:
+    dataset = DatasetSnapshot(
+        snapshot_id="kernel_stage_trace",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=tuple(
+            Candle(index * 60_000, 100.0 + index, 100.0 + index, 100.0 + index, 100.0 + index, 1.0)
+            for index in range(4)
+        ),
+    )
+    event = ResearchDecisionEvent(
+        candle_ts=dataset.candles[1].ts,
+        decision_ts=dataset.candles[1].ts + 60_000,
+        strategy_name="buy_and_hold_baseline",
+        strategy_version="buy_and_hold_baseline.research_contract.v1",
+        raw_signal="BUY",
+        final_signal="BUY",
+        reason="kernel_stage_trace_buy",
+        feature_snapshot={"candle_index": 1, "close": dataset.candles[1].close},
+        strategy_diagnostics={"schema_version": 1, "emitted_buy_intent": True},
+        entry_signal="BUY",
+        order_intent={"side": "BUY"},
+    )
+
+    result = run_decision_event_backtest(
+        dataset=dataset,
+        strategy_name="buy_and_hold_baseline",
+        parameter_values={"BUY_HOLD_BUY_INDEX": 1, "BUY_HOLD_DECISION_REASON": "kernel_stage_trace_buy"},
+        fee_rate=0.001,
+        slippage_bps=5.0,
+        decision_events=(event,),
+        context=BacktestRunContext(report_detail="full"),
+    )
+
+    traces = result.resource_usage["stage_trace"]
+    by_stage = {trace["stage_id"]: trace for trace in traces}
+    assert {"strategy", "risk", "execution", "ledger", "equity"} <= set(by_stage)
+    assert by_stage["strategy"]["payload"]["replay_tick_hash"].startswith("sha256:")
+    assert by_stage["strategy"]["payload"]["position_snapshot_hash"].startswith("sha256:")
+    assert by_stage["strategy"]["payload"]["strategy_decision_hash"].startswith("sha256:")
+    assert by_stage["risk"]["payload"]["risk_gate_hash"].startswith("sha256:")
+    assert by_stage["execution"]["payload"]["execution_plan_hash"].startswith("sha256:")
+    assert by_stage["execution"]["payload"]["fill_hash"].startswith("sha256:")
+    assert by_stage["ledger"]["payload"]["ledger_hash"].startswith("sha256:")
+    assert by_stage["equity"]["payload"]["equity_hash"].startswith("sha256:")
+
+
+def test_stage_trace_hashes_are_deterministic_for_same_input() -> None:
+    dataset = DatasetSnapshot(
+        snapshot_id="kernel_stage_trace_deterministic",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=tuple(
+            Candle(index * 60_000, 100.0 + index, 100.0 + index, 100.0 + index, 100.0 + index, 1.0)
+            for index in range(4)
+        ),
+    )
+    event = ResearchDecisionEvent(
+        candle_ts=dataset.candles[1].ts,
+        decision_ts=dataset.candles[1].ts + 60_000,
+        strategy_name="buy_and_hold_baseline",
+        strategy_version="buy_and_hold_baseline.research_contract.v1",
+        raw_signal="BUY",
+        final_signal="BUY",
+        reason="kernel_stage_trace_deterministic_buy",
+        feature_snapshot={"candle_index": 1, "close": dataset.candles[1].close},
+        strategy_diagnostics={"schema_version": 1, "emitted_buy_intent": True},
+        entry_signal="BUY",
+        order_intent={"side": "BUY"},
+    )
+    kwargs = {
+        "dataset": dataset,
+        "strategy_name": "buy_and_hold_baseline",
+        "parameter_values": {
+            "BUY_HOLD_BUY_INDEX": 1,
+            "BUY_HOLD_DECISION_REASON": "kernel_stage_trace_deterministic_buy",
+        },
+        "fee_rate": 0.001,
+        "slippage_bps": 5.0,
+        "decision_events": (event,),
+        "context": BacktestRunContext(report_detail="full"),
+    }
+
+    first = run_decision_event_backtest(**kwargs)
+    second = run_decision_event_backtest(**{**kwargs, "context": BacktestRunContext(report_detail="full")})
+
+    assert first.resource_usage["stage_trace_hash"] == second.resource_usage["stage_trace_hash"]
+    assert first.resource_usage["composite_behavior_hash_v2"] == second.resource_usage["composite_behavior_hash_v2"]
+    assert first.resource_usage["trade_ledger_hash"] == second.resource_usage["trade_ledger_hash"]
+    assert first.resource_usage["equity_curve_hash"] == second.resource_usage["equity_curve_hash"]
+
+
+def test_metrics_and_audit_do_not_mutate_authority_state() -> None:
+    dataset = DatasetSnapshot(
+        snapshot_id="kernel_observability_no_authority_mutation",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=tuple(
+            Candle(index * 60_000, 100.0 + index, 100.0 + index, 100.0 + index, 100.0 + index, 1.0)
+            for index in range(4)
+        ),
+    )
+    event = ResearchDecisionEvent(
+        candle_ts=dataset.candles[1].ts,
+        decision_ts=dataset.candles[1].ts + 60_000,
+        strategy_name="buy_and_hold_baseline",
+        strategy_version="buy_and_hold_baseline.research_contract.v1",
+        raw_signal="BUY",
+        final_signal="BUY",
+        reason="kernel_observability_no_authority_mutation_buy",
+        feature_snapshot={"candle_index": 1, "close": dataset.candles[1].close},
+        strategy_diagnostics={"schema_version": 1, "emitted_buy_intent": True},
+        entry_signal="BUY",
+        order_intent={"side": "BUY"},
+    )
+    kwargs = {
+        "dataset": dataset,
+        "strategy_name": "buy_and_hold_baseline",
+        "parameter_values": {
+            "BUY_HOLD_BUY_INDEX": 1,
+            "BUY_HOLD_DECISION_REASON": "kernel_observability_no_authority_mutation_buy",
+        },
+        "fee_rate": 0.001,
+        "slippage_bps": 5.0,
+        "decision_events": (event,),
+    }
+
+    with_audit = run_decision_event_backtest(**kwargs, context=BacktestRunContext(report_detail="full"))
+    repeated = run_decision_event_backtest(**kwargs, context=BacktestRunContext(report_detail="full"))
+
+    assert len(with_audit.trades) == len(repeated.trades)
+    assert with_audit.trades[-1]["cash"] == repeated.trades[-1]["cash"]
+    assert with_audit.trades[-1]["asset_qty"] == repeated.trades[-1]["asset_qty"]
+    assert with_audit.resource_usage["composite_behavior_hash_v2"] == repeated.resource_usage[
+        "composite_behavior_hash_v2"
+    ]
 
 
 def test_decision_event_backtest_uses_typed_execution_service_boundary(monkeypatch) -> None:

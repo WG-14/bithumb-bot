@@ -57,8 +57,10 @@ def test_default_backtest_authority_calls_live_inside_stage_classes() -> None:
     assert "class DefaultStrategyEvaluator" in pipeline_source
     assert "merge_exit_rules(" in pipeline_source
     assert "class DefaultRiskGate" in pipeline_source
-    assert "SignalExecutionRequest(" in pipeline_source
-    assert "class DefaultExecutionSimulator" in pipeline_source
+    assert "from .execution_simulator_stage import DefaultExecutionSimulator" in pipeline_source
+    assert "SignalExecutionRequest(" not in pipeline_source
+    assert "class DefaultExecutionSimulator" not in pipeline_source
+    assert "class DefaultExecutionSimulator" in _source("src/bithumb_bot/research/execution_simulator_stage.py")
 
     for forbidden in (
         "research_policy_decision_builder(",
@@ -93,6 +95,39 @@ def test_production_strategy_decisions_go_through_canonical_service() -> None:
                     violations.append(f"{rel}:{node.lineno}")
 
     assert violations == []
+
+
+def test_all_promotion_grade_plugins_fail_closed_without_typed_decision() -> None:
+    plugins = [
+        plugin
+        for plugin in list_research_strategy_plugins()
+        if plugin.runtime_capabilities.promotion_runtime_decisions_supported
+    ]
+
+    assert {plugin.name for plugin in plugins} >= {"sma_with_filter", "canary_non_sma", "safe_hold"}
+    for plugin in plugins:
+        assert plugin.runtime_decision_adapter_factory is not None
+        assert plugin.policy_assembly_factory is not None
+        if plugin.research_runnable:
+            assert plugin.research_policy_decision_builder is not None
+
+    evaluator_source = _source("src/bithumb_bot/research/backtest_pipeline.py")
+    assert "research_strategy_decision_promotion_fields_missing" in evaluator_source
+    assert "if promotion_grade_policy_required and policy_decision is None" in evaluator_source
+
+
+def test_all_promotion_grade_plugins_fail_closed_without_typed_submit_plan() -> None:
+    plugins = [
+        plugin
+        for plugin in list_research_strategy_plugins()
+        if plugin.runtime_capabilities.promotion_runtime_decisions_supported
+    ]
+
+    assert plugins
+    stage_source = _source("src/bithumb_bot/research/execution_simulator_stage.py")
+    service_source = _source("src/bithumb_bot/research/execution_simulator.py")
+    assert "raise ValueError(\"research_submit_plan_missing\")" in stage_source
+    assert "research_dict_only_submit_plan_not_authority" in service_source
 
 
 def test_runtime_production_modules_do_not_import_legacy_db_strategies() -> None:

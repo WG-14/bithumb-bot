@@ -12,6 +12,7 @@ from bithumb_bot.research.backtest_kernel import (
     execution_submit_plan_to_research_request,
 )
 from bithumb_bot.research.execution_model import FixedBpsExecutionModel
+from bithumb_bot.research.execution_simulator_stage import DefaultExecutionSimulator
 
 
 def _typed_decision(*, raw_signal: str = "BUY", final_signal: str = "BUY") -> StrategyDecisionV2:
@@ -463,6 +464,13 @@ def test_malformed_submit_plan_fails_closed_before_research_request() -> None:
             reference_price=10.0,
             fee_rate=0.001,
         )
+
+
+def test_execution_simulator_is_independent_stage() -> None:
+    simulator = DefaultExecutionSimulator()
+
+    assert simulator.run(object()) is not None
+    assert DefaultExecutionSimulator.__module__ == "bithumb_bot.research.execution_simulator_stage"
 
 
 def test_direct_cash_fraction_is_not_request_authority_when_plan_exists() -> None:

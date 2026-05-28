@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from bithumb_bot.research import backtest_support as support
 from bithumb_bot.research.execution_model import ExecutionFill
 from bithumb_bot.research.portfolio_ledger import PortfolioLedger
@@ -139,3 +141,57 @@ def test_portfolio_ledger_final_pending_fill_marking() -> None:
 
     assert ledger.qty == 0.0
     assert ledger.export_trades()[0]["is_portfolio_applied_trade"] is False
+
+
+def test_portfolio_ledger_high_level_tick_api_owns_mark_projection() -> None:
+    ledger = PortfolioLedger.create(starting_cash=1_000.0)
+    fill = _fill(side="BUY", qty=1.0, price=100.0, fee=0.0, effective_ts=100)
+    pending = _pending(fill, trade_index=0, effective_ts=100)
+    outcome = type(
+        "Outcome",
+        (),
+        {
+            "fill": fill,
+            "pending_fill": pending,
+            "trade": {"side": "BUY"},
+            "mark_cash_delta": pending.cash_delta,
+            "mark_qty_delta": pending.qty,
+        },
+    )()
+
+    tick = ledger.begin_tick(mark_boundary_ts=101, decision_boundary_ts=100, candle_ts=0, close=100.0)
+    applied = ledger.apply_execution_outcome(
+        outcome,
+        mark_boundary_ts=101,
+        mark_cash=tick.mark_cash,
+        mark_qty=tick.mark_qty,
+    )
+    ledger.mark_tick_equity(ts=100, mark_price=100.0, tick_state=applied)
+
+    assert applied.fill_applied_to_mark is True
+    assert applied.mark_cash == 900.0
+    assert applied.mark_qty == 1.0
+    assert ledger.export_equity_curve()[-1].equity == 1_000.0
+
+
+def test_portfolio_ledger_randomized_fill_sequence_invariants() -> None:
+    ledger = PortfolioLedger.create(starting_cash=1_000.0)
+    expected_cash = 1_000.0
+    expected_qty = 0.0
+    for index in range(20):
+        if index % 3 == 0 or expected_qty <= 0.0:
+            fill = _fill(side="BUY", signal_ts=index, effective_ts=index, qty=0.1, price=100.0, fee=0.01)
+            expected_cash -= 10.01
+            expected_qty += 0.1
+        else:
+            sell_qty = min(0.05, expected_qty)
+            fill = _fill(side="SELL", signal_ts=index, effective_ts=index, qty=sell_qty, price=101.0, fee=0.01)
+            expected_cash += sell_qty * 101.0 - 0.01
+            expected_qty -= sell_qty
+        ledger.record_pending_fill(_pending(fill, trade_index=index), {"side": fill.side})
+        ledger.apply_pending_fills(index)
+
+        assert ledger.cash == pytest.approx(expected_cash)
+        assert ledger.qty == pytest.approx(max(0.0, expected_qty))
+        assert ledger.cash >= 0.0
+        assert ledger.qty >= 0.0

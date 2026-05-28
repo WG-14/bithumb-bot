@@ -12,11 +12,17 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.risk import (
     DAILY_LOSS_LIMIT_REASON_CODE,
+    PureRiskInput,
     RISK_STATE_MISMATCH,
+    evaluate_pure_risk,
     evaluate_daily_loss_state,
     fetch_daily_risk_baseline,
     fetch_recent_risk_evaluations,
 )
+from bithumb_bot.reason_codes import POSITION_LOSS_LIMIT
+from bithumb_bot.research.backtest_pipeline import DefaultRiskGate
+from bithumb_bot.research.backtest_stages import StrategyEvaluationEnvelope
+from bithumb_bot.strategy_policy_contract import PositionSnapshot
 
 KST = timezone(timedelta(hours=9))
 
@@ -69,6 +75,107 @@ def _record_verified_reconcile(*, observed_ts_ms: int) -> None:
             "dust_residual_present": 0,
         },
     )
+
+
+def _research_risk_decision(risk_input: PureRiskInput, *, requested_action: str = "BUY"):
+    event = type(
+        "Event",
+        (),
+        {
+            "reason": "unit",
+            "final_signal": requested_action,
+            "exit_intent": None,
+        },
+    )()
+    envelope = StrategyEvaluationEnvelope(
+        decision=None,
+        provenance={
+            "raw_signal": requested_action,
+            "raw_reason": "unit",
+            "entry_signal": requested_action,
+            "evaluates_exit_policy": False,
+        },
+        replay_fingerprint_hash="sha256:unit",
+    )
+    return DefaultRiskGate().evaluate(
+        None,
+        PositionSnapshot(
+            in_position=bool((risk_input.current_asset_qty or 0.0) > 0.0),
+            entry_allowed=True,
+            exit_allowed=bool((risk_input.current_asset_qty or 0.0) > 0.0),
+            entry_price=risk_input.position_entry_price,
+            qty_open=float(risk_input.current_asset_qty or 0.0),
+        ),
+        {"candle_ts": risk_input.evaluation_ts_ms, "close": risk_input.mark_price},
+        {
+            "qty": float(risk_input.current_asset_qty or 0.0),
+            "pending_buy_qty": 0.0,
+            "pending_sell_qty": 0.0,
+            "sellable_qty": float(risk_input.current_asset_qty or 0.0),
+        },
+        {
+            "strategy_plugin": type("Plugin", (), {})(),
+            "event": event,
+            "active_exit_policy": {},
+            "parameter_values": {},
+            "fee_rate": 0.0,
+            "strategy_envelope": envelope,
+            "pure_risk_input": risk_input,
+        },
+    )
+
+
+def test_research_risk_gate_matches_runtime_daily_loss_reason_codes() -> None:
+    risk_input = PureRiskInput(
+        evaluation_ts_ms=1,
+        current_equity=950_000.0,
+        baseline_equity=1_000_000.0,
+        max_daily_loss_krw=30_000.0,
+        mark_price=100.0,
+    )
+
+    runtime = evaluate_pure_risk(risk_input)
+    research = _research_risk_decision(risk_input)
+
+    assert runtime.blocked is True
+    assert runtime.reason_code == DAILY_LOSS_LIMIT_REASON_CODE
+    assert research.block is True
+    assert research.allow is False
+    assert research.reason_code == runtime.reason_code
+
+
+def test_research_risk_gate_matches_runtime_position_loss_reason_code() -> None:
+    risk_input = PureRiskInput(
+        evaluation_ts_ms=1,
+        mark_price=80.0,
+        current_asset_qty=2.0,
+        position_entry_price=100.0,
+        max_position_loss_pct=10.0,
+    )
+
+    runtime = evaluate_pure_risk(risk_input)
+    research = _research_risk_decision(risk_input, requested_action="SELL")
+
+    assert runtime.blocked is True
+    assert runtime.reason_code == POSITION_LOSS_LIMIT
+    assert research.reason_code == POSITION_LOSS_LIMIT
+    assert research.allow is False
+
+
+def test_research_risk_gate_emits_risk_state_mismatch_reason_code() -> None:
+    risk_input = PureRiskInput(
+        evaluation_ts_ms=1,
+        mark_price=100.0,
+        broker_local_mismatch=True,
+        recovery_risk_mismatch_reason="broker/local portfolio mismatch",
+    )
+
+    runtime = evaluate_pure_risk(risk_input)
+    research = _research_risk_decision(risk_input)
+
+    assert runtime.reason_code == RISK_STATE_MISMATCH
+    assert research.reason_code == RISK_STATE_MISMATCH
+    assert research.allow is False
 
 
 def test_daily_loss_evaluation_matches_verified_snapshot_math(tmp_path):

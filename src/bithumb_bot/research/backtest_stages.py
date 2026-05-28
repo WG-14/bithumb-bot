@@ -40,6 +40,26 @@ class RiskGateDecision:
     payload: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class StageTrace:
+    stage_id: str
+    input_hash: str
+    output_hash: str
+    reason_code: str
+    payload: dict[str, object] | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "stage_id": self.stage_id,
+            "input_hash": self.input_hash,
+            "output_hash": self.output_hash,
+            "reason_code": self.reason_code,
+        }
+        if self.payload is not None:
+            result["payload"] = dict(self.payload)
+        return result
+
+
 class MarketReplayClock(Protocol):
     def ticks(self) -> tuple[ReplayTick, ...]:
         ...
@@ -93,5 +113,6 @@ class ExperimentRecorder(Protocol):
         input_hash: str,
         output_hash: str,
         reason_code: str,
+        payload: dict[str, object] | None = None,
     ) -> None:
         ...
