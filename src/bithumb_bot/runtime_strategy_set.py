@@ -24,7 +24,9 @@ from .research.strategy_registry import (
 )
 from .research.strategy_spec import (
     exit_policy_from_parameters,
+    materialize_strategy_parameters,
     materialized_strategy_parameters_hash,
+    runtime_bound_behavior_parameter_names,
 )
 from .runtime_strategy_decision import (
     RuntimeDecisionRequest,
@@ -45,6 +47,7 @@ def _optional_float(value: object) -> float | None:
 @dataclass(frozen=True)
 class RuntimeStrategySpec:
     strategy_name: str
+    strategy_instance_id: str | None = None
     enabled: bool = True
     pair: str | None = None
     interval: str | None = None
@@ -53,6 +56,7 @@ class RuntimeStrategySpec:
     desired_exposure_krw: float | None = None
     risk_budget_krw: float | None = None
     parameters: Mapping[str, object] | None = None
+    runtime_adapter_config: Mapping[str, object] | None = None
     approved_profile_path: str | None = None
     approved_profile_hash: str | None = None
     parameter_source: str | None = None
@@ -101,10 +105,20 @@ class RuntimeStrategySpec:
             object.__setattr__(self, "runtime_contract_hash", str(self.runtime_contract_hash).strip() or None)
         if self.strategy_version is not None:
             object.__setattr__(self, "strategy_version", str(self.strategy_version).strip() or None)
+        if self.strategy_instance_id is not None:
+            object.__setattr__(self, "strategy_instance_id", str(self.strategy_instance_id).strip() or None)
+        object.__setattr__(
+            self,
+            "runtime_adapter_config",
+            MappingProxyType(
+                {str(key): value for key, value in dict(self.runtime_adapter_config or {}).items()}
+            ),
+        )
 
     def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": int(self.schema_version),
+            "strategy_instance_id": self.strategy_instance_id,
             "strategy_name": self.strategy_name,
             "enabled": bool(self.enabled),
             "pair": self.pair,
@@ -114,11 +128,129 @@ class RuntimeStrategySpec:
             "desired_exposure_krw": self.desired_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
             "parameters": dict(self.parameters or {}),
+            "runtime_adapter_config": dict(self.runtime_adapter_config or {}),
             "approved_profile_path": self.approved_profile_path,
             "approved_profile_hash": self.approved_profile_hash,
             "parameter_source": self.parameter_source,
             "runtime_contract_hash": self.runtime_contract_hash,
             "strategy_version": self.strategy_version,
+        }
+
+
+def _runtime_strategy_identity_hash(payload: Mapping[str, object]) -> str:
+    return sha256_prefixed({"runtime_strategy_instance_identity": dict(payload)})
+
+
+def derive_strategy_instance_id(
+    spec: RuntimeStrategySpec,
+    *,
+    strategy_parameters_hash: str | None = None,
+) -> str:
+    explicit = str(spec.strategy_instance_id or "").strip()
+    if explicit:
+        return explicit
+    parameter_identity_hash = (
+        str(spec.approved_profile_hash or "").strip()
+        or str(strategy_parameters_hash or "").strip()
+    )
+    if not parameter_identity_hash:
+        try:
+            parameter_identity_hash = materialized_strategy_parameters_hash(
+                materialize_strategy_parameters(spec.strategy_name, dict(spec.parameters or {}))
+            )
+        except Exception:
+            parameter_identity_hash = materialized_strategy_parameters_hash(dict(spec.parameters or {}))
+    digest = _runtime_strategy_identity_hash(
+        {
+            "strategy_name": spec.strategy_name,
+            "pair": spec.pair,
+            "interval": spec.interval,
+            "parameter_identity_hash": parameter_identity_hash,
+        }
+    )
+    return (
+        f"{spec.strategy_name}:{str(spec.pair).lower()}:"
+        f"{str(spec.interval).lower()}:{digest.removeprefix('sha256:')[:16]}"
+    )
+
+
+@dataclass(frozen=True)
+class RuntimeStrategyInstance:
+    spec: RuntimeStrategySpec
+    strategy_instance_id: str
+    parameters_raw: Mapping[str, object]
+    parameters_materialized: Mapping[str, object]
+    strategy_parameters_hash: str
+    parameter_source: str
+    approved_profile_path: str | None
+    approved_profile_hash: str | None
+    runtime_contract_hash: str | None
+    plugin_contract_hash: str | None
+    strategy_version: str | None
+    runtime_contract: Mapping[str, object]
+    runtime_adapter_config: Mapping[str, object]
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "strategy_instance_id", str(self.strategy_instance_id).strip())
+        object.__setattr__(
+            self,
+            "parameters_raw",
+            MappingProxyType({str(key): value for key, value in dict(self.parameters_raw or {}).items()}),
+        )
+        object.__setattr__(
+            self,
+            "parameters_materialized",
+            MappingProxyType(
+                {str(key): value for key, value in dict(self.parameters_materialized or {}).items()}
+            ),
+        )
+        object.__setattr__(
+            self,
+            "runtime_contract",
+            MappingProxyType({str(key): value for key, value in dict(self.runtime_contract or {}).items()}),
+        )
+        object.__setattr__(
+            self,
+            "runtime_adapter_config",
+            MappingProxyType(
+                {str(key): value for key, value in dict(self.runtime_adapter_config or {}).items()}
+            ),
+        )
+
+    @property
+    def strategy_name(self) -> str:
+        return self.spec.strategy_name
+
+    @property
+    def pair(self) -> str:
+        return str(self.spec.pair)
+
+    @property
+    def interval(self) -> str:
+        return str(self.spec.interval)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": int(self.schema_version),
+            "strategy_instance_id": self.strategy_instance_id,
+            "strategy_name": self.strategy_name,
+            "pair": self.pair,
+            "interval": self.interval,
+            "priority": int(self.spec.priority),
+            "weight": float(self.spec.weight),
+            "desired_exposure_krw": self.spec.desired_exposure_krw,
+            "risk_budget_krw": self.spec.risk_budget_krw,
+            "parameter_source": self.parameter_source,
+            "parameters_raw": dict(self.parameters_raw),
+            "parameters_materialized": dict(self.parameters_materialized),
+            "strategy_parameters_hash": self.strategy_parameters_hash,
+            "approved_profile_path": self.approved_profile_path,
+            "approved_profile_hash": self.approved_profile_hash,
+            "runtime_contract_hash": self.runtime_contract_hash,
+            "plugin_contract_hash": self.plugin_contract_hash,
+            "strategy_version": self.strategy_version,
+            "runtime_adapter_config": dict(self.runtime_adapter_config),
         }
 
 
@@ -132,16 +264,21 @@ class RuntimeStrategySet:
         active = tuple(item for item in self.strategies if item.enabled)
         if not active:
             raise ValueError("runtime_strategy_set_empty")
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         for item in active:
-            key = (item.strategy_name, str(item.pair))
+            key = derive_strategy_instance_id(item)
             if key in seen:
-                raise ValueError(f"runtime_strategy_duplicate:{item.strategy_name}:{item.pair}")
+                raise ValueError(f"runtime_strategy_duplicate_instance:{key}")
             seen.add(key)
         object.__setattr__(
             self,
             "strategies",
-            tuple(sorted(self.strategies, key=lambda item: (str(item.pair), item.priority, item.strategy_name))),
+            tuple(
+                sorted(
+                    self.strategies,
+                    key=lambda item: (str(item.pair), item.priority, derive_strategy_instance_id(item)),
+                )
+            ),
         )
 
     @property
@@ -154,8 +291,15 @@ class RuntimeStrategySet:
 
     def spec_for_strategy(self, strategy_name: str) -> RuntimeStrategySpec | None:
         normalized = str(strategy_name or "").strip().lower()
+        matches = tuple(spec for spec in self.active_strategies if spec.strategy_name == normalized)
+        if len(matches) > 1:
+            raise ValueError(f"runtime_strategy_name_ambiguous:{normalized}")
+        return matches[0] if matches else None
+
+    def spec_for_instance(self, strategy_instance_id: str) -> RuntimeStrategySpec | None:
+        normalized = str(strategy_instance_id or "").strip()
         for spec in self.active_strategies:
-            if spec.strategy_name == normalized:
+            if derive_strategy_instance_id(spec) == normalized or spec.strategy_instance_id == normalized:
                 return spec
         return None
 
@@ -182,7 +326,11 @@ class RuntimeStrategySetResolver:
         self._settings = settings_obj
 
     def resolve(self) -> RuntimeStrategySet:
-        raw_json = str(self._env_getter("RUNTIME_STRATEGY_SET_JSON") or "").strip()
+        raw_json = str(
+            self._env_getter("RUNTIME_STRATEGY_SET_JSON")
+            or getattr(self._settings, "RUNTIME_STRATEGY_SET_JSON", "")
+            or ""
+        ).strip()
         if raw_json:
             return RuntimeStrategySet(
                 strategies=tuple(self._spec_from_mapping(item) for item in self._load_json_specs(raw_json)),
@@ -237,6 +385,10 @@ class RuntimeStrategySetResolver:
         default = self._default_spec(str(payload.get("strategy_name", "")))
         return RuntimeStrategySpec(
             strategy_name=str(payload.get("strategy_name", default.strategy_name)),
+            strategy_instance_id=(
+                str(payload.get("strategy_instance_id") or payload.get("instance_id") or "").strip()
+                or default.strategy_instance_id
+            ),
             enabled=bool(payload.get("enabled", default.enabled)),
             pair=str(payload.get("pair", default.pair)),
             interval=str(payload.get("interval", default.interval)),
@@ -245,6 +397,11 @@ class RuntimeStrategySetResolver:
             desired_exposure_krw=payload.get("desired_exposure_krw", default.desired_exposure_krw),
             risk_budget_krw=payload.get("risk_budget_krw", default.risk_budget_krw),
             parameters=payload.get("parameters") if isinstance(payload.get("parameters"), Mapping) else None,
+            runtime_adapter_config=(
+                payload.get("runtime_adapter_config")
+                if isinstance(payload.get("runtime_adapter_config"), Mapping)
+                else None
+            ),
             approved_profile_path=(
                 str(payload.get("approved_profile_path") or payload.get("profile_path") or "").strip()
                 or default.approved_profile_path
@@ -272,12 +429,10 @@ class RuntimeStrategySetResolver:
 class RuntimeDecisionRequestBuilder:
     settings_obj: object = settings
 
-    def build_for_spec(
+    def materialize_instance(
         self,
         spec: RuntimeStrategySpec,
-        *,
-        through_ts_ms: int | None,
-    ) -> RuntimeDecisionRequest:
+    ) -> RuntimeStrategyInstance:
         try:
             plugin = resolve_research_strategy_plugin(spec.strategy_name)
         except (ResearchStrategyRegistryError, ApprovedProfileError):
@@ -297,14 +452,18 @@ class RuntimeDecisionRequestBuilder:
             profile = load_approved_profile(approved_profile_path)
             profile_hash = str(profile.get(PROFILE_HASH_FIELD) or "")
             if spec.approved_profile_hash and spec.approved_profile_hash != profile_hash:
-                raise RuntimeError(f"approved_profile_hash_mismatch_for_runtime_strategy:{spec.strategy_name}")
+                raise RuntimeError(
+                    f"approved_profile_hash_mismatch_for_runtime_strategy:{spec.strategy_name}"
+                )
             approved_profile_hash = profile_hash
-            parameters = dict(profile["strategy_parameters"])
-            parameter_source = "strict_profile"
+            raw_parameters = dict(profile["strategy_parameters"])
+            parameter_source = spec.parameter_source or "strict_profile"
         else:
             self._require_profile_for_live_compatible_runtime(spec)
             approved_profile_hash = spec.approved_profile_hash
-            parameters, parameter_source = self._parameters_for_spec(spec)
+            raw_parameters, parameter_source = self._parameters_for_spec(spec)
+
+        parameters = self._materialize_parameters(spec, raw_parameters)
         strategy_parameters_hash = materialized_strategy_parameters_hash(parameters)
         try:
             settings_runtime_contract = runtime_contract_from_settings(cfg)
@@ -319,14 +478,21 @@ class RuntimeDecisionRequestBuilder:
                 "interval": str(spec.interval or getattr(cfg, "INTERVAL", "")),
                 "strategy_parameters": {},
             }
-        settings_runtime_contract = dict(settings_runtime_contract)
-        settings_runtime_contract["strategy_name"] = spec.strategy_name
-        settings_runtime_contract["market"] = str(spec.pair or getattr(cfg, "PAIR", ""))
-        settings_runtime_contract["interval"] = str(spec.interval or getattr(cfg, "INTERVAL", ""))
-        if approved_profile_path and not str(settings_runtime_contract.get("profile_selector") or "").strip():
-            settings_runtime_contract["profile_selector"] = approved_profile_path
+        runtime_contract = dict(settings_runtime_contract)
+        runtime_contract["strategy_name"] = spec.strategy_name
+        runtime_contract["market"] = str(spec.pair or getattr(cfg, "PAIR", ""))
+        runtime_contract["interval"] = str(spec.interval or getattr(cfg, "INTERVAL", ""))
+        runtime_contract["strategy_parameters"] = dict(parameters)
+        if approved_profile_path and not str(runtime_contract.get("profile_selector") or "").strip():
+            runtime_contract["profile_selector"] = approved_profile_path
+        if spec.strategy_name == "safe_hold":
+            runtime_contract["exit_policy"] = {"schema_version": 1, "rules": (), "strategy_name": "safe_hold"}
+        else:
+            runtime_contract["exit_policy"] = exit_policy_from_parameters(spec.strategy_name, dict(parameters))
+        runtime_contract["exit_policy_hash"] = sha256_prefixed(runtime_contract["exit_policy"])
+
         if profile is not None:
-            expected_modes, mode_reason = expected_profile_modes_for_runtime(settings_runtime_contract)
+            expected_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
             if expected_modes is not None and len(expected_modes) == 0:
                 raise RuntimeError(
                     f"approved_profile_runtime_mode_invalid:{spec.strategy_name}:{mode_reason or 'unknown'}"
@@ -338,57 +504,82 @@ class RuntimeDecisionRequestBuilder:
                 )
             mismatches = diff_profile_to_runtime(
                 profile,
-                settings_runtime_contract,
+                runtime_contract,
                 profile_path=approved_profile_path,
             )
             if mismatches:
                 fields = ",".join(str(item.get("field") or "unknown") for item in mismatches)
                 raise RuntimeError(f"approved_profile_runtime_parameter_mismatch:{spec.strategy_name}:{fields}")
-        runtime_contract = dict(settings_runtime_contract)
-        runtime_contract = dict(runtime_contract)
-        runtime_contract["strategy_name"] = spec.strategy_name
-        runtime_contract["market"] = str(spec.pair or getattr(cfg, "PAIR", ""))
-        runtime_contract["interval"] = str(spec.interval or getattr(cfg, "INTERVAL", ""))
-        runtime_contract["strategy_parameters"] = dict(parameters)
-        if spec.strategy_name == "safe_hold":
-            runtime_contract["exit_policy"] = {"schema_version": 1, "rules": (), "strategy_name": "safe_hold"}
-        else:
-            runtime_contract["exit_policy"] = exit_policy_from_parameters(spec.strategy_name, dict(parameters))
-        runtime_contract["exit_policy_hash"] = sha256_prefixed(runtime_contract["exit_policy"])
+
         runtime_contract_hash = spec.runtime_contract_hash or sha256_prefixed(runtime_contract)
         plugin_contract_hash = plugin.contract_hash() if hasattr(plugin, "contract_hash") else None
         strategy_version = spec.strategy_version or getattr(plugin, "version", None)
+        strategy_instance_id = derive_strategy_instance_id(
+            spec,
+            strategy_parameters_hash=strategy_parameters_hash,
+        )
+        return RuntimeStrategyInstance(
+            spec=spec,
+            strategy_instance_id=strategy_instance_id,
+            parameters_raw=raw_parameters,
+            parameters_materialized=parameters,
+            strategy_parameters_hash=strategy_parameters_hash,
+            parameter_source=parameter_source,
+            approved_profile_path=approved_profile_path,
+            approved_profile_hash=approved_profile_hash,
+            runtime_contract_hash=runtime_contract_hash,
+            plugin_contract_hash=plugin_contract_hash,
+            strategy_version=strategy_version,
+            runtime_contract=runtime_contract,
+            runtime_adapter_config=dict(spec.runtime_adapter_config or {}),
+        )
+
+    def build_for_spec(
+        self,
+        spec: RuntimeStrategySpec,
+        *,
+        through_ts_ms: int | None,
+    ) -> RuntimeDecisionRequest:
+        instance = self.materialize_instance(spec)
+        cfg = replace(self.settings_obj, STRATEGY_NAME=spec.strategy_name)
         request_payload = {
             "schema_version": 1,
+            "strategy_instance_id": instance.strategy_instance_id,
             "strategy_name": spec.strategy_name,
             "pair": spec.pair,
             "interval": str(spec.interval or getattr(cfg, "INTERVAL", "")),
             "through_ts_ms": through_ts_ms,
-            "parameters": dict(parameters),
-            "strategy_parameters_hash": strategy_parameters_hash,
-            "approved_profile_path": approved_profile_path,
-            "approved_profile_hash": approved_profile_hash,
-            "runtime_contract_hash": runtime_contract_hash,
-            "plugin_contract_hash": plugin_contract_hash,
-            "strategy_version": strategy_version,
-            "runtime_strategy_spec": spec.as_dict(),
-            "parameter_source": parameter_source,
+            "parameters": dict(instance.parameters_materialized),
+            "parameters_raw": dict(instance.parameters_raw),
+            "parameters_materialized": dict(instance.parameters_materialized),
+            "strategy_parameters_hash": instance.strategy_parameters_hash,
+            "approved_profile_path": instance.approved_profile_path,
+            "approved_profile_hash": instance.approved_profile_hash,
+            "runtime_contract_hash": instance.runtime_contract_hash,
+            "plugin_contract_hash": instance.plugin_contract_hash,
+            "strategy_version": instance.strategy_version,
+            "runtime_strategy_spec": instance.as_dict(),
+            "parameter_source": instance.parameter_source,
+            "runtime_adapter_config": dict(instance.runtime_adapter_config),
         }
         request_hash = sha256_prefixed(request_payload)
         return RuntimeDecisionRequest(
+            strategy_instance_id=instance.strategy_instance_id,
             strategy_name=spec.strategy_name,
             pair=str(spec.pair),
             interval=str(spec.interval or getattr(cfg, "INTERVAL", "")),
             through_ts_ms=through_ts_ms,
-            parameters=parameters,
-            strategy_parameters_hash=strategy_parameters_hash,
-            approved_profile_path=approved_profile_path,
-            approved_profile_hash=approved_profile_hash,
-            runtime_strategy_spec=spec,
-            runtime_contract_hash=runtime_contract_hash,
-            parameter_source=parameter_source,
-            plugin_contract_hash=plugin_contract_hash,
-            strategy_version=strategy_version,
+            parameters=dict(instance.parameters_materialized),
+            parameters_raw=dict(instance.parameters_raw),
+            parameters_materialized=dict(instance.parameters_materialized),
+            strategy_parameters_hash=instance.strategy_parameters_hash,
+            approved_profile_path=instance.approved_profile_path,
+            approved_profile_hash=instance.approved_profile_hash,
+            runtime_strategy_spec=instance,
+            runtime_contract_hash=instance.runtime_contract_hash,
+            parameter_source=instance.parameter_source,
+            plugin_contract_hash=instance.plugin_contract_hash,
+            strategy_version=instance.strategy_version,
             request_hash=request_hash,
         )
 
@@ -401,6 +592,36 @@ class RuntimeDecisionRequestBuilder:
             runtime_strategy_parameters_from_settings(spec.strategy_name, self.settings_obj),
             spec.parameter_source or "settings_compat",
         )
+
+    def _materialize_parameters(
+        self,
+        spec: RuntimeStrategySpec,
+        raw_parameters: Mapping[str, object],
+    ) -> dict[str, object]:
+        if spec.strategy_name == "safe_hold":
+            if raw_parameters:
+                raise RuntimeError("runtime_strategy_parameters_unsupported:safe_hold")
+            return {}
+        raw = {str(key): value for key, value in dict(raw_parameters or {}).items()}
+        required_runtime_bound = set(runtime_bound_behavior_parameter_names(spec.strategy_name))
+        missing_runtime_bound = sorted(required_runtime_bound - set(raw))
+        if missing_runtime_bound:
+            raise RuntimeError(
+                f"runtime_strategy_parameters_missing_runtime_bound:{spec.strategy_name}:"
+                + ",".join(missing_runtime_bound)
+            )
+        parameters = materialize_strategy_parameters(spec.strategy_name, raw)
+        try:
+            plugin = resolve_research_strategy_plugin(spec.strategy_name)
+        except ResearchStrategyRegistryError as exc:
+            raise RuntimeError(f"runtime_strategy_plugin_unsupported:{spec.strategy_name}") from exc
+        unexpected = sorted(set(parameters) - set(plugin.spec.accepted_parameter_names))
+        if unexpected:
+            raise RuntimeError(
+                f"runtime_strategy_parameters_unsupported:{spec.strategy_name}:"
+                + ",".join(unexpected)
+            )
+        return parameters
 
     def _require_profile_for_live_compatible_runtime(self, spec: RuntimeStrategySpec) -> None:
         mode = str(getattr(self.settings_obj, "MODE", "") or "").strip().lower()
@@ -421,19 +642,29 @@ class RuntimeStrategyDecisionResultBundle:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        active_names = {item.strategy_name for item in self.strategy_set.active_strategies}
-        result_names = {str(result.decision.strategy_name).strip().lower() for result in self.results}
-        if active_names != result_names:
-            missing = sorted(active_names - result_names)
-            extra = sorted(result_names - active_names)
-            raise ValueError(f"runtime_strategy_result_set_mismatch:missing={missing}:extra={extra}")
+        if len(self.results) != len(self.strategy_set.active_strategies):
+            raise ValueError(
+                "runtime_strategy_result_set_mismatch:"
+                f"expected={len(self.strategy_set.active_strategies)}:actual={len(self.results)}"
+            )
+        result_instances = [self._result_instance_id(result) for result in self.results]
+        if len(set(result_instances)) != len(result_instances):
+            raise ValueError("runtime_strategy_result_duplicate_instance")
+        for result in self.results:
+            result_instance_id = _result_strategy_instance_id(result)
+            result_name = str(getattr(result.decision, "strategy_name", "")).strip().lower()
+            spec = self.strategy_set.spec_for_instance(result_instance_id)
+            if spec is None:
+                spec = self.strategy_set.spec_for_strategy(result_name)
+            if spec is None:
+                raise ValueError(f"runtime_strategy_result_set_mismatch:extra={result_name}")
         candle_ts_values = {int(result.candle_ts) for result in self.results}
         if len(candle_ts_values) != 1:
             raise ValueError("runtime_strategy_results_must_share_candle")
         object.__setattr__(
             self,
             "results",
-            tuple(sorted(self.results, key=lambda item: str(item.decision.strategy_name).strip().lower())),
+            tuple(sorted(self.results, key=self._result_instance_id)),
         )
 
     @property
@@ -443,6 +674,27 @@ class RuntimeStrategyDecisionResultBundle:
     @property
     def market_price(self) -> float:
         return float(self.results[0].market_price)
+
+    def _result_instance_id(self, result: RuntimeStrategyDecisionResult) -> str:
+        explicit = _result_strategy_instance_id(result)
+        if explicit != str(getattr(result.decision, "strategy_name", "")).strip().lower():
+            return explicit
+        spec = self.strategy_set.spec_for_strategy(explicit)
+        return derive_strategy_instance_id(spec) if spec is not None else explicit
+
+
+def _result_strategy_instance_id(result: RuntimeStrategyDecisionResult) -> str:
+    base_context = getattr(result, "base_context", {})
+    if isinstance(base_context, Mapping):
+        value = str(base_context.get("strategy_instance_id") or "").strip()
+        if value:
+            return value
+    replay_fingerprint = getattr(result, "replay_fingerprint", {})
+    if isinstance(replay_fingerprint, Mapping):
+        value = str(replay_fingerprint.get("strategy_instance_id") or "").strip()
+        if value:
+            return value
+    return str(getattr(result.decision, "strategy_name", "")).strip().lower()
 
 
 class RuntimeStrategyDecisionCollector:

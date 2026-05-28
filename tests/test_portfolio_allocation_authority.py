@@ -50,6 +50,32 @@ class _Readiness:
         return dict(self.payload)
 
 
+def _complete_sma_parameters(**overrides: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "SMA_SHORT": 2,
+        "SMA_LONG": 5,
+        "SMA_FILTER_GAP_MIN_RATIO": 0.9,
+        "SMA_FILTER_VOL_WINDOW": 3,
+        "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.8,
+        "SMA_FILTER_OVEREXT_LOOKBACK": 4,
+        "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": 0.7,
+        "SMA_MARKET_REGIME_ENABLED": False,
+        "SMA_COST_EDGE_ENABLED": False,
+        "SMA_COST_EDGE_MIN_RATIO": 0.6,
+        "ENTRY_EDGE_BUFFER_RATIO": 0.5,
+        "STRATEGY_MIN_EXPECTED_EDGE_RATIO": 0.4,
+        "STRATEGY_ENTRY_SLIPPAGE_BPS": 33,
+        "LIVE_FEE_RATE_ESTIMATE": 0.0123,
+        "STRATEGY_EXIT_RULES": "opposite_cross",
+        "STRATEGY_EXIT_STOP_LOSS_RATIO": 0,
+        "STRATEGY_EXIT_MAX_HOLDING_MIN": 11,
+        "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": 0.22,
+        "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": 0.11,
+    }
+    params.update(overrides)
+    return params
+
+
 @dataclass(frozen=True)
 class _RuntimeResult:
     decision: StrategyDecisionV2
@@ -289,7 +315,7 @@ def test_multi_strategy_collector_executes_all_on_same_candle() -> None:
         strategy_set = RuntimeStrategySet(
             source="unit",
             strategies=(
-                RuntimeStrategySpec("sma_with_filter", priority=10, parameters={"SMA_SHORT": 7, "SMA_LONG": 30}),
+                RuntimeStrategySpec("sma_with_filter", priority=10, parameters=_complete_sma_parameters(SMA_SHORT=7, SMA_LONG=30)),
                 RuntimeStrategySpec("canary_non_sma", priority=10),
             ),
         )

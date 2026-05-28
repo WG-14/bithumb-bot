@@ -10,11 +10,14 @@ from .strategy_policy_contract import StrategyDecisionV2
 
 @dataclass(frozen=True)
 class RuntimeDecisionRequest:
+    strategy_instance_id: str
     strategy_name: str
     pair: str
     interval: str
     through_ts_ms: int | None
     parameters: Mapping[str, object]
+    parameters_raw: Mapping[str, object]
+    parameters_materialized: Mapping[str, object]
     strategy_parameters_hash: str
     approved_profile_path: str | None
     approved_profile_hash: str | None
@@ -26,6 +29,7 @@ class RuntimeDecisionRequest:
     request_hash: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "strategy_instance_id", str(self.strategy_instance_id or "").strip())
         object.__setattr__(self, "strategy_name", str(self.strategy_name or "").strip().lower())
         object.__setattr__(self, "pair", str(self.pair or "").strip())
         object.__setattr__(self, "interval", str(self.interval or "").strip())
@@ -34,12 +38,27 @@ class RuntimeDecisionRequest:
             "parameters",
             MappingProxyType({str(key): value for key, value in dict(self.parameters or {}).items()}),
         )
+        object.__setattr__(
+            self,
+            "parameters_raw",
+            MappingProxyType({str(key): value for key, value in dict(self.parameters_raw or {}).items()}),
+        )
+        object.__setattr__(
+            self,
+            "parameters_materialized",
+            MappingProxyType(
+                {str(key): value for key, value in dict(self.parameters_materialized or {}).items()}
+            ),
+        )
 
     def observability_fields(self) -> dict[str, object]:
         return {
+            "strategy_instance_id": self.strategy_instance_id,
             "strategy_name": self.strategy_name,
             "strategy_version": self.strategy_version,
             "strategy_parameters": dict(self.parameters),
+            "strategy_parameters_raw": dict(self.parameters_raw),
+            "strategy_parameters_materialized": dict(self.parameters_materialized),
             "strategy_parameters_hash": self.strategy_parameters_hash,
             "approved_profile_path": self.approved_profile_path,
             "approved_profile_hash": self.approved_profile_hash,
@@ -368,6 +387,7 @@ def _attach_runtime_request_metadata(
         result.replay_fingerprint.update(
             {
                 "runtime_decision_request_hash": request.request_hash,
+                "strategy_instance_id": request.strategy_instance_id,
                 "strategy_parameters_hash": request.strategy_parameters_hash,
                 "approved_profile_hash": request.approved_profile_hash,
                 "runtime_contract_hash": request.runtime_contract_hash,
@@ -379,6 +399,7 @@ def _attach_runtime_request_metadata(
         result.boundary.update(
             {
                 "runtime_decision_request_hash": request.request_hash,
+                "strategy_instance_id": request.strategy_instance_id,
                 "strategy_parameters_hash": request.strategy_parameters_hash,
             }
         )

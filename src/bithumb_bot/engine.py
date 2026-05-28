@@ -386,6 +386,24 @@ def build_signal_execution_request(
     )
 
 
+def authoritative_execution_signal_for_trade(
+    decision_context: dict[str, object] | None,
+    *,
+    fallback_signal: object,
+) -> str:
+    if isinstance(decision_context, dict):
+        planned = str(decision_context.get("authoritative_execution_signal") or "").strip().upper()
+        if planned in {"BUY", "SELL", "HOLD"}:
+            return planned
+        execution_decision = decision_context.get("execution_decision")
+        if isinstance(execution_decision, dict):
+            planned = str(execution_decision.get("final_signal") or "").strip().upper()
+            if planned in {"BUY", "SELL", "HOLD"}:
+                return planned
+    fallback = str(fallback_signal or "HOLD").strip().upper()
+    return fallback if fallback in {"BUY", "SELL", "HOLD"} else "HOLD"
+
+
 @dataclass(frozen=True)
 class TypedExecutionSubmitExpectation:
     submit_expected: bool
@@ -2008,7 +2026,10 @@ def run_loop() -> None:
                 _log_loop_event(
                     logging.WARNING,
                     "[ORDER_SKIP] strategy decision not durable",
-                    signal=str(r["signal"]),
+                    signal=authoritative_execution_signal_for_trade(
+                        decision_context_for_trade,
+                        fallback_signal=r["signal"],
+                    ),
                     candle_ts=r["ts"],
                     reason="decision_persistence_failed_retryable",
                 )
@@ -2021,7 +2042,10 @@ def run_loop() -> None:
                 _log_loop_event(
                     logging.WARNING,
                     "[ORDER_SKIP] typed execution decision summary missing",
-                    signal=str(r["signal"]),
+                    signal=authoritative_execution_signal_for_trade(
+                        decision_context_for_trade,
+                        fallback_signal=r["signal"],
+                    ),
                     candle_ts=r["ts"],
                     reason="execution_planning_failed_closed",
                 )
@@ -2041,7 +2065,11 @@ def run_loop() -> None:
                 == "target_delta"
                 and submit_expectation.submit_expected
             )
-            if r["signal"] not in ("BUY", "SELL") and not target_delta_submit:
+            authoritative_execution_signal = authoritative_execution_signal_for_trade(
+                decision_context_for_trade,
+                fallback_signal=r["signal"],
+            )
+            if authoritative_execution_signal not in ("BUY", "SELL") and not target_delta_submit:
                 continue
 
             trade = None
@@ -2049,7 +2077,7 @@ def run_loop() -> None:
                 try:
                     trade = execution_service.execute(
                         build_signal_execution_request(
-                            signal=r["signal"],
+                            signal=authoritative_execution_signal,
                             ts=r["ts"],
                             market_price=float(r["last_close"]),
                             strategy_name=decision_strategy_name_for_trade,

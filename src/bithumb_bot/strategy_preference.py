@@ -37,6 +37,7 @@ class StrategyPreference:
     typed execution planner.
     """
 
+    strategy_instance_id: str
     strategy_name: str
     pair: str
     signal_direction: str
@@ -76,10 +77,12 @@ class StrategyPreference:
             else _stable_value(dict(self.execution_intent_hint)),
         )
         object.__setattr__(self, "metadata", _stable_value(dict(self.metadata)))
+        object.__setattr__(self, "strategy_instance_id", str(self.strategy_instance_id or self.strategy_name))
 
     def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": int(self.schema_version),
+            "strategy_instance_id": self.strategy_instance_id,
             "strategy_name": self.strategy_name,
             "pair": self.pair,
             "signal_direction": self.signal_direction,
@@ -117,7 +120,12 @@ class StrategyPreferenceSet:
         object.__setattr__(
             self,
             "preferences",
-            tuple(sorted(self.preferences, key=lambda item: (item.pair, item.strategy_name, item.content_hash()))),
+            tuple(
+                sorted(
+                    self.preferences,
+                    key=lambda item: (item.pair, item.strategy_instance_id, item.content_hash()),
+                )
+            ),
         )
 
     def as_dict(self) -> dict[str, object]:
@@ -134,6 +142,7 @@ def strategy_decision_to_preference(
     decision: StrategyDecisionV2,
     *,
     pair: str,
+    strategy_instance_id: str | None = None,
     desired_exposure_krw: float | None = None,
     desired_weight: float | None = None,
     risk_budget_krw: float | None = None,
@@ -151,6 +160,7 @@ def strategy_decision_to_preference(
         else None
     )
     return StrategyPreference(
+        strategy_instance_id=str(strategy_instance_id or decision.strategy_name),
         strategy_name=decision.strategy_name,
         pair=pair,
         signal_direction=str(decision.final_signal or "HOLD").upper(),

@@ -10,6 +10,7 @@ from .strategy_preference import StrategyPreference, StrategyPreferenceSet
 
 @dataclass(frozen=True)
 class StrategyContribution:
+    strategy_instance_id: str
     strategy_name: str
     pair: str
     signal_direction: str
@@ -24,6 +25,7 @@ class StrategyContribution:
     def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": int(self.schema_version),
+            "strategy_instance_id": self.strategy_instance_id,
             "strategy_name": self.strategy_name,
             "pair": self.pair,
             "signal_direction": self.signal_direction,
@@ -229,13 +231,14 @@ class PortfolioAllocator:
         )
 
     def _contribution(self, preference: StrategyPreference) -> StrategyContribution:
-        name = preference.strategy_name
+        instance_id = preference.strategy_instance_id or preference.strategy_name
         return StrategyContribution(
-            strategy_name=name,
+            strategy_instance_id=instance_id,
+            strategy_name=preference.strategy_name,
             pair=preference.pair,
             signal_direction=preference.signal_direction,
-            priority=int(self.config.strategy_priorities.get(name, 100)),
-            weight=float(self.config.strategy_weights.get(name, preference.desired_weight or 1.0)),
+            priority=int(self.config.strategy_priorities.get(instance_id, 100)),
+            weight=float(self.config.strategy_weights.get(instance_id, preference.desired_weight or 1.0)),
             preference_hash=preference.content_hash(),
             desired_exposure_krw=preference.desired_exposure_krw,
             risk_budget_krw=preference.risk_budget_krw,
@@ -263,6 +266,7 @@ class PortfolioAllocator:
             "policy": self.config.conflict_policy,
             "mixed_hold_policy": self.config.mixed_hold_policy,
             "selected_priority": best_priority,
+            "selected_strategy_instance_ids": [item.strategy_instance_id for item in top],
             "selected_strategies": [item.strategy_name for item in top],
             "selected_signals": sorted(top_signals),
             "conflict_count": conflict_count,

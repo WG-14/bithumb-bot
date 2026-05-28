@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Mapping
 
 from .config import settings
@@ -24,7 +24,11 @@ from .portfolio_allocation import (
 )
 from .strategy_preference import strategy_decision_to_preference
 from .runtime_readiness import compute_runtime_readiness_snapshot
-from .runtime_strategy_set import RuntimeStrategyDecisionResultBundle, RuntimeStrategySet
+from .runtime_strategy_set import (
+    RuntimeStrategyDecisionResultBundle,
+    RuntimeStrategySet,
+    derive_strategy_instance_id,
+)
 from .strategy_policy_contract import StrategyDecisionV2
 from .strategy_performance import evaluate_strategy_performance_gate
 from .target_position import (
@@ -232,6 +236,9 @@ def _allocation_context_fields(decision) -> dict[str, object]:
         "allocation_primary_block_reason": decision.primary_block_reason,
         "allocation_selected_priority": target_conflict.get("selected_priority"),
         "allocation_selected_strategies": list(target_conflict.get("selected_strategies") or []),
+        "allocation_selected_strategy_instance_ids": list(
+            target_conflict.get("selected_strategy_instance_ids") or []
+        ),
         "allocation_selected_signals": list(target_conflict.get("selected_signals") or []),
         "allocation_selected_signal": str(target_conflict.get("selected_signal") or ""),
         "allocation_contributions": [item.as_dict() for item in decision.contributions],
@@ -343,6 +350,7 @@ def prepare_strategy_decision_persistence_context(
     context = dict(decision_context)
     context["execution_decision"] = execution_decision
     context["final_action"] = execution_decision["final_action"]
+    context.setdefault("authoritative_execution_signal", context.get("final_signal") or context.get("signal") or "HOLD")
     context["submit_expected"] = execution_decision["submit_expected"]
     context["pre_submit_proof_status"] = execution_decision["pre_submit_proof_status"]
     context["execution_block_reason"] = execution_decision["block_reason"]
@@ -534,9 +542,9 @@ class ExecutionPlanner:
                 conn,
                 readiness_payload=readiness_payload,
                 reference_price=reference_price,
-            raw_signal=planning_input.final_signal,
-            updated_ts=int(updated_ts),
-        )
+                raw_signal=planning_input.final_signal,
+                updated_ts=int(updated_ts),
+            )
             previous_target_exposure_krw = target_resolution.get("previous_target_exposure_krw")
             target_policy_metadata = dict(target_resolution.get("target_policy_metadata", {}))
             allocation_config = PortfolioAllocatorConfig(
@@ -544,39 +552,54 @@ class ExecutionPlanner:
                 strategy_priorities=(
                     {}
                     if strategy_set is None
-                    else {item.strategy_name: item.priority for item in strategy_set.active_strategies}
+                    else {derive_strategy_instance_id(item): item.priority for item in strategy_set.active_strategies}
                 ),
                 strategy_weights=(
                     {}
                     if strategy_set is None
-                    else {item.strategy_name: item.weight for item in strategy_set.active_strategies}
+                    else {derive_strategy_instance_id(item): item.weight for item in strategy_set.active_strategies}
                 ),
             )
             if runtime_result_bundle is None:
                 strategy_preference = strategy_decision_to_preference(
                     planning_input.strategy_decision,
                     pair=str(settings.PAIR),
+                    strategy_instance_id=str(
+                        context.get("strategy_instance_id")
+                        or planning_input.strategy_decision.strategy_name
+                    ),
                     desired_exposure_krw=_allocator_target_exposure_krw(),
                 )
                 preferences = (strategy_preference,)
             else:
                 preference_list = []
                 for result in runtime_result_bundle.results:
-                    spec = runtime_result_bundle.strategy_set.spec_for_strategy(
-                        result.decision.strategy_name
+                    result_context = getattr(result, "base_context", {})
+                    result_instance_id = (
+                        str(result_context.get("strategy_instance_id") or "").strip()
+                        if isinstance(result_context, Mapping)
+                        else ""
+                    )
+                    spec = (
+                        runtime_result_bundle.strategy_set.spec_for_instance(result_instance_id)
+                        if result_instance_id
+                        else runtime_result_bundle.strategy_set.spec_for_strategy(result.decision.strategy_name)
                     )
                     if spec is None:
                         raise ValueError(
                             f"runtime_strategy_spec_missing:{result.decision.strategy_name}"
                         )
+                    strategy_instance_id = derive_strategy_instance_id(spec)
                     preference_list.append(
                         strategy_decision_to_preference(
                             result.decision,
                             pair=str(spec.pair),
+                            strategy_instance_id=strategy_instance_id,
                             desired_exposure_krw=spec.desired_exposure_krw,
                             desired_weight=spec.weight,
                             risk_budget_krw=spec.risk_budget_krw,
                             metadata={
+                                "strategy_instance_id": strategy_instance_id,
                                 "runtime_strategy_priority": spec.priority,
                                 "runtime_strategy_set_source": runtime_result_bundle.strategy_set.source,
                             },
@@ -602,6 +625,26 @@ class ExecutionPlanner:
             portfolio_target = allocation_decision.target_for_pair(str(settings.PAIR))
             allocation_context = _allocation_context_fields(allocation_decision)
             context.update(allocation_context)
+            authoritative_signal = str(
+                context.get("allocation_selected_signal") or planning_input.final_signal or "HOLD"
+            ).upper()
+            if runtime_result_bundle is not None and authoritative_signal in {"BUY", "SELL", "HOLD"}:
+                planning_input = replace(
+                    planning_input,
+                    strategy_decision=replace(
+                        planning_input.strategy_decision,
+                        raw_signal=authoritative_signal,
+                        final_signal=authoritative_signal,
+                        final_reason=str(context.get("allocator_reason") or planning_input.final_reason),
+                    ),
+                )
+                context["signal"] = authoritative_signal
+                context["raw_signal"] = authoritative_signal
+                context["final_signal"] = authoritative_signal
+                context["final_reason"] = str(context.get("allocator_reason") or planning_input.final_reason)
+                context["authoritative_execution_signal"] = authoritative_signal
+            else:
+                context["authoritative_execution_signal"] = planning_input.final_signal
             readiness_payload = {**readiness_payload, **target_policy_metadata}
             authority = ExecutionAuthorityEnvelope(
                 planning_input=planning_input,

@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import argparse
 import inspect
+import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,7 @@ import pytest
 
 from bithumb_bot.db_core import ensure_schema
 from bithumb_bot.decision_envelope import DecisionEnvelope
-from bithumb_bot.config import settings
+from bithumb_bot.config import LiveModeValidationError, settings, validate_runtime_strategy_set_selection
 from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 from bithumb_bot.runtime_decision_contract import RuntimeStrategyPolicyHashes
 from bithumb_bot.runtime_adapters.safe_hold import SafeHoldRuntimeDecisionAdapter
@@ -19,6 +21,7 @@ from bithumb_bot.runtime_strategy_decision import RuntimeDecisionAdapter, Runtim
 from bithumb_bot.runtime_strategy_set import (
     RuntimeDecisionRequestBuilder,
     RuntimeStrategyDecisionCollector,
+    RuntimeStrategyDecisionResultBundle,
     RuntimeStrategySet,
     RuntimeStrategySpec,
 )
@@ -242,7 +245,7 @@ def test_multi_strategy_parameters_are_independent(monkeypatch: pytest.MonkeyPat
     strategy_set = RuntimeStrategySet(
         source="unit",
         strategies=(
-            RuntimeStrategySpec("sma_with_filter", parameters={"SMA_SHORT": 7, "SMA_LONG": 30}),
+            RuntimeStrategySpec("sma_with_filter", parameters=_complete_sma_parameters(SMA_SHORT=7, SMA_LONG=30)),
             RuntimeStrategySpec(
                 "canary_non_sma",
                 parameters={
@@ -256,13 +259,59 @@ def test_multi_strategy_parameters_are_independent(monkeypatch: pytest.MonkeyPat
     RuntimeStrategyDecisionCollector().collect(_conn(), strategy_set, through_ts_ms=1_700_000_180_000)
 
     assert set(received) == {"sma_with_filter", "canary_non_sma"}
-    assert dict(received["sma_with_filter"].parameters) == {"SMA_SHORT": 7, "SMA_LONG": 30}
+    assert received["sma_with_filter"].parameters["SMA_SHORT"] == 7
+    assert received["sma_with_filter"].parameters["SMA_LONG"] == 30
+    assert dict(received["sma_with_filter"].parameters_raw)["SMA_SHORT"] == 7
+    assert dict(received["sma_with_filter"].parameters_materialized) == dict(received["sma_with_filter"].parameters)
     assert dict(received["canary_non_sma"].parameters) == {
         "CANARY_ORDER_START_INDEX": 0,
         "CANARY_ORDER_SIDE": "BUY",
         "CANARY_ORDER_REASON": "unit",
     }
     assert received["sma_with_filter"].request_hash != received["canary_non_sma"].request_hash
+    assert received["sma_with_filter"].strategy_instance_id != received["canary_non_sma"].strategy_instance_id
+    assert received["sma_with_filter"].strategy_parameters_hash != received["canary_non_sma"].strategy_parameters_hash
+
+
+def test_same_strategy_name_different_instances_do_not_collide() -> None:
+    left_spec = RuntimeStrategySpec(
+        "canary_non_sma",
+        parameters={
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "BUY",
+            "CANARY_ORDER_REASON": "left",
+        },
+    )
+    right_spec = RuntimeStrategySpec(
+        "canary_non_sma",
+        parameters={
+            "CANARY_ORDER_START_INDEX": 0,
+            "CANARY_ORDER_SIDE": "BUY",
+            "CANARY_ORDER_REASON": "right",
+        },
+    )
+    strategy_set = RuntimeStrategySet(source="unit", strategies=(left_spec, right_spec))
+    left_request = RuntimeDecisionRequestBuilder().build_for_spec(
+        left_spec,
+        through_ts_ms=1_700_000_180_000,
+    )
+    right_request = RuntimeDecisionRequestBuilder().build_for_spec(
+        right_spec,
+        through_ts_ms=1_700_000_180_000,
+    )
+
+    left = _RuntimeResult("canary_non_sma")
+    right = _RuntimeResult("canary_non_sma")
+    left.base_context["strategy_instance_id"] = left_request.strategy_instance_id
+    right.base_context["strategy_instance_id"] = right_request.strategy_instance_id
+
+    bundle = RuntimeStrategyDecisionResultBundle(strategy_set=strategy_set, results=(right, left))
+
+    assert left_request.strategy_instance_id != right_request.strategy_instance_id
+    assert left_request.strategy_parameters_hash != right_request.strategy_parameters_hash
+    assert [item.base_context["strategy_instance_id"] for item in bundle.results] == sorted(
+        [left_request.strategy_instance_id, right_request.strategy_instance_id]
+    )
 
 
 def test_approved_profile_mismatch_fails_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,7 +391,8 @@ def test_request_builder_uses_strict_profile_parameters_when_profile_configured(
 
     def _diff(profile_payload: dict[str, object], runtime: dict[str, object], profile_path: str | None = None):
         assert profile_payload is profile
-        assert runtime["strategy_parameters"] == settings_params
+        assert runtime["strategy_parameters"]["SMA_SHORT"] == profile_params["SMA_SHORT"]
+        assert runtime["strategy_parameters"]["SMA_LONG"] == profile_params["SMA_LONG"]
         assert profile_path == "/tmp/profile.json"
         return ()
 
@@ -359,10 +409,79 @@ def test_request_builder_uses_strict_profile_parameters_when_profile_configured(
         through_ts_ms=1_700_000_180_000,
     )
 
-    assert dict(request.parameters) == profile_params
+    assert request.parameters["SMA_SHORT"] == profile_params["SMA_SHORT"]
+    assert request.parameters["SMA_LONG"] == profile_params["SMA_LONG"]
+    assert dict(request.parameters_raw) == profile_params
+    assert dict(request.parameters_materialized) == dict(request.parameters)
     assert request.parameter_source == "strict_profile"
     assert request.approved_profile_hash == "sha256:profile"
     assert request.observability_fields()["parameter_source"] == "strict_profile"
+
+
+def test_two_approved_profiles_are_spec_bound_not_global_settings_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left_params = _complete_sma_parameters(SMA_SHORT=3, SMA_LONG=8)
+    right_params = _complete_sma_parameters(SMA_SHORT=13, SMA_LONG=34)
+    profiles = {
+        "/tmp/left_profile.json": {
+            "profile_mode": "paper",
+            "profile_content_hash": "sha256:left-profile",
+            "strategy_parameters": dict(left_params),
+        },
+        "/tmp/right_profile.json": {
+            "profile_mode": "paper",
+            "profile_content_hash": "sha256:right-profile",
+            "strategy_parameters": dict(right_params),
+        },
+    }
+
+    from bithumb_bot import runtime_strategy_set
+
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profiles[str(path)])
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "runtime_contract_from_settings",
+        lambda cfg: {
+            "mode": "paper",
+            "live_dry_run": True,
+            "live_real_order_armed": False,
+            "profile_selector": "",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "strategy_parameters": _complete_sma_parameters(SMA_SHORT=999, SMA_LONG=1999),
+        },
+    )
+
+    def _diff(profile_payload: dict[str, object], runtime: dict[str, object], profile_path: str | None = None):
+        profile_parameters = profile_payload["strategy_parameters"]
+        assert runtime["strategy_parameters"]["SMA_SHORT"] == profile_parameters["SMA_SHORT"]
+        assert runtime["strategy_parameters"]["SMA_LONG"] == profile_parameters["SMA_LONG"]
+        return ()
+
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", _diff)
+
+    left = RuntimeDecisionRequestBuilder().build_for_spec(
+        RuntimeStrategySpec(
+            "sma_with_filter",
+            approved_profile_path="/tmp/left_profile.json",
+            approved_profile_hash="sha256:left-profile",
+        ),
+        through_ts_ms=1_700_000_180_000,
+    )
+    right = RuntimeDecisionRequestBuilder().build_for_spec(
+        RuntimeStrategySpec(
+            "sma_with_filter",
+            approved_profile_path="/tmp/right_profile.json",
+            approved_profile_hash="sha256:right-profile",
+        ),
+        through_ts_ms=1_700_000_180_000,
+    )
+
+    assert left.parameters["SMA_SHORT"] == 3
+    assert right.parameters["SMA_SHORT"] == 13
+    assert left.strategy_instance_id != right.strategy_instance_id
 
 
 def test_request_builder_rejects_explicit_profile_hash_mismatch(
@@ -586,6 +705,8 @@ def test_persisted_decision_context_contains_request_metadata() -> None:
         )
         context = bundle.persistence_context
         assert context["strategy_parameters"]
+        assert context["strategy_instance_id"] == request.strategy_instance_id
+        assert context["strategy_parameters_materialized"]
         assert context["strategy_parameters_hash"]
         assert context["runtime_decision_request_hash"] == request.request_hash
         assert "approved_profile_hash" in context
@@ -648,13 +769,11 @@ def test_sma_runtime_config_maps_every_runtime_bound_behavior_parameter() -> Non
 def test_sma_runtime_config_missing_behavior_parameter_fails_closed() -> None:
     params = _complete_sma_parameters()
     params.pop("SMA_FILTER_OVEREXT_LOOKBACK")
-    request = RuntimeDecisionRequestBuilder().build_for_spec(
-        RuntimeStrategySpec("sma_with_filter", parameters=params),
-        through_ts_ms=1_700_000_180_000,
-    )
-
-    with pytest.raises(RuntimeError, match="sma_runtime_request_behavior_parameter_missing"):
-        SmaWithFilterRuntimeConfig.from_runtime_request(request)
+    with pytest.raises(RuntimeError, match="runtime_strategy_parameters_missing_runtime_bound:sma_with_filter"):
+        RuntimeDecisionRequestBuilder().build_for_spec(
+            RuntimeStrategySpec("sma_with_filter", parameters=params),
+            through_ts_ms=1_700_000_180_000,
+        )
 
 
 def test_sma_runtime_replay_strategy_fails_closed_for_incomplete_profile() -> None:
@@ -791,3 +910,24 @@ def test_runtime_strategy_spec_carries_pair_and_interval_into_request() -> None:
     assert request.pair == "KRW-ETH"
     assert request.interval == "5m"
     assert request.runtime_strategy_spec.as_dict()["interval"] == "5m"
+
+
+def test_runtime_strategy_set_preflight_rejects_pair_mismatch() -> None:
+    cfg = replace(
+        settings,
+        PAIR="KRW-BTC",
+        RUNTIME_STRATEGY_SET_JSON=json.dumps(
+            {
+                "strategies": [
+                    {
+                        "strategy_name": "safe_hold",
+                        "pair": "KRW-ETH",
+                        "interval": "1m",
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(LiveModeValidationError, match="runtime_strategy_pair_mismatch"):
+        validate_runtime_strategy_set_selection(cfg)

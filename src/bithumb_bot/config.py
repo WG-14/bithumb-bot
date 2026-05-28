@@ -362,9 +362,12 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
         runtime_strategy_parameters_from_settings,
         strategy_runtime_capability_issues,
     )
-    from .approved_profile import PROFILE_HASH_FIELD, load_approved_profile
     from .runtime_strategy_decision import get_runtime_decision_adapter
-    from .runtime_strategy_set import RuntimeStrategySetResolver
+    from .runtime_strategy_set import (
+        RuntimeDecisionRequestBuilder,
+        RuntimeStrategySetResolver,
+        derive_strategy_instance_id,
+    )
 
     try:
         strategy_set = RuntimeStrategySetResolver(settings_obj=cfg).resolve()
@@ -375,8 +378,18 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
 
     issues: list[str] = []
     live_like = str(cfg.MODE or "").strip().lower() == "live"
+    active_instance_ids: set[str] = set()
+    request_builder = RuntimeDecisionRequestBuilder(settings_obj=cfg)
     for spec in strategy_set.active_strategies:
-        issue_count_before_spec = len(issues)
+        instance_id = derive_strategy_instance_id(spec)
+        if instance_id in active_instance_ids:
+            issues.append(f"{instance_id}:runtime_strategy_duplicate_instance")
+        active_instance_ids.add(instance_id)
+        if str(spec.pair) != str(cfg.PAIR):
+            issues.append(
+                f"{instance_id}:runtime_strategy_pair_mismatch:"
+                f"spec_pair={spec.pair}:settings_pair={cfg.PAIR}"
+            )
         try:
             plugin = resolve_research_strategy_plugin(spec.strategy_name)
         except ResearchStrategyRegistryError as exc:
@@ -429,18 +442,15 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
             if adapter is None:
                 issues.append(f"{spec.strategy_name}:runtime_decision_adapter_unavailable")
 
-        if spec.approved_profile_hash and spec.approved_profile_path and len(issues) == issue_count_before_spec:
-            try:
-                profile = load_approved_profile(spec.approved_profile_path)
-                profile_hash = str(profile.get(PROFILE_HASH_FIELD) or "")
-                if profile_hash != spec.approved_profile_hash:
-                    issues.append(f"{spec.strategy_name}:approved_profile_hash_mismatch")
-            except Exception as exc:
-                issues.append(
-                    f"{spec.strategy_name}:approved_profile_hash_validation_failed:{type(exc).__name__}:{exc}"
-                )
         if spec.runtime_contract_hash and not str(spec.runtime_contract_hash).startswith("sha256:"):
             issues.append(f"{spec.strategy_name}:runtime_contract_hash_invalid")
+        if strategy_set.source != "STRATEGY_NAME" or not live_like:
+            try:
+                request_builder.materialize_instance(spec)
+            except Exception as exc:
+                issues.append(
+                    f"{instance_id}:runtime_strategy_materialization_failed:{type(exc).__name__}:{exc}"
+                )
 
     if issues:
         raise LiveModeValidationError(
