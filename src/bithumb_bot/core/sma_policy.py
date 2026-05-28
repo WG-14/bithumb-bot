@@ -197,7 +197,14 @@ class SmaPolicyConfig:
                 float(self.strategy_min_expected_edge_ratio),
             ),
             "market_regime_enabled": bool(self.market_regime_enabled),
+            "buy_fraction": float(self.buy_fraction),
+            "max_order_krw": float(self.max_order_krw),
             "require_candidate_regime_policy": bool(self.require_candidate_regime_policy),
+            "candidate_regime_policy_effective_required": (
+                bool(self.require_candidate_regime_policy)
+                if self.candidate_regime_policy_enforced is None
+                else bool(self.candidate_regime_policy_enforced)
+            ),
             "candidate_regime_policy_status": candidate_status,
             "runtime_comparable": bool(self.runtime_comparable),
             "materialization_equivalence_scope": (

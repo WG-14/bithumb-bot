@@ -493,11 +493,11 @@ def cmd_research_export_decisions(
                     if isinstance(profile, dict)
                     else None
                 ),
-                candidate_regime_policy_drives_research_execution=bool(
-                    profile.get("candidate_regime_policy_applied_in_research")
-                )
-                if isinstance(profile, dict)
-                else False,
+                candidate_regime_policy_drives_research_execution=(
+                    bool(promotion_grade_export)
+                    if isinstance(profile, dict)
+                    else False
+                ),
                 policy_materialization_mode=(
                     "research_promotion" if promotion_grade_export else "research_exploratory"
                 ),

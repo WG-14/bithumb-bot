@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .dataset_snapshot import DatasetSnapshot
-from .sma_policy_assembly import MaterializationMode, SmaWithFilterPolicyAssembly
+from bithumb_bot.strategy_plugins.sma_with_filter_assembly import (
+    MaterializationMode,
+    SmaWithFilterPolicyAssembly,
+)
 
 
 @dataclass(frozen=True)

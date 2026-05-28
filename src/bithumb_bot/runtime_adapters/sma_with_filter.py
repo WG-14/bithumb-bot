@@ -11,11 +11,11 @@ from bithumb_bot.runtime_sma_snapshot_builder import (
     _resolve_signal_through_ts_ms,
 )
 from bithumb_bot.runtime_strategy_decision import RuntimeStrategyDecisionResult
-from bithumb_bot.research.sma_policy_assembly import (
+from bithumb_bot.strategy_plugins.sma_with_filter_assembly import (
     MaterializationMode,
+    MaterializedSmaWithFilterParameters,
     SmaWithFilterPolicyAssembly,
 )
-from bithumb_bot.research.strategy_spec import runtime_bound_behavior_parameter_names
 from bithumb_bot.strategy.sma_policy_strategy import SmaWithFilterStrategy
 
 
@@ -112,25 +112,7 @@ def compute_strategy_decision_after_normalization(
 class SmaWithFilterRuntimeConfig:
     pair: str
     interval: str
-    short_n: int
-    long_n: int
-    min_gap_ratio: float
-    volatility_window: int
-    min_volatility_ratio: float
-    overextended_lookback: int
-    overextended_max_return_ratio: float
-    cost_edge_enabled: bool
-    cost_edge_min_ratio: float
-    market_regime_enabled: bool
-    entry_edge_buffer_ratio: float
-    strategy_min_expected_edge_ratio: float
-    slippage_bps: float
-    live_fee_rate_estimate: float
-    exit_rule_names: tuple[str, ...]
-    exit_stop_loss_ratio: float
-    exit_max_holding_min: int
-    exit_min_take_profit_ratio: float
-    exit_small_loss_tolerance_ratio: float
+    materialized: MaterializedSmaWithFilterParameters
 
     @classmethod
     def from_runtime_request(cls, request) -> "SmaWithFilterRuntimeConfig":
@@ -176,110 +158,24 @@ class SmaWithFilterRuntimeConfig:
                     "sma_runtime_request_behavior_parameter_missing:" + missing
                 ) from exc
             raise RuntimeError(str(exc)) from exc
-        params = materialized.values
-        runtime_bound = runtime_bound_behavior_parameter_names("sma_with_filter")
-        config = cls(
-            pair=pair,
-            interval=interval,
-            short_n=int(params["SMA_SHORT"]),
-            long_n=int(params["SMA_LONG"]),
-            min_gap_ratio=float(params["SMA_FILTER_GAP_MIN_RATIO"]),
-            volatility_window=int(params["SMA_FILTER_VOL_WINDOW"]),
-            min_volatility_ratio=float(params["SMA_FILTER_VOL_MIN_RANGE_RATIO"]),
-            overextended_lookback=int(params["SMA_FILTER_OVEREXT_LOOKBACK"]),
-            overextended_max_return_ratio=float(params["SMA_FILTER_OVEREXT_MAX_RETURN_RATIO"]),
-            cost_edge_enabled=_coerce_bool(params["SMA_COST_EDGE_ENABLED"]),
-            cost_edge_min_ratio=float(params["SMA_COST_EDGE_MIN_RATIO"]),
-            market_regime_enabled=_coerce_bool(params["SMA_MARKET_REGIME_ENABLED"]),
-            entry_edge_buffer_ratio=float(params["ENTRY_EDGE_BUFFER_RATIO"]),
-            strategy_min_expected_edge_ratio=float(params["STRATEGY_MIN_EXPECTED_EDGE_RATIO"]),
-            slippage_bps=float(params["STRATEGY_ENTRY_SLIPPAGE_BPS"]),
-            live_fee_rate_estimate=float(params["LIVE_FEE_RATE_ESTIMATE"]),
-            exit_rule_names=tuple(
-                token.strip()
-                for token in str(params["STRATEGY_EXIT_RULES"]).split(",")
-                if token.strip()
-            ),
-            exit_stop_loss_ratio=float(params["STRATEGY_EXIT_STOP_LOSS_RATIO"]),
-            exit_max_holding_min=int(params["STRATEGY_EXIT_MAX_HOLDING_MIN"]),
-            exit_min_take_profit_ratio=float(params["STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO"]),
-            exit_small_loss_tolerance_ratio=float(params["STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO"]),
-        )
-        config_keys = set(config.runtime_parameter_names())
-        missing_from_config = sorted(set(runtime_bound) - config_keys)
-        if missing_from_config:
-            raise RuntimeError(
-                "sma_runtime_config_unmapped_behavior_parameter:" + ",".join(missing_from_config)
-            )
-        return config
+        return cls(pair=pair, interval=interval, materialized=materialized)
 
     @staticmethod
     def runtime_parameter_names() -> tuple[str, ...]:
-        return (
-            "SMA_SHORT",
-            "SMA_LONG",
-            "SMA_FILTER_GAP_MIN_RATIO",
-            "SMA_FILTER_VOL_WINDOW",
-            "SMA_FILTER_VOL_MIN_RANGE_RATIO",
-            "SMA_FILTER_OVEREXT_LOOKBACK",
-            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO",
-            "SMA_COST_EDGE_ENABLED",
-            "SMA_COST_EDGE_MIN_RATIO",
-            "SMA_MARKET_REGIME_ENABLED",
-            "ENTRY_EDGE_BUFFER_RATIO",
-            "STRATEGY_MIN_EXPECTED_EDGE_RATIO",
-            "STRATEGY_ENTRY_SLIPPAGE_BPS",
-            "LIVE_FEE_RATE_ESTIMATE",
-            "STRATEGY_EXIT_RULES",
-            "STRATEGY_EXIT_STOP_LOSS_RATIO",
-            "STRATEGY_EXIT_MAX_HOLDING_MIN",
-            "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO",
-            "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO",
-        )
+        return SmaWithFilterPolicyAssembly().runtime_parameter_names()
 
     def build_strategy(
         self,
         *,
         candidate_regime_policy: dict[str, object] | None = None,
     ) -> SmaWithFilterStrategy:
-        parameters = {
-            "SMA_SHORT": self.short_n,
-            "SMA_LONG": self.long_n,
-            "SMA_FILTER_GAP_MIN_RATIO": self.min_gap_ratio,
-            "SMA_FILTER_VOL_WINDOW": self.volatility_window,
-            "SMA_FILTER_VOL_MIN_RANGE_RATIO": self.min_volatility_ratio,
-            "SMA_FILTER_OVEREXT_LOOKBACK": self.overextended_lookback,
-            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO": self.overextended_max_return_ratio,
-            "SMA_COST_EDGE_ENABLED": self.cost_edge_enabled,
-            "SMA_COST_EDGE_MIN_RATIO": self.cost_edge_min_ratio,
-            "SMA_MARKET_REGIME_ENABLED": self.market_regime_enabled,
-            "ENTRY_EDGE_BUFFER_RATIO": self.entry_edge_buffer_ratio,
-            "STRATEGY_MIN_EXPECTED_EDGE_RATIO": self.strategy_min_expected_edge_ratio,
-            "STRATEGY_ENTRY_SLIPPAGE_BPS": self.slippage_bps,
-            "LIVE_FEE_RATE_ESTIMATE": self.live_fee_rate_estimate,
-            "STRATEGY_EXIT_RULES": ",".join(self.exit_rule_names),
-            "STRATEGY_EXIT_STOP_LOSS_RATIO": self.exit_stop_loss_ratio,
-            "STRATEGY_EXIT_MAX_HOLDING_MIN": self.exit_max_holding_min,
-            "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO": self.exit_min_take_profit_ratio,
-            "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO": self.exit_small_loss_tolerance_ratio,
-        }
         assembly = SmaWithFilterPolicyAssembly()
-        materialized = assembly.materialize_parameters(
-            parameters,
-            MaterializationMode.RUNTIME_REPLAY,
-        )
         return assembly.build_strategy(
-            materialized,
+            self.materialized,
             pair=self.pair,
             interval=self.interval,
             candidate_regime_policy=candidate_regime_policy,
         )
-
-
-def _coerce_bool(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)

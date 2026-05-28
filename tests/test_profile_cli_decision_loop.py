@@ -549,9 +549,15 @@ def _write_golden_profile(tmp_path: Path, manifest_payload: dict[str, object], d
         "execution_contract_hash": execution_contract["execution_contract_hash"],
         "regime_classifier_version": "market_regime_v2",
         "allowed_live_regimes": [
-            "downtrend_normal_vol_unknown",
-            "downtrend_low_vol_unknown",
-            "uptrend_normal_vol_unknown",
+            f"{trend}_{vol}_{volume}"
+            for trend in ("downtrend", "sideways", "uptrend")
+            for vol in ("high_vol", "normal_vol", "low_vol")
+            for volume in (
+                "volume_decreasing",
+                "volume_normal",
+                "volume_increasing",
+                "unknown",
+            )
         ],
         "blocked_live_regimes": [],
     }
