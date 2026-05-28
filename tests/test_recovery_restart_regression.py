@@ -3026,7 +3026,7 @@ def test_restarted_ambiguous_order_blocks_new_submit_until_resolved(isolated_db,
     )
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
 
-    run_loop(5, 20)
+    run_loop()
 
     reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
@@ -3062,7 +3062,7 @@ def test_submit_success_then_crash_restart_blocks_new_submit_attempt(isolated_db
     )
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
 
-    run_loop(5, 20)
+    run_loop()
 
     reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
@@ -3387,7 +3387,7 @@ def test_restart_reconcile_api_exception_halts_and_prevents_resume(isolated_db, 
         lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -3476,7 +3476,7 @@ def test_restart_with_risky_state_does_not_resume_trading_loop(isolated_db, monk
         lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -3506,7 +3506,7 @@ def test_restart_while_persisted_halted_does_not_resume_trading_loop(isolated_db
         lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -3550,7 +3550,7 @@ def test_restart_startup_proceeds_when_reconcile_clears_risky_state(isolated_db,
         lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.startup_gate_reason is None

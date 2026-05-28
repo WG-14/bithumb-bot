@@ -82,7 +82,13 @@ def test_canary_non_sma_plugin_runtime_envelope_and_planner(tmp_path: Path) -> N
     try:
         adapter = runtime_strategy_decision.get_runtime_decision_adapter("canary_non_sma")
         assert adapter is not None
-        result = adapter.decide(conn, short_n=0, long_n=0, through_ts_ms=through_ts)
+        from bithumb_bot.runtime_strategy_set import RuntimeDecisionRequestBuilder, RuntimeStrategySpec
+
+        request = RuntimeDecisionRequestBuilder().build_for_spec(
+            RuntimeStrategySpec(strategy_name="canary_non_sma"),
+            through_ts_ms=through_ts,
+        )
+        result = adapter.decide(conn, request)
 
         assert runtime_strategy_decision.is_runtime_strategy_decision_result(result)
         assert result is not None

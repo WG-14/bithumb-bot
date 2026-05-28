@@ -42,12 +42,9 @@ class _DynamicRuntimeDecisionAdapter:
     def decide(
         self,
         conn: Any,
-        *,
-        short_n: int,
-        long_n: int,
-        through_ts_ms: int | None = None,
+        request: Any,
     ) -> None:
-        del conn, short_n, long_n, through_ts_ms
+        del conn, request
         return None
 
     def typed_authority_required(self) -> bool:

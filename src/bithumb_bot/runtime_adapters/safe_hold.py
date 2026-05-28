@@ -186,13 +186,9 @@ class SafeHoldRuntimeDecisionAdapter:
     def decide(
         self,
         conn,
-        *,
-        short_n: int,
-        long_n: int,
-        through_ts_ms: int | None = None,
+        request,
     ) -> RuntimeStrategyDecisionResult | None:
-        del short_n, long_n
-        candle = _latest_runtime_candle(conn, through_ts_ms=through_ts_ms)
+        candle = _latest_runtime_candle(conn, through_ts_ms=request.through_ts_ms)
         if candle is None:
             return None
         candle_ts, market_price = candle

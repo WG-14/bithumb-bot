@@ -561,7 +561,7 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -632,7 +632,7 @@ def test_run_loop_surfaces_market_preflight_error_during_live_startup(monkeypatc
     monkeypatch.setattr("bithumb_bot.engine.validate_market_runtime", _market_runtime)
 
     with pytest.raises(Exception) as exc:
-        run_loop(5, 20)
+        run_loop()
 
     assert "market gate" in str(exc.value)
     assert called["n"] == 1
@@ -654,7 +654,7 @@ def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", _reconcile, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda broker, signal, ts, px: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -688,7 +688,7 @@ def test_run_loop_periodically_reconciles_when_open_order_exists(monkeypatch):
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", _reconcile, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     assert calls["n"] == 2
 
@@ -700,7 +700,7 @@ def test_run_loop_stale_open_order_halts_and_marks_recovery_required(monkeypatch
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -725,7 +725,7 @@ def test_run_loop_unresolved_open_order_blocks_new_trading(monkeypatch):
 
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", _live_execute)
 
-    run_loop(5, 20)
+    run_loop()
 
     assert called["n"] == 0
     state = runtime_state.snapshot()
@@ -750,7 +750,7 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -789,7 +789,7 @@ def test_run_loop_startup_safety_gate_halts_when_unresolved_open_order_exists(mo
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     health = get_health_status()
@@ -811,7 +811,7 @@ def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_pa
 
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", _live_execute)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is True
@@ -888,7 +888,7 @@ def test_run_loop_live_harmless_dust_sell_suppresses_before_live_execution(monke
         },
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is True
@@ -949,7 +949,7 @@ def test_run_loop_live_sell_does_not_presuppress_when_canonical_sell_authority_i
         },
     )
 
-    run_loop(5, 20)
+    run_loop()
 
 
 def test_residual_sell_candidate_is_modeled_separately_from_strategy_sell_authority() -> None:
@@ -2068,7 +2068,7 @@ def test_run_loop_target_delta_persisted_target_state_reaches_live_execution(
     monkeypatch.setattr("bithumb_bot.engine.evaluate_startup_safety_gate", lambda: None)
     monkeypatch.setattr(
         "bithumb_bot.engine.compute_signal",
-        lambda _conn, _short, _long, **_kwargs: _runtime_result_from_payload(
+        lambda _conn, **_kwargs: _runtime_result_from_payload(
             {
                 "ts": 9000,
                 "last_close": 100_000_000.0,
@@ -2111,7 +2111,7 @@ def test_run_loop_target_delta_persisted_target_state_reaches_live_execution(
     monkeypatch.setattr("bithumb_bot.engine.record_strategy_decision", _record_strategy_decision)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", _capture_live_execution)
 
-    run_loop(5, 20)
+    run_loop()
 
     assert len(recorded_contexts) == 1
     context = recorded_contexts[0]
@@ -2168,7 +2168,7 @@ def test_run_loop_target_delta_missing_target_holding_btc_adopts_without_closeou
     monkeypatch.setattr("bithumb_bot.engine.evaluate_startup_safety_gate", lambda: None)
     monkeypatch.setattr(
         "bithumb_bot.engine.compute_signal",
-        lambda _conn, _short, _long, **_kwargs: _runtime_result_from_payload(
+        lambda _conn, **_kwargs: _runtime_result_from_payload(
             {
                 "ts": 9000,
                 "last_close": 114_120_000.0,
@@ -2195,7 +2195,7 @@ def test_run_loop_target_delta_missing_target_holding_btc_adopts_without_closeou
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("startup adoption must not submit")),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     assert len(recorded_contexts) == 1
     context = recorded_contexts[0]
@@ -2240,7 +2240,7 @@ def test_run_loop_target_delta_adopted_target_strategy_sell_submits_delta_sell(m
     monkeypatch.setattr("bithumb_bot.engine.evaluate_startup_safety_gate", lambda: None)
     monkeypatch.setattr(
         "bithumb_bot.engine.compute_signal",
-        lambda _conn, _short, _long, **_kwargs: _runtime_result_from_payload(
+        lambda _conn, **_kwargs: _runtime_result_from_payload(
             {
                 "ts": 9000,
                 "last_close": 100_000_000.0,
@@ -2265,7 +2265,7 @@ def test_run_loop_target_delta_adopted_target_strategy_sell_submits_delta_sell(m
         ),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     assert len(executor_calls) == 1
     forwarded = executor_calls[0]["execution_submit_plan"]
@@ -2486,7 +2486,7 @@ def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(mon
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
 
-    run_loop(5, 20)
+    run_loop()
 
     assert cancel_calls["n"] == 1
     halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=KILL_SWITCH" in n]
@@ -2512,7 +2512,7 @@ def test_run_loop_kill_switch_liquidate_with_open_position_triggers_flatten(monk
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "KILL_SWITCH"
@@ -2530,7 +2530,7 @@ def test_run_loop_kill_switch_liquidate_with_no_position_enters_safe_halt(monkey
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "KILL_SWITCH"
@@ -2555,7 +2555,7 @@ def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "KILL_SWITCH"
@@ -2581,7 +2581,7 @@ def test_run_loop_daily_loss_breach_halts_persistently(monkeypatch):
         lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -2620,7 +2620,7 @@ def test_run_loop_daily_loss_breach_attempts_open_order_cancel(monkeypatch):
     )
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     assert cancel_calls["n"] == 1
     assert flatten_calls["n"] == 1
@@ -2639,7 +2639,7 @@ def test_run_loop_daily_loss_breach_has_no_auto_resume(monkeypatch):
     monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -2665,7 +2665,7 @@ def test_run_loop_stale_open_order_emits_recovery_and_cancel_failure_alerts(monk
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
 
-    run_loop(5, 20)
+    run_loop()
 
     marked = [n for n in notifications if "event=recovery_required_marked" in n and "reason_code=STALE_OPEN_ORDER" in n]
     assert marked
@@ -2923,7 +2923,7 @@ def test_run_loop_position_loss_breach_triggers_halt(monkeypatch):
         ),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -2970,7 +2970,7 @@ def test_run_loop_position_loss_breach_uses_executable_exposure_qty(monkeypatch)
     monkeypatch.setattr("bithumb_bot.engine.evaluate_position_loss_breach", _capture_position_loss_breach)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     assert captured_qty
     assert captured_qty[0] == 0.0
@@ -2986,7 +2986,7 @@ def test_run_loop_daily_loss_breach_with_no_position_records_no_position_flatten
     )
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "DAILY_LOSS_LIMIT"
@@ -3011,7 +3011,7 @@ def test_run_loop_position_loss_breach_flatten_failure_marks_unresolved(monkeypa
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "POSITION_LOSS_LIMIT"
@@ -3034,7 +3034,7 @@ def test_run_loop_position_loss_breach_blocks_new_orders(monkeypatch):
         lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
     )
 
-    run_loop(5, 20)
+    run_loop()
 
     assert called["n"] == 0
 
@@ -3051,7 +3051,7 @@ def test_run_loop_position_loss_breach_sends_halt_notification(monkeypatch):
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
 
-    run_loop(5, 20)
+    run_loop()
 
     halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=POSITION_LOSS_LIMIT" in n]
     assert halted

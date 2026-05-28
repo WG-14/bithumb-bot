@@ -3626,7 +3626,7 @@ def test_target_delta_dry_run_prints_submit_plan_without_real_order_arming(
         monkeypatch.setattr(
             app_module,
             "compute_signal",
-            lambda _conn, _short, _long, **_kwargs: {
+            lambda _conn, **_kwargs: {
                 "ts": 9000,
                 "last_close": 100_000_000.0,
                 "curr_s": 1.0,

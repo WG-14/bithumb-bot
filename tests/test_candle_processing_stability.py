@@ -355,7 +355,7 @@ def test_run_loop_logs_duplicate_and_incomplete_candle_and_skips_reprocessing(mo
     monkeypatch.setattr("bithumb_bot.engine.time.sleep", _sleep)
 
     with caplog.at_level("INFO", logger="bithumb_bot.run"):
-        run_loop(5, 20)
+        run_loop()
 
     output = caplog.text
     assert "[SKIP] incomplete/open candle" in output
@@ -375,7 +375,7 @@ def test_run_loop_processes_latest_closed_candle_and_persists_it(monkeypatch, ca
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 60)
     monkeypatch.setattr(
         "bithumb_bot.engine.compute_signal",
-        lambda _conn, _short, _long, *, through_ts_ms=None, strategy_name=None: _runtime_handoff(
+        lambda _conn, *, through_ts_ms=None, strategy_name=None: _runtime_handoff(
             candle_ts=through_ts_ms,
             price=100.0,
             final_signal="HOLD",
@@ -395,7 +395,7 @@ def test_run_loop_processes_latest_closed_candle_and_persists_it(monkeypatch, ca
     monkeypatch.setattr("bithumb_bot.engine.paper_execute", lambda *_args, **_kwargs: pytest.fail("HOLD should not execute"))
 
     with caplog.at_level("INFO", logger="bithumb_bot.run"):
-        run_loop(5, 20)
+        run_loop()
 
     output = caplog.text
     assert "[RUN] processed closed candle" in output
@@ -412,7 +412,7 @@ def test_run_loop_uses_closed_candle_for_signal_and_trade_log_correlation(monkey
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 60)
 
-    def _compute_signal(_conn, _short, _long, *, through_ts_ms=None, strategy_name=None):
+    def _compute_signal(_conn, *, through_ts_ms=None, strategy_name=None):
         assert through_ts_ms == closed_ts
         return _runtime_handoff(candle_ts=through_ts_ms, price=100.0, final_signal="BUY")
 
@@ -460,7 +460,7 @@ def test_run_loop_uses_closed_candle_for_signal_and_trade_log_correlation(monkey
     monkeypatch.setattr("bithumb_bot.engine.run_loop_execution_planner", lambda **_kwargs: _Planner())
 
     with caplog.at_level("INFO", logger="bithumb_bot.run"):
-        run_loop(5, 20)
+        run_loop()
 
     output = caplog.text
     assert "[RUN] processed closed candle" in output

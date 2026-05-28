@@ -262,7 +262,7 @@ def test_failure_scenario_stale_open_order_detection_triggers_safe_halt(isolated
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert loop_conn.marked_recovery_required == 1
@@ -293,7 +293,7 @@ def test_failure_scenario_recovery_required_ambiguity_blocks_new_trading_loop_pr
     calls = {"n": 0}
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: calls.__setitem__("n", calls["n"] + 1))
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert calls["n"] == 0
@@ -314,7 +314,7 @@ def test_failure_scenario_position_hard_loss_breach_triggers_halt(isolated_db, m
     live_calls = {"n": 0}
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: live_calls.__setitem__("n", live_calls["n"] + 1))
 
-    run_loop(5, 20)
+    run_loop()
 
     state = runtime_state.snapshot()
     assert live_calls["n"] == 0

@@ -4,6 +4,7 @@ from .runtime_adapter_bootstrap import ensure_runtime_decision_adapters_register
 from .runtime_strategy_decision import (
     ORIGINAL_COMPUTE_SIGNAL,
     DecisionRunner,
+    RuntimeDecisionRequest,
     RuntimeDecisionAdapter,
     RuntimeStrategyDecisionResult,
     compute_signal,
@@ -28,6 +29,7 @@ ensure_runtime_decision_adapters_registered()
 __all__ = [
     "ORIGINAL_COMPUTE_SIGNAL",
     "DecisionRunner",
+    "RuntimeDecisionRequest",
     "RuntimeDecisionAdapter",
     "RuntimeStrategyDecisionResult",
     "RuntimeStrategyPolicyHashes",

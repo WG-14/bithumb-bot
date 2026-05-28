@@ -3,11 +3,32 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Callable, Mapping
 
+from .approved_profile import (
+    ApprovedProfileError,
+    PROFILE_HASH_FIELD,
+    approved_profile_path_from_env,
+    diff_profile_to_runtime,
+    load_approved_profile,
+    runtime_contract_from_settings,
+)
 from .config import settings, validate_live_strategy_selection
+from .decision_equivalence import sha256_prefixed
+from .research.strategy_registry import (
+    ResearchStrategyRegistryError,
+    resolve_research_strategy_plugin,
+    runtime_strategy_parameters_from_settings,
+)
+from .research.strategy_spec import (
+    exit_policy_from_parameters,
+    materialized_strategy_parameters_hash,
+)
 from .runtime_strategy_decision import (
+    RuntimeDecisionRequest,
     RuntimeStrategyDecisionResult,
+    _attach_runtime_request_metadata,
     get_runtime_decision_adapter,
     is_runtime_strategy_decision_result,
     production_runtime_strategy_missing_error,
@@ -29,6 +50,12 @@ class RuntimeStrategySpec:
     weight: float = 1.0
     desired_exposure_krw: float | None = None
     risk_budget_krw: float | None = None
+    parameters: Mapping[str, object] | None = None
+    approved_profile_path: str | None = None
+    approved_profile_hash: str | None = None
+    parameter_source: str | None = None
+    runtime_contract_hash: str | None = None
+    strategy_version: str | None = None
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -53,6 +80,21 @@ class RuntimeStrategySpec:
         object.__setattr__(self, "weight", weight)
         object.__setattr__(self, "desired_exposure_krw", desired_exposure)
         object.__setattr__(self, "risk_budget_krw", risk_budget)
+        object.__setattr__(
+            self,
+            "parameters",
+            MappingProxyType({str(key): value for key, value in dict(self.parameters or {}).items()}),
+        )
+        if self.approved_profile_path is not None:
+            object.__setattr__(self, "approved_profile_path", str(self.approved_profile_path).strip() or None)
+        if self.approved_profile_hash is not None:
+            object.__setattr__(self, "approved_profile_hash", str(self.approved_profile_hash).strip() or None)
+        if self.parameter_source is not None:
+            object.__setattr__(self, "parameter_source", str(self.parameter_source).strip() or None)
+        if self.runtime_contract_hash is not None:
+            object.__setattr__(self, "runtime_contract_hash", str(self.runtime_contract_hash).strip() or None)
+        if self.strategy_version is not None:
+            object.__setattr__(self, "strategy_version", str(self.strategy_version).strip() or None)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -64,6 +106,12 @@ class RuntimeStrategySpec:
             "weight": float(self.weight),
             "desired_exposure_krw": self.desired_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
+            "parameters": dict(self.parameters or {}),
+            "approved_profile_path": self.approved_profile_path,
+            "approved_profile_hash": self.approved_profile_hash,
+            "parameter_source": self.parameter_source,
+            "runtime_contract_hash": self.runtime_contract_hash,
+            "strategy_version": self.strategy_version,
         }
 
 
@@ -187,6 +235,130 @@ class RuntimeStrategySetResolver:
             weight=float(payload.get("weight", default.weight)),
             desired_exposure_krw=payload.get("desired_exposure_krw", default.desired_exposure_krw),
             risk_budget_krw=payload.get("risk_budget_krw", default.risk_budget_krw),
+            parameters=payload.get("parameters") if isinstance(payload.get("parameters"), Mapping) else None,
+            approved_profile_path=(
+                str(payload.get("approved_profile_path") or payload.get("profile_path") or "").strip()
+                or default.approved_profile_path
+            ),
+            approved_profile_hash=(
+                str(payload.get("approved_profile_hash") or payload.get("profile_hash") or "").strip()
+                or default.approved_profile_hash
+            ),
+            parameter_source=(
+                str(payload.get("parameter_source") or "").strip()
+                or default.parameter_source
+            ),
+            runtime_contract_hash=(
+                str(payload.get("runtime_contract_hash") or "").strip()
+                or default.runtime_contract_hash
+            ),
+            strategy_version=(
+                str(payload.get("strategy_version") or "").strip()
+                or default.strategy_version
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RuntimeDecisionRequestBuilder:
+    settings_obj: object = settings
+
+    def build_for_spec(
+        self,
+        spec: RuntimeStrategySpec,
+        *,
+        through_ts_ms: int | None,
+    ) -> RuntimeDecisionRequest:
+        try:
+            plugin = resolve_research_strategy_plugin(spec.strategy_name)
+        except (ResearchStrategyRegistryError, ApprovedProfileError):
+            if spec.strategy_name != "safe_hold":
+                raise
+            plugin = None
+        parameters, parameter_source = self._parameters_for_spec(spec)
+        strategy_parameters_hash = materialized_strategy_parameters_hash(parameters)
+        cfg = replace(self.settings_obj, STRATEGY_NAME=spec.strategy_name)
+        try:
+            runtime_contract = runtime_contract_from_settings(cfg)
+        except (ResearchStrategyRegistryError, ApprovedProfileError):
+            if spec.strategy_name != "safe_hold":
+                raise
+            runtime_contract = {
+                "schema_version": 1,
+                "mode": str(getattr(cfg, "MODE", "")),
+                "strategy_name": spec.strategy_name,
+                "market": str(spec.pair or getattr(cfg, "PAIR", "")),
+                "interval": str(getattr(cfg, "INTERVAL", "")),
+                "strategy_parameters": {},
+            }
+        runtime_contract = dict(runtime_contract)
+        runtime_contract["strategy_name"] = spec.strategy_name
+        runtime_contract["market"] = str(spec.pair or getattr(cfg, "PAIR", ""))
+        runtime_contract["interval"] = str(getattr(cfg, "INTERVAL", ""))
+        runtime_contract["strategy_parameters"] = dict(parameters)
+        if spec.strategy_name == "safe_hold":
+            runtime_contract["exit_policy"] = {"schema_version": 1, "rules": (), "strategy_name": "safe_hold"}
+        else:
+            runtime_contract["exit_policy"] = exit_policy_from_parameters(spec.strategy_name, dict(parameters))
+        runtime_contract["exit_policy_hash"] = sha256_prefixed(runtime_contract["exit_policy"])
+        runtime_contract_hash = spec.runtime_contract_hash or sha256_prefixed(runtime_contract)
+        approved_profile_path = spec.approved_profile_path or approved_profile_path_from_env() or None
+        approved_profile_hash = spec.approved_profile_hash
+        if approved_profile_path:
+            profile = load_approved_profile(approved_profile_path)
+            approved_profile_hash = str(profile.get(PROFILE_HASH_FIELD) or approved_profile_hash or "")
+            mismatches = diff_profile_to_runtime(
+                profile,
+                runtime_contract,
+                profile_path=approved_profile_path,
+            )
+            if mismatches:
+                fields = ",".join(str(item.get("field") or "unknown") for item in mismatches)
+                raise RuntimeError(f"approved_profile_runtime_parameter_mismatch:{spec.strategy_name}:{fields}")
+        plugin_contract_hash = plugin.contract_hash() if hasattr(plugin, "contract_hash") else None
+        strategy_version = spec.strategy_version or getattr(plugin, "version", None)
+        request_payload = {
+            "schema_version": 1,
+            "strategy_name": spec.strategy_name,
+            "pair": spec.pair,
+            "interval": str(getattr(cfg, "INTERVAL", "")),
+            "through_ts_ms": through_ts_ms,
+            "parameters": dict(parameters),
+            "strategy_parameters_hash": strategy_parameters_hash,
+            "approved_profile_path": approved_profile_path,
+            "approved_profile_hash": approved_profile_hash,
+            "runtime_contract_hash": runtime_contract_hash,
+            "plugin_contract_hash": plugin_contract_hash,
+            "strategy_version": strategy_version,
+            "runtime_strategy_spec": spec.as_dict(),
+            "parameter_source": parameter_source,
+        }
+        request_hash = sha256_prefixed(request_payload)
+        return RuntimeDecisionRequest(
+            strategy_name=spec.strategy_name,
+            pair=str(spec.pair),
+            interval=str(getattr(cfg, "INTERVAL", "")),
+            through_ts_ms=through_ts_ms,
+            parameters=parameters,
+            strategy_parameters_hash=strategy_parameters_hash,
+            approved_profile_path=approved_profile_path,
+            approved_profile_hash=approved_profile_hash,
+            runtime_strategy_spec=spec,
+            runtime_contract_hash=runtime_contract_hash,
+            parameter_source=parameter_source,
+            plugin_contract_hash=plugin_contract_hash,
+            strategy_version=strategy_version,
+            request_hash=request_hash,
+        )
+
+    def _parameters_for_spec(self, spec: RuntimeStrategySpec) -> tuple[dict[str, object], str]:
+        if spec.parameters:
+            return dict(spec.parameters), spec.parameter_source or "runtime_strategy_spec"
+        if spec.strategy_name == "safe_hold":
+            return {}, spec.parameter_source or "runtime_builtin_no_parameters"
+        return (
+            runtime_strategy_parameters_from_settings(spec.strategy_name, self.settings_obj),
+            spec.parameter_source or "runtime_parameter_adapter:settings",
         )
 
 
@@ -222,13 +394,13 @@ class RuntimeStrategyDecisionResultBundle:
 
 
 class RuntimeStrategyDecisionCollector:
+    request_builder: RuntimeDecisionRequestBuilder = RuntimeDecisionRequestBuilder()
+
     def collect(
         self,
         conn,
         strategy_set: RuntimeStrategySet,
         *,
-        short_n: int,
-        long_n: int,
         through_ts_ms: int | None,
     ) -> RuntimeStrategyDecisionResultBundle | None:
         results: list[RuntimeStrategyDecisionResult] = []
@@ -237,16 +409,13 @@ class RuntimeStrategyDecisionCollector:
             validate_live_strategy_selection(replace(settings, STRATEGY_NAME=spec.strategy_name))
             if adapter is None:
                 raise production_runtime_strategy_missing_error(spec.strategy_name)
-            result = adapter.decide(
-                conn,
-                short_n=short_n,
-                long_n=long_n,
-                through_ts_ms=through_ts_ms,
-            )
+            request = self.request_builder.build_for_spec(spec, through_ts_ms=through_ts_ms)
+            result = adapter.decide(conn, request)
             if result is None:
                 return None
             if not is_runtime_strategy_decision_result(result):
                 raise TypeError(f"typed_runtime_decision_required:{spec.strategy_name}")
+            _attach_runtime_request_metadata(result, request)
             if int(result.candle_ts) != int(through_ts_ms or result.candle_ts):
                 raise ValueError(f"runtime_strategy_candle_mismatch:{spec.strategy_name}")
             results.append(result)
@@ -260,8 +429,6 @@ def active_runtime_strategy_set() -> RuntimeStrategySet:
 def collect_runtime_strategy_decisions(
     conn,
     *,
-    short_n: int,
-    long_n: int,
     through_ts_ms: int | None,
     strategy_set: RuntimeStrategySet | None = None,
 ) -> RuntimeStrategyDecisionResultBundle | None:
@@ -269,7 +436,5 @@ def collect_runtime_strategy_decisions(
     return RuntimeStrategyDecisionCollector().collect(
         conn,
         resolved,
-        short_n=short_n,
-        long_n=long_n,
         through_ts_ms=through_ts_ms,
     )

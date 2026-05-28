@@ -109,11 +109,11 @@ uv run bithumb-bot candidate-regime-policy-equivalence-evidence --backtest-repor
 uv run bithumb-bot profile-diff --profile <profile.json> --target-env <env-file> --json
 uv run bithumb-bot profile-verify --profile <profile.json> --env <env-file>
 uv run bithumb-bot config-dump --masked
-uv run bithumb-bot live-dry-run --short 7 --long 30
+uv run bithumb-bot live-dry-run
 uv run bithumb-bot cash-drift-report --recent-limit 5
 uv run bithumb-bot experiment-report --sample-threshold 30 --top-n 3
 uv run bithumb-bot fee-pending-accounting-repair --client-order-id <id> --fill-id <fill_id> --fee <fee> --fee-provenance <evidence>
-uv run bithumb-bot run --short 7 --long 30
+uv run bithumb-bot run
 ```
 
 Root `backtest.py` is a fail-closed compatibility wrapper for a smoke backtest only. It does not run unless invoked with `--diagnostic-smoke-only`, and its output must not be used as evidence for strategy promotion, approved profiles, live readiness, or capital allocation. The official validation path is `uv run bithumb-bot research-validate --manifest ...`; `uv run bithumb-bot research-backtest --manifest ...` remains diagnostic/development evidence unless it is part of the full validation lifecycle. Full validation then requires walk-forward validation, lineage-backed promotion artifact review, `research-reproduce`, approved-profile generation or transition, mandatory decision-equivalence evidence, and separate paper/live-readiness checks. `--allow-legacy-lineage` is only an explicit compatibility escape hatch for reviewed historical artifacts, not the normal promotion path.

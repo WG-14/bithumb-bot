@@ -67,13 +67,15 @@ def _validate_db(args: argparse.Namespace, _context) -> int:
 def _run(args: argparse.Namespace, _context) -> None:
     from bithumb_bot.operator_commands import cmd_run
 
-    cmd_run(args.short, args.long)
+    del args
+    cmd_run()
 
 
 def _live_dry_run(args: argparse.Namespace, _context) -> None:
     from bithumb_bot.operator_commands import cmd_live_dry_run
 
-    cmd_live_dry_run(args.short, args.long)
+    del args
+    cmd_live_dry_run()
 
 
 def _build_window_parser(parser: argparse.ArgumentParser) -> None:
@@ -126,7 +128,6 @@ def command_specs() -> list[CommandSpec]:
             "run",
             domain="runtime",
             handler=_run,
-            build=_build_window_parser,
             read_only=False,
             mutating=True,
             guard_policy="live_run_loop",
@@ -139,7 +140,6 @@ def command_specs() -> list[CommandSpec]:
             handler=_live_dry_run,
             help="run one live no-submit decision cycle",
             description="Validate live decision flow, target_delta plan, and performance gate without broker submission.",
-            build=_build_window_parser,
             read_only=False,
             mutating=True,
             guard_policy="live_dry_run_loop",

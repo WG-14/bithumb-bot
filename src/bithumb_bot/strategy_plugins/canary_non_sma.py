@@ -269,13 +269,9 @@ class CanaryNonSmaRuntimeDecisionAdapter:
     def decide(
         self,
         conn: Any,
-        *,
-        short_n: int,
-        long_n: int,
-        through_ts_ms: int | None = None,
+        request: Any,
     ) -> Any | None:
-        del short_n, long_n
-        candle = _latest_runtime_candle(conn, through_ts_ms=through_ts_ms)
+        candle = _latest_runtime_candle(conn, through_ts_ms=request.through_ts_ms)
         if candle is None:
             return None
         candle_ts, market_price = candle
@@ -296,11 +292,15 @@ class CanaryNonSmaRuntimeReplayStrategy:
         *,
         through_ts_ms: int | None = None,
     ) -> Any | None:
+        from bithumb_bot.runtime_strategy_set import RuntimeDecisionRequestBuilder, RuntimeStrategySpec
+
+        request = RuntimeDecisionRequestBuilder().build_for_spec(
+            RuntimeStrategySpec(strategy_name=CANARY_NON_SMA_STRATEGY_NAME),
+            through_ts_ms=through_ts_ms,
+        )
         return CanaryNonSmaRuntimeDecisionAdapter().decide(
             conn,
-            short_n=0,
-            long_n=0,
-            through_ts_ms=through_ts_ms,
+            request,
         )
 
     def build_replay_bundle(

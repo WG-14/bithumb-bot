@@ -285,27 +285,28 @@ def test_live_sma_with_filter_route_does_not_call_legacy_decide(
 def test_decision_runner_exposes_typed_strategy_decision_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[int, int, str | None]] = []
+    calls: list[tuple[str, int | None]] = []
 
     class _UnitAdapter:
-        strategy_name = "unit_runner"
+        strategy_name = "canary_non_sma"
 
-        def decide(self, conn, *, short_n, long_n, through_ts_ms=None):
-            del conn, through_ts_ms
-            calls.append((short_n, long_n, self.strategy_name))
+        def decide(self, conn, request):
+            del conn
+            calls.append((request.strategy_name, request.through_ts_ms))
             return None
 
         def typed_authority_required(self) -> bool:
             return True
 
-    monkeypatch.setitem(runtime_strategy_decision._RUNTIME_DECISION_ADAPTERS, "unit_runner", _UnitAdapter)
+    runtime_strategy_decision.list_runtime_decision_adapters()
+    monkeypatch.setitem(runtime_strategy_decision._RUNTIME_DECISION_ADAPTERS, "canary_non_sma", _UnitAdapter)
 
-    runner = engine_module.DecisionRunner(strategy_name="unit_runner")
+    runner = engine_module.DecisionRunner(strategy_name="canary_non_sma")
     with sqlite3.connect(":memory:") as conn:
-        result = runner.decide_snapshot(conn, 2, 3, through_ts_ms=123)
+        result = runner.decide_snapshot(conn, through_ts_ms=123)
 
     assert result is None
-    assert calls == [(2, 3, "unit_runner")]
+    assert calls == [("canary_non_sma", 123)]
 
 
 def test_live_real_sma_cross_rejected_before_legacy_strategy_creation(

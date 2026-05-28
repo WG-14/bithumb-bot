@@ -32,8 +32,10 @@ from .runtime_decision_service import (
 )
 from .runtime_strategy_set import (
     RuntimeStrategyDecisionResultBundle,
+    active_runtime_strategy_set,
     collect_runtime_strategy_decisions,
 )
+from .decision_equivalence import sha256_prefixed
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import (
@@ -1198,7 +1200,7 @@ def perform_panic_stop_cleanup(
     )
 
 
-def run_loop(short_n: int, long_n: int) -> None:
+def run_loop() -> None:
     from .recovery import reconcile_with_broker
 
     configure_runtime_logging()
@@ -1327,6 +1329,8 @@ def run_loop(short_n: int, long_n: int) -> None:
                 return
 
     sec = parse_interval_sec(settings.INTERVAL)
+    runtime_strategy_set = active_runtime_strategy_set()
+    runtime_strategy_set_hash = sha256_prefixed(runtime_strategy_set.as_dict())
     _log_loop_event(
         logging.INFO,
         "[RUN] loop_start",
@@ -1339,8 +1343,9 @@ def run_loop(short_n: int, long_n: int) -> None:
             if os.getenv("STRATEGY_NAME") not in (None, "")
             else f"default:{DEFAULT_RUNTIME_STRATEGY}"
         ),
-        sma_short=short_n,
-        sma_long=long_n,
+        runtime_strategy_set_source=runtime_strategy_set.source,
+        runtime_strategy_set_hash=runtime_strategy_set_hash,
+        active_strategy_count=len(runtime_strategy_set.active_strategies),
     )
     _log_loop_event(logging.INFO, "[RUN] operator_hint", action="Ctrl+C to stop")
     fail_count = 0
@@ -1738,17 +1743,14 @@ def run_loop(short_n: int, long_n: int) -> None:
                 if signal_handoff_fn is compute_signal_runtime_handoff:
                     typed_runtime_decision_bundle = collect_runtime_strategy_decisions(
                         conn,
-                        short_n=short_n,
-                        long_n=long_n,
                         through_ts_ms=closed_candle_ts_ms,
+                        strategy_set=runtime_strategy_set,
                     )
                     signal_handoff = None if typed_runtime_decision_bundle is None else typed_runtime_decision_bundle.results[0]
                 else:
                     try:
                         signal_handoff = signal_handoff_fn(
                             conn,
-                            short_n,
-                            long_n,
                             through_ts_ms=closed_candle_ts_ms,
                             strategy_name=settings.STRATEGY_NAME,
                         )
@@ -1759,17 +1761,13 @@ def run_loop(short_n: int, long_n: int) -> None:
                         try:
                             signal_handoff = signal_handoff_fn(
                                 conn,
-                                short_n,
-                                long_n,
                                 through_ts_ms=closed_candle_ts_ms,
                             )
                         except TypeError as compat_exc:
                             compat_err = str(compat_exc)
                             if "through_ts_ms" not in compat_err:
                                 raise
-                            # Compatibility path for tests/mocks still patching the older
-                            # compute_signal(conn, short_n, long_n) signature.
-                            signal_handoff = compute_signal(conn, short_n, long_n)
+                            raise
             finally:
                 conn.close()
 
@@ -1945,6 +1943,11 @@ def run_loop(short_n: int, long_n: int) -> None:
                     policy_contract_hash=str(context.get("policy_contract_hash") or "-"),
                     policy_input_hash=str(context.get("policy_input_hash") or "-"),
                     policy_decision_hash=str(context.get("policy_decision_hash") or "-"),
+                    strategy_parameters_hash=str(context.get("strategy_parameters_hash") or "-"),
+                    approved_profile_hash=str(context.get("approved_profile_hash") or "-"),
+                    runtime_contract_hash=str(context.get("runtime_contract_hash") or "-"),
+                    plugin_contract_hash=str(context.get("plugin_contract_hash") or "-"),
+                    runtime_decision_request_hash=str(context.get("runtime_decision_request_hash") or "-"),
                     replay_fingerprint_hash=str(context.get("replay_fingerprint_hash") or "-"),
                     execution_engine=str(context.get("execution_decision", {}).get("execution_engine") if isinstance(context.get("execution_decision"), dict) else "-"),
                     target_engine_mode=str(context.get("target_engine_mode") or "-"),

@@ -733,7 +733,7 @@ def _finalize_repair_runtime_policy(
     return False
 
 
-def cmd_run(short_n: int, long_n: int):
+def cmd_run():
     from .engine import run_loop
     from .run_lock import RunLockError, acquire_run_lock
 
@@ -762,7 +762,7 @@ def cmd_run(short_n: int, long_n: int):
 
     try:
         with acquire_run_lock(Path(settings.RUN_LOCK_PATH)):
-            run_loop(short_n, long_n)
+            run_loop()
     except RunLockError as e:
         run_lock_status = read_run_lock_status(Path(settings.RUN_LOCK_PATH))
         notify(
@@ -1209,7 +1209,7 @@ def _print_live_dry_run_decision_summary(summary: dict[str, object]) -> None:
     print_decision_v2_summary(summary)
 
 
-def cmd_live_dry_run(short_n: int, long_n: int) -> None:
+def cmd_live_dry_run() -> None:
     log_live_execution_contract(
         settings,
         caller="cmd_live_dry_run",
@@ -1232,14 +1232,10 @@ def cmd_live_dry_run(short_n: int, long_n: int) -> None:
         try:
             signal_result = compute_signal(
                 conn,
-                short_n,
-                long_n,
                 strategy_name=settings.STRATEGY_NAME,
             )
-        except TypeError as exc:
-            if "strategy_name" not in str(exc):
-                raise
-            signal_result = compute_signal(conn, short_n, long_n)
+        except TypeError:
+            raise
         if signal_result is None:
             print("[LIVE-DRY-RUN] failed: insufficient candle history for one decision cycle")
             raise SystemExit(1)

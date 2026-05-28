@@ -76,8 +76,8 @@ class _Adapter:
         self.strategy_name = result.decision.strategy_name
         self._result = result
 
-    def decide(self, conn, *, short_n: int, long_n: int, through_ts_ms: int | None = None):
-        del conn, short_n, long_n, through_ts_ms
+    def decide(self, conn, request):
+        del conn, request
         return self._result
 
     def typed_authority_required(self) -> bool:
@@ -271,22 +271,20 @@ def test_runtime_strategy_set_resolver_reads_structured_strategy_contract(
 def test_multi_strategy_collector_executes_all_on_same_candle() -> None:
     reset_runtime_decision_adapters_for_tests()
     try:
-        first = _runtime_result("BUY", "strategy_a")
-        second = _runtime_result("HOLD", "strategy_b")
-        register_runtime_decision_adapter("strategy_a", lambda: _Adapter(first))
-        register_runtime_decision_adapter("strategy_b", lambda: _Adapter(second))
+        first = _runtime_result("BUY", "sma_with_filter")
+        second = _runtime_result("HOLD", "canary_non_sma")
+        register_runtime_decision_adapter("sma_with_filter", lambda: _Adapter(first))
+        register_runtime_decision_adapter("canary_non_sma", lambda: _Adapter(second))
         strategy_set = RuntimeStrategySet(
             source="unit",
             strategies=(
-                RuntimeStrategySpec("strategy_a", priority=10),
-                RuntimeStrategySpec("strategy_b", priority=10),
+                RuntimeStrategySpec("sma_with_filter", priority=10, parameters={"SMA_SHORT": 7, "SMA_LONG": 30}),
+                RuntimeStrategySpec("canary_non_sma", priority=10),
             ),
         )
         bundle = RuntimeStrategyDecisionCollector().collect(
             object(),
             strategy_set,
-            short_n=7,
-            long_n=30,
             through_ts_ms=123,
         )
     finally:

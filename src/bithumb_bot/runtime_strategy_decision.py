@@ -1,10 +1,68 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Callable, Protocol, runtime_checkable
+from types import MappingProxyType
+from typing import Callable, Mapping, Protocol, runtime_checkable
 
 from .config import settings, validate_live_strategy_selection
 from .strategy_policy_contract import StrategyDecisionV2
+
+
+@dataclass(frozen=True)
+class RuntimeDecisionRequest:
+    strategy_name: str
+    pair: str
+    interval: str
+    through_ts_ms: int | None
+    parameters: Mapping[str, object]
+    strategy_parameters_hash: str
+    approved_profile_path: str | None
+    approved_profile_hash: str | None
+    runtime_strategy_spec: object
+    runtime_contract_hash: str | None
+    parameter_source: str
+    plugin_contract_hash: str | None
+    strategy_version: str | None
+    request_hash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "strategy_name", str(self.strategy_name or "").strip().lower())
+        object.__setattr__(self, "pair", str(self.pair or "").strip())
+        object.__setattr__(self, "interval", str(self.interval or "").strip())
+        object.__setattr__(
+            self,
+            "parameters",
+            MappingProxyType({str(key): value for key, value in dict(self.parameters or {}).items()}),
+        )
+
+    def observability_fields(self) -> dict[str, object]:
+        return {
+            "strategy_name": self.strategy_name,
+            "strategy_version": self.strategy_version,
+            "strategy_parameters": dict(self.parameters),
+            "strategy_parameters_hash": self.strategy_parameters_hash,
+            "approved_profile_path": self.approved_profile_path,
+            "approved_profile_hash": self.approved_profile_hash,
+            "runtime_contract_hash": self.runtime_contract_hash,
+            "through_ts_ms": self.through_ts_ms,
+            "candle_ts": self.through_ts_ms,
+            "plugin_contract_hash": self.plugin_contract_hash,
+            "runtime_decision_request_hash": self.request_hash,
+            "request_hash": self.request_hash,
+            "parameter_source": self.parameter_source,
+        }
+
+    def as_dict(self) -> dict[str, object]:
+        spec = self.runtime_strategy_spec
+        spec_payload = spec.as_dict() if hasattr(spec, "as_dict") else str(spec)
+        return {
+            "schema_version": 1,
+            **self.observability_fields(),
+            "strategy": self.strategy_name,
+            "pair": self.pair,
+            "interval": self.interval,
+            "runtime_strategy_spec": spec_payload,
+        }
 
 
 @runtime_checkable
@@ -26,10 +84,7 @@ class RuntimeDecisionAdapter(Protocol):
     def decide(
         self,
         conn,
-        *,
-        short_n: int,
-        long_n: int,
-        through_ts_ms: int | None = None,
+        request: RuntimeDecisionRequest,
     ) -> RuntimeStrategyDecisionResult | None: ...
 
     def typed_authority_required(self) -> bool: ...
@@ -157,8 +212,6 @@ class DecisionRunner:
     def decide_snapshot(
         self,
         conn,
-        short_n: int,
-        long_n: int,
         *,
         through_ts_ms: int | None = None,
         strategy_name: str | None = None,
@@ -172,42 +225,38 @@ class DecisionRunner:
         adapter = get_runtime_decision_adapter(selected_strategy_name)
         if adapter is None:
             raise production_runtime_strategy_missing_error(selected_strategy_name)
-        return adapter.decide(
-            conn,
-            short_n=short_n,
-            long_n=long_n,
+        from .runtime_strategy_set import RuntimeDecisionRequestBuilder, RuntimeStrategySpec
+
+        request = RuntimeDecisionRequestBuilder().build_for_spec(
+            RuntimeStrategySpec(strategy_name=selected_strategy_name),
             through_ts_ms=through_ts_ms,
         )
+        result = adapter.decide(conn, request)
+        if result is not None:
+            _attach_runtime_request_metadata(result, request)
+        return result
 
 
 def compute_strategy_decision_snapshot(
     conn,
-    short_n: int,
-    long_n: int,
     *,
     through_ts_ms: int | None = None,
     strategy_name: str | None = None,
 ) -> RuntimeStrategyDecisionResult | None:
     return DecisionRunner(strategy_name=strategy_name).decide_snapshot(
         conn,
-        short_n,
-        long_n,
         through_ts_ms=through_ts_ms,
     )
 
 
 def compute_signal_runtime_handoff(
     conn,
-    short_n: int,
-    long_n: int,
     *,
     through_ts_ms: int | None = None,
     strategy_name: str | None = None,
 ) -> RuntimeStrategyDecisionResult | None:
     return compute_strategy_decision_snapshot(
         conn,
-        short_n,
-        long_n,
         through_ts_ms=through_ts_ms,
         strategy_name=strategy_name,
     )
@@ -215,16 +264,20 @@ def compute_signal_runtime_handoff(
 
 def compute_signal(
     conn,
-    short_n: int,
-    long_n: int,
-    *,
+    *diagnostic_sma_windows: int,
     through_ts_ms: int | None = None,
     strategy_name: str | None = None,
 ):
+    if diagnostic_sma_windows:
+        from .runtime_adapters.sma_with_filter import compute_sma_with_filter_signal
+
+        return compute_sma_with_filter_signal(
+            conn,
+            *diagnostic_sma_windows,
+            through_ts_ms=through_ts_ms,
+        )
     result = compute_signal_runtime_handoff(
         conn,
-        short_n,
-        long_n,
         through_ts_ms=through_ts_ms,
         strategy_name=strategy_name,
     )
@@ -233,6 +286,33 @@ def compute_signal(
     payload = result.as_legacy_dict()
     payload.setdefault("strategy", result.decision.strategy_name)
     return payload
+
+
+def _attach_runtime_request_metadata(
+    result: RuntimeStrategyDecisionResult,
+    request: RuntimeDecisionRequest,
+) -> None:
+    fields = request.observability_fields()
+    if isinstance(result.base_context, dict):
+        result.base_context.update(fields)
+    if isinstance(result.replay_fingerprint, dict):
+        result.replay_fingerprint.update(
+            {
+                "runtime_decision_request_hash": request.request_hash,
+                "strategy_parameters_hash": request.strategy_parameters_hash,
+                "approved_profile_hash": request.approved_profile_hash,
+                "runtime_contract_hash": request.runtime_contract_hash,
+                "plugin_contract_hash": request.plugin_contract_hash,
+                "through_ts_ms": request.through_ts_ms,
+            }
+        )
+    if isinstance(result.boundary, dict):
+        result.boundary.update(
+            {
+                "runtime_decision_request_hash": request.request_hash,
+                "strategy_parameters_hash": request.strategy_parameters_hash,
+            }
+        )
 
 
 ORIGINAL_COMPUTE_SIGNAL = compute_signal

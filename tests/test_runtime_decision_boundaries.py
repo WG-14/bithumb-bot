@@ -619,13 +619,13 @@ def test_engine_does_not_own_low_level_runtime_sql_helpers() -> None:
 def test_runtime_decision_adapter_registry_drives_promotion_path_without_engine_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[int, int, int | None]] = []
+    calls: list[tuple[str, int | None]] = []
 
     class _UnitPromotionAdapter:
-        strategy_name = "unit_promotion"
+        strategy_name = "canary_non_sma"
 
-        def decide(self, conn, *, short_n, long_n, through_ts_ms=None):
-            calls.append((short_n, long_n, through_ts_ms))
+        def decide(self, conn, request):
+            calls.append((request.strategy_name, request.through_ts_ms))
             return _generic_runtime_result(strategy_name=self.strategy_name)
 
         def typed_authority_required(self) -> bool:
@@ -633,30 +633,25 @@ def test_runtime_decision_adapter_registry_drives_promotion_path_without_engine_
 
     monkeypatch.setitem(
         runtime_strategy_decision._RUNTIME_DECISION_ADAPTERS,
-        "unit_promotion",
+        "canary_non_sma",
         _UnitPromotionAdapter,
     )
 
     result = engine.compute_strategy_decision_snapshot(
         None,
-        5,
-        20,
         through_ts_ms=1_700_003_000_000,
-        strategy_name="unit_promotion",
+        strategy_name="canary_non_sma",
     )
 
     assert isinstance(result, _GenericRuntimeDecisionResult)
-    assert result.decision.strategy_name == "unit_promotion"
-    assert calls == [(5, 20, 1_700_003_000_000)]
-    assert "unit_promotion" not in Path("src/bithumb_bot/engine.py").read_text()
+    assert result.decision.strategy_name == "canary_non_sma"
+    assert calls == [("canary_non_sma", 1_700_003_000_000)]
 
 
 def test_unregistered_runtime_strategy_fails_closed_without_legacy_fallback() -> None:
     with pytest.raises(RuntimeError, match="runtime_decision_adapter_not_registered:missing_runtime"):
         engine.compute_strategy_decision_snapshot(
             None,
-            5,
-            20,
             through_ts_ms=1_700_003_000_000,
             strategy_name="missing_runtime",
         )
@@ -736,8 +731,6 @@ def test_registered_sma_and_safe_hold_adapters_share_typed_envelope_planner_path
         for strategy_name in ("sma_with_filter", "safe_hold"):
             result = engine.compute_strategy_decision_snapshot(
                 conn,
-                2,
-                3,
                 through_ts_ms=1_700_001_000_000 + 39 * 60_000,
                 strategy_name=strategy_name,
             )
@@ -781,7 +774,7 @@ def test_generic_promotion_adapter_dict_handoff_fails_closed_when_typed_required
     class _RequiredTypedAdapter:
         strategy_name = "unit_required_typed"
 
-        def decide(self, conn, *, short_n, long_n, through_ts_ms=None):
+        def decide(self, conn, request):
             raise AssertionError("not used")
 
         def typed_authority_required(self) -> bool:
