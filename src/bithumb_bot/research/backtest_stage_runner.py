@@ -743,6 +743,12 @@ def _build_decision_observability_payload(
             sellable_qty=sellable_qty,
         )
         payload.update(dict(execution_evidence))
+        if not bool(getattr(strategy_plugin, "is_promotion_grade", False)):
+            payload["promotion_grade"] = False
+            payload["promotion_extension_missing_reason"] = str(
+                getattr(getattr(strategy_plugin, "runtime_capabilities", None), "fail_closed_reason", "")
+            )
+            payload["recommended_next_action"] = "promote_strategy_contract"
         return payload
     except Exception as exc:
         warnings.append("decision_payload_observability_failed")

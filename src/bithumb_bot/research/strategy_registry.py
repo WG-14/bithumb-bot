@@ -247,6 +247,8 @@ class ResearchStrategyPlugin:
     policy_assembly_factory: Callable[[], Any] | None = None
     runtime_capabilities: StrategyRuntimeCapabilities | None = None
     research_runnable: bool = True
+    authoring_contract_kind: str = "legacy_research_strategy_plugin"
+    promotion_extension_payload: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.runtime_capabilities is None:
@@ -286,6 +288,15 @@ class ResearchStrategyPlugin:
             "runner_module": self.runner.__module__,
             "runner_qualname": self.runner.__qualname__,
             "research_runnable": bool(self.research_runnable),
+            "authoring_contract_kind": self.authoring_contract_kind,
+            "promotion_grade": self.is_promotion_grade,
+            "promotion_extension": self.promotion_extension_payload,
+            "promotion_extension_missing_reason": (
+                None if self.is_promotion_grade else self.runtime_capabilities.fail_closed_reason
+            ),
+            "recommended_next_action": (
+                "none" if self.is_promotion_grade else "promote_strategy_contract"
+            ),
             "research_event_builder_supported": self.research_event_builder is not None,
             "research_event_builder_module": (
                 self.research_event_builder.__module__ if self.research_event_builder is not None else None
@@ -437,6 +448,17 @@ class ResearchStrategyPlugin:
 
     def contract_hash(self) -> str:
         return sha256_prefixed(self.contract_payload())
+
+    @property
+    def is_promotion_grade(self) -> bool:
+        if self.promotion_extension_payload is not None:
+            return True
+        return (
+            bool(self.runtime_capabilities.promotion_runtime_decisions_supported)
+            and self.runtime_parameter_adapter is not None
+            and self.runtime_decision_adapter_factory is not None
+            and self.policy_assembly_factory is not None
+        )
 
 
 def _legacy_inferred_runtime_capabilities(plugin: ResearchStrategyPlugin) -> StrategyRuntimeCapabilities:
@@ -630,10 +652,11 @@ _DISCOVERED_STRATEGY_PLUGINS_LOADED = False
 
 
 def register_research_strategy_plugin(
-    plugin: ResearchStrategyPlugin,
+    plugin: Any,
     *,
     replace: bool = False,
 ) -> None:
+    plugin = _normalize_research_strategy_plugin(plugin)
     key = str(plugin.name or "").strip().lower()
     if not key:
         raise ResearchStrategyRegistryError("research strategy plugin name must be non-empty")
@@ -658,11 +681,22 @@ def _ensure_discovered_strategy_plugins_loaded() -> None:
     _DISCOVERED_STRATEGY_PLUGINS_LOADED = True
 
 
+def _normalize_research_strategy_plugin(plugin: Any) -> ResearchStrategyPlugin:
+    if isinstance(plugin, ResearchStrategyPlugin):
+        return plugin
+    adapter = getattr(plugin, "to_research_strategy_plugin", None)
+    if callable(adapter):
+        normalized = adapter()
+        if isinstance(normalized, ResearchStrategyPlugin):
+            return normalized
+    raise TypeError(f"research_strategy_plugin_invalid_type:{type(plugin).__name__}")
+
+
 def _load_strategy_plugins_from_provider(
-    provider: Callable[[], Iterable[ResearchStrategyPlugin]] | Callable[[], Any],
+    provider: Callable[[], Iterable[Any]] | Callable[[], Any],
 ) -> None:
     for plugin in provider():
-        register_research_strategy_plugin(plugin)
+        register_research_strategy_plugin(_normalize_research_strategy_plugin(plugin))
 
 
 def reload_research_strategy_plugins_for_tests(

@@ -11,9 +11,9 @@ from bithumb_bot.research.strategy_registry import (
     ResearchStrategyPlugin,
     ResearchStrategyRegistryError,
     RuntimeParameterAdapter,
-    StrategyRuntimeCapabilities,
 )
 from bithumb_bot.research.strategy_spec import StrategySpec
+from bithumb_bot.strategy_authoring import PromotionGradeStrategyExtension
 
 
 SAFE_HOLD_STRATEGY_NAME = "safe_hold"
@@ -91,6 +91,22 @@ SAFE_HOLD_SPEC = StrategySpec(
 )
 
 
+_SAFE_HOLD_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
+    runtime_replay_builder=None,
+    runtime_parameter_adapter=RuntimeParameterAdapter(
+        from_env=_safe_hold_runtime_parameters_from_env,
+        from_settings=_safe_hold_runtime_parameters_from_settings,
+        env_keys=(),
+    ),
+    runtime_decision_adapter_factory=_safe_hold_runtime_decision_adapter_factory,
+    policy_assembly_factory=_safe_hold_policy_assembly_factory,
+    live_dry_run_allowed=False,
+    live_real_order_allowed=False,
+    approved_profile_required=False,
+    fail_closed_reason="safe_hold_runtime_fallback_not_live_eligible",
+)
+
+
 SAFE_HOLD_PLUGIN = ResearchStrategyPlugin(
     name=SAFE_HOLD_SPEC.strategy_name,
     version=SAFE_HOLD_SPEC.strategy_version,
@@ -99,25 +115,14 @@ SAFE_HOLD_PLUGIN = ResearchStrategyPlugin(
     optional_data=SAFE_HOLD_SPEC.optional_data,
     runner=run_safe_hold_research_placeholder,
     research_event_builder=None,
-    runtime_replay_builder=None,
-    runtime_parameter_adapter=RuntimeParameterAdapter(
-        from_env=_safe_hold_runtime_parameters_from_env,
-        from_settings=_safe_hold_runtime_parameters_from_settings,
-        env_keys=(),
-    ),
+    runtime_replay_builder=_SAFE_HOLD_PROMOTION_EXTENSION.runtime_replay_builder,
+    runtime_parameter_adapter=_SAFE_HOLD_PROMOTION_EXTENSION.runtime_parameter_adapter,
     decision_contract_version=SAFE_HOLD_SPEC.decision_contract_version,
     diagnostics_namespace=SAFE_HOLD_STRATEGY_NAME,
-    runtime_decision_adapter_factory=_safe_hold_runtime_decision_adapter_factory,
-    policy_assembly_factory=_safe_hold_policy_assembly_factory,
+    runtime_decision_adapter_factory=_SAFE_HOLD_PROMOTION_EXTENSION.runtime_decision_adapter_factory,
+    policy_assembly_factory=_SAFE_HOLD_PROMOTION_EXTENSION.policy_assembly_factory,
     research_runnable=False,
-    runtime_capabilities=StrategyRuntimeCapabilities(
-        promotion_runtime_decisions_supported=True,
-        runtime_replay_supported=False,
-        research_only=False,
-        baseline_only=False,
-        live_dry_run_allowed=False,
-        live_real_order_allowed=False,
-        approved_profile_required=False,
-        fail_closed_reason="safe_hold_runtime_fallback_not_live_eligible",
-    ),
+    runtime_capabilities=_SAFE_HOLD_PROMOTION_EXTENSION.runtime_capabilities(),
+    authoring_contract_kind="promotion_grade",
+    promotion_extension_payload=_SAFE_HOLD_PROMOTION_EXTENSION.contract_payload(),
 )

@@ -1,129 +1,116 @@
 # Strategy Plugin Authoring
 
-Promotion-grade strategies have one official registration path:
-`ResearchStrategyPlugin` in `bithumb_bot.research.strategy_registry`.
+Strategy authoring has two distinct paths:
 
-Do not register promotion-grade runtime strategies in
-`bithumb_bot.strategy.registry`. That module is compatibility-only for smoke
-strategy policies and legacy DB-bound strategy construction.
+1. fast research-only strategies for experiments and backtests
+2. promotion-grade extensions for runtime replay, approved profiles, live dry-run, and live real-order eligibility
 
-## Required Path
+Live safety is not weakened by the research-only API. A strategy without a promotion extension fails closed for promotion export, runtime replay, live dry-run, and live real-order.
+
+Do not register promotion-grade runtime strategies in `bithumb_bot.strategy.registry`. That module is compatibility-only for smoke strategy policies and legacy DB-bound construction.
+
+## Fast Research Path
+
+Use `bithumb_bot.strategy_authoring.ResearchOnlyStrategyPlugin` or one of its helpers:
+
+- `research_plugin_from_decide_snapshot()`
+- `research_plugin_from_event_builder()`
+
+A research-only strategy should provide only:
+
+- `strategy_name`
+- `version`
+- a plugin-local `StrategySpec`
+- `required_data` and optional data
+- either a snapshot decision function or a research event builder
+- a diagnostics namespace, or the default strategy name
+
+Research-only authors must not declare runtime/live vocabulary such as `StrategyRuntimeCapabilities`, runtime replay builders, runtime parameter adapters, approved-profile requirements, live dry-run eligibility, or live real-order eligibility. The authoring adapter normalizes research-only plugins into the internal registry with `promotion_extension_missing`.
+
+Research-only plugins can run through the generic research/backtest pipeline and emit reproducibility evidence, including strategy spec hash, dataset hash, deterministic decision hashes, `promotion_grade=false`, `promotion_extension_missing_reason=promotion_extension_missing`, and `recommended_next_action=promote_strategy_contract`.
+
+Research-only plugins are not promotion evidence. If promotion is attempted before adding a promotion extension, gates must fail closed with stable reason codes such as:
+
+- `promotion_extension_missing`
+- `promotion_runtime_unsupported_for_strategy`
+- `runtime_replay_unsupported_for_strategy`
+- `live_dry_run_not_allowed_for_strategy`
+- `live_real_order_not_allowed_for_strategy`
+
+`threshold_research_only` is the minimal built-in template for this path. It demonstrates that a strategy can be added without runtime replay, live, approved-profile, or adapter boilerplate. `canary_non_sma` is not the minimal template; it remains a promotion-grade architecture proof.
+
+## Promotion-Grade Path
+
+Use `bithumb_bot.strategy_authoring.PromotionGradeStrategyExtension` for strategies that opt into runtime/promotion/live contracts. The extension owns the heavy requirements:
+
+- runtime replay builder
+- runtime parameter adapter
+- runtime decision adapter factory
+- policy assembly factory
+- export normalizer or equivalence exporter when needed
+- approved-profile requirement
+- runtime capability declaration
+- live dry-run eligibility
+- live real-order eligibility
+- fail-closed reason
+
+Promotion-grade strategies are normalized into `ResearchStrategyPlugin` for the existing registry, contract hashing, runtime replay, approved profile verification, and live preflight gates. Runtime capability is explicit and must not be inferred from adapter presence.
+
+Runtime fail-safe strategies such as `safe_hold` are outside the research parity target. They may declare typed runtime decision support and policy assembly for fail-closed runtime fallback behavior, but they must remain `research_runnable=false`, have no `research_event_builder`, reject research execution explicitly, and remain ineligible for live real orders unless a separate reviewed promotion contract changes that.
+
+Promotion-bound strategies must preserve existing evidence:
+
+- plugin contract hash
+- runtime decision request hash
+- replay fingerprint hash
+- approved profile hash
+- runtime contract hash
+- policy hash fields
+
+Production-bound manifests still fail closed when runtime-bound behavior parameters, replay support, runtime adapters, policy assembly, approved-profile evidence, or decision equivalence evidence are missing.
+
+## Required Architecture
 
 The supported research architecture is:
 
-`StrategySpec` -> `ResearchStrategyPlugin` -> plugin-owned
-`research_event_builder` -> `research.backtest_runner.run_plugin_backtest` ->
-strategy-neutral `research.backtest_kernel` -> runtime replay, promotion, and
-live capability gates.
+`StrategySpec` -> plugin authoring object -> normalized `ResearchStrategyPlugin` -> plugin-owned `research_event_builder` -> `research.backtest_runner.run_plugin_backtest` -> strategy-neutral `research.backtest_kernel` -> runtime replay, promotion, and live capability gates.
 
-`research.backtest_runner` is generic and strategy-neutral. It may call explicit
-plugin contract hooks such as `research_parameter_materializer` and
-`research_event_builder`, but it must not branch on strategy names or own
-strategy-specific defaults. Strategy-specific research materialization,
-exploratory legacy behavior, empty-event policy, event generation, diagnostics,
-and payload adaptation belong in plugin-owned modules.
+`research.backtest_runner` is generic and strategy-neutral. It may call explicit plugin hooks such as `research_parameter_materializer` and `research_event_builder`, but it must not branch on strategy names or own strategy-specific defaults. Strategy-specific research materialization, exploratory legacy behavior, empty-event policy, event generation, diagnostics, and payload adaptation belong in plugin-owned modules.
 
-`research.strategy_registry` owns contract dataclasses, validation,
-registration, discovery, listing, resolving, and test reload behavior only. It
-does not define built-in plugin objects and does not import strategy-specific
-event builders. Built-in plugins are loaded through
-`bithumb_bot.strategy_plugins.iter_builtin_strategy_plugins()`, which should use
-lazy imports to avoid circular dependencies.
+`research.strategy_registry` owns normalized contract dataclasses, validation, registration, discovery, listing, resolving, and test reload behavior only. Built-in plugins are loaded through `bithumb_bot.strategy_plugins.iter_builtin_strategy_plugins()` using lazy imports.
 
-1. Create a `StrategySpec`.
-   - Include accepted, required, behavior-affecting, metadata-only, and
-     research-only parameter names.
-   - Include required and optional data inputs.
-   - Include the decision contract version and exit policy schema.
+## StrategySpec Ownership
 
-2. Create a `ResearchStrategyPlugin`.
-   - The plugin name is the strategy identity used by research, replay,
-     profiles, runtime strategy sets, and runtime decision requests.
-   - The plugin contract hash is part of runtime reproducibility evidence.
-   - Declare `research_event_builder` for every research-runnable strategy.
-     The builder owns deterministic historical `ResearchDecisionEvent`
-     construction from the dataset, materialized parameters, fee/slippage,
-     timing policy, portfolio policy, and run context needed by the strategy.
-   - Runtime-only strategies must set the explicit non-runnable contract rather
-     than relying on a missing research runner as an implicit signal.
-   - Built-in plugin definitions belong under `bithumb_bot.strategy_plugins`,
-     not in `research.strategy_registry`.
+New strategies should define `StrategySpec` in the plugin module that owns the strategy. This keeps new strategy PRs from modifying common research/runtime engine files.
 
-3. Declare explicit `StrategyRuntimeCapabilities`.
-   - Runtime capability is never inferred from adapter presence.
-   - Research-only and baseline-only strategies must explicitly declare that
-     they do not support promotion runtime decisions.
-   - Runtime fail-safe strategies such as `safe_hold` are outside the research
-     parity target. They may declare typed runtime decision support and a policy
-     assembly for runtime fail-closed behavior, but they must remain
-     `research_runnable=false`, have no `research_event_builder`, and reject
-     research execution explicitly.
-   - Live dry-run and live real-order eligibility must be declared separately.
+`research/strategy_spec.py` still contains common dataclasses, validation helpers, compatibility helpers, and historical built-in specs. It is no longer the required central edit point for every new strategy. Existing centralized specs remain for backward compatibility unless a focused migration safely moves them into plugin-local modules.
 
-4. Implement `runtime_decision_adapter_factory`.
-   - The adapter must expose `strategy_name`.
-   - Runtime resolution fails closed if `adapter.strategy_name` does not match
-     `ResearchStrategyPlugin.name`.
-   - Runtime adapter resolution is derived from the plugin manifest, not from a
-     standalone mutable registry.
+Architecture guard tests should continue to prevent new strategy-specific branches from entering common research files such as `backtest_runner`, `backtest_kernel`, `backtest_engine`, `backtest_support`, and `strategy_registry`.
 
-5. Implement `runtime_replay_builder`.
-   - Promotion/live runtime strategies must support replay when live preflight
-     requires it.
-   - Replay output must bind to the same strategy parameters and contract
-     hashes used by runtime.
+## Tests
 
-6. Implement a runtime parameter adapter.
-   - Provide env and settings extraction.
-   - Return only parameters accepted by `StrategySpec`.
-   - Keep research-only parameters out of runtime-bound behavior.
+Research-only strategy tests should prove:
 
-7. Use the generic research runner.
-   - Research execution should consume manifest-backed datasets and declared
-     parameter values through `run_plugin_backtest`.
-   - Decision-event backtests execute through `BacktestKernel` ->
-     `DefaultBacktestPipeline` -> typed stages. Strategy evaluation, risk
-     evaluation, execution planning, execution simulation, portfolio ledger
-     mutation, metrics, audit, and experiment recording are separate boundaries.
-   - Execution planning is owned by `DefaultExecutionPlanner`; execution
-     simulation consumes the typed plan and must not invent submit authority.
-   - Strategy-specific historical feature and event generation belongs in the
-     plugin layer, not in `research/backtest_runner.py`,
-     `research/backtest_kernel.py`, `research/backtest_engine.py`, or
-     strategy-neutral registry internals.
-   - `research/backtest_engine.py` is deprecated compatibility-only for old
-     import paths. Active research modules should import common types from
-     `backtest_types.py`, common helpers from `backtest_common.py`, and generic
-     execution through the runner or kernel directly.
-   - New strategy PRs should normally modify plugin, spec, and test files. They
-     should not add strategy-specific branches to common research files.
-   - Do not couple research experiments directly to live runtime state.
+- registration and discovery
+- research/backtest execution through the generic runner
+- deterministic reproducibility fields and `promotion_grade=false`
+- fail-closed promotion/runtime/live behavior
+- no runtime/live/promotion boilerplate in the public authoring path
 
-8. Add tests.
-   - Contract hash stability or intentional contract change evidence.
-   - Runtime replay and decision request hash binding.
-   - Live fail-closed capability checks.
-   - Dynamic plugin discovery through entry points when applicable.
-   - A non-SMA canary path proving generic platform files do not need
-     strategy-specific branches.
-   - Architecture guards preventing strategy-specific event generation from
-     re-entering common research modules. Guard tests enforce that
-     `backtest_runner`, `backtest_kernel`, `backtest_engine`,
-     `backtest_support`, and `strategy_registry` remain on their documented
-     side of the plugin boundary.
+Promotion-grade strategy tests should prove:
 
-9. Keep compatibility code isolated.
-   - `strategy.registry` is legacy/smoke compatibility only.
-   - `research.backtest_engine`, `research.backtest_loop`, and compatibility
-     re-exports from `research.backtest_kernel` are compatibility-only for old
-     import paths. They must delegate through `BacktestKernel` or
-     `DefaultBacktestPipeline` and must not regain strategy, risk, execution, or
-     ledger authority.
-   - Do not use compatibility registry APIs as promotion, replay, or runtime
-     decision authority.
+- explicit runtime parameter adapter
+- runtime decision adapter factory
+- replay support when required
+- policy assembly
+- approved-profile binding
+- live dry-run and live real-order capability behavior
+- preserved decision, replay, runtime, policy, and profile hashes
 
-Promotion-bound strategies must provide replay/runtime/capability evidence
-through the plugin contract. Production-bound manifests still fail closed when
-runtime-bound behavior parameters, replay support, runtime adapters, or approved
-profile evidence are missing; exploratory defaults are not promotion-grade
-evidence.
+New strategy PRs should normally modify one plugin file and one focused test file. They should not add strategy-specific branches to common research or runtime gateway files.
+
+## Compatibility
+
+`ResearchStrategyPlugin` remains the normalized internal registry representation. Existing code may still inspect it for contract hashes, runtime capability validation, profile verification, and live preflight. Public research-only authoring should use `strategy_authoring` instead of hand-writing a broad `ResearchStrategyPlugin`.
+
+`strategy.registry` is legacy/smoke compatibility only. `research.backtest_engine`, `research.backtest_loop`, and compatibility re-exports from `research.backtest_kernel` are compatibility-only for old import paths and must not regain strategy, risk, execution, or ledger authority.

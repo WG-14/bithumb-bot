@@ -482,6 +482,11 @@ def cmd_research_export_decisions(
             profile=profile,
         )
         plugin = resolve_research_strategy_plugin(manifest.strategy_name)
+        if promotion_grade_export and not plugin.is_promotion_grade:
+            raise ValueError(
+                f"promotion_extension_missing:{plugin.name}:"
+                "recommended_next_action=promote_strategy_contract"
+            )
         scenario = manifest.execution_model.scenarios[0]
         run = plugin.runner(
             snapshot,
@@ -598,7 +603,14 @@ def cmd_runtime_replay_decisions(
             raise ValueError("runtime_replay_profile_strategy_name_missing")
         plugin = resolve_research_strategy_plugin(strategy_name)
         if plugin.runtime_replay_builder is None:
-            raise ValueError(f"runtime replay unsupported for research strategy: {strategy_name}")
+            capability_reason = str(
+                getattr(getattr(plugin, "runtime_capabilities", None), "fail_closed_reason", "")
+                or "runtime_replay_unsupported_for_strategy"
+            )
+            raise ValueError(
+                f"runtime replay unsupported for research strategy: {strategy_name}; "
+                f"runtime_replay_unsupported_for_strategy:{strategy_name}:{capability_reason}"
+            )
         strategy = plugin.runtime_replay_builder(
             profile,
             _candidate_regime_policy_from_approved_profile(profile),

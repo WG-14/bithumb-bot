@@ -8,10 +8,10 @@ from bithumb_bot.decision_equivalence import sha256_prefixed
 from bithumb_bot.research.strategy_registry import (
     ResearchStrategyPlugin,
     RuntimeParameterAdapter,
-    StrategyRuntimeCapabilities,
 )
 from bithumb_bot.research.strategy_spec import StrategySpec, materialize_strategy_parameters
 from bithumb_bot.runtime_decision_contract import RuntimeStrategyPolicyHashes
+from bithumb_bot.strategy_authoring import PromotionGradeStrategyExtension
 from bithumb_bot.strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
 from bithumb_bot.strategy_policy_contract import (
     EntryExecutionIntent,
@@ -875,6 +875,25 @@ def _canary_decision_payload_adapter(
     return payload
 
 
+_CANARY_NON_SMA_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
+    runtime_replay_builder=_build_canary_runtime_replay_strategy,
+    runtime_parameter_adapter=RuntimeParameterAdapter(
+        from_env=_canary_runtime_parameters_from_env,
+        from_settings=_canary_runtime_parameters_from_settings,
+        env_keys=("CANARY_ORDER_START_INDEX", "CANARY_ORDER_SIDE", "CANARY_ORDER_REASON"),
+    ),
+    runtime_decision_adapter_factory=CanaryNonSmaRuntimeDecisionAdapter,
+    policy_assembly_factory=_canary_policy_assembly_factory,
+    decision_payload_adapter=_canary_decision_payload_adapter,
+    research_policy_decision_builder=_canary_research_policy_decision_builder,
+    single_replay_bundle_builder=_canary_single_replay_bundle_builder,
+    live_dry_run_allowed=True,
+    live_real_order_allowed=False,
+    approved_profile_required=True,
+    fail_closed_reason="canary_non_sma_live_real_order_not_allowed",
+)
+
+
 CANARY_NON_SMA_PLUGIN = ResearchStrategyPlugin(
     name=CANARY_NON_SMA_SPEC.strategy_name,
     version=CANARY_NON_SMA_SPEC.strategy_version,
@@ -883,27 +902,16 @@ CANARY_NON_SMA_PLUGIN = ResearchStrategyPlugin(
     optional_data=CANARY_NON_SMA_SPEC.optional_data,
     runner=run_canary_non_sma_backtest,
     research_event_builder=build_canary_non_sma_research_events,
-    runtime_replay_builder=_build_canary_runtime_replay_strategy,
-    runtime_parameter_adapter=RuntimeParameterAdapter(
-        from_env=_canary_runtime_parameters_from_env,
-        from_settings=_canary_runtime_parameters_from_settings,
-        env_keys=("CANARY_ORDER_START_INDEX", "CANARY_ORDER_SIDE", "CANARY_ORDER_REASON"),
-    ),
+    runtime_replay_builder=_CANARY_NON_SMA_PROMOTION_EXTENSION.runtime_replay_builder,
+    runtime_parameter_adapter=_CANARY_NON_SMA_PROMOTION_EXTENSION.runtime_parameter_adapter,
     decision_contract_version=CANARY_NON_SMA_SPEC.decision_contract_version,
     diagnostics_namespace=CANARY_NON_SMA_STRATEGY_NAME,
-    decision_payload_adapter=_canary_decision_payload_adapter,
-    research_policy_decision_builder=_canary_research_policy_decision_builder,
-    runtime_decision_adapter_factory=CanaryNonSmaRuntimeDecisionAdapter,
-    single_replay_bundle_builder=_canary_single_replay_bundle_builder,
-    policy_assembly_factory=_canary_policy_assembly_factory,
-    runtime_capabilities=StrategyRuntimeCapabilities(
-        promotion_runtime_decisions_supported=True,
-        runtime_replay_supported=True,
-        research_only=False,
-        baseline_only=False,
-        live_dry_run_allowed=True,
-        live_real_order_allowed=False,
-        approved_profile_required=True,
-        fail_closed_reason="canary_non_sma_live_real_order_not_allowed",
-    ),
+    decision_payload_adapter=_CANARY_NON_SMA_PROMOTION_EXTENSION.decision_payload_adapter,
+    research_policy_decision_builder=_CANARY_NON_SMA_PROMOTION_EXTENSION.research_policy_decision_builder,
+    runtime_decision_adapter_factory=_CANARY_NON_SMA_PROMOTION_EXTENSION.runtime_decision_adapter_factory,
+    single_replay_bundle_builder=_CANARY_NON_SMA_PROMOTION_EXTENSION.single_replay_bundle_builder,
+    policy_assembly_factory=_CANARY_NON_SMA_PROMOTION_EXTENSION.policy_assembly_factory,
+    runtime_capabilities=_CANARY_NON_SMA_PROMOTION_EXTENSION.runtime_capabilities(),
+    authoring_contract_kind="promotion_grade",
+    promotion_extension_payload=_CANARY_NON_SMA_PROMOTION_EXTENSION.contract_payload(),
 )

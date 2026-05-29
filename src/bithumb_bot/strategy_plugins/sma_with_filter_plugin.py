@@ -11,9 +11,9 @@ from bithumb_bot.research.strategy_registry import (
     ResearchStrategyPlugin,
     ResearchStrategyRegistryError,
     RuntimeParameterAdapter,
-    StrategyRuntimeCapabilities,
 )
 from bithumb_bot.research.strategy_spec import SMA_WITH_FILTER_SPEC, materialize_strategy_parameters
+from bithumb_bot.strategy_authoring import PromotionGradeStrategyExtension
 from bithumb_bot.strategy_plugins.sma_with_filter_events import build_sma_with_filter_research_events
 
 
@@ -82,15 +82,7 @@ def _require_parameter(parameter_values: dict[str, Any], key: str) -> None:
         raise ResearchStrategyRegistryError(f"sma_with_filter missing required parameter: {key}")
 
 
-SMA_WITH_FILTER_PLUGIN = ResearchStrategyPlugin(
-    name=SMA_WITH_FILTER_SPEC.strategy_name,
-    version=SMA_WITH_FILTER_SPEC.strategy_version,
-    spec=SMA_WITH_FILTER_SPEC,
-    required_data=SMA_WITH_FILTER_SPEC.required_data,
-    optional_data=SMA_WITH_FILTER_SPEC.optional_data,
-    runner=run_sma_with_filter_backtest,
-    research_event_builder=build_sma_with_filter_research_events,
-    research_parameter_materializer=materialize_sma_with_filter_research_parameters,
+_SMA_WITH_FILTER_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
     runtime_replay_builder=runtime_contract.build_runtime_replay_strategy,
     runtime_parameter_adapter=RuntimeParameterAdapter(
         from_env=runtime_contract.runtime_parameters_from_env,
@@ -117,8 +109,6 @@ SMA_WITH_FILTER_PLUGIN = ResearchStrategyPlugin(
             "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO",
         ),
     ),
-    decision_contract_version=SMA_WITH_FILTER_SPEC.decision_contract_version,
-    diagnostics_namespace="sma_with_filter",
     decision_payload_adapter=runtime_contract.decision_payload_adapter,
     exit_signal_context_builder=runtime_contract.exit_signal_context,
     exit_rule_factory=runtime_contract.exit_rule_factory,
@@ -127,14 +117,35 @@ SMA_WITH_FILTER_PLUGIN = ResearchStrategyPlugin(
     runtime_decision_adapter_factory=runtime_contract.runtime_decision_adapter_factory,
     single_replay_bundle_builder=runtime_contract.single_replay_bundle_builder,
     policy_assembly_factory=runtime_contract.policy_assembly_factory,
-    runtime_capabilities=StrategyRuntimeCapabilities(
-        promotion_runtime_decisions_supported=True,
-        runtime_replay_supported=True,
-        research_only=False,
-        baseline_only=False,
-        live_dry_run_allowed=True,
-        live_real_order_allowed=True,
-        approved_profile_required=True,
-        fail_closed_reason="sma_with_filter_capability_missing",
-    ),
+    live_dry_run_allowed=True,
+    live_real_order_allowed=True,
+    approved_profile_required=True,
+    fail_closed_reason="sma_with_filter_capability_missing",
+)
+
+
+SMA_WITH_FILTER_PLUGIN = ResearchStrategyPlugin(
+    name=SMA_WITH_FILTER_SPEC.strategy_name,
+    version=SMA_WITH_FILTER_SPEC.strategy_version,
+    spec=SMA_WITH_FILTER_SPEC,
+    required_data=SMA_WITH_FILTER_SPEC.required_data,
+    optional_data=SMA_WITH_FILTER_SPEC.optional_data,
+    runner=run_sma_with_filter_backtest,
+    research_event_builder=build_sma_with_filter_research_events,
+    research_parameter_materializer=materialize_sma_with_filter_research_parameters,
+    runtime_replay_builder=_SMA_WITH_FILTER_PROMOTION_EXTENSION.runtime_replay_builder,
+    runtime_parameter_adapter=_SMA_WITH_FILTER_PROMOTION_EXTENSION.runtime_parameter_adapter,
+    decision_contract_version=SMA_WITH_FILTER_SPEC.decision_contract_version,
+    diagnostics_namespace="sma_with_filter",
+    decision_payload_adapter=_SMA_WITH_FILTER_PROMOTION_EXTENSION.decision_payload_adapter,
+    exit_signal_context_builder=_SMA_WITH_FILTER_PROMOTION_EXTENSION.exit_signal_context_builder,
+    exit_rule_factory=_SMA_WITH_FILTER_PROMOTION_EXTENSION.exit_rule_factory,
+    research_policy_decision_builder=_SMA_WITH_FILTER_PROMOTION_EXTENSION.research_policy_decision_builder,
+    research_export_normalizer=_SMA_WITH_FILTER_PROMOTION_EXTENSION.research_export_normalizer,
+    runtime_decision_adapter_factory=_SMA_WITH_FILTER_PROMOTION_EXTENSION.runtime_decision_adapter_factory,
+    single_replay_bundle_builder=_SMA_WITH_FILTER_PROMOTION_EXTENSION.single_replay_bundle_builder,
+    policy_assembly_factory=_SMA_WITH_FILTER_PROMOTION_EXTENSION.policy_assembly_factory,
+    runtime_capabilities=_SMA_WITH_FILTER_PROMOTION_EXTENSION.runtime_capabilities(),
+    authoring_contract_kind="promotion_grade",
+    promotion_extension_payload=_SMA_WITH_FILTER_PROMOTION_EXTENSION.contract_payload(),
 )

@@ -535,6 +535,8 @@ def _research_decision_payload(
         "strategy_spec_hash": strategy_spec_hash,
         "strategy_plugin_contract": strategy_plugin_contract,
         "strategy_plugin_contract_hash": strategy_plugin_contract_hash,
+        "dataset_content_hash": dataset_content_hash,
+        "parameter_values_hash": canonical_payload_hash(parameter_values),
         "exit_policy": exit_policy,
         "exit_policy_hash": exit_policy_hash,
         "market": dataset.market,

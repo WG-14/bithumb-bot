@@ -117,10 +117,19 @@ class DecisionPayloadBuilder:
         )
         if strategy_plugin.decision_payload_adapter is not None:
             payload = strategy_plugin.decision_payload_adapter(payload, event)
+        promotion_grade = bool(getattr(strategy_plugin, "is_promotion_grade", False))
+        promotion_missing_reason = (
+            ""
+            if promotion_grade
+            else str(getattr(getattr(strategy_plugin, "runtime_capabilities", None), "fail_closed_reason", ""))
+        )
         payload.update(
             {
                 "decision_event_schema_version": 1,
                 "strategy_decision_contract_version": strategy_plugin.decision_contract_version,
+                "promotion_grade": promotion_grade,
+                "promotion_extension_missing_reason": promotion_missing_reason,
+                "recommended_next_action": "none" if promotion_grade else "promote_strategy_contract",
                 "raw_reason": raw_reason,
                 "feature_snapshot": dict(event.feature_snapshot),
                 "strategy_diagnostics_namespace": strategy_plugin.diagnostics_namespace,
