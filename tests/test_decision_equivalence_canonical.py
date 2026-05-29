@@ -10,6 +10,7 @@ from bithumb_bot.canonical_decision import (
     research_decision_to_canonical_event,
     runtime_decision_to_canonical_event,
     validate_canonical_decision_payload,
+    validate_promotion_artifact,
 )
 from bithumb_bot.decision_equivalence import (
     compare_decision_export_artifacts,
@@ -118,6 +119,7 @@ def _decision_v2(**overrides: object) -> dict[str, object]:
             "strategy_decision_contract_version": "research_sma_decision_contract.v3_entry_exit_risk_exit",
             "execution_summary_hash": "sha256:summary",
             "execution_submit_plan_hash": "sha256:plan",
+            "execution_plan_bundle_hash": "sha256:bundle",
             "final_action": "ENTER_STRATEGY_POSITION",
             "submit_expected": True,
             "pre_submit_proof_status": "not_required",
@@ -125,6 +127,16 @@ def _decision_v2(**overrides: object) -> dict[str, object]:
             "submit_plan_source": "research_backtest",
             "submit_plan_authority": "strategy_execution_intent",
             "execution_engine": "research_virtual",
+            "execution_plan_bundle_present": True,
+            "execution_evidence_source": "typed_execution_plan_bundle",
+            "typed_execution_summary_present": True,
+            "decision_authority_source": "DecisionEnvelope.strategy_decision",
+            "compatibility_fallback": False,
+            "legacy_context_planning_used": False,
+            "artifact_grade": "promotion_candidate",
+            "authority_plane": "typed_execution_plan_bundle",
+            "runtime_replay_planning_error": "",
+            "promotion_rejection_reason": "",
             "feature_snapshot": {"short_sma": 102.0, "long_sma": 101.0},
             "feature_snapshot_hash": "sha256:feature_snapshot",
             "strategy_specific_payload": {"curr_s": 102.0, "curr_l": 101.0, "gap_ratio": 0.01},
@@ -610,6 +622,69 @@ def test_promotion_grade_gate_rejects_full_lifecycle_claim_without_lifecycle_evi
     assert "decision_equivalence_full_lifecycle_equivalence_evidence_missing" in reasons
 
 
+def test_promotion_rejects_legacy_context_planning() -> None:
+    payload = _decision_v2(legacy_context_planning_used=True)
+
+    validation = validate_promotion_artifact(payload)
+
+    assert validation.promotion_grade is False
+    assert "canonical_promotion_legacy_context_planning" in validation.reason_codes
+
+
+def test_canonical_promotion_rejects_compatibility_fallback_context() -> None:
+    payload = _decision_v2(compatibility_fallback=True)
+
+    validation = validate_canonical_decision_payload(payload, promotion_grade=True)
+
+    assert validation.promotion_grade is False
+    assert "canonical_promotion_compatibility_fallback" in validation.reason_codes
+
+
+def test_promotion_requires_typed_execution_plan_bundle() -> None:
+    payload = _decision_v2(
+        execution_plan_bundle_present=False,
+        execution_plan_bundle_hash="",
+        typed_execution_summary_present=False,
+    )
+
+    validation = validate_promotion_artifact(payload)
+
+    assert validation.promotion_grade is False
+    assert "execution_plan_bundle_present" in validation.missing_fields
+    assert "execution_plan_bundle_hash" in validation.missing_fields
+    assert "typed_execution_summary_present" in validation.missing_fields
+    assert "canonical_promotion_execution_plan_bundle_missing" in validation.reason_codes
+    assert "canonical_promotion_execution_plan_bundle_hash_missing" in validation.reason_codes
+    assert "canonical_promotion_typed_execution_summary_missing" in validation.reason_codes
+
+
+def test_promotion_rejects_legacy_context_authority_and_runtime_planning_error() -> None:
+    payload = _decision_v2(
+        decision_authority_source="legacy_context",
+        runtime_replay_planning_error="runtime_replay_execution_readiness_unavailable",
+    )
+
+    validation = validate_promotion_artifact(payload)
+
+    assert validation.promotion_grade is False
+    assert "canonical_promotion_legacy_context_authority" in validation.reason_codes
+    assert "canonical_promotion_runtime_replay_planning_error" in validation.reason_codes
+
+
+def test_promotion_rejects_context_fallback_execution_evidence() -> None:
+    payload = _decision_v2(
+        execution_evidence_source="diagnostic_context_fallback",
+        artifact_grade="diagnostic_only",
+        authority_plane="compatibility_context",
+        promotion_rejection_reason="context_fallback_execution_evidence",
+    )
+
+    validation = validate_promotion_artifact(payload)
+
+    assert validation.promotion_grade is False
+    assert "canonical_promotion_typed_execution_provenance_missing" in validation.reason_codes
+
+
 def test_policy_hashes_are_canonical_diagnostics_not_promotion_required() -> None:
     assert "policy_contract_hash" not in PROMOTION_REQUIRED_CANONICAL_FIELDS
     assert "policy_input_hash" not in PROMOTION_REQUIRED_CANONICAL_FIELDS
@@ -621,6 +696,7 @@ def test_policy_hashes_are_canonical_diagnostics_not_promotion_required() -> Non
     [
         "execution_summary_hash",
         "execution_submit_plan_hash",
+        "execution_plan_bundle_hash",
         "final_action",
         "submit_expected",
         "pre_submit_proof_status",
@@ -1065,7 +1141,8 @@ def test_incomplete_runtime_positive_state_missing_lot_fields_fails_closed() -> 
     result = _compare(event, event)
 
     assert result.ok is False
-    assert result.report["outcome"] == "FAIL_CLOSED_UNMODELED_STATE"
+    assert result.report["outcome"] == "FAIL_INCOMPLETE_CANONICAL_PAYLOAD"
+    assert "canonical_promotion_typed_execution_provenance_missing" in result.report["reason_codes"]
     assert event["position_authority"]["state_class"] == "open_exposure"  # type: ignore[index]
     assert event["position_authority"]["unsupported_reason"] == "research_model_lacks_lot_native_authority"  # type: ignore[index]
     assert result.report["state_coverage_matrix"]["open_exposure"]["fail_closed_expected"] is True

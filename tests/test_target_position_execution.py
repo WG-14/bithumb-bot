@@ -38,6 +38,15 @@ from bithumb_bot.target_position import (
 )
 
 
+def _submit_plan_payload(plan: object | None) -> dict[str, object]:
+    assert plan is not None
+    as_dict = getattr(plan, "as_dict", None)
+    assert callable(as_dict)
+    payload = as_dict()
+    assert isinstance(payload, dict)
+    return payload
+
+
 def _readiness(
     *,
     broker_qty: float,
@@ -263,8 +272,8 @@ def test_execution_order_rule_block_remains_separate_from_strategy_signal() -> N
 
     assert summary.final_signal == "BUY"
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["submit_expected"] is False
-    assert summary.target_submit_plan["block_reason"] == "delta_below_exchange_min"
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is False
+    assert _submit_plan_payload(summary.target_submit_plan)["block_reason"] == "delta_below_exchange_min"
     assert summary.signal_flow is not None
     assert summary.signal_flow["primary_block_layer"] == "execution_order_rule"
 
@@ -487,9 +496,9 @@ def test_execution_summary_after_startup_adoption_does_not_sell() -> None:
     assert summary.submit_expected is False
     assert summary.final_action != "REBALANCE_TO_TARGET"
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["submit_expected"] is False
-    assert summary.target_submit_plan["side"] != "SELL"
-    assert summary.target_submit_plan["target_delta_side"] == "NONE"
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is False
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] != "SELL"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_delta_side"] == "NONE"
     assert summary.target_shadow_decision is not None
     assert summary.target_shadow_decision["target_origin"] == TARGET_ORIGIN_ADOPTED_EXISTING_POSITION
     assert summary.target_shadow_decision["target_delta_side"] == "NONE"
@@ -859,20 +868,20 @@ def test_target_delta_execution_uses_canonical_sizing_without_residual_policy() 
     assert summary.residual_submit_plan is None
     assert summary.buy_submit_plan is None
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["source"] == "target_delta"
-    assert summary.target_submit_plan["authority"] == "canonical_target_delta_sizing"
-    assert summary.target_submit_plan["intent_type"] == "target_delta_rebalance"
-    assert summary.target_submit_plan["strategy_context"] == "target_delta"
-    assert summary.target_submit_plan["side"] == "SELL"
-    assert summary.target_submit_plan["target_desired_qty"] == pytest.approx(0.0004998)
-    assert summary.target_submit_plan["qty"] == pytest.approx(0.0004)
-    assert summary.target_submit_plan["target_final_submitted_qty"] == pytest.approx(0.0004)
-    assert summary.target_submit_plan["target_exchange_constrained_qty"] == pytest.approx(0.0004)
-    assert summary.target_submit_plan["invariant_status"] == "passed"
-    assert summary.target_submit_plan["dust_policy"] == "exchange_step_remainder_tracked"
-    assert summary.target_submit_plan["submit_expected"] is True
-    assert summary.target_submit_plan["block_reason"] == "none"
-    assert summary.target_submit_plan["target_desired_qty"] == pytest.approx(
+    assert _submit_plan_payload(summary.target_submit_plan)["source"] == "target_delta"
+    assert _submit_plan_payload(summary.target_submit_plan)["authority"] == "canonical_target_delta_sizing"
+    assert _submit_plan_payload(summary.target_submit_plan)["intent_type"] == "target_delta_rebalance"
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_context"] == "target_delta"
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "SELL"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_desired_qty"] == pytest.approx(0.0004998)
+    assert _submit_plan_payload(summary.target_submit_plan)["qty"] == pytest.approx(0.0004)
+    assert _submit_plan_payload(summary.target_submit_plan)["target_final_submitted_qty"] == pytest.approx(0.0004)
+    assert _submit_plan_payload(summary.target_submit_plan)["target_exchange_constrained_qty"] == pytest.approx(0.0004)
+    assert _submit_plan_payload(summary.target_submit_plan)["invariant_status"] == "passed"
+    assert _submit_plan_payload(summary.target_submit_plan)["dust_policy"] == "exchange_step_remainder_tracked"
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["block_reason"] == "none"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_desired_qty"] == pytest.approx(
         summary.target_shadow_decision["target_submit_qty"]
     )
 
@@ -896,12 +905,12 @@ def test_target_delta_sell_floor_remainder_updates_or_reports_dust_target_state(
         object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
 
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["side"] == "SELL"
-    assert summary.target_submit_plan["qty"] == pytest.approx(0.0004)
-    assert summary.target_submit_plan["rejected_remainder"] == pytest.approx(0.0000998)
-    assert summary.target_submit_plan["dust_policy"] == "exchange_step_remainder_tracked"
-    assert summary.target_submit_plan["target_dust_classification"] == "executable_delta"
-    assert summary.target_submit_plan["invariant_status"] == "passed"
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "SELL"
+    assert _submit_plan_payload(summary.target_submit_plan)["qty"] == pytest.approx(0.0004)
+    assert _submit_plan_payload(summary.target_submit_plan)["rejected_remainder"] == pytest.approx(0.0000998)
+    assert _submit_plan_payload(summary.target_submit_plan)["dust_policy"] == "exchange_step_remainder_tracked"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_dust_classification"] == "executable_delta"
+    assert _submit_plan_payload(summary.target_submit_plan)["invariant_status"] == "passed"
 
 
 def test_target_delta_sell_floor_remainder_does_not_repeat_submit_when_remainder_below_min() -> None:
@@ -925,11 +934,11 @@ def test_target_delta_sell_floor_remainder_does_not_repeat_submit_when_remainder
     assert summary.target_submit_plan is not None
     assert summary.submit_expected is False
     assert summary.final_action == "HOLD_TARGET_TRUE_DUST"
-    assert summary.target_submit_plan["side"] == "NONE"
-    assert summary.target_submit_plan["submit_expected"] is False
-    assert summary.target_submit_plan["block_reason"] == "delta_below_exchange_min"
-    assert summary.target_submit_plan["target_position_truth_state"] == "converged"
-    assert summary.target_submit_plan["target_dust_classification"] == "true_dust"
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "NONE"
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is False
+    assert _submit_plan_payload(summary.target_submit_plan)["block_reason"] == "delta_below_exchange_min"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_position_truth_state"] == "converged"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_dust_classification"] == "true_dust"
     assert summary.target_shadow_decision["target_current_qty"] == pytest.approx(0.0000998)
     assert summary.target_shadow_decision["target_qty"] == pytest.approx(0.0)
 
@@ -955,11 +964,11 @@ def test_target_delta_buy_sizes_only_missing_delta() -> None:
         object.__setattr__(settings, "TARGET_EXPOSURE_KRW", old_target)
 
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["side"] == "BUY"
-    assert summary.target_submit_plan["qty"] == pytest.approx(0.0006)
-    assert summary.target_submit_plan["notional_krw"] == pytest.approx(60_000.0)
-    assert summary.target_submit_plan["authority"] == "canonical_target_delta_sizing"
-    assert summary.target_submit_plan["target_sizing"]["sizing_policy"] == "target_delta_exchange_floor_v1"
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "BUY"
+    assert _submit_plan_payload(summary.target_submit_plan)["qty"] == pytest.approx(0.0006)
+    assert _submit_plan_payload(summary.target_submit_plan)["notional_krw"] == pytest.approx(60_000.0)
+    assert _submit_plan_payload(summary.target_submit_plan)["authority"] == "canonical_target_delta_sizing"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_sizing"]["sizing_policy"] == "target_delta_exchange_floor_v1"
 
 
 def test_target_delta_buy_rebalance_blocked_by_strategy_performance_gate_when_live_armed() -> None:
@@ -984,19 +993,19 @@ def test_target_delta_buy_rebalance_blocked_by_strategy_performance_gate_when_li
     assert summary.submit_expected is False
     assert summary.final_action == "BLOCK_STRATEGY_PERFORMANCE_GATE"
     assert "STRATEGY_PERFORMANCE_BLOCKED" in summary.block_reason
-    assert summary.target_submit_plan["submit_expected"] is False
-    assert summary.target_submit_plan["final_action"] == "BLOCK_STRATEGY_PERFORMANCE_GATE"
-    assert summary.target_submit_plan["side"] == "BUY"
-    assert summary.target_submit_plan["target_delta_side"] == "BUY"
-    assert summary.target_submit_plan["qty"] == pytest.approx(0.0006)
-    assert summary.target_submit_plan["target_sizing"]["sizing_policy"] == "target_delta_exchange_floor_v1"
-    assert summary.target_submit_plan["invariant_status"] == "passed"
-    assert summary.target_submit_plan["strategy_performance_gate_blocked"] is True
-    assert summary.target_submit_plan["strategy_performance_gate_status"] == "blocked"
-    assert summary.target_submit_plan["strategy_performance_gate_enforced"] is True
-    assert summary.target_submit_plan["strategy_performance_gate_would_block_if_armed"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is False
+    assert _submit_plan_payload(summary.target_submit_plan)["final_action"] == "BLOCK_STRATEGY_PERFORMANCE_GATE"
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "BUY"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_delta_side"] == "BUY"
+    assert _submit_plan_payload(summary.target_submit_plan)["qty"] == pytest.approx(0.0006)
+    assert _submit_plan_payload(summary.target_submit_plan)["target_sizing"]["sizing_policy"] == "target_delta_exchange_floor_v1"
+    assert _submit_plan_payload(summary.target_submit_plan)["invariant_status"] == "passed"
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_blocked"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_status"] == "blocked"
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_enforced"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_would_block_if_armed"] is True
     assert "STRATEGY_EXPECTANCY_NEGATIVE" in str(
-        summary.target_submit_plan["strategy_performance_gate_reason_code"]
+        _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_reason_code"]
     )
 
 
@@ -1023,9 +1032,9 @@ def test_strategy_performance_gate_status_visible_but_not_enforced_when_unarmed(
     assert summary.target_submit_plan is not None
     assert summary.submit_expected is True
     assert summary.final_action == "REBALANCE_TO_TARGET"
-    assert summary.target_submit_plan["strategy_performance_gate_status"] == "blocked"
-    assert summary.target_submit_plan["strategy_performance_gate_enforced"] is False
-    assert summary.target_submit_plan["strategy_performance_gate_would_block_if_armed"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_status"] == "blocked"
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_enforced"] is False
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_would_block_if_armed"] is True
     assert summary.as_dict()["actual_primary_block_layer"] == "none"
 
 
@@ -1071,12 +1080,12 @@ def test_target_delta_hold_rebalance_buy_blocked_by_strategy_performance_gate_wh
         _restore_settings(old)
 
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["side"] == "BUY"
-    assert summary.target_submit_plan["submit_expected"] is False
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "BUY"
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is False
     assert summary.final_action == "BLOCK_STRATEGY_PERFORMANCE_GATE"
     assert "STRATEGY_PERFORMANCE_BLOCKED" in summary.block_reason
-    assert summary.target_submit_plan["target_sizing"] is not None
-    assert summary.target_submit_plan["strategy_performance_gate_sample_count"] == 30
+    assert _submit_plan_payload(summary.target_submit_plan)["target_sizing"] is not None
+    assert _submit_plan_payload(summary.target_submit_plan)["strategy_performance_gate_sample_count"] == 30
 
 
 def test_strategy_performance_gate_does_not_block_target_delta_sell() -> None:
@@ -1097,9 +1106,9 @@ def test_strategy_performance_gate_does_not_block_target_delta_sell() -> None:
         _restore_settings(old)
 
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["side"] == "SELL"
-    assert summary.target_submit_plan["submit_expected"] is True
-    assert summary.target_submit_plan["block_reason"] == "none"
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "SELL"
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["block_reason"] == "none"
     assert summary.final_action == "REBALANCE_TO_TARGET"
 
 
@@ -1123,10 +1132,10 @@ def test_strategy_performance_gate_does_not_block_recovery_or_flatten_commands_i
         _restore_settings(old)
 
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["side"] == "SELL"
-    assert summary.target_submit_plan["target_closeout_requested"] is True
-    assert summary.target_submit_plan["submit_expected"] is True
-    assert summary.target_submit_plan["block_reason"] == "none"
+    assert _submit_plan_payload(summary.target_submit_plan)["side"] == "SELL"
+    assert _submit_plan_payload(summary.target_submit_plan)["target_closeout_requested"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["block_reason"] == "none"
 
 
 def test_target_delta_ec2_reproduction_uses_settings_rules_when_payload_lacks_min_qty(
@@ -1180,11 +1189,11 @@ def test_target_delta_ec2_reproduction_uses_settings_rules_when_payload_lacks_mi
     assert summary.submit_expected is True
     assert summary.block_reason == "none"
     assert summary.target_submit_plan is not None
-    assert summary.target_submit_plan["submit_expected"] is True
-    assert summary.target_submit_plan["target_order_rule_min_qty"] == pytest.approx(0.0001)
-    assert summary.target_submit_plan["qty"] == pytest.approx(0.0006)
-    assert summary.target_submit_plan["target_desired_qty"] == pytest.approx(70_000.0 / 113_428_000.0)
-    assert summary.target_submit_plan["target_final_submitted_qty"] == pytest.approx(0.0006)
+    assert _submit_plan_payload(summary.target_submit_plan)["submit_expected"] is True
+    assert _submit_plan_payload(summary.target_submit_plan)["target_order_rule_min_qty"] == pytest.approx(0.0001)
+    assert _submit_plan_payload(summary.target_submit_plan)["qty"] == pytest.approx(0.0006)
+    assert _submit_plan_payload(summary.target_submit_plan)["target_desired_qty"] == pytest.approx(70_000.0 / 113_428_000.0)
+    assert _submit_plan_payload(summary.target_submit_plan)["target_final_submitted_qty"] == pytest.approx(0.0006)
 
 
 def test_target_delta_fails_closed_without_payload_effective_or_settings_rules(

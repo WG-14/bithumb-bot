@@ -44,7 +44,7 @@ class RunLoopCompatibilityPlanner:
         updated_ts: int,
         signal_handoff_fn: object,
     ) -> ExecutionPlanningResult:
-        return self.planner_factory().plan_strategy_decision(
+        return self.planner_factory().plan_diagnostic_legacy_context(
             conn,
             decision_context=decision_context,
             signal=signal,

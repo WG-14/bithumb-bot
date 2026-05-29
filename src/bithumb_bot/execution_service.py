@@ -336,19 +336,6 @@ class ExecutionSubmitPlan:
         )
         return payload
 
-    def __getitem__(self, key: str) -> object:
-        """Deprecated compatibility-only dict facade; not live submit authority."""
-        return self.as_dict()[key]
-
-    def get(self, key: str, default: object = None) -> object:
-        """Deprecated compatibility-only dict facade; not live submit authority."""
-        return self.as_dict().get(key, default)
-
-    def __contains__(self, key: object) -> bool:
-        """Deprecated compatibility-only dict facade; not live submit authority."""
-        return key in self.as_dict()
-
-
 EXECUTION_SUBMIT_PLAN_VALID_SOURCES = frozenset(
     {
         "target_delta",
@@ -665,6 +652,17 @@ def _request_execution_decision_payload(
     )
     if raw_execution_decision is not None and not isinstance(raw_execution_decision, dict):
         return None, "execution_decision_schema_not_object"
+    if (
+        _live_real_order_submit_plan_required()
+        and isinstance(raw_execution_decision, dict)
+        and any(
+            isinstance(raw_execution_decision.get(field), dict)
+            for field in ("target_submit_plan", "residual_submit_plan", "buy_submit_plan")
+        )
+        and request.execution_decision_summary is None
+        and getattr(request.execution_plan_bundle, "summary", None) is None
+    ):
+        return None, "live_real_order_dict_only_execution_decision_not_authority"
     typed_summary, typed_summary_error = require_typed_execution_decision_summary_for_live_real_order(
         request
     )
@@ -785,6 +783,14 @@ def require_typed_execution_decision_summary_for_live_real_order(
     request: SignalExecutionRequest,
 ) -> tuple[ExecutionDecisionSummary | None, str | None]:
     bundle_summary = getattr(request.execution_plan_bundle, "summary", None)
+    if (
+        request.execution_decision_summary is not None
+        and bundle_summary is not None
+        and isinstance(request.execution_decision_summary, ExecutionDecisionSummary)
+        and isinstance(bundle_summary, ExecutionDecisionSummary)
+        and request.execution_decision_summary.as_dict() != bundle_summary.as_dict()
+    ):
+        return None, "execution_decision_summary_bundle_mismatch"
     typed_summary = request.execution_decision_summary or bundle_summary
     if not _live_real_order_submit_plan_required():
         return typed_summary, None
@@ -795,6 +801,20 @@ def require_typed_execution_decision_summary_for_live_real_order(
     submit_plan_error = _live_real_order_typed_submit_plan_error(typed_summary)
     if submit_plan_error is not None:
         return None, submit_plan_error
+    bundle_plan = getattr(request.execution_plan_bundle, "submit_plan", None)
+    if bundle_plan is not None and not isinstance(bundle_plan, ExecutionSubmitPlan):
+        return None, "live_real_order_invalid_execution_plan_bundle_submit_plan"
+    summary_plan = (
+        typed_summary.typed_target_submit_plan()
+        or typed_summary.typed_residual_submit_plan()
+        or typed_summary.typed_buy_submit_plan()
+    )
+    if (
+        isinstance(bundle_plan, ExecutionSubmitPlan)
+        and summary_plan is not None
+        and bundle_plan.as_dict() != summary_plan.as_dict()
+    ):
+        return None, "execution_submit_plan_bundle_summary_mismatch"
     return typed_summary, None
 
 

@@ -71,6 +71,10 @@ COMMON_CANONICAL_DECISION_FIELDS_V2 = (
     "policy_input_hash",
     "policy_decision_hash",
     "replay_fingerprint_hash",
+    "runtime_decision_request_hash",
+    "runtime_strategy_set_manifest_hash",
+    "approved_profile_hash",
+    "execution_plan_bundle_hash",
     "execution_summary_hash",
     "execution_submit_plan_hash",
     "final_action",
@@ -80,6 +84,19 @@ COMMON_CANONICAL_DECISION_FIELDS_V2 = (
     "submit_plan_source",
     "submit_plan_authority",
     "execution_engine",
+    "decision_authority_source",
+    "decision_envelope_present",
+    "execution_plan_bundle_present",
+    "execution_evidence_source",
+    "typed_execution_summary_present",
+    "compatibility_fallback",
+    "legacy_context_planning_used",
+    "runtime_replay_planning_error",
+    "execution_plan_status",
+    "execution_plan_reason_code",
+    "artifact_grade",
+    "authority_plane",
+    "promotion_rejection_reason",
     "feature_snapshot_hash",
     "strategy_behavior_hash",
 )
@@ -156,6 +173,7 @@ PROMOTION_REQUIRED_CANONICAL_FIELDS = (
     "normalized_exposure_active",
     "exit_evaluations_hash",
     "execution_timing_policy_hash",
+    "execution_plan_bundle_hash",
     "execution_summary_hash",
     "execution_submit_plan_hash",
     "final_action",
@@ -223,6 +241,9 @@ class CanonicalDecisionValidation:
     reason_codes: tuple[str, ...]
 
 
+PROMOTION_TYPED_EXECUTION_EVIDENCE_SOURCE = "typed_execution_plan_bundle"
+
+
 def canonical_payload_hash(value: object) -> str:
     return sha256_prefixed(_stable_value(value))
 
@@ -252,6 +273,31 @@ def normalize_canonical_decision(payload: dict[str, Any]) -> dict[str, Any]:
     normalized["final_signal"] = str(payload.get("final_signal") or normalized["side"]).strip().upper()
     normalized["blocked"] = bool(payload.get("blocked"))
     normalized["blocked_filters"] = tuple(str(item) for item in payload.get("blocked_filters") or ())
+    for field in (
+        "compatibility_fallback",
+        "legacy_context_planning_used",
+        "typed_execution_summary_present",
+        "decision_envelope_present",
+        "execution_plan_bundle_present",
+    ):
+        if field in normalized:
+            normalized[field] = bool(payload.get(field))
+    for field in (
+        "runtime_decision_request_hash",
+        "runtime_strategy_set_manifest_hash",
+        "approved_profile_hash",
+        "execution_plan_bundle_hash",
+        "decision_authority_source",
+        "execution_evidence_source",
+        "runtime_replay_planning_error",
+        "execution_plan_status",
+        "execution_plan_reason_code",
+        "artifact_grade",
+        "authority_plane",
+        "promotion_rejection_reason",
+    ):
+        if field in normalized:
+            normalized[field] = str(payload.get(field) or "")
     if version >= CANONICAL_DECISION_CONTRACT_VERSION:
         feature_snapshot = _strategy_feature_snapshot(payload)
         strategy_payload = _strategy_behavior_payload(payload)
@@ -322,6 +368,11 @@ def validate_canonical_decision_payload(
             ]
         )
     if promotion_grade:
+        if int(normalized.get("decision_contract_version") or 0) >= CANONICAL_DECISION_CONTRACT_VERSION:
+            provenance_failures = _promotion_artifact_provenance_failures(payload, normalized)
+            for field, reason in provenance_failures:
+                missing.append(field)
+                reason_codes.extend([reason, "canonical_decision_incomplete"])
         authority = payload.get("position_authority")
         if not isinstance(authority, dict):
             missing.append("position_authority")
@@ -362,6 +413,35 @@ def validate_canonical_decision_payload(
         missing_fields=tuple(sorted(set(missing))),
         reason_codes=tuple(sorted(set(reason_codes))),
     )
+
+
+def validate_promotion_artifact(payload: dict[str, Any]) -> CanonicalDecisionValidation:
+    """Strict promotion-grade validation for canonical runtime/research artifacts."""
+    return validate_canonical_decision_payload(payload, promotion_grade=True)
+
+
+def _promotion_artifact_provenance_failures(
+    payload: dict[str, Any],
+    normalized: dict[str, Any],
+) -> list[tuple[str, str]]:
+    failures: list[tuple[str, str]] = []
+    if bool(payload.get("compatibility_fallback")):
+        failures.append(("compatibility_fallback", "canonical_promotion_compatibility_fallback"))
+    if bool(payload.get("legacy_context_planning_used")):
+        failures.append(("legacy_context_planning_used", "canonical_promotion_legacy_context_planning"))
+    if payload.get("execution_plan_bundle_present") is not True:
+        failures.append(("execution_plan_bundle_present", "canonical_promotion_execution_plan_bundle_missing"))
+    if _canonical_required_missing(normalized.get("execution_plan_bundle_hash")):
+        failures.append(("execution_plan_bundle_hash", "canonical_promotion_execution_plan_bundle_hash_missing"))
+    if payload.get("typed_execution_summary_present") is not True:
+        failures.append(("typed_execution_summary_present", "canonical_promotion_typed_execution_summary_missing"))
+    if str(payload.get("decision_authority_source") or "").strip() == "legacy_context":
+        failures.append(("decision_authority_source", "canonical_promotion_legacy_context_authority"))
+    if str(payload.get("runtime_replay_planning_error") or "").strip():
+        failures.append(("runtime_replay_planning_error", "canonical_promotion_runtime_replay_planning_error"))
+    if str(normalized.get("execution_evidence_source") or "").strip() != PROMOTION_TYPED_EXECUTION_EVIDENCE_SOURCE:
+        failures.append(("execution_evidence_source", "canonical_promotion_typed_execution_provenance_missing"))
+    return failures
 
 
 def runtime_decision_to_canonical_event(
@@ -487,6 +567,9 @@ def runtime_decision_to_canonical_event(
         "policy_input_hash": str(context.get("policy_input_hash") or ""),
         "policy_decision_hash": str(context.get("policy_decision_hash") or ""),
         "replay_fingerprint_hash": canonical_payload_hash(context.get("replay_fingerprint") or {}),
+        "runtime_decision_request_hash": str(context.get("runtime_decision_request_hash") or ""),
+        "runtime_strategy_set_manifest_hash": str(context.get("runtime_strategy_set_manifest_hash") or ""),
+        "approved_profile_hash": str(context.get("approved_profile_hash") or ""),
     }
     execution_evidence = _runtime_execution_plan_evidence(
         execution_plan_bundle=execution_plan_bundle,
@@ -508,6 +591,14 @@ def runtime_decision_to_canonical_event(
             "submit_plan_source": execution_evidence["submit_plan_source"],
             "submit_plan_authority": execution_evidence["submit_plan_authority"],
             "execution_engine": execution_evidence["execution_engine"],
+            "execution_plan_bundle_hash": execution_evidence["execution_plan_bundle_hash"],
+            "execution_evidence_source": execution_evidence["execution_evidence_source"],
+            "typed_execution_summary_present": bool(execution_evidence["typed_execution_summary_present"]),
+            "compatibility_fallback": bool(context.get("compatibility_fallback")),
+            "legacy_context_planning_used": bool(context.get("legacy_context_planning_used")),
+            "artifact_grade": str(execution_evidence["artifact_grade"]),
+            "authority_plane": str(execution_evidence["authority_plane"]),
+            "promotion_rejection_reason": str(execution_evidence["promotion_rejection_reason"]),
         }
     )
     payload.update(execution_evidence["observability"])
@@ -533,10 +624,18 @@ def runtime_decision_to_canonical_event(
         "decision_authority_source",
         "decision_envelope_present",
         "execution_plan_bundle_present",
+        "execution_plan_bundle_hash",
+        "execution_evidence_source",
+        "typed_execution_summary_present",
+        "compatibility_fallback",
+        "legacy_context_planning_used",
         "persistence_context_authoritative",
         "runtime_replay_planning_error",
         "execution_plan_status",
         "execution_plan_reason_code",
+        "artifact_grade",
+        "authority_plane",
+        "promotion_rejection_reason",
     ):
         if key in payload:
             normalized[key] = payload[key]
@@ -573,6 +672,10 @@ def research_decision_to_canonical_event(
     payload["policy_contract_hash"] = str(payload.get("policy_contract_hash") or "")
     payload["policy_input_hash"] = str(payload.get("policy_input_hash") or "")
     payload["policy_decision_hash"] = str(payload.get("policy_decision_hash") or "")
+    payload["runtime_decision_request_hash"] = str(payload.get("runtime_decision_request_hash") or "")
+    payload["runtime_strategy_set_manifest_hash"] = str(payload.get("runtime_strategy_set_manifest_hash") or "")
+    payload["approved_profile_hash"] = str(payload.get("approved_profile_hash") or "")
+    payload["execution_plan_bundle_hash"] = str(payload.get("execution_plan_bundle_hash") or "")
     payload["execution_summary_hash"] = str(payload.get("execution_summary_hash") or "")
     payload["execution_submit_plan_hash"] = str(payload.get("execution_submit_plan_hash") or "")
     payload["final_action"] = str(payload.get("final_action") or "")
@@ -582,6 +685,19 @@ def research_decision_to_canonical_event(
     payload["submit_plan_source"] = str(payload.get("submit_plan_source") or "")
     payload["submit_plan_authority"] = str(payload.get("submit_plan_authority") or "")
     payload["execution_engine"] = str(payload.get("execution_engine") or "")
+    payload["decision_authority_source"] = str(payload.get("decision_authority_source") or "")
+    payload["decision_envelope_present"] = bool(payload.get("decision_envelope_present"))
+    payload["execution_plan_bundle_present"] = bool(payload.get("execution_plan_bundle_present"))
+    payload["execution_evidence_source"] = str(payload.get("execution_evidence_source") or "")
+    payload["typed_execution_summary_present"] = bool(payload.get("typed_execution_summary_present"))
+    payload["compatibility_fallback"] = bool(payload.get("compatibility_fallback"))
+    payload["legacy_context_planning_used"] = bool(payload.get("legacy_context_planning_used"))
+    payload["runtime_replay_planning_error"] = str(payload.get("runtime_replay_planning_error") or "")
+    payload["execution_plan_status"] = str(payload.get("execution_plan_status") or "")
+    payload["execution_plan_reason_code"] = str(payload.get("execution_plan_reason_code") or "")
+    payload["artifact_grade"] = str(payload.get("artifact_grade") or "")
+    payload["authority_plane"] = str(payload.get("authority_plane") or "")
+    payload["promotion_rejection_reason"] = str(payload.get("promotion_rejection_reason") or "")
     normalized = normalize_canonical_decision(payload)
     if isinstance(payload.get("position_authority"), dict):
         normalized["position_authority"] = dict(payload["position_authority"])  # type: ignore[arg-type]
@@ -666,6 +782,19 @@ def _runtime_execution_plan_evidence(
         submit_plan_payload = None if submit_plan is None else submit_plan.as_dict()
         summary_payload = execution_plan_bundle.summary.as_dict()
         execution_engine = str(summary_payload.get("execution_engine") or "")
+        bundle_hash = str(execution_plan_bundle.content_hash())
+        observability = _runtime_execution_observability(
+            execution_plan_bundle=execution_plan_bundle,
+            runtime_replay_planning_error=runtime_replay_planning_error,
+        )
+        provenance = {
+            "execution_plan_bundle_hash": bundle_hash,
+            "execution_evidence_source": PROMOTION_TYPED_EXECUTION_EVIDENCE_SOURCE,
+            "typed_execution_summary_present": True,
+            "artifact_grade": "promotion_candidate",
+            "authority_plane": "typed_execution_plan_bundle",
+            "promotion_rejection_reason": str(observability.get("runtime_replay_planning_error") or ""),
+        }
         if submit_plan is None:
             return {
                 "execution_summary_hash": canonical_payload_hash(summary_payload),
@@ -677,10 +806,8 @@ def _runtime_execution_plan_evidence(
                 "submit_plan_source": "typed_execution_planner",
                 "submit_plan_authority": "typed_execution_planner",
                 "execution_engine": execution_engine,
-                "observability": _runtime_execution_observability(
-                    execution_plan_bundle=execution_plan_bundle,
-                    runtime_replay_planning_error=runtime_replay_planning_error,
-                ),
+                "observability": observability,
+                **provenance,
             }
         canonical_summary_payload = {
             "final_action": submit_plan.final_action,
@@ -700,10 +827,8 @@ def _runtime_execution_plan_evidence(
             "submit_plan_source": submit_plan.source,
             "submit_plan_authority": submit_plan.authority,
             "execution_engine": execution_engine,
-            "observability": _runtime_execution_observability(
-                execution_plan_bundle=execution_plan_bundle,
-                runtime_replay_planning_error=runtime_replay_planning_error,
-            ),
+            "observability": observability,
+            **provenance,
         }
 
     execution_decision = (
@@ -743,9 +868,16 @@ def _runtime_execution_plan_evidence(
                 "decision_authority_source": context.get("decision_authority_source", ""),
                 "decision_envelope_present": bool(context.get("decision_envelope_present")),
                 "execution_plan_bundle_present": bool(context.get("execution_plan_bundle_present")),
+                "execution_plan_bundle_hash": str(context.get("execution_plan_bundle_hash") or ""),
                 "persistence_context_authoritative": int(context.get("persistence_context_authoritative") or 0),
                 "runtime_replay_planning_error": runtime_replay_planning_error,
             },
+            "execution_plan_bundle_hash": str(context.get("execution_plan_bundle_hash") or ""),
+            "execution_evidence_source": "diagnostic_context_fallback",
+            "typed_execution_summary_present": False,
+            "artifact_grade": "diagnostic_only",
+            "authority_plane": "compatibility_context",
+            "promotion_rejection_reason": "context_fallback_execution_evidence",
         }
 
     execution_block_reason = block_reason or "none"
@@ -779,17 +911,27 @@ def _runtime_execution_plan_evidence(
         "execution_block_reason": execution_block_reason,
         "submit_plan_source": "none",
         "submit_plan_authority": "none",
-        "execution_engine": "none",
-        "observability": {
-            "decision_authority_source": context.get("decision_authority_source", ""),
-            "decision_envelope_present": bool(context.get("decision_envelope_present")),
-            "execution_plan_bundle_present": False,
-            "persistence_context_authoritative": int(context.get("persistence_context_authoritative") or 0),
-            "runtime_replay_planning_error": runtime_replay_planning_error,
-            "execution_plan_status": "ERROR" if runtime_replay_planning_error else "",
-            "execution_plan_reason_code": execution_block_reason if final_signal in {"BUY", "SELL"} else "",
-        },
-    }
+            "execution_engine": "none",
+            "observability": {
+                "decision_authority_source": context.get("decision_authority_source", ""),
+                "decision_envelope_present": bool(context.get("decision_envelope_present")),
+                "execution_plan_bundle_present": False,
+                "execution_plan_bundle_hash": "",
+                "persistence_context_authoritative": int(context.get("persistence_context_authoritative") or 0),
+                "runtime_replay_planning_error": runtime_replay_planning_error,
+                "execution_plan_status": "ERROR" if runtime_replay_planning_error else "",
+                "execution_plan_reason_code": execution_block_reason if final_signal in {"BUY", "SELL"} else "",
+            },
+            "execution_plan_bundle_hash": "",
+            "execution_evidence_source": "typed_execution_plan_bundle_missing_fail_closed",
+            "typed_execution_summary_present": False,
+            "artifact_grade": "diagnostic_only",
+            "authority_plane": "runtime_replay_fail_closed",
+            "promotion_rejection_reason": (
+                runtime_replay_planning_error
+                or "typed_execution_plan_bundle_missing"
+            ),
+        }
 
 
 def _runtime_execution_observability(
@@ -806,6 +948,7 @@ def _runtime_execution_observability(
             execution_plan_bundle.persistence_context.get("decision_envelope_present")
         ),
         "execution_plan_bundle_present": True,
+        "execution_plan_bundle_hash": str(execution_plan_bundle.content_hash()),
         "persistence_context_authoritative": int(
             execution_plan_bundle.persistence_context.get("persistence_context_authoritative") or 0
         ),
@@ -1115,6 +1258,11 @@ def _canonical_field_value(field: str, value: object) -> object:
         "effective_flat",
         "normalized_exposure_active",
         "submit_expected",
+        "decision_envelope_present",
+        "execution_plan_bundle_present",
+        "typed_execution_summary_present",
+        "compatibility_fallback",
+        "legacy_context_planning_used",
     }:
         if value is None:
             return None

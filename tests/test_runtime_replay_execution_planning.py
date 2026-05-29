@@ -6,6 +6,7 @@ from dataclasses import replace
 from bithumb_bot.canonical_decision import (
     build_runtime_replay_execution_plan_bundle,
     runtime_decision_to_canonical_event,
+    validate_promotion_artifact,
 )
 from bithumb_bot.core.sma_policy import EntryExecutionIntent, ExitExecutionIntent, PositionSnapshot, StrategyDecisionV2
 from bithumb_bot.research.backtest_kernel import _execution_plan_evidence, _research_execution_plan_bundle
@@ -202,6 +203,11 @@ def test_runtime_replay_buy_submit_evidence_comes_from_typed_plan() -> None:
         assert canonical[key] == research_evidence[key]
     assert canonical["decision_envelope_present"] is True
     assert canonical["execution_plan_bundle_present"] is True
+    assert canonical["execution_plan_bundle_hash"] == bundle.content_hash()
+    assert canonical["execution_evidence_source"] == "typed_execution_plan_bundle"
+    assert canonical["typed_execution_summary_present"] is True
+    assert canonical["artifact_grade"] == "promotion_candidate"
+    assert canonical["authority_plane"] == "typed_execution_plan_bundle"
     assert canonical["decision_authority_source"] == "DecisionEnvelope.strategy_decision"
     assert canonical["persistence_context_authoritative"] == 0
 
@@ -276,3 +282,39 @@ def test_runtime_replay_submit_signal_ignores_dict_only_execution_authority() ->
     assert canonical["execution_block_reason"] == "runtime_replay_execution_readiness_unavailable"
     assert canonical["submit_plan_source"] == "none"
     assert canonical["submit_plan_authority"] == "none"
+
+
+def test_runtime_execution_plan_evidence_context_fallback_is_diagnostic_only() -> None:
+    decision = StrategyDecision(
+        signal="HOLD",
+        reason="dict_only_hold",
+        context={
+            "strategy": "sma_with_filter",
+            "execution_decision": {
+                "execution_engine": "research_virtual",
+                "final_action": "STRATEGY_HOLD",
+                "submit_expected": False,
+                "pre_submit_proof_status": "not_required",
+                "block_reason": "none",
+            },
+            "decision_authority_source": "legacy_context",
+            "execution_plan_bundle_present": False,
+            "position_gate": _position_gate(),
+            "fee_authority": {"fee_source": "test", "degraded": False},
+            "order_rules": {"min_notional_krw": 5000.0},
+        },
+    )
+
+    canonical = runtime_decision_to_canonical_event(
+        decision,
+        market="KRW-BTC",
+        interval="1m",
+    ).as_dict()
+    validation = validate_promotion_artifact(canonical)
+
+    assert canonical["execution_evidence_source"] == "diagnostic_context_fallback"
+    assert canonical["artifact_grade"] == "diagnostic_only"
+    assert canonical["authority_plane"] == "compatibility_context"
+    assert canonical["promotion_rejection_reason"] == "context_fallback_execution_evidence"
+    assert validation.promotion_grade is False
+    assert "canonical_promotion_typed_execution_provenance_missing" in validation.reason_codes

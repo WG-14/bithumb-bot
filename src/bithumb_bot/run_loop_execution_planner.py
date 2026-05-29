@@ -760,17 +760,36 @@ class ExecutionPlanner:
         updated_ts: int,
         allow_legacy_context_planning: bool = False,
     ) -> ExecutionPlanningResult:
-        if self.strict_promotion_mode and not allow_legacy_context_planning:
+        return self._fail_closed_context(
+            decision_context=decision_context,
+            reason_code=(
+                "legacy_context_planning_diagnostic_only"
+                if allow_legacy_context_planning
+                else "legacy_context_planning_disabled"
+            ),
+        )
+
+    def plan_diagnostic_legacy_context(
+        self,
+        conn,
+        *,
+        decision_context: dict[str, object],
+        signal: str,
+        reason: str,
+        updated_ts: int,
+        allow_legacy_context_planning: bool = False,
+    ) -> ExecutionPlanningResult:
+        if not allow_legacy_context_planning:
             return self._fail_closed_context(
                 decision_context=decision_context,
                 reason_code="legacy_context_planning_disabled",
             )
-        if _live_real_order_submit_plan_required() and allow_legacy_context_planning:
+        if _live_real_order_submit_plan_required():
             return self._fail_closed_context(
                 decision_context=decision_context,
                 reason_code="legacy_context_planning_live_real_order_disabled",
             )
-        return self._plan_context(
+        return self._plan_diagnostic_context(
             conn,
             decision_context=decision_context,
             signal=signal,
@@ -846,7 +865,7 @@ class ExecutionPlanner:
             planning_error=planning_error,
         )
 
-    def _plan_context(
+    def _plan_diagnostic_context(
         self,
         conn,
         *,

@@ -26,6 +26,7 @@ from bithumb_bot.run_loop_execution_planner import (
 )
 from bithumb_bot.run_loop_compatibility import (
     LegacyDbDecisionCompatibilityRunner,
+    RunLoopCompatibilityPlanner,
     legacy_context_planning_allowed_for_compatibility,
 )
 from bithumb_bot.runtime_recovery_gate import RuntimeRecoveryGateService
@@ -267,19 +268,22 @@ def test_runtime_result_decision_envelope_preserves_typed_observability() -> Non
     assert context["persistence_context_authoritative"] == 0
 
 
-def test_execution_planner_plan_envelope_matches_legacy_context_summary_semantics() -> None:
+def test_diagnostic_execution_planner_legacy_context_matches_typed_summary_semantics() -> None:
     result = _runtime_result()
     envelope = DecisionEnvelope.from_runtime_result(result)
     planner = _planner()
 
     bundle = planner.plan_envelope(None, envelope, updated_ts=1_700_003_060_000)
-    legacy = planner.plan_strategy_decision(
+    legacy = RunLoopCompatibilityPlanner(
+        planner_factory=lambda: planner,
+        runtime_handoff_fn=object(),
+    ).plan_legacy_context(
         None,
         decision_context=envelope.as_persistence_context(),
         signal=result.decision.final_signal,
         reason=result.decision.final_reason,
         updated_ts=1_700_003_060_000,
-        allow_legacy_context_planning=True,
+        signal_handoff_fn=object(),
     )
 
     assert bundle.summary is not None
@@ -290,6 +294,9 @@ def test_execution_planner_plan_envelope_matches_legacy_context_summary_semantic
     assert bundle.persistence_context["persistence_context_authoritative"] == 0
     assert bundle.status is not None
     assert bundle.status.status == "BLOCKED"
+    assert legacy.context["promotion_grade"] is False
+    assert legacy.context["compatibility_fallback"] is True
+    assert legacy.context["legacy_context_planning_used"] is True
 
 
 def test_legacy_plan_strategy_decision_fails_closed_by_default() -> None:
@@ -311,7 +318,7 @@ def test_legacy_plan_strategy_decision_fails_closed_by_default() -> None:
     assert planning.context["persistence_context_authoritative"] == 0
 
 
-def test_legacy_plan_strategy_decision_fails_closed_for_live_real_order_even_when_opted_in() -> None:
+def test_production_execution_planner_rejects_legacy_context_even_when_opted_in() -> None:
     original = {
         "MODE": settings.MODE,
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
@@ -337,7 +344,7 @@ def test_legacy_plan_strategy_decision_fails_closed_for_live_real_order_even_whe
             object.__setattr__(settings, key, value)
 
     assert planning.execution_decision_summary is None
-    assert planning.planning_error == "legacy_context_planning_live_real_order_disabled"
+    assert planning.planning_error == "legacy_context_planning_diagnostic_only"
     assert planning.context["submit_expected"] is False
 
 

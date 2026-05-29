@@ -9,6 +9,7 @@ from bithumb_bot.execution_service import (
     ExecutionSubmitPlan,
     TypedExecutionPlanningInput,
 )
+from bithumb_bot.run_loop_compatibility import RunLoopCompatibilityPlanner
 from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 
 
@@ -84,7 +85,7 @@ def _typed_decision(
     )
 
 
-def test_run_loop_execution_planner_materializes_context_with_policy_hashes() -> None:
+def test_diagnostic_legacy_equivalence_cannot_create_promotion_artifact() -> None:
     plan = ExecutionSubmitPlan(
         side="BUY",
         source="target_delta",
@@ -114,7 +115,10 @@ def test_run_loop_execution_planner_materializes_context_with_policy_hashes() ->
         summary_builder=lambda **_kwargs: _summary(target_plan=plan),
     )
 
-    result = planner.plan_strategy_decision(
+    result = RunLoopCompatibilityPlanner(
+        planner_factory=lambda: planner,
+        runtime_handoff_fn=object(),
+    ).plan_legacy_context(
         object(),
         decision_context={
             "strategy": "sma_with_filter",
@@ -124,7 +128,7 @@ def test_run_loop_execution_planner_materializes_context_with_policy_hashes() ->
         signal="BUY",
         reason="cross_up",
         updated_ts=123,
-        allow_legacy_context_planning=True,
+        signal_handoff_fn=object(),
     )
 
     assert result.planning_error is None
@@ -140,18 +144,36 @@ def test_run_loop_execution_planner_materializes_context_with_policy_hashes() ->
     assert result.context["recommended_next_action"] == "regenerate_decision_with_typed_execution_authority"
 
 
-def test_run_loop_execution_planner_failure_returns_block_recovery_payload() -> None:
-    planner = ExecutionPlanner(
-        readiness_snapshot_builder=lambda _conn: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
-
-    result = planner.plan_strategy_decision(
+def test_execution_planner_rejects_legacy_context_planning_even_when_requested() -> None:
+    result = ExecutionPlanner().plan_strategy_decision(
         object(),
         decision_context={"strategy": "sma_with_filter"},
         signal="BUY",
         reason="cross_up",
         updated_ts=123,
         allow_legacy_context_planning=True,
+    )
+
+    assert result.execution_decision_summary is None
+    assert result.context["promotion_grade"] is False
+    assert result.context["execution_block_reason"] == "legacy_context_planning_diagnostic_only"
+
+
+def test_run_loop_execution_planner_failure_returns_block_recovery_payload() -> None:
+    planner = ExecutionPlanner(
+        readiness_snapshot_builder=lambda _conn: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    result = RunLoopCompatibilityPlanner(
+        planner_factory=lambda: planner,
+        runtime_handoff_fn=object(),
+    ).plan_legacy_context(
+        object(),
+        decision_context={"strategy": "sma_with_filter"},
+        signal="BUY",
+        reason="cross_up",
+        updated_ts=123,
+        signal_handoff_fn=object(),
     )
 
     assert result.execution_decision_summary is None

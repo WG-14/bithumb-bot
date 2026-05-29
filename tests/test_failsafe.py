@@ -30,6 +30,15 @@ from bithumb_bot.strategy_policy_contract import EntryExecutionIntent, PositionS
 from bithumb_bot.target_position import TargetPositionState
 
 
+def _submit_plan_payload(plan: object | None) -> dict[str, object]:
+    assert plan is not None
+    as_dict = getattr(plan, "as_dict", None)
+    assert callable(as_dict)
+    payload = as_dict()
+    assert isinstance(payload, dict)
+    return payload
+
+
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path):
     from bithumb_bot.config import settings as current_settings
@@ -1122,8 +1131,8 @@ def test_residual_sell_candidate_is_modeled_separately_from_strategy_sell_author
     assert decision.residual_sell_candidate is not None
     assert decision.residual_sell_candidate["qty"] == pytest.approx(0.0004998)
     assert decision.residual_submit_plan is not None
-    assert decision.residual_submit_plan["side"] == "SELL"
-    assert decision.residual_submit_plan["source"] == "residual_inventory"
+    assert _submit_plan_payload(decision.residual_submit_plan)["side"] == "SELL"
+    assert _submit_plan_payload(decision.residual_submit_plan)["source"] == "residual_inventory"
 
 
 def test_residual_sell_candidate_is_absent_for_unsellable_tracked_tiny_dust() -> None:
@@ -1305,12 +1314,12 @@ def test_residual_sell_policy_dry_run_builds_plan_without_broker_submit() -> Non
     assert decision.submit_expected is False
     assert decision.block_reason == "residual_live_sell_mode_dry_run"
     assert decision.residual_submit_plan is not None
-    assert decision.residual_submit_plan["qty"] == pytest.approx(0.0004998)
-    assert decision.residual_submit_plan["would_submit_pipeline"] == "standard"
-    assert decision.residual_submit_plan["would_source"] == "residual_inventory"
-    assert decision.residual_submit_plan["would_authority"] == "residual_inventory_policy"
-    assert decision.residual_submit_plan["would_submit_side"] == "SELL"
-    assert decision.residual_submit_plan["would_submit_qty"] == pytest.approx(0.0004998)
+    assert _submit_plan_payload(decision.residual_submit_plan)["qty"] == pytest.approx(0.0004998)
+    assert _submit_plan_payload(decision.residual_submit_plan)["would_submit_pipeline"] == "standard"
+    assert _submit_plan_payload(decision.residual_submit_plan)["would_source"] == "residual_inventory"
+    assert _submit_plan_payload(decision.residual_submit_plan)["would_authority"] == "residual_inventory_policy"
+    assert _submit_plan_payload(decision.residual_submit_plan)["would_submit_side"] == "SELL"
+    assert _submit_plan_payload(decision.residual_submit_plan)["would_submit_qty"] == pytest.approx(0.0004998)
 
     broker = _ResidualFakeBroker()
     service = LiveSignalExecutionService(broker=broker, executor=lambda *_a, **_k: None, harmless_dust_recorder=lambda **_k: False)
@@ -1347,9 +1356,11 @@ def test_residual_sell_intent_key_is_stable_for_same_decision() -> None:
 
     assert first.residual_submit_plan is not None
     assert second.residual_submit_plan is not None
-    assert first.residual_submit_plan["idempotency_key"] == second.residual_submit_plan["idempotency_key"]
-    assert first.residual_submit_plan["intent_type"] == "residual_close"
-    assert first.residual_submit_plan["strategy_context"] == "residual_inventory_policy"
+    assert _submit_plan_payload(first.residual_submit_plan)["idempotency_key"] == _submit_plan_payload(
+        second.residual_submit_plan
+    )["idempotency_key"]
+    assert _submit_plan_payload(first.residual_submit_plan)["intent_type"] == "residual_close"
+    assert _submit_plan_payload(first.residual_submit_plan)["strategy_context"] == "residual_inventory_policy"
 
 
 def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_authority() -> None:
@@ -1366,7 +1377,7 @@ def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_
     assert decision.submit_expected is True
     assert decision.strategy_sell_candidate is None
     assert decision.residual_submit_plan is not None
-    assert decision.residual_submit_plan["authority"] == "residual_inventory_policy"
+    assert _submit_plan_payload(decision.residual_submit_plan)["authority"] == "residual_inventory_policy"
 
     broker = _ResidualFakeBroker()
     executor_calls: list[dict[str, object]] = []
@@ -1862,6 +1873,41 @@ def test_live_real_order_rejects_raw_dict_submit_plan_even_when_summary_present(
     assert result is None
     assert executor_calls == []
     assert "live_real_order_missing_typed_submit_plan:target_submit_plan" in caplog.text
+
+
+def test_live_real_order_rejects_dict_only_submit_plan_even_with_valid_shape(caplog) -> None:
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    executor_calls: list[dict[str, object]] = []
+    service = LiveSignalExecutionService(
+        broker=_ResidualFakeBroker(),
+        executor=lambda *_args, **kwargs: executor_calls.append(dict(kwargs)) or {"status": "unexpected"},
+        harmless_dust_recorder=lambda **_k: False,
+    )
+
+    result = service.execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=115_000_000.0,
+            decision_context={
+                "execution_decision": {
+                    "execution_engine": "target_delta",
+                    "final_action": "REBALANCE_TO_TARGET",
+                    "submit_expected": True,
+                    "pre_submit_proof_status": "passed",
+                    "block_reason": "none",
+                    "target_submit_plan": _valid_target_submit_plan(),
+                }
+            },
+        )
+    )
+
+    assert result is None
+    assert executor_calls == []
+    assert "live_real_order_dict_only_execution_decision_not_authority" in caplog.text
 
 
 def test_live_real_order_rejects_typed_summary_serialized_context_mismatch(caplog) -> None:
@@ -2537,13 +2583,13 @@ def test_residual_buy_sizing_modes_telemetry_and_delta() -> None:
     assert telemetry.buy_delta_krw == pytest.approx(42_184.0)
     assert telemetry.submit_expected is True
     assert telemetry.buy_submit_plan is not None
-    assert telemetry.buy_submit_plan["notional_krw"] == pytest.approx(100_000.0)
+    assert _submit_plan_payload(telemetry.buy_submit_plan)["notional_krw"] == pytest.approx(100_000.0)
     assert telemetry.block_reason == "residual_buy_sizing_mode_telemetry"
 
     object.__setattr__(settings, "RESIDUAL_BUY_SIZING_MODE", "delta")
     delta = build_execution_decision_summary(decision_context=context, raw_signal="BUY", final_signal="BUY")
     assert delta.buy_submit_plan is not None
-    assert delta.buy_submit_plan["notional_krw"] == pytest.approx(42_184.0)
+    assert _submit_plan_payload(delta.buy_submit_plan)["notional_krw"] == pytest.approx(42_184.0)
     assert delta.submit_expected is True
     assert delta.block_reason == "none"
 
