@@ -19,6 +19,76 @@ class StartupController:
     position_summary: Callable[[], str]
     recommended_commands: Callable[..., list[str]]
     auto_recovery_allowed: Callable[..., bool]
+    broker_factory: Callable[[], object | tuple[object, object]] | None = None
+    initial_reconcile: Callable[[object], None] | None = None
+    halt_on_startup_failure: Callable[..., object] | None = None
+    enable_trading: Callable[[], None] | None = None
+    set_resume_gate: Callable[..., None] | None = None
+
+    def prepare_runtime_start(self, *, live_mode: bool) -> StartupResult:
+        persisted = self.evaluate_persisted_halt()
+        if persisted.status != "READY":
+            return persisted
+
+        broker = None
+        if live_mode:
+            if self.broker_factory is None or self.initial_reconcile is None:
+                return StartupResult(
+                    status="BLOCKED",
+                    reason_code="STARTUP_BROKER_BOUNDARY_MISSING",
+                    startup_gate_reason="startup broker/reconcile dependency is not configured",
+                    evidence={"live_mode": True, "dependency_missing": True},
+                )
+            try:
+                broker_result = self.broker_factory()
+                broker = broker_result[0] if isinstance(broker_result, tuple) else broker_result
+                self.initial_reconcile(broker)
+            except Exception as exc:
+                reason = f"initial reconcile failed ({type(exc).__name__}): {exc}"
+                transition = None
+                if self.halt_on_startup_failure is not None:
+                    transition = self.halt_on_startup_failure(
+                        reason_code="INITIAL_RECONCILE_FAILED",
+                        reason=reason,
+                        unresolved=True,
+                    )
+                return StartupResult(
+                    status="BLOCKED",
+                    broker=broker,
+                    reason_code="INITIAL_RECONCILE_FAILED",
+                    startup_gate_reason=reason,
+                    halt_transition=transition,
+                    evidence={"live_mode": True, "initial_reconcile": "failed"},
+                )
+
+        gate = self.evaluate_startup_gate()
+        if gate.status == "DEGRADED_RECOVERY_CONTINUE":
+            if self.enable_trading is not None:
+                self.enable_trading()
+            if self.set_resume_gate is not None:
+                self.set_resume_gate(blocked=True, reason=gate.startup_gate_reason)
+        if gate.status != "READY":
+            transition = gate.halt_transition
+            if gate.status == "BLOCKED" and self.halt_on_startup_failure is not None:
+                transition = self.halt_on_startup_failure(
+                    reason_code="STARTUP_SAFETY_GATE",
+                    reason=str(gate.startup_gate_reason or "startup safety gate blocked"),
+                    unresolved=True,
+                )
+            return StartupResult(
+                status=gate.status,
+                broker=broker,
+                startup_gate_reason=gate.startup_gate_reason,
+                reason_code=gate.reason_code,
+                operator_event=gate.operator_event,
+                halt_transition=transition,
+                evidence={**gate.evidence, "live_mode": live_mode},
+            )
+        return StartupResult(
+            status="READY",
+            broker=broker,
+            evidence={"live_mode": live_mode, "startup_gate": "clear"},
+        )
 
     def evaluate_persisted_halt(self) -> StartupResult:
         self.stale_initial_reconcile_clearer()

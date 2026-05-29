@@ -15,6 +15,7 @@ class ResumeGatePreparation:
     initial_reconcile_halt_cleared: bool
     live_execution_broker_halt_cleared: bool
     risk_state_mismatch_halt_cleared: bool
+    clearance_artifacts: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,37 +121,88 @@ def classify_startup_gate_reason(
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class RuntimeRecoveryGateService:
     """Small service boundary for recovery/readiness gate orchestration."""
 
     startup_gate_evaluator: Callable[[], str | None]
-    stale_initial_reconcile_halt_clearer: Callable[[], bool]
-    stale_live_execution_broker_halt_clearer: Callable[..., bool]
-    stale_risk_state_mismatch_halt_clearer: Callable[..., bool]
+    initial_reconcile_halt_evaluator: Callable[..., object]
+    live_execution_broker_halt_evaluator: Callable[..., object]
+    risk_state_mismatch_halt_evaluator: Callable[..., object]
     state_snapshot: Callable[[], object]
     startup_gate_reason_classifier: Callable[..., tuple[str, str]] = classify_startup_gate_reason
     resume_blocker_factory: Callable[..., object] = resume_blocker
 
+    def __init__(
+        self,
+        *,
+        startup_gate_evaluator: Callable[[], str | None],
+        initial_reconcile_halt_evaluator: Callable[..., object] | None = None,
+        live_execution_broker_halt_evaluator: Callable[..., object] | None = None,
+        risk_state_mismatch_halt_evaluator: Callable[..., object] | None = None,
+        state_snapshot: Callable[[], object],
+        startup_gate_reason_classifier: Callable[..., tuple[str, str]] = classify_startup_gate_reason,
+        resume_blocker_factory: Callable[..., object] = resume_blocker,
+        stale_initial_reconcile_halt_clearer: Callable[[], bool] | None = None,
+        stale_live_execution_broker_halt_clearer: Callable[..., bool] | None = None,
+        stale_risk_state_mismatch_halt_clearer: Callable[..., bool] | None = None,
+    ) -> None:
+        object.__setattr__(self, "startup_gate_evaluator", startup_gate_evaluator)
+        object.__setattr__(
+            self,
+            "initial_reconcile_halt_evaluator",
+            initial_reconcile_halt_evaluator
+            or (lambda **_kwargs: stale_initial_reconcile_halt_clearer() if stale_initial_reconcile_halt_clearer else False),
+        )
+        object.__setattr__(
+            self,
+            "live_execution_broker_halt_evaluator",
+            live_execution_broker_halt_evaluator
+            or (lambda **kwargs: stale_live_execution_broker_halt_clearer(**kwargs) if stale_live_execution_broker_halt_clearer else False),
+        )
+        object.__setattr__(
+            self,
+            "risk_state_mismatch_halt_evaluator",
+            risk_state_mismatch_halt_evaluator
+            or (lambda **kwargs: stale_risk_state_mismatch_halt_clearer(**kwargs) if stale_risk_state_mismatch_halt_clearer else False),
+        )
+        object.__setattr__(self, "state_snapshot", state_snapshot)
+        object.__setattr__(self, "startup_gate_reason_classifier", startup_gate_reason_classifier)
+        object.__setattr__(self, "resume_blocker_factory", resume_blocker_factory)
+
     def prepare_resume_gate(self) -> ResumeGatePreparation:
-        initial_cleared = bool(self.stale_initial_reconcile_halt_clearer())
         startup_gate_reason = self.startup_gate_evaluator()
-        broker_cleared = bool(
-            self.stale_live_execution_broker_halt_clearer(
-                startup_gate_reason=startup_gate_reason
-            )
+        initial_clearance = self.initial_reconcile_halt_evaluator(
+            startup_gate_reason=startup_gate_reason
         )
-        risk_cleared = bool(
-            self.stale_risk_state_mismatch_halt_clearer(
-                startup_gate_reason=startup_gate_reason
-            )
+        broker_clearance = self.live_execution_broker_halt_evaluator(
+            startup_gate_reason=startup_gate_reason
         )
-        startup_gate_reason = self.startup_gate_evaluator()
+        risk_clearance = self.risk_state_mismatch_halt_evaluator(
+            startup_gate_reason=startup_gate_reason
+        )
+
+        def _allowed(clearance: object) -> bool:
+            return bool(getattr(clearance, "allowed", clearance))
+
+        def _artifact(clearance: object) -> dict[str, object]:
+            as_dict = getattr(clearance, "as_dict", None)
+            if callable(as_dict):
+                payload = as_dict()
+                if isinstance(payload, dict):
+                    return payload
+            return {"allowed": _allowed(clearance)}
+
         return ResumeGatePreparation(
             startup_gate_reason=startup_gate_reason,
-            initial_reconcile_halt_cleared=initial_cleared,
-            live_execution_broker_halt_cleared=broker_cleared,
-            risk_state_mismatch_halt_cleared=risk_cleared,
+            initial_reconcile_halt_cleared=_allowed(initial_clearance),
+            live_execution_broker_halt_cleared=_allowed(broker_clearance),
+            risk_state_mismatch_halt_cleared=_allowed(risk_clearance),
+            clearance_artifacts=(
+                _artifact(initial_clearance),
+                _artifact(broker_clearance),
+                _artifact(risk_clearance),
+            ),
         )
 
     def startup_safety_resume_blockers(self, startup_gate_reason: str | None) -> list[object]:

@@ -474,7 +474,8 @@ def test_engine_import_boundary_stays_thin_for_runtime_entrypoint() -> None:
     }
 
     assert violations == {}
-    assert "from .runtime import runner as _runner" in source
+    assert "from .runtime.runner import (" in source
+    assert "sys.modules[__name__]" not in source
     assert "from .operator_repair_service import" not in source
     assert "from .operator_notification_service import" not in source
     assert "from .operator_flatten_service import" not in source

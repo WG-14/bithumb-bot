@@ -1,18 +1,13 @@
 ﻿from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass
 from threading import Lock
 
-from .config import settings
 from .db_core import ensure_db
 from .oms import OPEN_ORDER_STATUSES
-from .reason_codes import HALT_ENTERED, STARTUP_BLOCKED
-from .observability import safety_event
 from .sqlite_resilience import run_with_locked_db_retry
-from .dust import build_dust_display_context, build_position_state_model
-from .lifecycle import summarize_position_lots
+from .runtime.halt_state_projector import HaltStateProjector
 
 HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
 _HEALTH_SUMMARY_MAX_LEN = 2400
@@ -200,9 +195,6 @@ class RuntimeState:
 
 _STATE = RuntimeState()
 _LOCK = Lock()
-_LOG = logging.getLogger(__name__)
-
-
 def _sync_state_from_persisted_locked() -> None:
     persisted = _read_persisted_state()
     if persisted is None:
@@ -828,6 +820,7 @@ def disable_trading_until(
     halt_new_orders_blocked: bool = False,
     unresolved: bool = False,
     attempt_flatten: bool = False,
+    halt_projection: dict[str, object] | None = None,
 ) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
@@ -844,48 +837,26 @@ def disable_trading_until(
         _STATE.halt_position_present = False
         _STATE.halt_open_orders_present = False
         _STATE.halt_operator_action_required = bool(unresolved)
-        if halt_new_orders_blocked:
-            conn = ensure_db()
-            try:
-                open_row = conn.execute(
-                    "SELECT COUNT(*) AS open_count FROM orders WHERE status IN ({})".format(",".join("?" for _ in OPEN_ORDER_STATUSES)),
-                    OPEN_ORDER_STATUSES,
-                ).fetchone()
-                portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-                lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
-                lot_definition = getattr(lot_snapshot, "lot_definition", None)
-            finally:
-                conn.close()
-            open_count = int(open_row["open_count"] if open_row else 0)
-            asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
-            dust_context = build_dust_display_context(_STATE.last_reconcile_metadata)
-            position_state = build_position_state_model(
-                raw_qty_open=asset_qty,
-                metadata_raw=_STATE.last_reconcile_metadata,
-                raw_total_asset_qty=max(
-                    asset_qty,
-                    float(lot_snapshot.raw_total_asset_qty),
-                    float(dust_context.raw_holdings.broker_qty),
-                ),
-                open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
-                dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
-                open_lot_count=int(lot_snapshot.open_lot_count),
-                dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
-                internal_lot_size=(None if lot_definition is None else lot_definition.internal_lot_size),
-                min_qty=(None if lot_definition is None else lot_definition.min_qty),
-                qty_step=(None if lot_definition is None else lot_definition.qty_step),
-                min_notional_krw=(None if lot_definition is None else lot_definition.min_notional_krw),
-                max_qty_decimals=(None if lot_definition is None else lot_definition.max_qty_decimals),
-            )
+        if halt_new_orders_blocked and halt_projection is not None:
+            open_count = int(halt_projection.get("open_count", 0) or 0)
+            position_present = bool(halt_projection.get("position_present", False))
+            dust_only_remainder = bool(halt_projection.get("dust_only_remainder", False))
             _STATE.halt_open_orders_present = open_count > 0
-            _STATE.halt_position_present = bool(position_state.normalized_exposure.has_any_position_residue)
+            _STATE.halt_position_present = position_present
             _STATE.halt_operator_action_required = bool(
                 unresolved
                 or _STATE.halt_open_orders_present
                 or _STATE.halt_position_present
-                or bool(position_state.normalized_exposure.has_dust_only_remainder)
+                or dust_only_remainder
             )
         _persist_state(_STATE)
+
+
+def project_halt_state() -> dict[str, object]:
+    state = snapshot()
+    return HaltStateProjector(db_factory=ensure_db).project_from_db(
+        metadata_raw=state.last_reconcile_metadata
+    )
 
 
 def enter_halt(
@@ -895,6 +866,7 @@ def enter_halt(
     unresolved: bool,
     attempt_flatten: bool = False,
 ) -> None:
+    halt_projection = project_halt_state()
     disable_trading_until(
         float("inf"),
         reason=reason,
@@ -902,16 +874,7 @@ def enter_halt(
         halt_new_orders_blocked=True,
         unresolved=unresolved,
         attempt_flatten=attempt_flatten,
-    )
-    _LOG.error(
-        safety_event(
-            "trading_halted",
-            reason_code=HALT_ENTERED,
-            state_to="HALTED",
-            unresolved=int(unresolved),
-            halt_detail_code=reason_code,
-            reason=reason,
-        )
+        halt_projection=halt_projection,
     )
 
 

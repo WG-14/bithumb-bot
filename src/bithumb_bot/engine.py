@@ -1,7 +1,57 @@
 from __future__ import annotations
 
-import sys
+from .runtime.runner import (
+    ResumeBlocker,
+    _attempt_open_order_cancellation,
+    _classify_balance_split_blocker,
+    _close_guard_ms,
+    _is_closed_candle,
+    _legacy_db_strategy_fallback_allowed,
+    _load_previous_target_exposure_for_run_loop,
+    _persist_target_position_state_for_run_loop,
+    _promotion_grade_typed_runtime_decision_required,
+    _resolve_target_position_state_for_run_loop,
+    _revalidate_cleanup_state_after_failure,
+    _select_latest_closed_candle,
+    _typed_runtime_handoff_failure_reason,
+    authoritative_execution_signal_for_trade,
+    build_resume_guidance,
+    build_signal_execution_request,
+    compute_strategy_decision_snapshot,
+    evaluate_restart_readiness,
+    evaluate_resume_eligibility,
+    evaluate_startup_safety_gate,
+    get_health_status,
+    get_stale_risk_state_mismatch_halt_diagnostics,
+    maybe_clear_stale_initial_reconcile_halt,
+    perform_panic_stop_cleanup,
+    run_loop,
+)
 
-from .runtime import runner as _runner
-
-sys.modules[__name__] = _runner
+__all__ = [
+    "ResumeBlocker",
+    "_attempt_open_order_cancellation",
+    "_classify_balance_split_blocker",
+    "_close_guard_ms",
+    "_is_closed_candle",
+    "_legacy_db_strategy_fallback_allowed",
+    "_load_previous_target_exposure_for_run_loop",
+    "_persist_target_position_state_for_run_loop",
+    "_promotion_grade_typed_runtime_decision_required",
+    "_resolve_target_position_state_for_run_loop",
+    "_revalidate_cleanup_state_after_failure",
+    "_select_latest_closed_candle",
+    "_typed_runtime_handoff_failure_reason",
+    "authoritative_execution_signal_for_trade",
+    "build_resume_guidance",
+    "build_signal_execution_request",
+    "compute_strategy_decision_snapshot",
+    "evaluate_restart_readiness",
+    "evaluate_resume_eligibility",
+    "evaluate_startup_safety_gate",
+    "get_health_status",
+    "get_stale_risk_state_mismatch_halt_diagnostics",
+    "maybe_clear_stale_initial_reconcile_halt",
+    "perform_panic_stop_cleanup",
+    "run_loop",
+]

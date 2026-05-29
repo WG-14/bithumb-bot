@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from .. import runtime_state
+
 
 @dataclass(frozen=True)
 class RuntimeStateStore:
@@ -12,4 +14,8 @@ class RuntimeStateStore:
         return self.snapshot_reader()
 
 
-__all__ = ["RuntimeStateStore"]
+def pause_trading_until(epoch_sec: float, reason: str | None = None) -> None:
+    runtime_state.disable_trading_until(epoch_sec, reason=reason)
+
+
+__all__ = ["RuntimeStateStore", "pause_trading_until"]

@@ -3,10 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
-from ..observability import safety_event
 from ..reason_codes import CANCEL_FAILURE
 from .lifecycle_artifacts import SafetyDecision, StateTransitionResult
-from .operator_event_composer import OperatorEventComposer
+from .operator_event_composer import (
+    OperatorEventComposer,
+    format_operator_next_action,
+    operator_compact_summary,
+    operator_hint_command,
+    recommended_operator_commands,
+)
 
 
 @dataclass(frozen=True)
@@ -42,13 +47,13 @@ class SafetyController:
     now_ms: Callable[[], int]
     live_dry_run: Callable[[], bool]
 
-    def halt_trading(self, reason: HaltReason, *, unresolved: bool = False, attempt_flatten: bool = False) -> SafetyDecision:
-        self.enter_halt(
-            reason_code=reason.code,
-            reason=reason.detail,
-            unresolved=unresolved,
-            attempt_flatten=attempt_flatten,
-        )
+    def evaluate_halt(
+        self,
+        reason: HaltReason,
+        *,
+        unresolved: bool = False,
+        attempt_flatten: bool = False,
+    ) -> SafetyDecision:
         halt_state = self.state_snapshot()
         _resume_allowed, resume_blockers = self.resume_evaluator()
         latest_client_order_id, latest_exchange_order_id = self.latest_order_identifiers()
@@ -107,13 +112,12 @@ class SafetyController:
                 ),
             },
         )
-        self.notification_sender.send_event(event)
         transition = StateTransitionResult(
-            status="applied",
+            status="pending",
             reason_code=reason.code,
             state_from="READY",
             state_to="HALTED",
-            applied=True,
+            applied=False,
         )
         return SafetyDecision(
             action="HALT",
@@ -126,6 +130,54 @@ class SafetyController:
             evidence={"resume_blocker_count": len(resume_blockers)},
         )
 
+    def apply(self, decision: SafetyDecision) -> StateTransitionResult:
+        if decision.action != "HALT":
+            return StateTransitionResult(
+                status="not_applied",
+                reason_code=decision.reason_code,
+                state_from=None,
+                state_to=None,
+                applied=False,
+                evidence=decision.as_dict(),
+            )
+        self.enter_halt(
+            reason_code=decision.reason_code,
+            reason=decision.reason,
+            unresolved=decision.unresolved,
+            attempt_flatten=decision.attempt_flatten,
+        )
+        if decision.operator_event:
+            self.notification_sender.send_event(decision.operator_event)
+        return StateTransitionResult(
+            status="applied",
+            reason_code=decision.reason_code,
+            state_from="READY",
+            state_to="HALTED",
+            applied=True,
+            evidence=decision.as_dict(),
+        )
+
+    def halt_trading(self, reason: HaltReason, *, unresolved: bool = False, attempt_flatten: bool = False) -> SafetyDecision:
+        decision = self.evaluate_halt(
+            reason,
+            unresolved=unresolved,
+            attempt_flatten=attempt_flatten,
+        )
+        transition = self.apply(decision)
+        return SafetyDecision(
+            action=decision.action,
+            reason_code=decision.reason_code,
+            reason=decision.reason,
+            unresolved=decision.unresolved,
+            attempt_flatten=decision.attempt_flatten,
+            state_transition=transition,
+            operator_event=decision.operator_event,
+            input_hash=decision.input_hash,
+            evidence_hash=decision.evidence_hash,
+            decision_hash=decision.decision_hash,
+            evidence=decision.evidence,
+        )
+
     def attempt_open_order_cancellation(self, broker: object, trigger: str) -> bool:
         try:
             summary = self.cancel_open_orders_with_broker(broker)
@@ -135,12 +187,11 @@ class SafetyController:
                 status="error",
                 summary={"error": f"{type(exc).__name__}: {exc}"},
             )
-            self.notification_sender.send_message(
-                safety_event(
-                    "cancel_open_orders_failed",
-                    alert_kind="cancel_failure",
-                    trigger=trigger,
+            self.notification_sender.send_event(
+                OperatorEventComposer(self.symbol).panic_cleanup_event(
                     reason_code=CANCEL_FAILURE,
+                    status="cancel_open_orders_error",
+                    trigger=trigger,
                     cancel_detail_code="CANCEL_OPEN_ORDERS_ERROR",
                     error_type=type(exc).__name__,
                     reason=str(exc),
@@ -166,12 +217,11 @@ class SafetyController:
             self.notification_sender.send_message(str(message))
         self.record_cancel_open_orders_result(trigger=trigger, status=status, summary=summary)
         if failed_count > 0:
-            self.notification_sender.send_message(
-                safety_event(
-                    "cancel_open_orders_failed",
-                    alert_kind="cancel_failure",
-                    trigger=trigger,
+            self.notification_sender.send_event(
+                OperatorEventComposer(self.symbol).panic_cleanup_event(
                     reason_code=CANCEL_FAILURE,
+                    status="cancel_open_orders_incomplete",
+                    trigger=trigger,
                     cancel_detail_code="CANCEL_OPEN_ORDERS_INCOMPLETE",
                     failed_count=failed_count,
                 )
@@ -271,83 +321,8 @@ class SafetyController:
         )
 
 
-def format_operator_next_action(
-    *,
-    reason_code: str,
-    unresolved: bool,
-    operator_action_required: bool,
-    open_orders_present: bool,
-    position_present: bool,
-) -> str:
-    from ..reason_codes import POSITION_LOSS_LIMIT
-    from ..risk import RISK_STATE_MISMATCH
-
-    if reason_code in {"DAILY_LOSS_LIMIT", POSITION_LOSS_LIMIT}:
-        return "review risk breach details, verify exposure, then run recovery-report"
-    if reason_code == RISK_STATE_MISMATCH:
-        return "review risk-report, verify reconcile and portfolio state, then run recovery-report"
-    if "RECONCILE" in reason_code:
-        return "run reconcile, validate order state, then run recovery-report before resume"
-    if operator_action_required or unresolved:
-        if open_orders_present or position_present:
-            return "operator must review open exposure and reconcile before resume"
-        return "operator must review halt reason and run safe resume checks"
-    return "no immediate operator action required"
-
-
-def operator_hint_command(reason_code: str, *, force_resume_allowed: bool = False) -> str:
-    from ..risk import RISK_STATE_MISMATCH
-
-    if force_resume_allowed:
-        return "uv run python bot.py resume --force"
-    if reason_code == RISK_STATE_MISMATCH:
-        return "uv run bithumb-bot risk-report && uv run python bot.py recovery-report"
-    if "RECONCILE" in reason_code:
-        return "uv run python bot.py reconcile && uv run python bot.py recovery-report"
-    return "uv run python bot.py recovery-report"
-
-
-def recommended_operator_commands(
-    *,
-    reason_code: str,
-    startup_gate: bool,
-    recovery_required: bool,
-    unresolved_count: int,
-) -> list[str]:
-    if startup_gate:
-        return ["uv run python bot.py reconcile", "uv run python bot.py recovery-report"]
-    if recovery_required:
-        return ["uv run python bot.py recover-order --client-order-id <id>", "uv run python bot.py recovery-report"]
-    if reason_code == "KILL_SWITCH":
-        return ["uv run python bot.py recovery-report", "uv run python bot.py resume"]
-    if unresolved_count > 0:
-        return ["uv run python bot.py recovery-report"]
-    return ["uv run python bot.py resume"]
-
-
-def operator_compact_summary(
-    *,
-    halt_reason: str,
-    unresolved_order_count: int,
-    open_order_count: int,
-    position_summary: str,
-    recommended_commands: list[str],
-) -> str:
-    return (
-        f"halt_reason={halt_reason} "
-        f"unresolved_order_count={unresolved_order_count} "
-        f"open_order_count={open_order_count} "
-        f"position={position_summary} "
-        f"next={' | '.join(recommended_commands)}"
-    )
-
-
 __all__ = [
     "CleanupResult",
     "HaltReason",
     "SafetyController",
-    "format_operator_next_action",
-    "operator_compact_summary",
-    "operator_hint_command",
-    "recommended_operator_commands",
 ]

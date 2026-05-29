@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import math
@@ -6,7 +6,6 @@ import time
 import json
 import os
 import importlib
-from dataclasses import dataclass
 from functools import partial
 
 from ..config import (
@@ -57,10 +56,7 @@ from ..runtime_recovery_gate import (
     classify_startup_gate_reason,
     resume_blocker,
 )
-from ..runtime_recovery_services import (
-    STARTUP_RECOVERY_GATE_PREFIX,
-    StaleRiskStateMismatchHaltService,
-)
+from ..runtime_recovery_services import StaleRiskStateMismatchHaltService
 from ..runtime_gate_api import RuntimeGateApi
 from ..runtime_resume_services import (
     RestartReadinessService,
@@ -78,14 +74,9 @@ from ..runtime_resume_services import (
 )
 from ..dust import build_dust_display_context
 from ..utils_time import kst_str, parse_interval_sec
-from ..observability import configure_runtime_logging, format_log_kv, safety_event
+from ..observability import configure_runtime_logging, format_log_kv
 from ..bootstrap import get_last_explicit_env_load_summary
-from ..reason_codes import (
-    CANCEL_FAILURE,
-    POSITION_LOSS_LIMIT,
-    RISKY_ORDER_BLOCK,
-    STARTUP_BLOCKED,
-)
+from ..reason_codes import POSITION_LOSS_LIMIT, RISKY_ORDER_BLOCK
 from .. import runtime_state
 from ..risk import (
     RISK_STATE_MISMATCH,
@@ -94,7 +85,6 @@ from ..risk import (
     evaluate_position_loss_breach,
 )
 from ..execution_service import (
-    ExecutionDecisionSummary,
     ExecutionObservabilityPayload,
     SignalExecutionRequest,
     TypedExecutionRequest,
@@ -116,20 +106,21 @@ from ..runtime_service_factories import (
     run_loop_execution_planner,
 )
 from .execution_coordinator import ExecutionCoordinator
+from .lifecycle_artifacts import RuntimeCycleArtifact
+from .runtime_checkpoint import apply_processed_candle_checkpoint
+from .state_store import pause_trading_until
 from .notification_adapter import NotificationAdapter
+from .operator_event_composer import (
+    OperatorEventComposer,
+    recommended_operator_commands,
+)
 from .recovery_controller import (
-    NON_CLEARING_RECONCILE_REASON_CODES,
     RecoveryController,
     ReconcileClearEvidence,
-    SAFE_CLEARABLE_RECONCILE_HALT_REASON_CODES,
 )
 from .safety_controller import (
     HaltReason,
     SafetyController,
-    format_operator_next_action,
-    operator_compact_summary,
-    operator_hint_command,
-    recommended_operator_commands,
 )
 from .startup_controller import StartupController
 
@@ -139,15 +130,67 @@ CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
+def _record_runtime_cycle_artifact(
+    cycle_id: str,
+    *,
+    candle_ts: int | None = None,
+    startup_state: str | None = None,
+    readiness_hash: str | None = None,
+    strategy_decision_hash: str | None = None,
+    execution_plan_bundle_hash: str | None = None,
+    safety_decision_hash: str | None = None,
+    recovery_decision_hash: str | None = None,
+    state_transition_hash: str | None = None,
+    notification_event_hashes: object = (),
+) -> RuntimeCycleArtifact:
+    hashes = (
+        list(notification_event_hashes)
+        if isinstance(notification_event_hashes, (list, tuple))
+        else []
+    )
+    artifact = RuntimeCycleArtifact(
+        cycle_id=cycle_id,
+        candle_ts=candle_ts,
+        startup_state=startup_state,
+        readiness_hash=readiness_hash,
+        strategy_decision_hash=strategy_decision_hash,
+        execution_plan_bundle_hash=execution_plan_bundle_hash,
+        safety_decision_hash=safety_decision_hash,
+        recovery_decision_hash=recovery_decision_hash,
+        state_transition_hash=state_transition_hash,
+        notification_event_hashes=[str(item) for item in hashes],
+    )
+    RUN_LOG.info(format_log_kv("[RUN] runtime_cycle_artifact", **artifact.as_dict()))
+    return artifact
+
+
+def _artifact_hash(value: object) -> str | None:
+    content_hash = getattr(value, "content_hash", None)
+    if callable(content_hash):
+        return str(content_hash())
+    as_dict = getattr(value, "as_dict", None)
+    if callable(as_dict):
+        payload = as_dict()
+        if isinstance(payload, dict):
+            decision_hash = payload.get("decision_hash")
+            if decision_hash is not None:
+                return str(decision_hash)
+    if isinstance(value, dict):
+        decision_hash = value.get("decision_hash") or value.get("event_hash")
+        if decision_hash is not None:
+            return str(decision_hash)
+    return None
+
+
 def _runtime_recovery_gate_service() -> RuntimeRecoveryGateService:
     return _runtime_gate_api().recovery_gate_service()
 
 
 def _runtime_gate_api() -> RuntimeGateApi:
     return RuntimeGateApi(
-        stale_initial_reconcile_halt_clearer=maybe_clear_stale_initial_reconcile_halt,
-        stale_live_execution_broker_halt_clearer=maybe_clear_stale_live_execution_broker_halt,
-        stale_risk_state_mismatch_halt_clearer=maybe_clear_stale_risk_state_mismatch_halt,
+        initial_reconcile_halt_evaluator=evaluate_initial_reconcile_halt_clearance,
+        live_execution_broker_halt_evaluator=evaluate_live_execution_broker_halt_clearance,
+        risk_state_mismatch_halt_evaluator=evaluate_risk_state_mismatch_halt_clearance,
         exposure_snapshot=_get_exposure_snapshot,
         logger=RUN_LOG,
     )
@@ -162,10 +205,10 @@ def _operator_notification_service():
 
     class _NotificationProxy:
         def send_event(self, event_name: str, /, **fields: object) -> None:
-            globals()["not" + "ify"](service.event_formatter(event_name, **fields))
+            _notify_operator(service.event_formatter(event_name, **fields))
 
         def send_message(self, message: str) -> None:
-            globals()["not" + "ify"](message)
+            _notify_operator(message)
 
     return _NotificationProxy()
 
@@ -178,14 +221,8 @@ def _notify_operator(message: str) -> None:
     importlib.import_module("bithumb_bot.notifier").notify(message)
 
 
-globals()["not" + "ify"] = _notify_operator
-
-
 def _flatten_position_compat(*args: object, **kwargs: object) -> dict[str, object]:
     return _operator_flatten_service().flatten_position(*args, **kwargs)
-
-
-globals()["flatten_" + "btc_position"] = _flatten_position_compat
 
 
 def _runtime_resume_service() -> RuntimeResumeService:
@@ -413,41 +450,6 @@ def authoritative_execution_signal_for_trade(
     return fallback if fallback in {"BUY", "SELL", "HOLD"} else "HOLD"
 
 
-@dataclass(frozen=True)
-class TypedExecutionSubmitExpectation:
-    submit_expected: bool
-    plan_source: str | None = None
-    block_reason: str | None = None
-
-
-def resolve_typed_execution_submit_expectation(
-    summary: ExecutionDecisionSummary | None,
-) -> TypedExecutionSubmitExpectation:
-    if summary is None:
-        return TypedExecutionSubmitExpectation(submit_expected=False)
-    engine_name = str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native").strip().lower()
-    if engine_name != "target_delta":
-        return TypedExecutionSubmitExpectation(submit_expected=bool(summary.submit_expected))
-    target_plan = summary.typed_target_submit_plan()
-    if target_plan is None:
-        return TypedExecutionSubmitExpectation(
-            submit_expected=False,
-            block_reason="missing_typed_target_submit_plan",
-        )
-    return TypedExecutionSubmitExpectation(
-        submit_expected=bool(target_plan.submit_expected)
-        and str(target_plan.block_reason or "none") == "none",
-        plan_source=target_plan.source,
-        block_reason=target_plan.block_reason,
-    )
-
-
-@dataclass(frozen=True)
-class HaltReason:
-    code: str
-    detail: str
-
-
 def _halt_reason(code: str, detail: str) -> HaltReason:
     return HaltReason(code=code, detail=detail)
 
@@ -514,25 +516,6 @@ def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
 def _dust_residual_resume_blocker(dust_context: dict[str, object]) -> tuple[str, str] | None:
     return dust_residual_resume_blocker(dust_context)
 
-
-RISK_EXPOSURE_HALT_REASON_CODES = {
-    "KILL_SWITCH",
-    "DAILY_LOSS_LIMIT",
-    POSITION_LOSS_LIMIT,
-}
-
-SAFE_CLEARABLE_RECONCILE_HALT_REASON_CODES = {
-    "INITIAL_RECONCILE_FAILED",
-    "PERIODIC_RECONCILE_FAILED",
-    "POST_TRADE_RECONCILE_FAILED",
-}
-
-NON_CLEARING_RECONCILE_REASON_CODES = {
-    "RECONCILE_FAILED",
-    "SOURCE_CONFLICT_HALT",
-    "STARTUP_GATE_BLOCKED",
-    "SUBMIT_UNKNOWN_UNRESOLVED",
-}
 
 def _log_loop_event(level: int, prefix: str, /, **fields: object) -> None:
     RUN_LOG.log(level, format_log_kv(prefix, mode=settings.MODE, **fields))
@@ -645,58 +628,83 @@ def _recovery_controller() -> RecoveryController:
     )
 
 
+def _evaluate_recovery_clearance(*, clearance_type: str, startup_gate_reason: str | None = None):
+    runtime_state.refresh_open_order_health()
+    snapshot = runtime_state.snapshot()
+    gate_reason = startup_gate_reason if startup_gate_reason is not None else evaluate_startup_safety_gate()
+    return _recovery_controller().evaluate_clearance(
+        snapshot=snapshot,
+        startup_gate_reason=gate_reason,
+        clearance_type=clearance_type,
+    )
+
+
+def evaluate_initial_reconcile_halt_clearance(*, startup_gate_reason: str | None = None):
+    snapshot = runtime_state.snapshot()
+    if (
+        bool(getattr(snapshot, "halt_new_orders_blocked", False))
+        and bool(getattr(snapshot, "halt_state_unresolved", False))
+        and getattr(snapshot, "halt_reason_code", None) == "STARTUP_SAFETY_GATE"
+    ):
+        return _evaluate_recovery_clearance(
+            clearance_type="startup_gate_auto_recovery_continue",
+            startup_gate_reason=startup_gate_reason,
+        )
+    return _evaluate_recovery_clearance(
+        clearance_type="initial_reconcile",
+        startup_gate_reason=startup_gate_reason,
+    )
+
+
+def evaluate_live_execution_broker_halt_clearance(*, startup_gate_reason: str | None = None):
+    return _evaluate_recovery_clearance(
+        clearance_type="live_execution_broker",
+        startup_gate_reason=startup_gate_reason,
+    )
+
+
+def evaluate_risk_state_mismatch_halt_clearance(*, startup_gate_reason: str | None = None):
+    return _evaluate_recovery_clearance(
+        clearance_type="risk_state_mismatch",
+        startup_gate_reason=startup_gate_reason,
+    )
+
+
 def maybe_clear_stale_initial_reconcile_halt() -> bool:
     state = runtime_state.snapshot()
-    if (
-        state.halt_new_orders_blocked
-        and state.halt_state_unresolved
-        and state.halt_reason_code == "STARTUP_SAFETY_GATE"
-    ):
-        cleared = _recovery_controller().evaluate_and_apply(clearance_type="startup_gate_auto_recovery_continue")
-        if cleared:
-            _log_loop_event(
-                logging.INFO,
-                "[RUN] startup_gate_auto_recovery_continue",
-                halt_reason_code=state.halt_reason_code or "-",
-                reconcile_reason_code=state.last_reconcile_reason_code or "-",
-                startup_gate_reason=evaluate_startup_safety_gate() or "-",
-            )
-            return True
-
-    if not (
-        state.halt_new_orders_blocked
-        and state.halt_state_unresolved
-        and state.halt_reason_code in SAFE_CLEARABLE_RECONCILE_HALT_REASON_CODES
-    ):
+    clearance = evaluate_initial_reconcile_halt_clearance()
+    if not clearance.allowed:
         return False
-
-    cleared = _recovery_controller().evaluate_and_apply(clearance_type="initial_reconcile")
-    if not cleared:
-        return False
-
+    _recovery_controller().apply_clearance(clearance)
+    event_name = (
+        "[RUN] startup_gate_auto_recovery_continue"
+        if state.halt_reason_code == "STARTUP_SAFETY_GATE"
+        else "[RUN] stale_reconcile_failure_halt_cleared"
+    )
     _log_loop_event(
         logging.INFO,
-        "[RUN] stale_reconcile_failure_halt_cleared",
+        event_name,
         halt_reason_code=state.halt_reason_code or "-",
         reconcile_reason_code=state.last_reconcile_reason_code or "-",
+        recovery_clearance_hash=clearance.as_dict()["decision_hash"],
     )
     return True
 
 
 def maybe_clear_stale_live_execution_broker_halt(*, startup_gate_reason: str | None = None) -> bool:
     state = runtime_state.snapshot()
-    gate_reason = startup_gate_reason if startup_gate_reason is not None else evaluate_startup_safety_gate()
-    cleared = _recovery_controller().evaluate_and_apply(
-        clearance_type="live_execution_broker",
-        startup_gate_reason=gate_reason,
+    clearance = evaluate_live_execution_broker_halt_clearance(
+        startup_gate_reason=startup_gate_reason,
     )
-    if not cleared:
+    if not clearance.allowed:
         return False
+    _recovery_controller().apply_clearance(clearance)
     _log_loop_event(
         logging.INFO,
         "[RUN] stale_live_execution_broker_halt_cleared",
         halt_reason_code=state.halt_reason_code or "-",
         reconcile_reason_code=state.last_reconcile_reason_code or "-",
+        recovery_clearance_hash=clearance.as_dict()["decision_hash"],
     )
     return True
 
@@ -711,17 +719,18 @@ def _can_clear_stale_risk_state_mismatch_halt(*, state, startup_gate_reason: str
 
 def maybe_clear_stale_risk_state_mismatch_halt(*, startup_gate_reason: str | None = None) -> bool:
     state = runtime_state.snapshot()
-    gate_reason = startup_gate_reason if startup_gate_reason is not None else evaluate_startup_safety_gate()
-    if not _recovery_controller().evaluate_and_apply(
-        clearance_type="risk_state_mismatch",
-        startup_gate_reason=gate_reason,
-    ):
+    clearance = evaluate_risk_state_mismatch_halt_clearance(
+        startup_gate_reason=startup_gate_reason,
+    )
+    if not clearance.allowed:
         return False
+    _recovery_controller().apply_clearance(clearance)
     _log_loop_event(
         logging.INFO,
         "[RUN] stale_risk_state_mismatch_halt_cleared",
         halt_reason_code=state.halt_reason_code or "-",
         reconcile_reason_code=state.last_reconcile_reason_code or "-",
+        recovery_clearance_hash=clearance.as_dict()["decision_hash"],
     )
     return True
 
@@ -814,7 +823,7 @@ def _safety_controller() -> SafetyController:
         notification_sender=NotificationAdapter(_operator_notification_service()),
         cancel_open_orders_with_broker=cancel_open_orders_with_broker,
         record_cancel_open_orders_result=runtime_state.record_cancel_open_orders_result,
-        flatten_position=globals()["flatten_" + "btc_position"],
+        flatten_position=_flatten_position_compat,
         record_flatten_position_result=runtime_state.record_flatten_position_result,
         exposure_snapshot=_get_exposure_snapshot,
         revalidate_cleanup_state_after_failure=_revalidate_cleanup_state_after_failure,
@@ -835,6 +844,20 @@ def _startup_controller() -> StartupController:
         position_summary=_position_summary,
         recommended_commands=_recommended_operator_commands,
         auto_recovery_allowed=_startup_gate_allows_process_auto_recovery,
+        broker_factory=lambda: build_broker_with_auth_diagnostics(
+            caller="run_loop",
+            env_summary=get_last_explicit_env_load_summary().as_dict(),
+            broker_factory=BithumbBroker,
+        ),
+        initial_reconcile=lambda broker: importlib.import_module("bithumb_bot.recovery").reconcile_with_broker(broker),
+        halt_on_startup_failure=lambda *, reason_code, reason, unresolved: _safety_controller().apply(
+            _safety_controller().evaluate_halt(
+                _halt_reason(reason_code, reason),
+                unresolved=bool(unresolved),
+            )
+        ),
+        enable_trading=runtime_state.enable_trading,
+        set_resume_gate=runtime_state.set_resume_gate,
     )
 
 
@@ -844,20 +867,6 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False, attempt_flatt
         unresolved=unresolved,
         attempt_flatten=attempt_flatten,
     )
-
-
-def _format_operator_next_action(*, reason_code: str, unresolved: bool, operator_action_required: bool, open_orders_present: bool, position_present: bool) -> str:
-    return format_operator_next_action(
-        reason_code=reason_code,
-        unresolved=unresolved,
-        operator_action_required=operator_action_required,
-        open_orders_present=open_orders_present,
-        position_present=position_present,
-    )
-
-
-def _operator_hint_command(reason_code: str) -> str:
-    return operator_hint_command(reason_code)
 
 
 def _recommended_operator_commands(
@@ -872,23 +881,6 @@ def _recommended_operator_commands(
         startup_gate=startup_gate,
         recovery_required=recovery_required,
         unresolved_count=unresolved_count,
-    )
-
-
-def _operator_compact_summary(
-    *,
-    halt_reason: str,
-    unresolved_order_count: int,
-    open_order_count: int,
-    position_summary: str,
-    recommended_commands: list[str],
-) -> str:
-    return operator_compact_summary(
-        halt_reason=halt_reason,
-        unresolved_order_count=unresolved_order_count,
-        open_order_count=open_order_count,
-        position_summary=position_summary,
-        recommended_commands=recommended_commands,
     )
 
 
@@ -1031,8 +1023,6 @@ def perform_panic_stop_cleanup(
 
 
 def run_loop() -> None:
-    from ..recovery import reconcile_with_broker
-
     configure_runtime_logging()
     if settings.MODE != "live":
         try:
@@ -1049,115 +1039,41 @@ def run_loop() -> None:
     validate_runtime_strategy_set_selection(settings)
     validate_live_mode_preflight(settings)
 
-    maybe_clear_stale_initial_reconcile_halt()
-    maybe_clear_stale_live_execution_broker_halt()
-    state = runtime_state.snapshot()
-    if state.halt_new_orders_blocked:
-        reason = state.last_disable_reason or "persisted halt state requires explicit operator resume"
-        reason_code = state.halt_reason_code or "PERSISTED_HALT_STATE"
-        latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
-        _, resume_blockers = evaluate_resume_eligibility()
-        force_resume_allowed = bool(resume_blockers) and all(bool(b.overridable) for b in resume_blockers)
-        primary_blocker_code = resume_blockers[0].code if resume_blockers else "-"
-        _operator_notification_service().send_event(
-            "startup_halt_state_blocked",
-                alert_kind="startup_gate",
-                symbol=settings.PAIR,
-                reason_code=reason_code,
-                reason=reason,
-                unresolved_order_count=state.unresolved_open_order_count,
-                position_may_remain=int(state.halt_position_present),
-                latest_client_order_id=latest_client_order_id,
-                latest_exchange_order_id=latest_exchange_order_id,
-                operator_action_required=int(state.halt_operator_action_required),
-                operator_next_action=_format_operator_next_action(
-                    reason_code=reason_code,
-                    unresolved=bool(state.halt_state_unresolved),
-                    operator_action_required=bool(state.halt_operator_action_required),
-                    open_orders_present=bool(state.halt_open_orders_present),
-                    position_present=bool(state.halt_position_present),
-                ),
-                primary_blocker_code=primary_blocker_code,
-                force_resume_allowed=int(force_resume_allowed),
-                operator_hint_command=(
-                    "uv run python bot.py resume --force"
-                    if force_resume_allowed
-                    else "uv run python bot.py recovery-report"
-                ),
-            )
+    startup_result = _startup_controller().prepare_runtime_start(
+        live_mode=settings.MODE == "live"
+    )
+    if startup_result.operator_event:
+        NotificationAdapter(_operator_notification_service()).send_event(startup_result.operator_event)
+    _record_runtime_cycle_artifact(
+        "startup",
+        startup_state=startup_result.status,
+        notification_event_hashes=startup_result.as_dict().get("operator_event_hashes", []),
+        state_transition_hash=(
+            startup_result.as_dict().get("halt_transition", {}).get("decision_hash")
+            if isinstance(startup_result.as_dict().get("halt_transition"), dict)
+            else None
+        ),
+    )
+    if startup_result.status == "BLOCKED":
         _log_loop_event(
             logging.WARNING,
             "[RUN] startup_blocked",
             symbol=settings.PAIR,
             interval=settings.INTERVAL,
-            reason="persisted runtime halt is active; refusing to enter trading loop",
+            reason=startup_result.startup_gate_reason or startup_result.reason_code or "startup blocked",
+            startup_result_hash=startup_result.as_dict()["decision_hash"],
         )
         return
-
-    broker = None
-    if settings.MODE == "live":
-        broker, _auth_diag = build_broker_with_auth_diagnostics(
-            caller="run_loop",
-            env_summary=get_last_explicit_env_load_summary().as_dict(),
-            broker_factory=BithumbBroker,
+    if startup_result.status == "DEGRADED_RECOVERY_CONTINUE":
+        _log_loop_event(
+            logging.WARNING,
+            "[RUN] startup_gate_degraded_continue",
+            reason=startup_result.startup_gate_reason or "-",
+            recovery_stage="FEE_AUTO_RECOVERY_DEGRADED",
+            startup_result_hash=startup_result.as_dict()["decision_hash"],
         )
-        try:
-            reconcile_with_broker(broker)
-        except Exception as e:
-            _halt_trading(_halt_reason("INITIAL_RECONCILE_FAILED", f"initial reconcile failed ({type(e).__name__}): {e}"), unresolved=True)
-            return
-
-        startup_gate_reason = evaluate_startup_safety_gate()
-        if startup_gate_reason is not None:
-            if _startup_gate_allows_process_auto_recovery(
-                state=runtime_state.snapshot(),
-                startup_gate_reason=startup_gate_reason,
-            ):
-                runtime_state.enable_trading()
-                runtime_state.set_resume_gate(blocked=True, reason=startup_gate_reason)
-                _log_loop_event(
-                    logging.WARNING,
-                    "[RUN] startup_gate_degraded_continue",
-                    reason=startup_gate_reason,
-                    recovery_stage="FEE_AUTO_RECOVERY_DEGRADED",
-                )
-            else:
-                latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
-                startup_open_order_count = _count_open_orders()
-                startup_position_summary = _position_summary()
-                startup_commands = _recommended_operator_commands(
-                    reason_code="STARTUP_SAFETY_GATE",
-                    startup_gate=True,
-                    recovery_required=(state.recovery_required_count > 0),
-                    unresolved_count=int(state.unresolved_open_order_count),
-                )
-                _operator_notification_service().send_message(
-                    safety_event(
-                        "startup_gate_blocked",
-                        alert_kind="startup_gate",
-                        reason_code=STARTUP_BLOCKED,
-                        reason=startup_gate_reason,
-                        unresolved_order_count=state.unresolved_open_order_count,
-                        position_may_remain=int(state.halt_position_present),
-                        latest_client_order_id=latest_client_order_id,
-                        latest_exchange_order_id=latest_exchange_order_id,
-                        operator_action_required=1,
-                        operator_next_action="operator must reconcile unresolved orders before startup",
-                        open_order_count=startup_open_order_count,
-                        position_summary=startup_position_summary,
-                        operator_recommended_commands=" | ".join(startup_commands),
-                        operator_compact_summary=_operator_compact_summary(
-                            halt_reason="STARTUP_SAFETY_GATE",
-                            unresolved_order_count=int(state.unresolved_open_order_count),
-                            open_order_count=startup_open_order_count,
-                            position_summary=startup_position_summary,
-                            recommended_commands=startup_commands,
-                        ),
-                        state_to="HALTED",
-                    )
-                )
-                _halt_trading(_halt_reason("STARTUP_SAFETY_GATE", startup_gate_reason), unresolved=True)
-                return
+    broker = startup_result.broker
+    from ..recovery import reconcile_with_broker
 
     sec = parse_interval_sec(settings.INTERVAL)
     runtime_strategy_set = active_runtime_strategy_set()
@@ -1258,6 +1174,7 @@ def run_loop() -> None:
                         detail="sync completed but latest candle row was not found",
                     )
                     _operator_notification_service().send_message("no candles after sync")
+                    _record_runtime_cycle_artifact("skip:no_candles", startup_state="READY")
                     continue
 
                 last_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
@@ -1283,11 +1200,12 @@ def run_loop() -> None:
                 _operator_notification_service().send_message(f"sync failed ({fail_count}/{MAX_FAILS}): {e}")
                 if fail_count >= MAX_FAILS:
                     retry_at = time.time() + FAILSAFE_RETRY_DELAY_SEC
-                    runtime_state.disable_trading_until(retry_at)
+                    pause_trading_until(retry_at)
                     _operator_notification_service().send_message(
                         "failsafe enabled after consecutive sync failures. "
                         f"trading paused until epoch={int(retry_at)}"
                     )
+                _record_runtime_cycle_artifact("skip:sync_failed", startup_state="READY")
                 continue
 
             stale_cutoff_sec = sec * 2
@@ -1296,6 +1214,7 @@ def run_loop() -> None:
                     f"stale candle detected: age={candle_age_sec:.1f}s > "
                     f"{stale_cutoff_sec}s; order blocked"
                 )
+                _record_runtime_cycle_artifact("skip:stale_candle", candle_ts=last_ts, startup_state="READY")
                 continue
 
             runtime_market_check_interval = float(settings.MARKET_RUNTIME_REGISTRY_REFRESH_INTERVAL_SEC)
@@ -1456,34 +1375,17 @@ def run_loop() -> None:
                                 reason, int(now * 1000)
                             )
                             latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
-                            _operator_notification_service().send_event(
-                                "recovery_required_marked",
-                                    alert_kind="recovery_required",
-                                    symbol=settings.PAIR,
-                                    reason_code="STALE_OPEN_ORDER",
+                            NotificationAdapter(_operator_notification_service()).send_event(
+                                OperatorEventComposer(settings.PAIR).stale_open_order_recovery_required_event(
+                                    reason=reason,
                                     marked_count=marked,
                                     latest_client_order_id=latest_client_order_id,
                                     latest_exchange_order_id=latest_exchange_order_id,
-                                    reason=reason,
-                                    operator_next_action="inspect stale order(s), run reconcile, then recovery-report",
-                                    operator_hint_command="uv run python bot.py reconcile && uv run python bot.py recovery-report",
                                     open_order_count=_count_open_orders(),
+                                    unresolved_order_count=runtime_state.snapshot().unresolved_open_order_count,
                                     position_summary=_position_summary(),
-                                    operator_recommended_commands=(
-                                        "uv run python bot.py reconcile"
-                                        " | uv run python bot.py recover-order --client-order-id <id>"
-                                    ),
-                                    operator_compact_summary=_operator_compact_summary(
-                                        halt_reason="STALE_OPEN_ORDER",
-                                        unresolved_order_count=runtime_state.snapshot().unresolved_open_order_count,
-                                        open_order_count=_count_open_orders(),
-                                        position_summary=_position_summary(),
-                                        recommended_commands=[
-                                            "uv run python bot.py reconcile",
-                                            "uv run python bot.py recover-order --client-order-id <id>",
-                                        ],
-                                    ),
                                 )
+                            )
                             canceled_ok = _attempt_open_order_cancellation(
                                 broker, trigger="stale-open-order-halt"
                             )
@@ -1513,7 +1415,14 @@ def run_loop() -> None:
                             continue
 
                     if open_count > 0:
-                        _operator_notification_service().send_message(safety_event("order_submit_blocked", reason_code=RISKY_ORDER_BLOCK, reason="unresolved open order exists; skip new order placement"))
+                        NotificationAdapter(_operator_notification_service()).send_event(
+                            OperatorEventComposer(settings.PAIR).recovery_required_event(
+                                reason_code=RISKY_ORDER_BLOCK,
+                                reason="unresolved open order exists; skip new order placement",
+                                event_name="order_submit_blocked",
+                            )
+                        )
+                        _record_runtime_cycle_artifact("skip:open_order_blocked", startup_state="READY")
                         continue
 
             state = runtime_state.snapshot()
@@ -1540,6 +1449,7 @@ def run_loop() -> None:
                     last_processed_candle_ts=last_processed_candle_ts_ms,
                     reason="no fully closed candle available yet",
                 )
+                _record_runtime_cycle_artifact("skip:no_closed_candle", candle_ts=incomplete_ts, startup_state="READY")
                 continue
 
             closed_candle_ts_ms = int(closed_row["ts"]) if hasattr(closed_row, "keys") else int(closed_row[0])
@@ -1554,6 +1464,7 @@ def run_loop() -> None:
                         last_processed_candle_ts=last_processed_candle_ts_ms,
                         reason="closed candle already processed before restart/previous tick",
                     )
+                    _record_runtime_cycle_artifact("skip:duplicate_candle", candle_ts=closed_candle_ts_ms, startup_state="READY")
                     continue
                 if closed_candle_ts_ms < last_processed_candle_ts_ms:
                     _log_loop_event(
@@ -1565,6 +1476,7 @@ def run_loop() -> None:
                         last_processed_candle_ts=last_processed_candle_ts_ms,
                         reason="closed candle is older than persisted last processed candle",
                     )
+                    _record_runtime_cycle_artifact("skip:stale_processed_candle", candle_ts=closed_candle_ts_ms, startup_state="READY")
                     continue
 
             conn = ensure_db()
@@ -1589,6 +1501,7 @@ def run_loop() -> None:
                     last_processed_candle_ts=last_processed_candle_ts_ms,
                     reason="insufficient candle history; signal will be recalculated after more syncs",
                 )
+                _record_runtime_cycle_artifact("skip:insufficient_signal_history", candle_ts=closed_candle_ts_ms, startup_state="READY")
                 continue
             typed_runtime_decision = typed_runtime_decision_bundle.results[0]
             r = {
@@ -1775,9 +1688,19 @@ def run_loop() -> None:
                     candle_ts=r["ts"],
                     reason="decision_persistence_failed_retryable",
                 )
+                _record_runtime_cycle_artifact(
+                    "skip:decision_persistence_failed",
+                    candle_ts=int(r["ts"]),
+                    startup_state="READY",
+                    strategy_decision_hash=_artifact_hash(decision_context_for_trade or {}),
+                    execution_plan_bundle_hash=_artifact_hash(execution_plan_bundle_for_trade),
+                )
                 continue
 
-            submit_expectation = resolve_typed_execution_submit_expectation(
+            execution_coordinator = ExecutionCoordinator(
+                str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native")
+            )
+            submit_expectation = execution_coordinator.resolve_submit_expectation(
                 execution_decision_summary_for_trade
             )
             if execution_decision_summary_for_trade is None:
@@ -1791,8 +1714,22 @@ def run_loop() -> None:
                     candle_ts=r["ts"],
                     reason="execution_planning_failed_closed",
                 )
+                _record_runtime_cycle_artifact(
+                    "skip:execution_summary_missing",
+                    candle_ts=int(r["ts"]),
+                    startup_state="READY",
+                    strategy_decision_hash=_artifact_hash(decision_context_for_trade or {}),
+                    execution_plan_bundle_hash=_artifact_hash(execution_plan_bundle_for_trade),
+                )
                 continue
-            runtime_state.mark_processed_candle(candle_ts_ms=int(r["ts"]), now_epoch_sec=now)
+            apply_processed_candle_checkpoint(candle_ts_ms=int(r["ts"]), now_epoch_sec=now)
+            _record_runtime_cycle_artifact(
+                "checkpoint:processed",
+                candle_ts=int(r["ts"]),
+                startup_state="READY",
+                strategy_decision_hash=_artifact_hash(decision_context_for_trade or {}),
+                execution_plan_bundle_hash=_artifact_hash(execution_plan_bundle_for_trade),
+            )
             _log_loop_event(
                 logging.INFO,
                 "[RUN] processed closed candle",
@@ -1802,9 +1739,7 @@ def run_loop() -> None:
                 last_processed_candle_ts=last_processed_candle_ts_ms,
                 reason="decision_persisted_execution_planned",
             )
-            target_delta_submit = ExecutionCoordinator(
-                str(getattr(settings, "EXECUTION_ENGINE", "lot_native") or "lot_native")
-            ).target_delta_submit_expected(submit_expected=submit_expectation.submit_expected)
+            target_delta_submit = execution_coordinator.target_delta_submit_expected(submit_expected=submit_expectation.submit_expected)
             authoritative_execution_signal = authoritative_execution_signal_for_trade(
                 decision_context_for_trade,
                 fallback_signal=r["signal"],

@@ -38,35 +38,50 @@ def _blocker_factory(**kwargs) -> _Blocker:
     return _Blocker(**kwargs)
 
 
-def test_prepare_resume_gate_runs_stale_clearers_around_startup_gate() -> None:
-    calls: list[str] = []
-    startup_reasons = iter(["startup safety gate: pending_submit_orders=1", None])
+@dataclass(frozen=True)
+class _Clearance:
+    allowed: bool
 
-    service = RuntimeRecoveryGateService(
-        startup_gate_evaluator=lambda: calls.append("startup") or next(startup_reasons),
-        stale_initial_reconcile_halt_clearer=lambda: calls.append("initial") or True,
-        stale_live_execution_broker_halt_clearer=lambda **_kwargs: calls.append("broker") or False,
-        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: calls.append("risk") or True,
-        state_snapshot=lambda: _State(),
+    def as_dict(self) -> dict[str, object]:
+        return {"allowed": self.allowed, "decision_hash": f"hash:{int(self.allowed)}"}
+
+
+def _gate_service(**overrides) -> RuntimeRecoveryGateService:
+    kwargs = {
+        "startup_gate_evaluator": lambda: None,
+        "initial_reconcile_halt_evaluator": lambda **_kwargs: _Clearance(False),
+        "live_execution_broker_halt_evaluator": lambda **_kwargs: _Clearance(False),
+        "risk_state_mismatch_halt_evaluator": lambda **_kwargs: _Clearance(False),
+        "state_snapshot": lambda: _State(),
+    }
+    kwargs.update(overrides)
+    return RuntimeRecoveryGateService(**kwargs)
+
+
+def test_prepare_resume_gate_evaluates_clearance_without_stale_clear_side_effects() -> None:
+    calls: list[str] = []
+
+    service = _gate_service(
+        startup_gate_evaluator=lambda: calls.append("startup") or "startup safety gate: pending_submit_orders=1",
+        initial_reconcile_halt_evaluator=lambda **_kwargs: calls.append("initial_eval") or _Clearance(True),
+        live_execution_broker_halt_evaluator=lambda **_kwargs: calls.append("broker_eval") or _Clearance(False),
+        risk_state_mismatch_halt_evaluator=lambda **_kwargs: calls.append("risk_eval") or _Clearance(True),
         startup_gate_reason_classifier=lambda _reason, **_kwargs: ("UNUSED", "unused"),
         resume_blocker_factory=_blocker_factory,
     )
 
     result = service.prepare_resume_gate()
 
-    assert calls == ["initial", "startup", "broker", "risk", "startup"]
+    assert calls == ["startup", "initial_eval", "broker_eval", "risk_eval"]
     assert result.initial_reconcile_halt_cleared is True
     assert result.live_execution_broker_halt_cleared is False
     assert result.risk_state_mismatch_halt_cleared is True
-    assert result.startup_gate_reason is None
+    assert result.startup_gate_reason == "startup safety gate: pending_submit_orders=1"
+    assert len(result.clearance_artifacts) == 3
 
 
 def test_startup_safety_resume_blocker_preserves_classified_reason_code() -> None:
-    service = RuntimeRecoveryGateService(
-        startup_gate_evaluator=lambda: None,
-        stale_initial_reconcile_halt_clearer=lambda: False,
-        stale_live_execution_broker_halt_clearer=lambda **_kwargs: False,
-        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: False,
+    service = _gate_service(
         state_snapshot=lambda: _State(recovery_required_count=1),
         startup_gate_reason_classifier=lambda reason, **_kwargs: (
             "SUBMIT_UNKNOWN_RECOVERY_REQUIRED",
@@ -91,11 +106,7 @@ def test_startup_safety_resume_blocker_preserves_classified_reason_code() -> Non
 
 
 def test_reconcile_ok_did_not_clear_blocker_skips_fee_gap_recovery() -> None:
-    service = RuntimeRecoveryGateService(
-        startup_gate_evaluator=lambda: None,
-        stale_initial_reconcile_halt_clearer=lambda: False,
-        stale_live_execution_broker_halt_clearer=lambda **_kwargs: False,
-        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: False,
+    service = _gate_service(
         state_snapshot=lambda: _State(last_reconcile_status="ok"),
         startup_gate_reason_classifier=lambda _reason, **_kwargs: (
             "FEE_GAP_RECOVERY_REQUIRED",
@@ -108,11 +119,7 @@ def test_reconcile_ok_did_not_clear_blocker_skips_fee_gap_recovery() -> None:
 
 
 def test_default_blocker_factory_and_classifier_preserve_production_structure() -> None:
-    service = RuntimeRecoveryGateService(
-        startup_gate_evaluator=lambda: None,
-        stale_initial_reconcile_halt_clearer=lambda: False,
-        stale_live_execution_broker_halt_clearer=lambda **_kwargs: False,
-        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: False,
+    service = _gate_service(
         state_snapshot=lambda: _State(last_reconcile_status="ok", recovery_required_count=1),
     )
 
@@ -144,11 +151,7 @@ def test_default_blocker_factory_and_classifier_preserve_production_structure() 
 
 
 def test_startup_gate_blocker_classification_variants_are_stable() -> None:
-    assert RuntimeRecoveryGateService(
-        startup_gate_evaluator=lambda: None,
-        stale_initial_reconcile_halt_clearer=lambda: False,
-        stale_live_execution_broker_halt_clearer=lambda **_kwargs: False,
-        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: False,
+    assert _gate_service(
         state_snapshot=lambda: _State(),
     ).startup_safety_resume_blockers(
         "startup safety gate: position_authority_projection_convergence_required=qty drift"

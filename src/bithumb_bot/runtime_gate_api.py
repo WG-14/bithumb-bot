@@ -18,9 +18,9 @@ from .runtime_resume_services import (
 
 @dataclass(frozen=True)
 class RuntimeGateApi:
-    stale_initial_reconcile_halt_clearer: Callable[[], bool]
-    stale_live_execution_broker_halt_clearer: Callable[..., bool]
-    stale_risk_state_mismatch_halt_clearer: Callable[..., bool]
+    initial_reconcile_halt_evaluator: Callable[..., object]
+    live_execution_broker_halt_evaluator: Callable[..., object]
+    risk_state_mismatch_halt_evaluator: Callable[..., object]
     exposure_snapshot: Callable[[int], tuple[bool, bool]]
     emergency_flatten_blocker: Callable[[], str | None] = runtime_state.get_emergency_flatten_blocker
     logger: logging.Logger = logging.getLogger("bithumb_bot.run")
@@ -38,9 +38,9 @@ class RuntimeGateApi:
     def recovery_gate_service(self) -> RuntimeRecoveryGateService:
         return RuntimeRecoveryGateService(
             startup_gate_evaluator=self.startup_safety_gate,
-            stale_initial_reconcile_halt_clearer=self.stale_initial_reconcile_halt_clearer,
-            stale_live_execution_broker_halt_clearer=self.stale_live_execution_broker_halt_clearer,
-            stale_risk_state_mismatch_halt_clearer=self.stale_risk_state_mismatch_halt_clearer,
+            initial_reconcile_halt_evaluator=self.initial_reconcile_halt_evaluator,
+            live_execution_broker_halt_evaluator=self.live_execution_broker_halt_evaluator,
+            risk_state_mismatch_halt_evaluator=self.risk_state_mismatch_halt_evaluator,
             state_snapshot=runtime_state.snapshot,
         )
 

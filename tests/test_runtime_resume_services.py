@@ -77,9 +77,9 @@ class _Readiness:
 def _clear_recovery_gate(state: _State) -> RuntimeRecoveryGateService:
     return RuntimeRecoveryGateService(
         startup_gate_evaluator=lambda: None,
-        stale_initial_reconcile_halt_clearer=lambda: False,
-        stale_live_execution_broker_halt_clearer=lambda **_kwargs: False,
-        stale_risk_state_mismatch_halt_clearer=lambda **_kwargs: False,
+        initial_reconcile_halt_evaluator=lambda **_kwargs: False,
+        live_execution_broker_halt_evaluator=lambda **_kwargs: False,
+        risk_state_mismatch_halt_evaluator=lambda **_kwargs: False,
         state_snapshot=lambda: state,
     )
 

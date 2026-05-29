@@ -34,6 +34,8 @@ class OperatorEventComposer:
         recommended_commands: Sequence[str] = (),
         extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        extra_fields = dict(extra or {})
+        extra_fields.pop("alert_kind", None)
         return _event(
             "trading_halted",
             status="HALTED",
@@ -49,7 +51,7 @@ class OperatorEventComposer:
             open_order_count=int(open_order_count),
             position_summary=position_summary,
             operator_recommended_commands=" | ".join(recommended_commands),
-            **dict(extra or {}),
+            **extra_fields,
         )
 
     def startup_gate_blocked_event(
@@ -94,6 +96,41 @@ class OperatorEventComposer:
             **fields,
         )
 
+    def stale_open_order_recovery_required_event(
+        self,
+        *,
+        reason: str,
+        marked_count: int,
+        latest_client_order_id: str | None,
+        latest_exchange_order_id: str | None,
+        open_order_count: int,
+        unresolved_order_count: int,
+        position_summary: str,
+    ) -> dict[str, Any]:
+        commands = ["uv run python bot.py reconcile", "uv run python bot.py recover-order --client-order-id <id>"]
+        return _event(
+            "recovery_required_marked",
+            alert_kind="recovery_required",
+            symbol=self.symbol,
+            reason_code="STALE_OPEN_ORDER",
+            marked_count=int(marked_count),
+            latest_client_order_id=latest_client_order_id,
+            latest_exchange_order_id=latest_exchange_order_id,
+            reason=reason,
+            operator_next_action="inspect stale order(s), run reconcile, then recovery-report",
+            operator_hint_command="uv run python bot.py reconcile && uv run python bot.py recovery-report",
+            open_order_count=int(open_order_count),
+            position_summary=position_summary,
+            operator_recommended_commands=" | ".join(commands),
+            operator_compact_summary=operator_compact_summary(
+                halt_reason="STALE_OPEN_ORDER",
+                unresolved_order_count=int(unresolved_order_count),
+                open_order_count=int(open_order_count),
+                position_summary=position_summary,
+                recommended_commands=commands,
+            ),
+        )
+
     def cancel_open_orders_result_event(
         self,
         *,
@@ -124,4 +161,81 @@ class OperatorEventComposer:
         )
 
 
-__all__ = ["OperatorEventComposer"]
+def format_operator_next_action(
+    *,
+    reason_code: str,
+    unresolved: bool,
+    operator_action_required: bool,
+    open_orders_present: bool,
+    position_present: bool,
+) -> str:
+    from ..reason_codes import POSITION_LOSS_LIMIT
+    from ..risk import RISK_STATE_MISMATCH
+
+    if reason_code in {"DAILY_LOSS_LIMIT", POSITION_LOSS_LIMIT}:
+        return "review risk breach details, verify exposure, then run recovery-report"
+    if reason_code == RISK_STATE_MISMATCH:
+        return "review risk-report, verify reconcile and portfolio state, then run recovery-report"
+    if "RECONCILE" in reason_code:
+        return "run reconcile, validate order state, then run recovery-report before resume"
+    if operator_action_required or unresolved:
+        if open_orders_present or position_present:
+            return "operator must review open exposure and reconcile before resume"
+        return "operator must review halt reason and run safe resume checks"
+    return "no immediate operator action required"
+
+
+def operator_hint_command(reason_code: str, *, force_resume_allowed: bool = False) -> str:
+    from ..risk import RISK_STATE_MISMATCH
+
+    if force_resume_allowed:
+        return "uv run python bot.py resume --force"
+    if reason_code == RISK_STATE_MISMATCH:
+        return "uv run bithumb-bot risk-report && uv run python bot.py recovery-report"
+    if "RECONCILE" in reason_code:
+        return "uv run python bot.py reconcile && uv run python bot.py recovery-report"
+    return "uv run python bot.py recovery-report"
+
+
+def recommended_operator_commands(
+    *,
+    reason_code: str,
+    startup_gate: bool,
+    recovery_required: bool,
+    unresolved_count: int,
+) -> list[str]:
+    if startup_gate:
+        return ["uv run python bot.py reconcile", "uv run python bot.py recovery-report"]
+    if recovery_required:
+        return ["uv run python bot.py recover-order --client-order-id <id>", "uv run python bot.py recovery-report"]
+    if reason_code == "KILL_SWITCH":
+        return ["uv run python bot.py recovery-report", "uv run python bot.py resume"]
+    if unresolved_count > 0:
+        return ["uv run python bot.py recovery-report"]
+    return ["uv run python bot.py resume"]
+
+
+def operator_compact_summary(
+    *,
+    halt_reason: str,
+    unresolved_order_count: int,
+    open_order_count: int,
+    position_summary: str,
+    recommended_commands: Sequence[str],
+) -> str:
+    return (
+        f"halt_reason={halt_reason} "
+        f"unresolved_order_count={unresolved_order_count} "
+        f"open_order_count={open_order_count} "
+        f"position={position_summary} "
+        f"next={' | '.join(recommended_commands)}"
+    )
+
+
+__all__ = [
+    "OperatorEventComposer",
+    "format_operator_next_action",
+    "operator_compact_summary",
+    "operator_hint_command",
+    "recommended_operator_commands",
+]
