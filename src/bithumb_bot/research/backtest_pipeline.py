@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from bithumb_bot.canonical_decision import canonical_payload_hash
 from bithumb_bot.market_regime import aggregate_regime_coverage, aggregate_regime_performance
 from bithumb_bot.risk import PureRiskInput, evaluate_pure_risk
+from bithumb_bot.strategy_policy_contract import StrategyDecisionV2
 
 from . import backtest_support as support
 from .backtest_stages import (
@@ -245,6 +246,12 @@ class DefaultStrategyEvaluator:
             unsupported_reason = "research_policy_decision_missing_not_comparable"
         if promotion_grade_policy_required and policy_decision is None:
             raise ValueError(unsupported_reason or "research_policy_decision_missing_not_comparable")
+        if policy_decision is not None:
+            if not isinstance(policy_decision, StrategyDecisionV2):
+                if promotion_grade_policy_required:
+                    raise ValueError("research_strategy_decision_not_typed:StrategyDecisionV2")
+                unsupported_reason = "research_strategy_decision_not_typed_compatibility_fallback"
+                policy_decision = None
         if policy_decision is not None:
             trace = policy_decision.as_trace()
             replay_hash = str(trace.get("replay_fingerprint_hash") or "")

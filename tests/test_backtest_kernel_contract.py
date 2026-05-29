@@ -227,6 +227,75 @@ def test_metrics_and_audit_do_not_mutate_authority_state() -> None:
     ]
 
 
+def test_decision_payload_failure_does_not_block_execution_authority(monkeypatch) -> None:
+    dataset = DatasetSnapshot(
+        snapshot_id="kernel_payload_failure_isolated",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2026-01-01", "2026-01-02"),
+        candles=tuple(
+            Candle(index * 60_000, 100.0 + index, 100.0 + index, 100.0 + index, 100.0 + index, 1.0)
+            for index in range(4)
+        ),
+    )
+    event = ResearchDecisionEvent(
+        candle_ts=dataset.candles[1].ts,
+        decision_ts=dataset.candles[1].ts + 60_000,
+        strategy_name="buy_and_hold_baseline",
+        strategy_version="buy_and_hold_baseline.research_contract.v1",
+        raw_signal="BUY",
+        final_signal="BUY",
+        reason="kernel_payload_failure_buy",
+        feature_snapshot={"candle_index": 1, "close": dataset.candles[1].close},
+        strategy_diagnostics={"schema_version": 1, "emitted_buy_intent": True},
+        entry_signal="BUY",
+        order_intent={"side": "BUY"},
+    )
+    kwargs = {
+        "dataset": dataset,
+        "strategy_name": "buy_and_hold_baseline",
+        "parameter_values": {
+            "BUY_HOLD_BUY_INDEX": 1,
+            "BUY_HOLD_DECISION_REASON": "kernel_payload_failure_buy",
+        },
+        "fee_rate": 0.001,
+        "slippage_bps": 5.0,
+        "decision_events": (event,),
+        "context": BacktestRunContext(report_detail="full"),
+    }
+    normal = run_decision_event_backtest(**kwargs)
+
+    def _fail_payload_build(self, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("unit decision payload failure")
+
+    monkeypatch.setattr(
+        "bithumb_bot.research.decision_payload.DecisionPayloadBuilder.build",
+        _fail_payload_build,
+    )
+
+    failed_observability = run_decision_event_backtest(
+        **{**kwargs, "context": BacktestRunContext(report_detail="full")}
+    )
+
+    assert "decision_payload_observability_failed" in failed_observability.warnings
+    assert failed_observability.trades
+    assert failed_observability.trades == normal.trades
+    assert failed_observability.execution_event_summary == normal.execution_event_summary
+    assert failed_observability.metrics_v2.cost_execution.filled_execution_count == 1
+    assert failed_observability.resource_usage["trade_ledger_hash"] == normal.resource_usage["trade_ledger_hash"]
+    assert failed_observability.resource_usage["equity_curve_hash"] == normal.resource_usage["equity_curve_hash"]
+    assert failed_observability.decisions[0]["final_signal"] == "BUY"
+    assert failed_observability.decisions[0]["execution_plan_status"] == "PLANNED"
+    trace = failed_observability.resource_usage["stage_trace"]
+    assert any(
+        item["stage_id"] == "decision_payload_observability"
+        and item["reason_code"] == "decision_payload_observability_failed"
+        for item in trace
+    )
+
+
 def test_decision_event_backtest_uses_typed_execution_service_boundary(monkeypatch) -> None:
     dataset = DatasetSnapshot(
         snapshot_id="kernel_typed_execution_service",

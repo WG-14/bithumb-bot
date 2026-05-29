@@ -24,7 +24,12 @@ class BacktestResultAssembler:
         initial_position_qty: float,
         parameter_stability_score: float | None,
     ) -> support.BacktestRun:
-        audit_trace_index = support.complete_audit_trace(run_context, status="completed")
+        warnings = ["not_enough_candles"]
+        audit_trace_index = _complete_audit_trace_observability(
+            run_context,
+            warnings=warnings,
+            status="completed",
+        )
         return support.BacktestRun(
             metrics=support.empty_metrics(parameter_stability_score),
             metrics_v2=support.empty_metrics_v2(
@@ -33,7 +38,7 @@ class BacktestResultAssembler:
             ),
             trades=(),
             candle_count=0,
-            warnings=("not_enough_candles",),
+            warnings=tuple(warnings),
             execution_event_summary=support.empty_execution_event_summary(),
             resource_usage=accumulator.resource_usage(candles_processed=0),
             strategy_diagnostics=accumulator.strategy_diagnostics(trades=[]),
@@ -76,8 +81,9 @@ class BacktestResultAssembler:
                 EquityPoint(ts=last_mark_ts, equity=final_equity, cash=ledger.cash, asset_qty=ledger.qty)
             )
         accumulator.update_equity(retained=retain_final_equity, ts=last_mark_ts, asset_qty=ledger.qty)
-        support.trace_equity_mark(
+        _trace_equity_mark_observability(
             run_context,
+            warnings=warnings,
             ts=last_mark_ts,
             equity=final_equity,
             cash=ledger.cash,
@@ -131,7 +137,11 @@ class BacktestResultAssembler:
                     sorted(set(metrics_v2.limitation_reasons) | {"bounded_detail_equity_curve_not_retained"})
                 ),
             )
-        audit_trace_index = support.complete_audit_trace(run_context, status="completed")
+        audit_trace_index = _complete_audit_trace_observability(
+            run_context,
+            warnings=warnings,
+            status="completed",
+        )
         accumulator.trade_ledger_hash_material = [support.trade_hash_payload(trade) for trade in ledger.trade_ledger]
         accumulator.equity_curve_hash_material = [
             {
@@ -171,3 +181,37 @@ class BacktestResultAssembler:
 
 
 __all__ = ["BacktestResultAssembler"]
+
+
+def _trace_equity_mark_observability(
+    run_context: Any,
+    *,
+    warnings: list[str],
+    ts: int,
+    equity: float,
+    cash: float,
+    asset_qty: float,
+) -> None:
+    try:
+        support.trace_equity_mark(
+            run_context,
+            ts=ts,
+            equity=equity,
+            cash=cash,
+            asset_qty=asset_qty,
+        )
+    except Exception:
+        warnings.append("audit_equity_observability_failed")
+
+
+def _complete_audit_trace_observability(
+    run_context: Any,
+    *,
+    warnings: list[str],
+    status: str,
+) -> dict[str, object] | None:
+    try:
+        return support.complete_audit_trace(run_context, status=status)
+    except Exception:
+        warnings.append("audit_trace_completion_observability_failed")
+        return {"status": "audit_trace_completion_observability_failed"}

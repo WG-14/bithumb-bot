@@ -107,8 +107,12 @@ def run_stage_owned_decision_event_backtest(
             EquityPoint(ts=first_ts, equity=starting_cash, cash=ledger.cash, asset_qty=ledger.qty)
         )
     accumulator.update_equity(retained=retain_initial_equity, ts=first_ts, asset_qty=ledger.qty)
-    audit_recorder.record_equity_mark(
+    _record_audit_equity_mark(
+        audit_recorder,
         run_context,
+        warnings,
+        trace_recorder,
+        input_hash=canonical_payload_hash({"stage": "initial_equity", "ts": first_ts}),
         ts=first_ts,
         equity=starting_cash,
         cash=ledger.cash,
@@ -216,28 +220,9 @@ def run_stage_owned_decision_event_backtest(
             reason_code=risk_decision.reason_code,
         )
         action = risk_decision.final_signal
-        decision_payload = payload_builder.build(
-            dataset=dataset,
-            dataset_content_hash=dataset_content_hash,
-            parameter_values=parameter_values,
-            strategy_plugin=strategy_plugin,
-            strategy_spec=strategy_spec,
-            exit_policy=active_exit_policy,
-            exit_policy_hash=active_exit_policy_hash,
-            fee_rate=fee_rate,
-            slippage_bps=slippage_bps,
-            timing_policy=timing_policy,
-            portfolio_policy=policy,
-            event=event,
-            decision_boundary_ts=decision_boundary_ts,
-            strategy_envelope=strategy_envelope,
-            risk_decision=risk_decision,
-            policy_position=policy_position,
-            policy_decision=policy_decision,
-            regime_snapshot=regime_snapshot,
-            qty=ledger.qty,
-            sellable_qty=sellable_qty,
-        )
+        execution_evidence: dict[str, object]
+        decision_payload_qty = float(ledger.qty)
+        decision_payload_sellable_qty = float(sellable_qty)
         if action in {"BUY", "SELL"}:
             outcome = execution_simulator.execute(
                 dataset=dataset,
@@ -252,7 +237,7 @@ def run_stage_owned_decision_event_backtest(
                 action=action,
                 decision_reason=risk_decision.reason_code,
                 regime_snapshot=regime_snapshot,
-                decision_hash=str(decision_payload.get("replay_fingerprint_hash") or ""),
+                decision_hash=str(strategy_envelope.replay_fingerprint_hash or strategy_decision_hash),
                 sellable_qty=sellable_qty,
                 buy_fraction=buy_fraction,
                 promotion_grade_policy_required=bool(
@@ -271,7 +256,7 @@ def run_stage_owned_decision_event_backtest(
                 exit_rule=risk_decision.exit_rule,
                 exit_reason=risk_decision.exit_reason,
             )
-            decision_payload.update(dict(outcome.evidence))
+            execution_evidence = dict(outcome.evidence)
             warnings.extend(outcome.warnings)
             application = ledger.apply_execution_outcome(
                 outcome,
@@ -282,28 +267,29 @@ def run_stage_owned_decision_event_backtest(
             mark_cash = application.mark_cash
             mark_qty = application.mark_qty
             if application.trade_recorded:
-                audit_recorder.record_execution(run_context, ledger.trade_ledger[-1])
+                _record_audit_execution(
+                    audit_recorder,
+                    run_context,
+                    warnings,
+                    trace_recorder,
+                    input_hash=canonical_payload_hash(ledger.trade_ledger[-1]),
+                    trade=ledger.trade_ledger[-1],
+                )
                 ledger.apply_pending_fills(decision_boundary_ts)
-            execution_plan_hash = canonical_payload_hash(dict(outcome.evidence))
+            execution_plan_hash = canonical_payload_hash(execution_evidence)
             fill_hash = canonical_payload_hash(
                 outcome.fill.as_dict() if outcome.fill is not None and hasattr(outcome.fill, "as_dict") else {}
             )
         else:
-            blocked_evidence = blocked_execution_evidence(risk_decision.reason_code)
-            decision_payload.update(blocked_evidence)
-            execution_plan_hash = canonical_payload_hash(blocked_evidence)
+            execution_evidence = blocked_execution_evidence(risk_decision.reason_code)
+            execution_plan_hash = canonical_payload_hash(execution_evidence)
             fill_hash = canonical_payload_hash({})
         trace_recorder.record_execution(
             input_hash=risk_gate_hash,
             execution_plan_hash=execution_plan_hash,
             fill_hash=fill_hash,
-            reason_code=str(decision_payload.get("execution_plan_reason_code") or risk_decision.reason_code),
+            reason_code=str(execution_evidence.get("execution_plan_reason_code") or risk_decision.reason_code),
         )
-        retain_decision = accumulator.retain_decision()
-        if retain_decision:
-            decisions.append(decision_payload)
-        accumulator.update_decision(decision_payload, retained=retain_decision)
-        audit_recorder.record_decision(run_context, decision_payload)
 
         retain_equity = accumulator.retain_equity_point()
         ledger.mark_tick_equity(
@@ -323,14 +309,66 @@ def run_stage_owned_decision_event_backtest(
         if not retain_equity and ledger.equity_curve:
             ledger.equity_curve.pop()
         accumulator.update_equity(retained=retain_equity, ts=mark_boundary_ts, asset_qty=mark_qty)
-        audit_recorder.record_equity_mark(
+        decision_payload = _build_decision_observability_payload(
+            payload_builder=payload_builder,
+            trace_recorder=trace_recorder,
+            warnings=warnings,
+            dataset=dataset,
+            dataset_content_hash=dataset_content_hash,
+            parameter_values=parameter_values,
+            strategy_plugin=strategy_plugin,
+            strategy_spec=strategy_spec,
+            exit_policy=active_exit_policy,
+            exit_policy_hash=active_exit_policy_hash,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            timing_policy=timing_policy,
+            portfolio_policy=policy,
+            event=event,
+            decision_boundary_ts=decision_boundary_ts,
+            strategy_envelope=strategy_envelope,
+            risk_decision=risk_decision,
+            policy_position=policy_position,
+            policy_decision=policy_decision,
+            regime_snapshot=regime_snapshot,
+            qty=decision_payload_qty,
+            sellable_qty=decision_payload_sellable_qty,
+            execution_evidence=execution_evidence,
+            input_hash=execution_plan_hash,
+        )
+        retain_decision = accumulator.retain_decision()
+        if retain_decision:
+            decisions.append(decision_payload)
+        accumulator.update_decision(decision_payload, retained=retain_decision)
+        _record_audit_decision(
+            audit_recorder,
             run_context,
+            warnings,
+            trace_recorder,
+            input_hash=canonical_payload_hash(decision_payload),
+            decision_payload=decision_payload,
+        )
+        _record_audit_equity_mark(
+            audit_recorder,
+            run_context,
+            warnings,
+            trace_recorder,
+            input_hash=canonical_payload_hash(
+                {
+                    "stage": "tick_equity",
+                    "ts": mark_boundary_ts,
+                    "cash": mark_cash,
+                    "asset_qty": mark_qty,
+                }
+            ),
             ts=mark_boundary_ts,
             equity=mark_cash + mark_qty * float(candle.close),
             cash=mark_cash,
             asset_qty=mark_qty,
         )
-        trace_recorder.flush_latest(
+        _flush_stage_trace_observability(
+            trace_recorder,
+            warnings,
             count=5,
             metrics_collector=metrics_collector,
             experiment_recorder=experiment_recorder,
@@ -354,3 +392,254 @@ def run_stage_owned_decision_event_backtest(
         warnings=warnings,
         stage_trace_records=[trace.as_dict() for trace in trace_recorder.traces],
     )
+
+
+def _build_decision_observability_payload(
+    *,
+    payload_builder: DecisionPayloadBuilder,
+    trace_recorder: StageTraceRecorder,
+    warnings: list[str],
+    dataset: Any,
+    dataset_content_hash: str,
+    parameter_values: dict[str, Any],
+    strategy_plugin: Any,
+    strategy_spec: Any,
+    exit_policy: dict[str, Any],
+    exit_policy_hash: str,
+    fee_rate: float,
+    slippage_bps: float,
+    timing_policy: Any,
+    portfolio_policy: Any,
+    event: Any,
+    decision_boundary_ts: int,
+    strategy_envelope: Any,
+    risk_decision: Any,
+    policy_position: Any,
+    policy_decision: Any | None,
+    regime_snapshot: dict[str, object],
+    qty: float,
+    sellable_qty: float,
+    execution_evidence: dict[str, object],
+    input_hash: str,
+) -> dict[str, object]:
+    try:
+        payload = payload_builder.build(
+            dataset=dataset,
+            dataset_content_hash=dataset_content_hash,
+            parameter_values=parameter_values,
+            strategy_plugin=strategy_plugin,
+            strategy_spec=strategy_spec,
+            exit_policy=exit_policy,
+            exit_policy_hash=exit_policy_hash,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            timing_policy=timing_policy,
+            portfolio_policy=portfolio_policy,
+            event=event,
+            decision_boundary_ts=decision_boundary_ts,
+            strategy_envelope=strategy_envelope,
+            risk_decision=risk_decision,
+            policy_position=policy_position,
+            policy_decision=policy_decision,
+            regime_snapshot=regime_snapshot,
+            qty=qty,
+            sellable_qty=sellable_qty,
+        )
+        payload.update(dict(execution_evidence))
+        return payload
+    except Exception as exc:
+        warnings.append("decision_payload_observability_failed")
+        error_payload = {
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "strategy_name": str(strategy_plugin.name),
+            "candle_ts": int(event.candle_ts),
+            "decision_ts": int(decision_boundary_ts),
+        }
+        trace_recorder.record_observability_error(
+            stage_id="decision_payload_observability",
+            input_hash=input_hash,
+            reason_code="decision_payload_observability_failed",
+            payload=error_payload,
+        )
+        fallback = _minimal_decision_observability_payload(
+            event=event,
+            strategy_plugin=strategy_plugin,
+            strategy_envelope=strategy_envelope,
+            risk_decision=risk_decision,
+            regime_snapshot=regime_snapshot,
+            qty=qty,
+            sellable_qty=sellable_qty,
+            execution_evidence=execution_evidence,
+        )
+        fallback["decision_payload_observability_error"] = error_payload
+        return fallback
+
+
+def _minimal_decision_observability_payload(
+    *,
+    event: Any,
+    strategy_plugin: Any,
+    strategy_envelope: Any,
+    risk_decision: Any,
+    regime_snapshot: dict[str, object],
+    qty: float,
+    sellable_qty: float,
+    execution_evidence: dict[str, object],
+) -> dict[str, object]:
+    raw_signal = str(strategy_envelope.provenance.get("raw_signal") or event.raw_signal or "HOLD").upper()
+    entry_signal = str(strategy_envelope.provenance.get("entry_signal") or event.entry_signal or raw_signal).upper()
+    exit_signal = str(strategy_envelope.provenance.get("exit_signal") or event.exit_signal or raw_signal).upper()
+    payload: dict[str, object] = {
+        "candle_ts": int(event.candle_ts),
+        "decision_ts": int(event.decision_ts),
+        "strategy_name": str(strategy_plugin.name),
+        "strategy_diagnostics_namespace": str(strategy_plugin.diagnostics_namespace),
+        "raw_signal": raw_signal,
+        "entry_signal": entry_signal,
+        "exit_signal": exit_signal,
+        "final_signal": str(risk_decision.final_signal),
+        "entry_reason": str(risk_decision.reason_code),
+        "exit_rule": str(risk_decision.exit_rule or ""),
+        "exit_reason": str(risk_decision.exit_reason or ""),
+        "blocked_filters": tuple(strategy_envelope.provenance.get("blocked_filters") or ()),
+        "feature_snapshot": dict(event.feature_snapshot),
+        "current_market_regime_snapshot": dict(regime_snapshot),
+        "regime_decision": "observability_unavailable",
+        "regime_block_reason": "",
+        "qty": float(qty),
+        "sellable_qty": float(sellable_qty),
+        "replay_fingerprint_hash": str(strategy_envelope.replay_fingerprint_hash or ""),
+        "strategy_behavior_payload": {
+            "strategy_name": str(strategy_plugin.name),
+            "raw_signal": raw_signal,
+            "final_signal": str(risk_decision.final_signal),
+            "reason": str(risk_decision.reason_code),
+            "feature_snapshot": dict(event.feature_snapshot),
+        },
+        "research_policy_unsupported": bool(strategy_envelope.unsupported_reason),
+        "research_policy_unsupported_reason": str(strategy_envelope.unsupported_reason or ""),
+        "research_policy_comparable": not bool(strategy_envelope.unsupported_reason),
+    }
+    payload.update(dict(execution_evidence))
+    return payload
+
+
+def _record_observability_error(
+    *,
+    trace_recorder: StageTraceRecorder,
+    warnings: list[str],
+    warning: str,
+    stage_id: str,
+    input_hash: str,
+    exc: Exception,
+) -> None:
+    warnings.append(warning)
+    trace_recorder.record_observability_error(
+        stage_id=stage_id,
+        input_hash=input_hash,
+        reason_code=warning,
+        payload={"error_type": type(exc).__name__, "error_message": str(exc)},
+    )
+
+
+def _record_audit_execution(
+    audit_recorder: AuditTraceRecorder,
+    run_context: Any,
+    warnings: list[str],
+    trace_recorder: StageTraceRecorder,
+    *,
+    input_hash: str,
+    trade: dict[str, object],
+) -> None:
+    try:
+        audit_recorder.record_execution(run_context, trade)
+    except Exception as exc:
+        _record_observability_error(
+            trace_recorder=trace_recorder,
+            warnings=warnings,
+            warning="audit_execution_observability_failed",
+            stage_id="audit_execution_observability",
+            input_hash=input_hash,
+            exc=exc,
+        )
+
+
+def _record_audit_decision(
+    audit_recorder: AuditTraceRecorder,
+    run_context: Any,
+    warnings: list[str],
+    trace_recorder: StageTraceRecorder,
+    *,
+    input_hash: str,
+    decision_payload: dict[str, object],
+) -> None:
+    try:
+        audit_recorder.record_decision(run_context, decision_payload)
+    except Exception as exc:
+        _record_observability_error(
+            trace_recorder=trace_recorder,
+            warnings=warnings,
+            warning="audit_decision_observability_failed",
+            stage_id="audit_decision_observability",
+            input_hash=input_hash,
+            exc=exc,
+        )
+
+
+def _record_audit_equity_mark(
+    audit_recorder: AuditTraceRecorder,
+    run_context: Any,
+    warnings: list[str],
+    trace_recorder: StageTraceRecorder,
+    *,
+    input_hash: str,
+    ts: int,
+    equity: float,
+    cash: float,
+    asset_qty: float,
+) -> None:
+    try:
+        audit_recorder.record_equity_mark(
+            run_context,
+            ts=ts,
+            equity=equity,
+            cash=cash,
+            asset_qty=asset_qty,
+        )
+    except Exception as exc:
+        _record_observability_error(
+            trace_recorder=trace_recorder,
+            warnings=warnings,
+            warning="audit_equity_observability_failed",
+            stage_id="audit_equity_observability",
+            input_hash=input_hash,
+            exc=exc,
+        )
+
+
+def _flush_stage_trace_observability(
+    trace_recorder: StageTraceRecorder,
+    warnings: list[str],
+    *,
+    count: int,
+    metrics_collector: Any | None,
+    experiment_recorder: Any | None,
+    event_number: int,
+) -> None:
+    try:
+        trace_recorder.flush_latest(
+            count=count,
+            metrics_collector=metrics_collector,
+            experiment_recorder=experiment_recorder,
+            event_number=event_number,
+        )
+    except Exception as exc:
+        _record_observability_error(
+            trace_recorder=trace_recorder,
+            warnings=warnings,
+            warning="stage_trace_observability_flush_failed",
+            stage_id="stage_trace_observability",
+            input_hash=canonical_payload_hash({"event_number": int(event_number)}),
+            exc=exc,
+        )

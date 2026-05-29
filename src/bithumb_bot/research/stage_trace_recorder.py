@@ -71,6 +71,31 @@ class StageTraceRecorder:
             )
         )
 
+    def record_observability_error(
+        self,
+        *,
+        stage_id: str,
+        input_hash: str,
+        reason_code: str,
+        payload: dict[str, object],
+    ) -> StageTrace:
+        output_hash = canonical_payload_hash(
+            {
+                "stage_id": str(stage_id),
+                "reason_code": str(reason_code),
+                "payload": dict(payload),
+            }
+        )
+        return self.record(
+            StageTrace(
+                stage_id=str(stage_id),
+                input_hash=str(input_hash),
+                output_hash=output_hash,
+                reason_code=str(reason_code),
+                payload=dict(payload),
+            )
+        )
+
     def record_ledger_and_equity(
         self,
         *,
