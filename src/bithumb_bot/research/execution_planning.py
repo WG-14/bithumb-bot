@@ -6,6 +6,7 @@ from typing import Any
 from bithumb_bot.execution_service import (
     ExecutionDecisionSummary,
     ExecutionReadinessPlanningInput,
+    SignalExecutionRequest,
     ExecutionSubmitPlan,
     ExecutionTargetPlanningInput,
     TypedExecutionPlanningInput,
@@ -391,6 +392,34 @@ def _research_position_snapshot(
     )
 
 
+def execute_research_signal_request(
+    *,
+    service_cls: type[Any],
+    execution_model: Any,
+    fee_rate: float,
+    signal: str,
+    signal_ts: int,
+    market_price: float,
+    strategy_name: str,
+    decision_reason: str,
+    plan_bundle: ResearchExecutionPlanBundle,
+    research_execution_context: Any,
+) -> Any:
+    service = service_cls(execution_model=execution_model, fee_rate=fee_rate)
+    return service.execute(
+        SignalExecutionRequest(
+            signal=str(signal),
+            ts=int(signal_ts),
+            market_price=float(market_price),
+            strategy_name=strategy_name,
+            decision_reason=decision_reason,
+            execution_decision_summary=plan_bundle.summary,
+            execution_plan_bundle=plan_bundle,
+            research_execution_context=research_execution_context,
+        )
+    )
+
+
 def _research_lot_count(qty: float) -> int:
     return quantize_to_lot_count(qty=max(0.0, float(qty)), lot_size=0.0001)
 
@@ -398,6 +427,7 @@ def _research_lot_count(qty: float) -> int:
 __all__ = [
     "ResearchExecutionPlanBundle",
     "_execution_plan_evidence",
+    "execute_research_signal_request",
     "_research_execution_plan_bundle",
     "_research_execution_submit_plan",
     "_research_position_snapshot",

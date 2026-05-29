@@ -35,6 +35,12 @@ class LedgerExecutionApplication:
     trade_recorded: bool
 
 
+@dataclass(frozen=True)
+class LedgerFinalization:
+    final_equity: float
+    equity_retained: bool
+
+
 @dataclass
 class PortfolioLedger:
     starting_cash: float
@@ -299,14 +305,17 @@ class PortfolioLedger:
             qty=mark_qty,
         )
 
-    def finalize(self, *, last_mark_ts: int, last_price: float) -> None:
+    def finalize(self, *, last_mark_ts: int, last_price: float, retain_equity: bool = True) -> LedgerFinalization:
         self.apply_pending_fills(int(last_mark_ts))
         support.mark_pending_fills_at_end(
             pending_fills=self.pending_fills,
             trades=self.trade_ledger,
             final_mark_ts=int(last_mark_ts),
         )
-        self.mark_equity(ts=int(last_mark_ts), mark_price=float(last_price))
+        final_equity = self.cash + self.qty * float(last_price)
+        if retain_equity:
+            self.mark_equity(ts=int(last_mark_ts), mark_price=float(last_price))
+        return LedgerFinalization(final_equity=final_equity, equity_retained=bool(retain_equity))
 
     def export_trades(self) -> tuple[dict[str, object], ...]:
         return tuple(self.trade_ledger)

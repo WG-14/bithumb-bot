@@ -7,8 +7,7 @@ from bithumb_bot.canonical_decision import canonical_payload_hash
 from bithumb_bot.market_regime import aggregate_regime_coverage, aggregate_regime_performance
 
 from . import backtest_support as support
-from .execution_timing import candle_close_ts
-from .metrics_contract import EquityPoint, build_metrics_v2
+from .metrics_contract import build_metrics_v2
 
 
 @dataclass(frozen=True)
@@ -67,28 +66,7 @@ class BacktestResultAssembler:
         stage_trace_records: list[dict[str, object]],
     ) -> support.BacktestRun:
         last = candles[-1]
-        last_mark_ts = candle_close_ts(last, interval=dataset.interval)
-        ledger.apply_pending_fills(last_mark_ts)
-        support.mark_pending_fills_at_end(
-            pending_fills=ledger.pending_fills,
-            trades=ledger.trade_ledger,
-            final_mark_ts=last_mark_ts,
-        )
         final_equity = ledger.cash + ledger.qty * float(last.close)
-        retain_final_equity = accumulator.retain_equity_point()
-        if retain_final_equity:
-            ledger.equity_curve.append(
-                EquityPoint(ts=last_mark_ts, equity=final_equity, cash=ledger.cash, asset_qty=ledger.qty)
-            )
-        accumulator.update_equity(retained=retain_final_equity, ts=last_mark_ts, asset_qty=ledger.qty)
-        _trace_equity_mark_observability(
-            run_context,
-            warnings=warnings,
-            ts=last_mark_ts,
-            equity=final_equity,
-            cash=ledger.cash,
-            asset_qty=ledger.qty,
-        )
         return_pct = ((final_equity / starting_cash) - 1.0) * 100.0 if starting_cash > 0.0 else 0.0
         metrics = support.metrics(
             return_pct=return_pct,

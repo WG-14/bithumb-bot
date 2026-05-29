@@ -244,12 +244,7 @@ def run_stage_owned_decision_event_backtest(
                     strategy_envelope.provenance.get("promotion_grade_policy_required")
                 ),
                 allow_execution_compatibility_fallback=bool(
-                    policy_decision is None
-                    and not strategy_envelope.unsupported_reason
-                    and (
-                        strategy_plugin.research_policy_decision_builder is None
-                        or bool(strategy_envelope.provenance.get("allows_legacy_event_first_exit_policy"))
-                    )
+                    strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
                 ),
                 policy_drives_execution=True,
                 policy_decision=policy_decision,
@@ -376,6 +371,38 @@ def run_stage_owned_decision_event_backtest(
         )
         accumulator.maybe_emit_heartbeat(event_number)
         accumulator.check_limits(candles_processed=event_number, trades=ledger.trade_ledger)
+
+    last = candles[-1]
+    last_mark_ts = candle_close_ts(last, interval=dataset.interval)
+    retain_final_equity = accumulator.retain_equity_point()
+    finalization = ledger.finalize(
+        last_mark_ts=last_mark_ts,
+        last_price=float(last.close),
+        retain_equity=retain_final_equity,
+    )
+    accumulator.update_equity(
+        retained=finalization.equity_retained,
+        ts=last_mark_ts,
+        asset_qty=ledger.qty,
+    )
+    _record_audit_equity_mark(
+        audit_recorder,
+        run_context,
+        warnings,
+        trace_recorder,
+        input_hash=canonical_payload_hash(
+            {
+                "stage": "final_equity",
+                "ts": last_mark_ts,
+                "cash": ledger.cash,
+                "asset_qty": ledger.qty,
+            }
+        ),
+        ts=last_mark_ts,
+        equity=finalization.final_equity,
+        cash=ledger.cash,
+        asset_qty=ledger.qty,
+    )
 
     return result_assembler.assemble(
         dataset=dataset,

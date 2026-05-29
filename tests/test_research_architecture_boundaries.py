@@ -63,20 +63,34 @@ def test_backtest_kernel_is_orchestration_facade_not_transaction_script() -> Non
 def test_default_backtest_authority_calls_live_inside_stage_classes() -> None:
     pipeline_source = _source("src/bithumb_bot/research/backtest_pipeline.py")
     runner_source = _source("src/bithumb_bot/research/backtest_stage_runner.py")
+    strategy_source = _source("src/bithumb_bot/research/strategy_evaluator_stage.py")
+    risk_source = _source("src/bithumb_bot/research/risk_gate_stage.py")
+    execution_source = _source("src/bithumb_bot/research/execution_simulator_stage.py")
+    planning_source = _source("src/bithumb_bot/research/execution_planning.py")
     loop_source = _source("src/bithumb_bot/research/backtest_loop.py")
 
-    assert "plugin.research_policy_decision_builder" in pipeline_source
-    assert "builder(**policy_builder_kwargs)" in pipeline_source
-    assert "class DefaultStrategyEvaluator" in pipeline_source
-    assert "merge_exit_rules(" in pipeline_source
-    assert "class DefaultRiskGate" in pipeline_source
+    assert "plugin.research_policy_decision_builder" in strategy_source
+    assert "builder(**policy_builder_kwargs)" in strategy_source
+    assert "class DefaultStrategyEvaluator" in strategy_source
+    assert "merge_exit_rules(" in risk_source
+    assert "class DefaultRiskGate" in risk_source
+    assert "class RiskGateContext" in risk_source
+    assert "class RiskMarketSnapshot" in risk_source
+    assert "class RiskPortfolioSnapshot" in risk_source
+    assert "class DefaultStrategyEvaluator" not in pipeline_source
+    assert "class DefaultRiskGate" not in pipeline_source
+    assert "merge_exit_rules(" not in pipeline_source
+    assert "plugin.research_policy_decision_builder" not in pipeline_source
     assert "from .execution_simulator_stage import DefaultExecutionSimulator" in pipeline_source
     assert "SignalExecutionRequest(" not in pipeline_source
     assert "class DefaultExecutionSimulator" not in pipeline_source
-    assert "class DefaultExecutionSimulator" in _source("src/bithumb_bot/research/execution_simulator_stage.py")
+    assert "class DefaultExecutionSimulator" in execution_source
+    assert "SignalExecutionRequest(" not in execution_source
+    assert "ResearchVirtualExecutionService(" not in execution_source
+    assert "SignalExecutionRequest(" in planning_source
 
     for forbidden in (
-        "research_policy_decision_builder(",
+        "research_policy_decision_builder",
         "merge_exit_rules(",
         "SignalExecutionRequest(",
         "ResearchVirtualExecutionService(",
@@ -164,7 +178,7 @@ def test_all_promotion_grade_plugins_fail_closed_without_typed_decision() -> Non
         if plugin.research_runnable:
             assert plugin.research_policy_decision_builder is not None
 
-    evaluator_source = _source("src/bithumb_bot/research/backtest_pipeline.py")
+    evaluator_source = _source("src/bithumb_bot/research/strategy_evaluator_stage.py")
     assert "research_strategy_decision_promotion_fields_missing" in evaluator_source
     assert "if promotion_grade_policy_required and policy_decision is None" in evaluator_source
     assert "StrategyDecisionService.evaluate" in evaluator_source
@@ -247,6 +261,23 @@ def test_portfolio_ledger_is_only_authority_facing_pending_fill_mutator() -> Non
     assert "Compatibility wrapper; PortfolioLedger owns authority-facing mutation" in _source(
         "src/bithumb_bot/research/backtest_support.py"
     )
+
+
+def test_backtest_result_assembler_is_read_only_for_ledger_finalization() -> None:
+    assembler_source = _source("src/bithumb_bot/research/backtest_result_assembler.py")
+    ledger_source = _source("src/bithumb_bot/research/portfolio_ledger.py")
+    runner_source = _source("src/bithumb_bot/research/backtest_stage_runner.py")
+
+    forbidden = (
+        "apply_pending_fills(",
+        "mark_pending_fills_at_end(",
+        "ledger.equity_curve.append(",
+        "ledger.mark_equity(",
+    )
+    assert all(token not in assembler_source for token in forbidden)
+    assert "def finalize(" in ledger_source
+    assert "support.mark_pending_fills_at_end(" in ledger_source
+    assert "ledger.finalize(" in runner_source
 
 
 def test_backtest_compatibility_surfaces_document_pipeline_delegation() -> None:

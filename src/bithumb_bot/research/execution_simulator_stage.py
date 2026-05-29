@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import backtest_support as support
-from .execution_planning import ResearchExecutionPlanBundle
+from .execution_planning import ResearchExecutionPlanBundle, execute_research_signal_request
 from .execution_planning import _execution_plan_evidence as _default_execution_plan_evidence
 from .execution_planning import _research_execution_plan_bundle as _default_research_execution_plan_bundle
 from .execution_simulator import ResearchExecutionContext, ResearchVirtualExecutionService
@@ -31,8 +31,6 @@ class DefaultExecutionSimulator:
         return state
 
     def execute(self, *args: Any, **kwargs: Any) -> ExecutionSimulationOutcome:
-        from bithumb_bot.execution_service import SignalExecutionRequest
-
         action = str(kwargs["action"]).upper()
         if action not in {"BUY", "SELL"}:
             return ExecutionSimulationOutcome(fill=None)
@@ -126,18 +124,17 @@ class DefaultExecutionSimulator:
             )
         else:
             service_cls = _compat_attr("ResearchVirtualExecutionService", ResearchVirtualExecutionService)
-            service = service_cls(execution_model=model, fee_rate=fee_rate)
-            fill = service.execute(
-                SignalExecutionRequest(
-                    signal=action,
-                    ts=signal.signal_candle_start_ts,
-                    market_price=float(reference.fill_reference_price),
-                    strategy_name=strategy_name,
-                    decision_reason=decision_reason,
-                    execution_decision_summary=plan_bundle.summary,
-                    execution_plan_bundle=plan_bundle,
-                    research_execution_context=research_execution_context,
-                )
+            fill = execute_research_signal_request(
+                service_cls=service_cls,
+                execution_model=model,
+                fee_rate=fee_rate,
+                signal=action,
+                signal_ts=signal.signal_candle_start_ts,
+                market_price=float(reference.fill_reference_price),
+                strategy_name=strategy_name,
+                decision_reason=decision_reason,
+                plan_bundle=plan_bundle,
+                research_execution_context=research_execution_context,
             )
             if fill is None:
                 return ExecutionSimulationOutcome(
