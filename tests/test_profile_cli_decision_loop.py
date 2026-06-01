@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import inspect
 from types import SimpleNamespace
@@ -30,7 +31,8 @@ from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
 from bithumb_bot.research.parameter_space import candidate_id
 from bithumb_bot.research.promotion_gate import build_candidate_profile
 from bithumb_bot.research.strategy_registry import resolve_research_strategy_plugin
-from tests.test_decision_equivalence_canonical import _decision
+import bithumb_bot.research.decision_export_normalizers as decision_export_normalizers
+from tests.test_decision_equivalence_canonical import _decision, _decision_v2
 
 
 def test_runtime_replay_fails_closed_when_plugin_lacks_runtime_adapter(
@@ -209,6 +211,76 @@ def test_profile_cli_does_not_own_sma_promotion_normalizer() -> None:
 
     assert "_sma_promotion_grade_research_export_decisions" not in source
     assert "classify_sma_market_regime" not in source
+
+
+def test_sma_promotion_export_normalizer_does_not_recompute_policy_fields() -> None:
+    source = inspect.getsource(decision_export_normalizers)
+    tree = ast.parse(source)
+
+    forbidden_calls = {"classify_sma_market_regime", "decide", "decide_snapshot", "evaluate"}
+    forbidden_assignments = {"market_regime", "regime_decision", "regime_block_reason", "final_signal", "side"}
+    calls = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    calls.update(
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    )
+    assigned_subscripts = {
+        node.slice.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, ast.Store)
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    }
+
+    assert not (calls & forbidden_calls)
+    assert not (assigned_subscripts & forbidden_assignments)
+
+
+def test_sma_promotion_export_normalizer_preserves_policy_observability_hashes() -> None:
+    candle_ts = 1_714_521_660_000
+    snapshot = SimpleNamespace(
+        candles=(
+            SimpleNamespace(ts=candle_ts - 60_000),
+            SimpleNamespace(ts=candle_ts),
+        ),
+        content_hash=lambda: "sha256:data",
+    )
+    raw = _decision_v2(
+        candle_ts=candle_ts,
+        market_regime="authoritative_regime_from_trace",
+        regime_decision="TRACE_ON",
+        regime_block_reason="trace_none",
+        feature_snapshot_hash="sha256:feature-from-trace",
+        market_feature_hash="sha256:market-feature-from-projector",
+        canonical_feature_projection_hash="sha256:canonical-feature-from-projector",
+    )
+
+    decisions = decision_export_normalizers.sma_promotion_grade_research_export_decisions(
+        raw_decisions=[raw],
+        snapshot=snapshot,
+        params={},
+        profile={
+            "profile_content_hash": "sha256:profile",
+            "candidate_profile_hash": "sha256:candidate",
+            "strategy_parameters": {},
+            "cost_model": {"fee_rate": 0.0, "slippage_bps": 0.0},
+        },
+        order_rules_hash="sha256:order-rules",
+    )
+
+    assert decisions[0]["market_regime"] == "authoritative_regime_from_trace"
+    assert decisions[0]["regime_decision"] == "TRACE_ON"
+    assert decisions[0]["regime_block_reason"] == "trace_none"
+    assert decisions[0]["feature_snapshot_hash"] == "sha256:feature-from-trace"
+    assert decisions[0]["market_feature_hash"] == "sha256:market-feature-from-projector"
+    assert decisions[0]["canonical_feature_projection_hash"] == "sha256:canonical-feature-from-projector"
+    assert "export_diagnostics" not in decisions[0]
 
 
 def test_generic_promotion_grade_research_export_accepts_non_sma_decisions() -> None:
@@ -711,6 +783,7 @@ def _promotion_decision_equivalence_report(
         "strategy_decision_contract_version": decision_contract_version,
         "repo_owned_export_artifacts": True,
         "legacy_or_unverified_export": False,
+        "post_export_canonical_artifact_equivalence": True,
         "claims_scope": {
             "positive_equivalence_state_classes": ["flat_no_dust_no_position"],
             "unsupported_state_classes": [],
@@ -921,8 +994,48 @@ def test_repo_owned_export_replay_artifacts_can_pass_positive_equivalence(
     assert result.report["mismatch_count"] == 0
     assert result.report["missing_research_decisions"] == []
     assert result.report["missing_runtime_decisions"] == []
+    assert result.report["post_export_canonical_artifact_equivalence"] is True
     assert result.report["research_export_content_hash"].startswith("sha256:")
     assert result.report["runtime_export_content_hash"].startswith("sha256:")
+    assert result.report["policy_input_hash_coverage"]["ok"] is True
+    required_equal_fields = (
+        "decision_input_bundle_hash",
+        "policy_input_hash",
+        "policy_decision_hash",
+        "final_signal",
+        "execution_submit_plan_hash",
+        "exit_rule",
+        "exit_evaluations_hash",
+    )
+    research_by_key = {
+        (decision["signal_timestamp"], decision["candle_ts"]): decision
+        for decision in research_artifact.decisions
+    }
+    runtime_by_key = {
+        (decision["signal_timestamp"], decision["candle_ts"]): decision
+        for decision in runtime_artifact.decisions
+    }
+    assert research_by_key.keys() == runtime_by_key.keys()
+    for key, research_decision in research_by_key.items():
+        runtime_decision = runtime_by_key[key]
+        for field in required_equal_fields:
+            assert research_decision[field] == runtime_decision[field], {
+                "decision_key": key,
+                "field": field,
+                "research": research_decision[field],
+                "runtime": runtime_decision[field],
+                "drift_diagnostics": result.report["mismatches"],
+            }
+        assert (
+            research_decision["execution_submit_plan_evidence"]
+            == runtime_decision["execution_submit_plan_evidence"]
+        ), {
+            "decision_key": key,
+            "field": "execution_intent",
+            "research": research_decision["execution_submit_plan_evidence"],
+            "runtime": runtime_decision["execution_submit_plan_evidence"],
+            "drift_diagnostics": result.report["mismatches"],
+        }
 
 
 def test_repo_owned_export_replay_open_exposure_policy_drift_fails_closed(

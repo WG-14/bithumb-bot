@@ -355,6 +355,7 @@ def compare_decision_equivalence(
         "promotion_grade_comparison": (
             canonical_complete_and_bound and outcome == "PASS_POSITIVE_EQUIVALENCE"
         ),
+        "post_export_canonical_artifact_equivalence": False,
         "ok": outcome == "PASS_POSITIVE_EQUIVALENCE" and not reason_code_set,
         "outcome": outcome,
         "reason_codes": reason_code_set,
@@ -468,6 +469,7 @@ def compare_decision_export_artifacts(
             "strategy_decision_contract_version": research_artifact.strategy_decision_contract_version,
             "repo_owned_export_artifacts": True,
             "legacy_or_unverified_export": False,
+            "post_export_canonical_artifact_equivalence": True,
             "artifact_binding_validation": artifact_binding,
             "reason_codes": reason_codes,
         }
@@ -536,6 +538,8 @@ def promotion_grade_decision_equivalence_fail_reasons(report: dict[str, Any]) ->
         reasons.append("decision_equivalence_legacy_schema")
     if report.get("legacy_or_unverified_export") is True:
         reasons.append("decision_equivalence_unverified_export")
+    if report.get("post_export_canonical_artifact_equivalence") is not True:
+        reasons.append("decision_equivalence_post_export_canonical_artifact_missing")
     for field in (
         "execution_submit_plan_hash",
         "submit_plan_source",

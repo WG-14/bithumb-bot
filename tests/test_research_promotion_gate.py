@@ -560,6 +560,7 @@ def _decision_equivalence_report_for_candidate(candidate: dict[str, object], tmp
         ).decision_contract_version,
         "repo_owned_export_artifacts": True,
         "legacy_or_unverified_export": False,
+        "post_export_canonical_artifact_equivalence": True,
         "outcome": "PASS_POSITIVE_EQUIVALENCE",
         "claims_scope": {
             "positive_equivalence_state_classes": ["flat_no_dust_no_position"],
@@ -592,7 +593,8 @@ def _decision_equivalence_report_for_candidate(candidate: dict[str, object], tmp
         "generated_at": "2026-05-04T00:00:00+00:00",
     }
     report["content_hash"] = compute_decision_equivalence_hash(report)
-    path = tmp_path / "decision_equivalence.json"
+    candidate_id = str(candidate.get("parameter_candidate_id") or "candidate").replace("/", "_")
+    path = tmp_path / f"decision_equivalence_{candidate_id}.json"
     write_json_atomic(path, report)
     return path
 
@@ -686,6 +688,23 @@ def test_production_bound_candidate_rejects_decision_equivalence_hash_mismatch(t
 
     assert not allowed
     assert "decision_equivalence_report_hash_mismatch" in reasons
+
+
+def test_production_bound_candidate_rejects_pre_export_only_decision_equivalence(tmp_path: Path) -> None:
+    candidate = _production_candidate()
+    report_path = _decision_equivalence_report_for_candidate(candidate, tmp_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report.pop("post_export_canonical_artifact_equivalence", None)
+    report["content_hash"] = compute_decision_equivalence_hash(report)
+    write_json_atomic(report_path, report)
+    candidate["decision_equivalence_report_path"] = str(report_path.resolve())
+    candidate["decision_equivalence_content_hash"] = report["content_hash"]
+    candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
+
+    allowed, reasons = validate_backtest_candidate_for_promotion(candidate)
+
+    assert not allowed
+    assert "decision_equivalence_post_export_canonical_artifact_missing" in reasons
 
 
 def test_backtest_candidate_smoke_markers_fail_closed_for_promotion() -> None:

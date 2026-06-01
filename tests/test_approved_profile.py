@@ -301,6 +301,7 @@ def _write_source_decision_equivalence_report(candidate: dict[str, object]) -> t
         "strategy_decision_contract_version": plugin.decision_contract_version,
         "repo_owned_export_artifacts": True,
         "legacy_or_unverified_export": False,
+        "post_export_canonical_artifact_equivalence": True,
         "claims_scope": {
             "positive_equivalence_state_classes": ["flat_no_dust_no_position"],
             "unsupported_state_classes": [],
@@ -934,6 +935,7 @@ def _attach_decision_equivalence_report(
         ),
         "repo_owned_export_artifacts": True,
         "legacy_or_unverified_export": False,
+        "post_export_canonical_artifact_equivalence": True,
         "outcome": "PASS_POSITIVE_EQUIVALENCE",
         "claims_scope": {
             "positive_equivalence_state_classes": ["flat_no_dust_no_position"],

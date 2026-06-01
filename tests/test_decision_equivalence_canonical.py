@@ -230,6 +230,7 @@ def _mark_repo_owned_report(report: dict[str, object]) -> dict[str, object]:
     report["runtime_export_content_hash"] = "sha256:runtime-export"
     report["research_export_path"] = "/tmp/research_decisions.json"
     report["runtime_export_path"] = "/tmp/runtime_decisions.json"
+    report["post_export_canonical_artifact_equivalence"] = True
     return report
 
 
@@ -584,6 +585,20 @@ def test_promotion_grade_equivalence_gate_accepts_positive_canonical_v2_export_r
 
     require_promotion_grade_decision_equivalence(report)
     assert promotion_grade_decision_equivalence_fail_reasons(report) == ()
+
+
+def test_promotion_grade_equivalence_gate_rejects_pre_export_only_report() -> None:
+    report = dict(_compare(_decision_v2(), _decision_v2()).report)
+    report["repo_owned_export_artifacts"] = True
+    report["legacy_or_unverified_export"] = False
+    report["research_export_source"] = "research"
+    report["runtime_export_source"] = "runtime_replay"
+    report["research_export_content_hash"] = "sha256:research-export"
+    report["runtime_export_content_hash"] = "sha256:runtime-export"
+
+    reasons = promotion_grade_decision_equivalence_fail_reasons(report)
+
+    assert "decision_equivalence_post_export_canonical_artifact_missing" in reasons
 
 
 def test_promotion_grade_equivalence_gate_rejects_execution_plan_drift() -> None:
@@ -1027,6 +1042,7 @@ def test_decision_export_artifacts_can_produce_promotion_grade_report(tmp_path) 
     assert "state_coverage_matrix" in result.report
     assert result.report["claims_scope"]["positive_equivalence_state_classes"] == ["flat_no_dust_no_position"]
     assert result.report["promotion_grade_comparison"] is True
+    assert result.report["post_export_canonical_artifact_equivalence"] is True
     assert result.report["research_export_content_hash"].startswith("sha256:")
     assert result.report["runtime_export_content_hash"].startswith("sha256:")
     assert result.report["research_strategy_plugin_contract_hash"].startswith("sha256:")
