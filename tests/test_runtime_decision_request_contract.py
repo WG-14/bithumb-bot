@@ -1541,6 +1541,37 @@ def test_runtime_strategy_set_rejects_multi_pair_until_pair_scoped_runtime_exist
     assert "multi_pair_runtime_unsupported" in str(exc.value)
 
 
+def test_explicit_multi_pair_portfolio_scope_fails_closed_until_supported() -> None:
+    cfg = replace(
+        settings,
+        PAIR="KRW-BTC",
+        INTERVAL="1m",
+        RUNTIME_STRATEGY_SET_JSON=json.dumps(
+            {
+                "market_scope": {"mode": "multi_pair_portfolio", "pair": "KRW-BTC", "interval": "1m"},
+                "strategies": [{"strategy_name": "safe_hold", "pair": "KRW-BTC"}],
+            }
+        ),
+    )
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+    assert "multi_pair_runtime_unsupported:market_scope_mode=multi_pair_portfolio" in str(exc.value)
+
+
+def test_live_like_rejects_list_form_runtime_strategy_set_json() -> None:
+    cfg = replace(
+        settings,
+        MODE="live",
+        LIVE_DRY_RUN=True,
+        RUNTIME_STRATEGY_SET_JSON=json.dumps([{"strategy_name": "safe_hold"}]),
+    )
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+    assert "runtime_strategy_set_json_object_required_for_live_like" in str(exc.value)
+
+
 def test_market_scope_pair_must_match_settings_pair() -> None:
     cfg = replace(
         settings,

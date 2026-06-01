@@ -165,7 +165,7 @@ class RuntimeMarketScope:
 
     def __post_init__(self) -> None:
         mode = str(self.mode or "").strip().lower() or "single_pair"
-        if mode != "single_pair":
+        if mode not in {"single_pair", "multi_pair_portfolio"}:
             raise ValueError(f"runtime_market_scope_mode_unsupported:{mode}")
         pair = str(self.pair or settings.PAIR).strip()
         interval = str(self.interval or settings.INTERVAL).strip()
@@ -461,6 +461,10 @@ class RuntimeStrategySetResolver:
     def _load_json_strategy_set(self, raw_json: str) -> tuple[list[Mapping[str, object]], RuntimeMarketScope]:
         payload = json.loads(raw_json)
         market_scope_payload: Mapping[str, object] = {}
+        live_like = (
+            str(getattr(self._settings, "MODE", "") or "").strip().lower() == "live"
+            or bool(getattr(self._settings, "LIVE_DRY_RUN", False))
+        )
         if isinstance(payload, Mapping):
             strategies_payload = payload.get("strategies", ())
             if "strategies" in payload and not isinstance(strategies_payload, list):
@@ -472,6 +476,8 @@ class RuntimeStrategySetResolver:
                 raise ValueError("runtime_market_scope_must_be_object")
             market_scope_payload = raw_scope if isinstance(raw_scope, Mapping) else {}
             payload = strategies_payload
+        elif live_like:
+            raise ValueError("runtime_strategy_set_json_object_required_for_live_like")
         if not isinstance(payload, list):
             raise ValueError("runtime_strategy_set_json_must_be_list")
         specs: list[Mapping[str, object]] = []
@@ -938,7 +944,6 @@ class RuntimeStrategyDecisionResultBundle:
             "strategy_set": self.strategy_set.as_dict(),
             "runtime_strategy_set_manifest_hash": runtime_strategy_set_manifest_hash(
                 self.strategy_set,
-                data_availability_report=self.data_availability_report,
             ),
             "runtime_data_availability_report": (
                 None if self.data_availability_report is None else self.data_availability_report.as_dict()
@@ -1025,7 +1030,7 @@ def runtime_strategy_set_manifest_hash(
                 "runtime_strategy_set_manifest_hash"
             ]
         )
-    except ResearchStrategyRegistryError:
+    except (ResearchStrategyRegistryError, RuntimeError, ValueError):
         return sha256_prefixed(
             {
                 "schema_version": 1,
@@ -1380,9 +1385,10 @@ def normalized_runtime_strategy_set_manifest(
                 "runtime_strategy_manifest_legacy_compatibility_rejected:"
                 + ",".join(legacy_instances)
             )
-        if data_availability_report is None:
-            raise RuntimeError("runtime_data_preflight_not_evaluated")
-        if data_availability_report.status in {"", "FAIL", "NOT_EVALUATED"} or not data_availability_report.ok:
+        if data_availability_report is not None and (
+            data_availability_report.status in {"", "FAIL", "NOT_EVALUATED"}
+            or not data_availability_report.ok
+        ):
             reasons = ",".join(data_availability_report.reasons) or "runtime_data_preflight_failed"
             raise RuntimeError(f"runtime_data_preflight_gate_failed:{data_availability_report.status}:{reasons}")
     run_start_requests = tuple(
@@ -1404,6 +1410,22 @@ def normalized_runtime_strategy_set_manifest(
         "source": resolved.source,
         "runtime_pair": str(getattr(settings_obj, "PAIR", "")),
         "runtime_interval": str(getattr(settings_obj, "INTERVAL", "")),
+        "runtime_scope": "multi-strategy / single-pair runtime",
+        "unsupported_runtime_scopes": {
+            "multi_pair_portfolio": {
+                "supported": False,
+                "fail_closed_reason": "multi_pair_runtime_unsupported",
+                "required_before_enablement": [
+                    "pair-specific target state",
+                    "pair-specific runtime data preflight",
+                    "pair-specific strategy decision bundles or pair-scoped bundle partitioning",
+                    "pair-specific allocation targets",
+                    "pair-specific execution plans",
+                    "pair-specific submit/reconcile loops",
+                    "cross-pair risk budget semantics",
+                ],
+            }
+        },
         "single_pair_runtime_enforced": True,
         "market_scope": market_scope.as_dict(),
         "multi_strategy_enabled": resolved.multi_strategy_enabled,
@@ -1449,41 +1471,30 @@ def _runtime_data_manifest_evidence(
 ) -> dict[str, object]:
     requirements = RuntimeDataRequirementResolver().resolve_for_strategy_set(strategy_set)
     if data_availability_report is None:
-        report_payload: dict[str, object] = {
-            "schema_version": 1,
-            "provider_name": "sqlite_runtime_data_provider",
-            "provider_version": "1",
+        return {
+            "runtime_data_evidence_scope": "decision_cycle",
+            "runtime_data_preflight_required_scope": "decision_cycle",
+            "runtime_data_contract_hash": requirements.content_hash(),
+            "runtime_data_availability_report_hash": None,
             "provider_contract_hash": runtime_data_provider_contract_hash(),
-            "through_ts_ms": None,
-            "status": "NOT_EVALUATED",
-            "reasons": ["runtime_data_preflight_not_evaluated"],
-            "warnings": [],
-            "capabilities_present": [],
-            "capabilities_missing": list(requirements.all_names),
-            "coverage_by_capability": {},
-            "source_tables_or_streams": [],
-            "db_schema_fingerprint": "not_evaluated",
-            "source_schema_hash": "not_evaluated",
-            "per_strategy_requirements": {
-                key: dict(value) for key, value in requirements.per_strategy.items()
-            },
-            "per_strategy_status": {
+            "runtime_data_db_schema_fingerprint": None,
+            "source_schema_hash": None,
+            "runtime_data_status": "cycle_specific",
+            "runtime_data_requirements_hash": requirements.content_hash(),
+            "coverage_by_strategy": {
                 key: {
                     "strategy_name": value.get("strategy_name"),
-                    "status": "NOT_EVALUATED",
                     "required": list(value.get("required") or ()),
                     "optional": list(value.get("optional") or ()),
-                    "missing_required": [],
                     "requirements_hash": value.get("requirements_hash"),
                 }
                 for key, value in requirements.per_strategy.items()
             },
-            "runtime_data_requirements_hash": requirements.content_hash(),
         }
-        report_payload["report_hash"] = sha256_prefixed(report_payload)
-        data_availability_report = RuntimeDataAvailabilityReport(report_payload)
     report = data_availability_report.as_dict()
     return {
+        "runtime_data_evidence_scope": "decision_cycle",
+        "runtime_data_preflight_required_scope": "decision_cycle",
         "runtime_data_contract_hash": requirements.content_hash(),
         "runtime_data_availability_report_hash": data_availability_report.report_hash,
         "provider_contract_hash": report.get("provider_contract_hash") or runtime_data_provider_contract_hash(),

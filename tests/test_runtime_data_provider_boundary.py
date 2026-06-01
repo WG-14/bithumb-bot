@@ -444,15 +444,18 @@ def test_runtime_strategy_set_manifest_includes_provider_evidence() -> None:
     assert manifest["coverage_by_strategy"]
 
 
-def test_live_like_runtime_manifest_rejects_not_evaluated_preflight() -> None:
+def test_live_like_run_start_manifest_splits_cycle_preflight_evidence() -> None:
     strategy_set = RuntimeStrategySet(source="unit", strategies=(_canary_spec(),))
 
-    with pytest.raises(RuntimeError, match="runtime_data_preflight_not_evaluated"):
-        normalized_runtime_strategy_set_manifest(
-            strategy_set=strategy_set,
-            settings_obj=replace(settings, LIVE_DRY_RUN=True),
-            data_availability_report=None,
-        )
+    manifest = normalized_runtime_strategy_set_manifest(
+        strategy_set=strategy_set,
+        settings_obj=replace(settings, LIVE_DRY_RUN=True),
+        data_availability_report=None,
+    )
+
+    assert manifest["runtime_data_evidence_scope"] == "decision_cycle"
+    assert manifest["runtime_data_availability_report_hash"] is None
+    assert "runtime_data_preflight_not_evaluated" not in str(manifest)
 
 
 def test_live_like_runtime_manifest_rejects_failed_preflight() -> None:

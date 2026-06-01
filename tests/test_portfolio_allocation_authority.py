@@ -8,6 +8,7 @@ import pytest
 
 from bithumb_bot.db_core import (
     ensure_db,
+    ensure_schema,
     rebuild_allocation_decision_from_bundle,
     rebuild_execution_submit_plan_from_execution_plan,
     rebuild_portfolio_target_from_allocation,
@@ -94,6 +95,16 @@ def _complete_sma_parameters(**overrides: object) -> dict[str, object]:
     return params
 
 
+def _complete_canary_parameters(**overrides: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "CANARY_ORDER_START_INDEX": 0,
+        "CANARY_ORDER_SIDE": "BUY",
+        "CANARY_ORDER_REASON": "unit_canary",
+    }
+    params.update(overrides)
+    return params
+
+
 @dataclass(frozen=True)
 class _RuntimeResult:
     decision: StrategyDecisionV2
@@ -122,6 +133,10 @@ class _Adapter:
 
     def decide(self, conn, request):
         del conn, request
+        return self._result
+
+    def decide_feature_snapshot(self, request, feature_snapshot):
+        del request, feature_snapshot
         return self._result
 
     def typed_authority_required(self) -> bool:
@@ -262,6 +277,26 @@ def _readiness(*, broker_qty: float = 0.0) -> dict[str, object]:
     }
 
 
+def _runtime_data_conn():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    for idx in range(40):
+        ts = 123 - (39 - idx) * 60_000
+        close = 100_000_000.0 + idx
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO candles(ts, pair, interval, open, high, low, close, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, "KRW-BTC", "1m", close, close, close, close, 1.0),
+        )
+    conn.commit()
+    return conn
+
+
 def test_strategy_preference_and_portfolio_target_hashes_are_deterministic() -> None:
     first = _preference("BUY", "strategy_a")
     second = _preference("BUY", "strategy_a")
@@ -368,7 +403,7 @@ def test_multi_strategy_collector_executes_all_on_same_candle() -> None:
     bundle = RuntimeStrategyDecisionCollector(
         adapter_resolver=lambda strategy_name: adapters.get(str(strategy_name).strip().lower()),
     ).collect(
-        object(),
+        _runtime_data_conn(),
         strategy_set,
         through_ts_ms=123,
     )
@@ -874,6 +909,254 @@ def test_run_loop_multi_strategy_conflict_fails_closed_without_submit() -> None:
     assert result.persistence_context["authoritative_execution_signal"] == "HOLD"
     assert result.persistence_context["signal"] == "HOLD"
     assert result.persistence_context["final_reason"] == "conflicting_equal_priority_signals"
+
+
+def test_single_pair_planner_rejects_multi_target_allocation_before_submit() -> None:
+    from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
+
+    old_engine = settings.EXECUTION_ENGINE
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        planner = ExecutionPlanner(
+            readiness_snapshot_builder=lambda _conn: _Readiness(_readiness(broker_qty=0.0)),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+        )
+        btc_spec = RuntimeStrategySpec("canary_non_sma", strategy_instance_id="btc_buy", pair="KRW-BTC", priority=10)
+        eth_spec = RuntimeStrategySpec("safe_hold", strategy_instance_id="eth_hold", pair="KRW-ETH", priority=10)
+        bundle = RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit_bypass", strategies=(btc_spec, eth_spec)),
+            results=(
+                _runtime_result("BUY", "canary_non_sma", spec=btc_spec),
+                _runtime_result("HOLD", "safe_hold", spec=eth_spec),
+            ),
+        )
+        result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+
+    assert result.submit_plan is None
+    assert result.planning_error == "single_pair_allocation_target_count_mismatch"
+    assert result.persistence_context["execution_block_reason"] == "single_pair_allocation_target_count_mismatch"
+    assert result.persistence_context["allocation_target_count"] == 2
+
+
+def test_single_pair_planner_rejects_target_pair_mismatch_before_submit() -> None:
+    from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
+
+    old_engine = settings.EXECUTION_ENGINE
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        planner = ExecutionPlanner(
+            readiness_snapshot_builder=lambda _conn: _Readiness(_readiness(broker_qty=0.0)),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+        )
+        eth_spec = RuntimeStrategySpec("canary_non_sma", strategy_instance_id="eth_buy", pair="KRW-ETH", priority=10)
+        bundle = RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit_bypass", strategies=(eth_spec,)),
+            results=(_runtime_result("BUY", "canary_non_sma", spec=eth_spec),),
+        )
+        result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", old_engine)
+
+    assert result.submit_plan is None
+    assert result.planning_error == "single_pair_allocation_target_pair_mismatch"
+    assert result.persistence_context["execution_block_reason"] == "single_pair_allocation_target_pair_mismatch"
+    assert result.persistence_context["allocation_target_pairs"] == ["KRW-ETH"]
+
+
+def test_live_performance_gate_uses_allocator_selected_contributions_not_global_strategy() -> None:
+    from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
+
+    calls: list[tuple[str, str]] = []
+
+    def _gate(_conn, *, strategy_name: str | None = None, pair: str | None = None):
+        calls.append((str(strategy_name), str(pair)))
+        return {
+            "enabled": True,
+            "allowed": True,
+            "blocked": False,
+            "reason_code": "STRATEGY_PERFORMANCE_OK",
+            "reason": "ok",
+            "recommended_next_action": "none",
+            "summary": {"sample_count": 100, "expectancy_per_trade": 1.0, "net_pnl": 100.0},
+            "thresholds": {"min_sample": 30},
+        }
+
+    old_values = {
+        "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
+        "MODE": settings.MODE,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "STRATEGY_NAME": settings.STRATEGY_NAME,
+    }
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+        object.__setattr__(settings, "LIVE_DRY_RUN", False)
+        object.__setattr__(settings, "STRATEGY_NAME", "global_should_not_be_used")
+        planner = ExecutionPlanner(
+            readiness_snapshot_builder=lambda _conn: _Readiness(_readiness(broker_qty=0.0)),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+            performance_gate_evaluator=_gate,
+        )
+        buy_spec = RuntimeStrategySpec(
+            "canary_non_sma",
+            strategy_instance_id="selected_buy",
+            priority=10,
+            parameters=_complete_canary_parameters(),
+        )
+        hold_spec = RuntimeStrategySpec("safe_hold", strategy_instance_id="selected_hold", priority=10)
+        loser_spec = RuntimeStrategySpec("sma_with_filter", strategy_instance_id="unselected_sell", priority=20, parameters=_complete_sma_parameters())
+        bundle = RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit", strategies=(buy_spec, hold_spec, loser_spec)),
+            results=(
+                _runtime_result("BUY", "canary_non_sma", spec=buy_spec),
+                _runtime_result("HOLD", "safe_hold", spec=hold_spec),
+                _runtime_result("SELL", "sma_with_filter", spec=loser_spec),
+            ),
+        )
+        result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
+    finally:
+        for key, value in old_values.items():
+            object.__setattr__(settings, key, value)
+
+    assert result.submit_plan is not None
+    assert result.planning_error is None
+    assert result.persistence_context["execution_block_reason"] != "selected_strategy_performance_gate_blocked"
+    assert calls == [("canary_non_sma", "KRW-BTC")]
+    assert result.persistence_context["performance_gate_scope"]["selected_strategy_instance_ids"] == ["selected_buy"]
+    assert result.persistence_context["performance_gate_scope"]["selected_strategy_names"] == ["canary_non_sma"]
+    assert result.persistence_context["performance_gate_scope"]["selected_signal"] == "BUY"
+
+
+def test_selected_buy_performance_gate_failure_blocks_before_submit_plan() -> None:
+    from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
+
+    def _gate(_conn, *, strategy_name: str | None = None, pair: str | None = None):
+        return {
+            "enabled": True,
+            "allowed": str(strategy_name) != "canary_non_sma",
+            "blocked": str(strategy_name) == "canary_non_sma",
+            "reason_code": "STRATEGY_PERFORMANCE_BLOCKED:STRATEGY_SAMPLE_INSUFFICIENT",
+            "reason": "sample_count=0 below min_sample=30",
+            "recommended_next_action": "review strategy-report",
+            "summary": {"sample_count": 0, "expectancy_per_trade": 0.0, "net_pnl": 0.0},
+            "thresholds": {"min_sample": 30},
+        }
+
+    old_values = {
+        "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
+        "MODE": settings.MODE,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+    }
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+        object.__setattr__(settings, "LIVE_DRY_RUN", False)
+        planner = ExecutionPlanner(
+            readiness_snapshot_builder=lambda _conn: _Readiness(_readiness(broker_qty=0.0)),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+            performance_gate_evaluator=_gate,
+        )
+        buy_spec = RuntimeStrategySpec(
+            "canary_non_sma",
+            strategy_instance_id="selected_buy",
+            priority=10,
+            parameters=_complete_canary_parameters(),
+        )
+        hold_spec = RuntimeStrategySpec("safe_hold", strategy_instance_id="selected_hold", priority=10)
+        bundle = RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit", strategies=(buy_spec, hold_spec)),
+            results=(
+                _runtime_result("BUY", "canary_non_sma", spec=buy_spec),
+                _runtime_result("HOLD", "safe_hold", spec=hold_spec),
+            ),
+        )
+        result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
+    finally:
+        for key, value in old_values.items():
+            object.__setattr__(settings, key, value)
+
+    assert result.submit_plan is None
+    assert result.planning_error == "selected_strategy_performance_gate_blocked"
+    assert result.persistence_context["execution_block_reason"] == "selected_strategy_performance_gate_blocked"
+    assert result.persistence_context["performance_gate_scope"]["blocking_strategy_instance_ids"] == ["selected_buy"]
+    assert result.persistence_context["strategy_performance_gate_reason_code"] == "STRATEGY_PERFORMANCE_BLOCKED:SELECTED_ALLOCATOR_CONTRIBUTION"
+
+
+def test_performance_gate_threshold_changes_execution_plan_hash_when_blocking() -> None:
+    from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
+
+    def _plan_with_min_sample(min_sample: int):
+        def _gate(_conn, *, strategy_name: str | None = None, pair: str | None = None):
+            del strategy_name, pair
+            return {
+                "enabled": True,
+                "allowed": False,
+                "blocked": True,
+                "reason_code": "STRATEGY_PERFORMANCE_BLOCKED:STRATEGY_SAMPLE_INSUFFICIENT",
+                "reason": f"sample_count=0 below min_sample={min_sample}",
+                "recommended_next_action": "review strategy-report",
+                "summary": {"sample_count": 0, "expectancy_per_trade": 0.0, "net_pnl": 0.0},
+                "thresholds": {"min_sample": min_sample},
+            }
+
+        planner = ExecutionPlanner(
+            readiness_snapshot_builder=lambda _conn: _Readiness(_readiness(broker_qty=0.0)),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+            performance_gate_evaluator=_gate,
+        )
+        buy_spec = RuntimeStrategySpec(
+            "canary_non_sma",
+            strategy_instance_id="selected_buy",
+            priority=10,
+            parameters=_complete_canary_parameters(),
+        )
+        bundle = RuntimeStrategyDecisionResultBundle(
+            strategy_set=RuntimeStrategySet(source="unit", strategies=(buy_spec,)),
+            results=(_runtime_result("BUY", "canary_non_sma", spec=buy_spec),),
+        )
+        return planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
+
+    old_values = {
+        "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
+        "MODE": settings.MODE,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+    }
+    try:
+        object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+        object.__setattr__(settings, "LIVE_DRY_RUN", False)
+        first = _plan_with_min_sample(30)
+        second = _plan_with_min_sample(60)
+    finally:
+        for key, value in old_values.items():
+            object.__setattr__(settings, key, value)
+
+    assert first.planning_error == "selected_strategy_performance_gate_blocked"
+    assert second.planning_error == "selected_strategy_performance_gate_blocked"
+    assert first.content_hash() != second.content_hash()
 
 
 @pytest.mark.parametrize("first_signal", ["BUY", "SELL", "HOLD"])

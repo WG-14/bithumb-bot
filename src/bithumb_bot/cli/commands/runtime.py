@@ -87,6 +87,7 @@ def _runtime_strategy_set_lint(_args: argparse.Namespace, context) -> int:
     manifest = normalized_runtime_strategy_set_manifest(settings_obj=context.settings)
     context.printer(
         "runtime_strategy_set_lint_ok "
+        f"runtime_scope={manifest['runtime_scope']!r} "
         f"manifest_hash={manifest['runtime_strategy_set_manifest_hash']} "
         f"active_strategy_count={manifest['active_strategy_count']} "
         f"source={manifest['source']}"

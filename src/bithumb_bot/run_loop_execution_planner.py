@@ -102,6 +102,7 @@ class ExecutionPlanBundle:
             "primary_submit_plan": submit_plan,
             "status": status,
             "planning_error": self.planning_error,
+            "persistence_context_hash": sha256_prefixed(self.persistence_context),
             "readiness_payload_hash": sha256_prefixed(self.readiness_payload),
             "target_policy_metadata": dict(self.target_policy_metadata),
             "target_policy_metadata_hash": sha256_prefixed(self.target_policy_metadata),
@@ -315,6 +316,186 @@ def _runtime_strategy_set_context_fields(strategy_set: RuntimeStrategySet | None
         "runtime_strategy_set_manifest_hash": runtime_strategy_set_manifest_hash(strategy_set),
         "active_strategy_set": [item.as_dict() for item in strategy_set.active_strategies],
         "active_strategy_count": len(strategy_set.active_strategies),
+    }
+
+
+def _runtime_pair_for_planning(strategy_set: RuntimeStrategySet | None) -> str:
+    del strategy_set
+    return str(settings.PAIR)
+
+
+def _allocation_single_pair_invariant_error(decision, *, runtime_pair: str) -> str | None:
+    targets = tuple(getattr(decision, "targets", ()) or ())
+    if len(targets) != 1:
+        return "single_pair_allocation_target_count_mismatch"
+    target = targets[0]
+    if str(getattr(target, "pair", "") or "") != str(runtime_pair):
+        return "single_pair_allocation_target_pair_mismatch"
+    recorded_hash = str(target.as_dict().get("final_portfolio_target_hash") or "")
+    if recorded_hash != target.content_hash():
+        return "single_pair_portfolio_target_hash_mismatch"
+    return None
+
+
+def _allocation_single_pair_invariant_context(decision, *, runtime_pair: str) -> dict[str, object]:
+    targets = tuple(getattr(decision, "targets", ()) or ())
+    return {
+        "runtime_scope": "multi-strategy / single-pair runtime",
+        "runtime_scope_mode": "single_pair",
+        "multi_pair_portfolio_supported": False,
+        "multi_pair_portfolio_fail_closed_reason": "multi_pair_runtime_unsupported",
+        "allocation_target_count": len(targets),
+        "allocation_target_pairs": [str(getattr(target, "pair", "") or "") for target in targets],
+        "runtime_pair": str(runtime_pair),
+        "single_pair_allocation_invariant_checked": True,
+    }
+
+
+def _gate_payload(raw_gate: object | None) -> dict[str, object]:
+    if raw_gate is None:
+        return {}
+    if isinstance(raw_gate, dict):
+        return dict(raw_gate)
+    as_dict = getattr(raw_gate, "as_dict", None)
+    if callable(as_dict):
+        payload = as_dict()
+        return dict(payload) if isinstance(payload, dict) else {}
+    return {}
+
+
+def _selected_performance_gate_scope(decision, *, runtime_pair: str, manifest_hash: str | None) -> dict[str, object]:
+    targets = tuple(getattr(decision, "targets", ()) or ())
+    target = targets[0] if len(targets) == 1 else None
+    conflict = dict(getattr(target, "conflict_resolution", {}) or {}) if target is not None else {}
+    selected_signal = str(conflict.get("selected_signal") or "").upper()
+    selected_ids = [str(item) for item in (conflict.get("selected_strategy_instance_ids") or [])]
+    selected_id_set = set(selected_ids)
+    selected_contributions = [
+        item
+        for item in getattr(decision, "contributions", ())
+        if str(getattr(item, "strategy_instance_id", "") or "") in selected_id_set
+        and str(getattr(item, "signal_direction", "") or "").upper() == selected_signal
+        and selected_signal in {"BUY", "SELL"}
+        and str(getattr(item, "pair", "") or "") == str(runtime_pair)
+    ]
+    return {
+        "schema_version": 1,
+        "scope": "allocator_selected_strategy_contributions",
+        "performance_gate_policy": "all_allocator_selected_buy_sell_contributions_must_pass",
+        "selected_by_allocator": True,
+        "selected_pair": str(runtime_pair),
+        "selected_signal": selected_signal,
+        "selected_strategy_instance_ids": [item.strategy_instance_id for item in selected_contributions],
+        "selected_strategy_names": [item.strategy_name for item in selected_contributions],
+        "selected_signal_strategy_instance_ids": selected_ids,
+        "runtime_strategy_set_manifest_hash": manifest_hash,
+    }
+
+
+def _aggregate_selected_performance_gate(
+    evaluator: Callable[..., object],
+    conn,
+    decision,
+    *,
+    runtime_pair: str,
+    manifest_hash: str | None,
+) -> dict[str, object] | None:
+    scope = _selected_performance_gate_scope(
+        decision,
+        runtime_pair=runtime_pair,
+        manifest_hash=manifest_hash,
+    )
+    selected_ids = set(scope["selected_strategy_instance_ids"])
+    selected = [
+        item
+        for item in getattr(decision, "contributions", ())
+        if str(getattr(item, "strategy_instance_id", "") or "") in selected_ids
+    ]
+    if not selected:
+        return {
+            "enabled": True,
+            "allowed": True,
+            "blocked": False,
+            "reason_code": "STRATEGY_PERFORMANCE_GATE_NOT_APPLICABLE",
+            "reason": "no allocator-selected BUY/SELL contribution requires performance gate",
+            "recommended_next_action": "none",
+            "summary": {"sample_count": 0, "expectancy_per_trade": 0.0, "net_pnl": 0.0},
+            "thresholds": {"policy": scope["performance_gate_policy"]},
+            "performance_gate_scope": scope,
+            "per_strategy_gate_results": [],
+            "blocking_strategy_instance_ids": [],
+        }
+    results: list[dict[str, object]] = []
+    blocking_ids: list[str] = []
+    for contribution in selected:
+        raw = evaluator(
+            conn,
+            strategy_name=str(contribution.strategy_name),
+            pair=str(contribution.pair),
+        )
+        payload = _gate_payload(raw)
+        item = {
+            "strategy_instance_id": contribution.strategy_instance_id,
+            "strategy_name": contribution.strategy_name,
+            "pair": contribution.pair,
+            "selected_signal": contribution.signal_direction,
+            "gate": payload,
+            "allowed": bool(payload.get("allowed", True)),
+            "reason_code": payload.get("reason_code"),
+        }
+        results.append(item)
+        if bool(payload.get("enabled", True)) and not bool(payload.get("allowed", True)):
+            blocking_ids.append(str(contribution.strategy_instance_id))
+    allowed = not blocking_ids
+    first_payload = dict(results[0].get("gate") or {}) if results else {}
+    first_blocking_payload = next(
+        (dict(item.get("gate") or {}) for item in results if str(item.get("strategy_instance_id")) in blocking_ids),
+        first_payload,
+    )
+    reason_code = (
+        "STRATEGY_PERFORMANCE_OK"
+        if allowed
+        else "STRATEGY_PERFORMANCE_BLOCKED:SELECTED_ALLOCATOR_CONTRIBUTION"
+    )
+    return {
+        "enabled": bool(first_payload.get("enabled", True)),
+        "allowed": allowed,
+        "blocked": not allowed,
+        "reason_code": reason_code,
+        "reason": (
+            "all allocator-selected BUY/SELL contributions passed performance gate"
+            if allowed
+            else str(first_blocking_payload.get("reason") or "allocator-selected contribution failed gate")
+        ),
+        "recommended_next_action": (
+            "none"
+            if allowed
+            else str(first_blocking_payload.get("recommended_next_action") or "review strategy-report")
+        ),
+        "summary": dict(first_blocking_payload.get("summary") or first_payload.get("summary") or {}),
+        "thresholds": {
+            **dict(first_blocking_payload.get("thresholds") or first_payload.get("thresholds") or {}),
+            "policy": scope["performance_gate_policy"],
+        },
+        "performance_gate_scope": {**scope, "blocking_strategy_instance_ids": blocking_ids},
+        "performance_gate_policy": scope["performance_gate_policy"],
+        "per_strategy_gate_results": results,
+        "blocking_strategy_instance_ids": blocking_ids,
+    }
+
+
+def _performance_gate_context_fields(gate: dict[str, object] | None) -> dict[str, object]:
+    if not gate:
+        return {}
+    return {
+        "performance_gate_scope": dict(gate.get("performance_gate_scope") or {}),
+        "performance_gate_policy": gate.get("performance_gate_policy"),
+        "per_strategy_gate_results": list(gate.get("per_strategy_gate_results") or []),
+        "blocking_strategy_instance_ids": list(gate.get("blocking_strategy_instance_ids") or []),
+        "strategy_performance_gate": gate,
+        "strategy_performance_gate_reason_code": gate.get("reason_code"),
+        "strategy_performance_gate_reason": gate.get("reason"),
+        "strategy_performance_gate_blocked": bool(gate.get("blocked")),
     }
 
 
@@ -679,12 +860,6 @@ class ExecutionPlanner:
             context.update(_runtime_result_bundle_context_fields(runtime_result_bundle))
             readiness_payload = self.readiness_snapshot_builder(conn).as_dict()
             strategy_performance_gate = None
-            if _live_real_target_delta_performance_gate_applies():
-                strategy_performance_gate = self.performance_gate_evaluator(
-                    conn,
-                    strategy_name=str(settings.STRATEGY_NAME),
-                    pair=str(settings.PAIR),
-                )
             reference_price = context.get("market_price", context.get("last_close", context.get("close")))
             if runtime_result_bundle is None:
                 target_resolution = self.target_state_resolver(
@@ -800,12 +975,46 @@ class ExecutionPlanner:
                 ),
             )
             allocation_decision = PortfolioAllocator(allocation_config).allocate(allocation_input)
-            portfolio_target = allocation_decision.target_for_pair(str(settings.PAIR))
             allocation_context = _allocation_context_fields(allocation_decision)
             context.update(allocation_context)
+            runtime_pair = _runtime_pair_for_planning(strategy_set)
+            context.update(
+                _allocation_single_pair_invariant_context(
+                    allocation_decision,
+                    runtime_pair=runtime_pair,
+                )
+            )
+            invariant_error = _allocation_single_pair_invariant_error(
+                allocation_decision,
+                runtime_pair=runtime_pair,
+            )
+            if invariant_error is not None:
+                return self._fail_closed_context(
+                    decision_context=context,
+                    reason_code=invariant_error,
+                )
+            portfolio_target = allocation_decision.target_for_pair(str(runtime_pair))
             selected_signal = str(context.get("allocation_selected_signal") or "").upper()
             target_authoritative = bool(portfolio_target is not None and portfolio_target.authoritative)
             allocation_authoritative = bool(allocation_decision.authoritative and target_authoritative)
+            if _live_real_target_delta_performance_gate_applies() and allocation_authoritative:
+                strategy_performance_gate = _aggregate_selected_performance_gate(
+                    self.performance_gate_evaluator,
+                    conn,
+                    allocation_decision,
+                    runtime_pair=runtime_pair,
+                    manifest_hash=(
+                        str(context.get("runtime_strategy_set_manifest_hash") or "")
+                        if context.get("runtime_strategy_set_manifest_hash")
+                        else None
+                    ),
+                )
+                context.update(_performance_gate_context_fields(strategy_performance_gate))
+                if bool(strategy_performance_gate.get("blocked")):
+                    return self._fail_closed_context(
+                        decision_context=context,
+                        reason_code="selected_strategy_performance_gate_blocked",
+                    )
             if (
                 runtime_result_bundle is not None
                 and allocation_authoritative
