@@ -36,6 +36,14 @@ from .runtime_strategy_decision import (
     is_runtime_strategy_decision_result,
     production_runtime_strategy_missing_error,
 )
+from .runtime_data_provider import (
+    RuntimeDataAvailabilityReport,
+    RuntimeDataRequirementResolver,
+    RuntimeFeatureSnapshot,
+    RuntimeStrategyDataRequirements,
+    SQLiteRuntimeDataProvider,
+    runtime_data_provider_contract_hash,
+)
 
 
 def _optional_float(value: object) -> float | None:
@@ -866,6 +874,7 @@ class RuntimeDecisionRequestBuilder:
 class RuntimeStrategyDecisionResultBundle:
     strategy_set: RuntimeStrategySet
     results: tuple[RuntimeStrategyDecisionResult, ...]
+    data_availability_report: RuntimeDataAvailabilityReport | None = None
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -925,7 +934,16 @@ class RuntimeStrategyDecisionResultBundle:
             "schema_version": int(self.schema_version),
             "authority_label": "RuntimeStrategyDecisionResultBundle",
             "strategy_set": self.strategy_set.as_dict(),
-            "runtime_strategy_set_manifest_hash": runtime_strategy_set_manifest_hash(self.strategy_set),
+            "runtime_strategy_set_manifest_hash": runtime_strategy_set_manifest_hash(
+                self.strategy_set,
+                data_availability_report=self.data_availability_report,
+            ),
+            "runtime_data_availability_report": (
+                None if self.data_availability_report is None else self.data_availability_report.as_dict()
+            ),
+            "runtime_data_availability_report_hash": (
+                None if self.data_availability_report is None else self.data_availability_report.report_hash
+            ),
             "result_count": len(self.results),
             "results": [
                 _runtime_result_replay_metadata(result)
@@ -981,10 +999,17 @@ def _runtime_result_replay_metadata(result: RuntimeStrategyDecisionResult) -> di
     }
 
 
-def runtime_strategy_set_manifest_hash(strategy_set: RuntimeStrategySet) -> str:
+def runtime_strategy_set_manifest_hash(
+    strategy_set: RuntimeStrategySet,
+    *,
+    data_availability_report: RuntimeDataAvailabilityReport | None = None,
+) -> str:
     try:
         return str(
-            normalized_runtime_strategy_set_manifest(strategy_set=strategy_set)[
+            normalized_runtime_strategy_set_manifest(
+                strategy_set=strategy_set,
+                data_availability_report=data_availability_report,
+            )[
                 "runtime_strategy_set_manifest_hash"
             ]
         )
@@ -1048,6 +1073,7 @@ RuntimeDecisionAdapterResolver = Callable[[str], RuntimeDecisionAdapter | None]
 class RuntimeStrategyDecisionCollector:
     request_builder: RuntimeDecisionRequestBuilder = RuntimeDecisionRequestBuilder()
     adapter_resolver: RuntimeDecisionAdapterResolver = get_runtime_decision_adapter
+    requirement_resolver: RuntimeDataRequirementResolver = RuntimeDataRequirementResolver()
 
     def collect(
         self,
@@ -1057,6 +1083,13 @@ class RuntimeStrategyDecisionCollector:
         through_ts_ms: int | None,
     ) -> RuntimeStrategyDecisionResultBundle | None:
         results: list[RuntimeStrategyDecisionResult] = []
+        data_provider = SQLiteRuntimeDataProvider(conn, resolver=self.requirement_resolver)
+        data_availability_report = data_provider.preflight(
+            strategy_set,
+            through_ts_ms=through_ts_ms,
+        )
+        if not data_availability_report.ok:
+            raise RuntimeError(";".join(data_availability_report.reasons))
         for spec in strategy_set.active_strategies:
             validate_live_strategy_selection(replace(settings, STRATEGY_NAME=spec.strategy_name))
             adapter = self.adapter_resolver(spec.strategy_name)
@@ -1068,7 +1101,18 @@ class RuntimeStrategyDecisionCollector:
                     f"runtime_decision_adapter_name_mismatch:{spec.strategy_name}:{adapter_name}"
                 )
             request = self.request_builder.build_for_spec(spec, through_ts_ms=through_ts_ms)
-            result = adapter.decide(conn, request)
+            requirements = self.requirement_resolver.resolve_for_strategy_set(
+                RuntimeStrategySet(strategies=(spec,), source=strategy_set.source, market_scope=strategy_set.market_scope)
+            )
+            feature_snapshot = data_provider.snapshot(request, requirements)
+            if feature_snapshot is None:
+                return None
+            result = _decide_with_feature_snapshot(
+                adapter=adapter,
+                conn=conn,
+                request=request,
+                feature_snapshot=feature_snapshot,
+            )
             if result is None:
                 return None
             if not is_runtime_strategy_decision_result(result):
@@ -1076,7 +1120,24 @@ class RuntimeStrategyDecisionCollector:
             _attach_runtime_request_metadata(result, request)
             validate_runtime_decision_result_provenance(result, request)
             results.append(result)
-        return RuntimeStrategyDecisionResultBundle(strategy_set=strategy_set, results=tuple(results))
+        return RuntimeStrategyDecisionResultBundle(
+            strategy_set=strategy_set,
+            results=tuple(results),
+            data_availability_report=data_availability_report,
+        )
+
+
+def _decide_with_feature_snapshot(
+    *,
+    adapter: RuntimeDecisionAdapter,
+    conn: object,
+    request: RuntimeDecisionRequest,
+    feature_snapshot: RuntimeFeatureSnapshot,
+) -> RuntimeStrategyDecisionResult | None:
+    feature_decider = getattr(adapter, "decide_feature_snapshot", None)
+    if callable(feature_decider):
+        return feature_decider(request, feature_snapshot)
+    return adapter.decide(conn, request)
 
 
 @dataclass(frozen=True)
@@ -1251,6 +1312,7 @@ def normalized_runtime_strategy_set_manifest(
     *,
     strategy_set: RuntimeStrategySet | None = None,
     settings_obj: object = settings,
+    data_availability_report: RuntimeDataAvailabilityReport | None = None,
 ) -> dict[str, object]:
     """Return the materialized active strategy-set manifest used by startup linting.
 
@@ -1319,6 +1381,12 @@ def normalized_runtime_strategy_set_manifest(
         "execution_config_hash": execution_config_hash(settings_obj),
         "risk_config_hash": risk_config_hash(settings_obj),
     }
+    payload.update(
+        _runtime_data_manifest_evidence(
+            resolved,
+            data_availability_report=data_availability_report,
+        )
+    )
     payload["strategy_instance_profile_bindings"] = [
         {
             "strategy_instance_id": instance.strategy_instance_id,
@@ -1332,3 +1400,62 @@ def normalized_runtime_strategy_set_manifest(
     ]
     payload["runtime_strategy_set_manifest_hash"] = sha256_prefixed(payload)
     return payload
+
+
+def _runtime_data_manifest_evidence(
+    strategy_set: RuntimeStrategySet,
+    *,
+    data_availability_report: RuntimeDataAvailabilityReport | None,
+) -> dict[str, object]:
+    requirements = RuntimeDataRequirementResolver().resolve_for_strategy_set(strategy_set)
+    if data_availability_report is None:
+        report_payload: dict[str, object] = {
+            "schema_version": 1,
+            "provider_name": "sqlite_runtime_data_provider",
+            "provider_version": "1",
+            "provider_contract_hash": runtime_data_provider_contract_hash(),
+            "through_ts_ms": None,
+            "status": "NOT_EVALUATED",
+            "reasons": ["runtime_data_preflight_not_evaluated"],
+            "warnings": [],
+            "capabilities_present": [],
+            "capabilities_missing": list(requirements.all_names),
+            "coverage_by_capability": {},
+            "source_tables_or_streams": [],
+            "db_schema_fingerprint": "not_evaluated",
+            "source_schema_hash": "not_evaluated",
+            "per_strategy_requirements": {
+                key: dict(value) for key, value in requirements.per_strategy.items()
+            },
+            "per_strategy_status": {
+                key: {
+                    "strategy_name": value.get("strategy_name"),
+                    "status": "NOT_EVALUATED",
+                    "required": list(value.get("required") or ()),
+                    "optional": list(value.get("optional") or ()),
+                    "missing_required": [],
+                    "requirements_hash": value.get("requirements_hash"),
+                }
+                for key, value in requirements.per_strategy.items()
+            },
+            "runtime_data_requirements_hash": requirements.content_hash(),
+        }
+        report_payload["report_hash"] = sha256_prefixed(report_payload)
+        data_availability_report = RuntimeDataAvailabilityReport(report_payload)
+    report = data_availability_report.as_dict()
+    return {
+        "runtime_data_contract_hash": requirements.content_hash(),
+        "runtime_data_availability_report_hash": data_availability_report.report_hash,
+        "provider_contract_hash": report.get("provider_contract_hash") or runtime_data_provider_contract_hash(),
+        "runtime_data_provider_name": report.get("provider_name"),
+        "runtime_data_provider_version": report.get("provider_version"),
+        "runtime_data_preflight_status": report.get("status"),
+        "runtime_data_preflight_reasons": list(report.get("reasons") or []),
+        "runtime_data_preflight_warnings": list(report.get("warnings") or []),
+        "coverage_by_strategy": dict(report.get("per_strategy_status") or {}),
+        "runtime_data_coverage_by_capability": dict(report.get("coverage_by_capability") or {}),
+        "runtime_data_source_tables_or_streams": list(report.get("source_tables_or_streams") or []),
+        "runtime_data_db_schema_fingerprint": report.get("db_schema_fingerprint"),
+        "runtime_data_source_schema_hash": report.get("source_schema_hash"),
+        "runtime_data_requirements": requirements.as_dict(),
+    }

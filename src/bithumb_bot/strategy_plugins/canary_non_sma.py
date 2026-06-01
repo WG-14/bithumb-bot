@@ -11,6 +11,11 @@ from bithumb_bot.research.strategy_spec import (
     StrategySpec,
     materialize_strategy_parameters,
 )
+from bithumb_bot.runtime_data_provider import (
+    RuntimeDataRequirementResolver,
+    RuntimeFeatureSnapshot,
+    SQLiteRuntimeDataProvider,
+)
 from bithumb_bot.runtime_decision_contract import RuntimeStrategyPolicyHashes
 from bithumb_bot.strategy_authoring import (
     PromotionGradeStrategyExtension,
@@ -189,32 +194,6 @@ def _normalize_canary_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _latest_runtime_candle(
-    conn: Any,
-    *,
-    pair: str,
-    interval: str,
-    through_ts_ms: int | None,
-) -> tuple[int, float, int] | None:
-    query = "SELECT ts, close FROM candles WHERE pair=? AND interval=?"
-    params: list[object] = [pair, interval]
-    if through_ts_ms is not None:
-        query += " AND ts<=?"
-        params.append(int(through_ts_ms))
-    query += " ORDER BY ts DESC LIMIT 1"
-    row = conn.execute(query, tuple(params)).fetchone()
-    if row is None:
-        return None
-    candle_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
-    close = float(row["close"]) if hasattr(row, "keys") else float(row[1])
-    count_row = conn.execute(
-        "SELECT COUNT(*) FROM candles WHERE pair=? AND interval=? AND ts<=?",
-        (pair, interval, candle_ts),
-    ).fetchone()
-    candle_index = int(count_row[0]) - 1 if count_row is not None else 0
-    return candle_ts, close, max(0, candle_index)
-
-
 def _canary_result(
     *,
     pair: str,
@@ -225,6 +204,7 @@ def _canary_result(
     parameters: dict[str, Any],
     request: Any | None = None,
     evaluation_mode: str = "runtime_replay",
+    feature_snapshot: RuntimeFeatureSnapshot | None = None,
 ) -> CanaryNonSmaRuntimeDecisionResult:
     return _evaluate_canary_result(
         pair=pair,
@@ -235,6 +215,7 @@ def _canary_result(
         parameters=parameters,
         request=request,
         evaluation_mode=evaluation_mode,
+        feature_snapshot=feature_snapshot,
     )
 
 
@@ -440,6 +421,7 @@ def _evaluate_canary_result(
     parameters: dict[str, Any],
     request: Any | None,
     evaluation_mode: str,
+    feature_snapshot: RuntimeFeatureSnapshot | None = None,
 ) -> CanaryNonSmaRuntimeDecisionResult:
     material = _canary_policy_material(
         pair=pair,
@@ -479,12 +461,63 @@ def _evaluate_canary_result(
             }
         }
         replay_fingerprint.update(request_replay_fields)
+    runtime_feature_snapshot = (
+        feature_snapshot.as_dict()
+        if feature_snapshot is not None
+        else {
+            "schema_version": 1,
+            "pair": pair,
+            "interval": interval,
+            "through_ts_ms": request_fields.get("through_ts_ms"),
+            "decision_candle_ts": int(candle_ts),
+            "capabilities_present": ["candles"],
+            "capabilities_missing": [],
+            "coverage_by_capability": {},
+            "source_tables_or_streams": [],
+            "db_schema_fingerprint": "compatibility_direct_material",
+            "source_schema_hash": "compatibility_direct_material",
+            "provider_name": "compatibility_direct_material",
+            "provider_version": "1",
+            "provider_contract_hash": "compatibility_direct_material",
+            "runtime_data_availability_report_hash": "compatibility_direct_material",
+            "staleness_ms": None,
+            "feature_payload": {
+                "candle_ts": int(candle_ts),
+                "market_price": float(market_price),
+                "last_close": float(market_price),
+                "candle_index": int(candle_index),
+            },
+        }
+    )
+    if "market_snapshot_hash" not in runtime_feature_snapshot:
+        runtime_feature_snapshot["market_snapshot_hash"] = sha256_prefixed(
+            {
+                "pair": pair,
+                "interval": interval,
+                "decision_candle_ts": int(candle_ts),
+                "market_price": float(market_price),
+                "last_close": float(market_price),
+            }
+        )
+    if "feature_snapshot_hash" not in runtime_feature_snapshot:
+        runtime_feature_snapshot["feature_snapshot_hash"] = sha256_prefixed(runtime_feature_snapshot)
+    replay_fingerprint.update(
+        {
+            "feature_snapshot_hash": runtime_feature_snapshot["feature_snapshot_hash"],
+            "market_snapshot_hash": runtime_feature_snapshot["market_snapshot_hash"],
+            "runtime_data_availability_report_hash": runtime_feature_snapshot.get(
+                "runtime_data_availability_report_hash"
+            ),
+            "provider_contract_hash": runtime_feature_snapshot.get("provider_contract_hash"),
+        }
+    )
     boundary = {
         "schema_version": 1,
         "decision_boundary_phase": "StrategyDecisionService.evaluate",
         "typed_authority": "StrategyDecisionV2",
         "order_submission_possible": final_signal in {"BUY", "SELL"},
         "read_only_replay_safe": True,
+        "runtime_feature_snapshot_hash": runtime_feature_snapshot["feature_snapshot_hash"],
     }
     feature_snapshot = {
         "candle_ts": int(candle_ts),
@@ -500,7 +533,14 @@ def _evaluate_canary_result(
     provenance = {
         **request_fields,
         "decision_boundary": "StrategyDecisionService.evaluate",
-        "snapshot_builder": "strategy_plugins.canary_non_sma",
+        "snapshot_builder": "RuntimeDataProvider.RuntimeFeatureSnapshot",
+        "runtime_feature_snapshot": dict(runtime_feature_snapshot),
+        "feature_snapshot_hash": runtime_feature_snapshot["feature_snapshot_hash"],
+        "market_snapshot_hash": runtime_feature_snapshot["market_snapshot_hash"],
+        "runtime_data_availability_report_hash": runtime_feature_snapshot.get(
+            "runtime_data_availability_report_hash"
+        ),
+        "provider_contract_hash": runtime_feature_snapshot.get("provider_contract_hash"),
         "replay_fingerprint": replay_fingerprint,
         "strategy_parameters_hash": request_fields.get("strategy_parameters_hash")
         or sha256_prefixed(dict(resolved)),
@@ -535,6 +575,8 @@ def _evaluate_canary_result(
                 "candle_ts": int(candle_ts),
                 "market_price": float(market_price),
                 "candle_index": int(candle_index),
+                "feature_snapshot_hash": runtime_feature_snapshot["feature_snapshot_hash"],
+                "market_snapshot_hash": runtime_feature_snapshot["market_snapshot_hash"],
             },
             position_snapshot=PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False),
             strategy_config={"parameters": dict(parameters or {})},
@@ -571,6 +613,13 @@ def _evaluate_canary_result(
         "final_reason": final_reason,
         "execution_intent": execution_intent.as_dict() if execution_intent is not None else None,
         "feature_snapshot": feature_snapshot,
+        "runtime_feature_snapshot": dict(runtime_feature_snapshot),
+        "feature_snapshot_hash": runtime_feature_snapshot["feature_snapshot_hash"],
+        "market_snapshot_hash": runtime_feature_snapshot["market_snapshot_hash"],
+        "runtime_data_availability_report_hash": runtime_feature_snapshot.get(
+            "runtime_data_availability_report_hash"
+        ),
+        "provider_contract_hash": runtime_feature_snapshot.get("provider_contract_hash"),
         "strategy_specific_payload": strategy_specific_payload,
         "strategy_diagnostics": {
             "schema_version": 1,
@@ -629,21 +678,49 @@ class CanaryNonSmaRuntimeDecisionAdapter:
         conn: Any,
         request: Any,
     ) -> Any | None:
+        from bithumb_bot.runtime_strategy_set import RuntimeMarketScope, RuntimeStrategySet, RuntimeStrategySpec
+
         pair = str(getattr(request, "pair", "") or "").strip()
         interval = str(getattr(request, "interval", "") or "").strip()
         if not pair:
             raise ValueError("canary_runtime_request_pair_missing")
         if not interval:
             raise ValueError("canary_runtime_request_interval_missing")
-        candle = _latest_runtime_candle(
-            conn,
+        spec = RuntimeStrategySpec(
+            strategy_name=CANARY_NON_SMA_STRATEGY_NAME,
             pair=pair,
             interval=interval,
-            through_ts_ms=request.through_ts_ms,
+            parameters=dict(getattr(request, "parameters", {}) or {}),
         )
-        if candle is None:
+        strategy_set = RuntimeStrategySet(
+            strategies=(spec,),
+            source="canary_compatibility_provider",
+            market_scope=RuntimeMarketScope(pair=pair, interval=interval),
+        )
+        resolver = RuntimeDataRequirementResolver()
+        provider = SQLiteRuntimeDataProvider(conn, resolver=resolver)
+        report = provider.preflight(strategy_set, through_ts_ms=request.through_ts_ms)
+        if not report.ok:
             return None
-        candle_ts, market_price, candle_index = candle
+        requirements = resolver.resolve_for_strategy_set(strategy_set)
+        feature_snapshot = provider.snapshot(request, requirements)
+        if feature_snapshot is None:
+            return None
+        return self.decide_feature_snapshot(request, feature_snapshot)
+
+    def decide_feature_snapshot(
+        self,
+        request: Any,
+        feature_snapshot: RuntimeFeatureSnapshot,
+    ) -> Any | None:
+        payload = feature_snapshot.feature_payload
+        candle_ts = int(payload.get("candle_ts") or 0)
+        if candle_ts <= 0:
+            return None
+        market_price = float(payload.get("market_price") or payload.get("last_close") or 0.0)
+        candle_index = int(payload.get("candle_index") or 0)
+        pair = str(getattr(request, "pair", "") or feature_snapshot.payload.get("pair") or "").strip()
+        interval = str(getattr(request, "interval", "") or feature_snapshot.payload.get("interval") or "").strip()
         return _canary_result(
             pair=pair,
             interval=interval,
@@ -652,6 +729,7 @@ class CanaryNonSmaRuntimeDecisionAdapter:
             candle_index=candle_index,
             parameters=dict(getattr(request, "parameters", {}) or {}),
             request=request,
+            feature_snapshot=feature_snapshot,
         )
 
     def typed_authority_required(self) -> bool:

@@ -4,6 +4,11 @@ from dataclasses import dataclass
 
 from bithumb_bot.config import settings
 from bithumb_bot.decision_equivalence import sha256_prefixed
+from bithumb_bot.runtime_data_provider import (
+    RuntimeDataRequirementResolver,
+    RuntimeFeatureSnapshot,
+    SQLiteRuntimeDataProvider,
+)
 from bithumb_bot.runtime_decision_contract import RuntimeStrategyPolicyHashes
 from bithumb_bot.runtime_strategy_decision import RuntimeStrategyDecisionResult
 from bithumb_bot.strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
@@ -43,36 +48,6 @@ class SafeHoldRuntimeDecisionResult:
         payload.setdefault("replay_fingerprint", dict(self.replay_fingerprint))
         payload.setdefault("boundary", dict(self.boundary))
         return payload
-
-
-def _latest_runtime_candle(conn, *, through_ts_ms: int | None) -> tuple[int, float] | None:
-    if through_ts_ms is None:
-        row = conn.execute(
-            """
-            SELECT ts, close
-            FROM candles
-            WHERE pair=? AND interval=?
-            ORDER BY ts DESC
-            LIMIT 1
-            """,
-            (settings.PAIR, settings.INTERVAL),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT ts, close
-            FROM candles
-            WHERE pair=? AND interval=? AND ts<=?
-            ORDER BY ts DESC
-            LIMIT 1
-            """,
-            (settings.PAIR, settings.INTERVAL, int(through_ts_ms)),
-        ).fetchone()
-    if row is None:
-        return None
-    candle_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
-    close = float(row["close"]) if hasattr(row, "keys") else float(row[1])
-    return candle_ts, close
 
 
 def _safe_hold_decision(*, candle_ts: int, market_price: float) -> SafeHoldRuntimeDecisionResult:
@@ -182,6 +157,7 @@ def _evaluate_safe_hold_decision(
     candle_ts: int,
     market_price: float,
     request: object | None,
+    feature_snapshot: RuntimeFeatureSnapshot | None = None,
 ) -> SafeHoldRuntimeDecisionResult:
     hashes = _safe_hold_policy_hash_material(candle_ts=candle_ts, market_price=market_price)
     policy_contract_hash = str(hashes["policy_contract_hash"])
@@ -219,16 +195,43 @@ def _evaluate_safe_hold_decision(
                 }
             }
         )
+    runtime_feature_snapshot = (
+        feature_snapshot.as_dict()
+        if feature_snapshot is not None
+        else {
+            "schema_version": 1,
+            "feature_snapshot_hash": "compatibility_direct_material",
+            "market_snapshot_hash": "compatibility_direct_material",
+        }
+    )
+    replay_fingerprint.update(
+        {
+            "feature_snapshot_hash": runtime_feature_snapshot.get("feature_snapshot_hash"),
+            "market_snapshot_hash": runtime_feature_snapshot.get("market_snapshot_hash"),
+            "runtime_data_availability_report_hash": runtime_feature_snapshot.get(
+                "runtime_data_availability_report_hash"
+            ),
+            "provider_contract_hash": runtime_feature_snapshot.get("provider_contract_hash"),
+        }
+    )
     boundary = {
         "schema_version": 1,
         "decision_boundary_phase": "StrategyDecisionService.evaluate",
         "typed_authority": "StrategyDecisionV2",
         "order_submission_possible": False,
+        "runtime_feature_snapshot_hash": runtime_feature_snapshot.get("feature_snapshot_hash"),
     }
     provenance = {
         **request_fields,
         "decision_boundary": "StrategyDecisionService.evaluate",
-        "snapshot_builder": "runtime_adapters.safe_hold",
+        "snapshot_builder": "RuntimeDataProvider.RuntimeFeatureSnapshot",
+        "runtime_feature_snapshot": dict(runtime_feature_snapshot),
+        "feature_snapshot_hash": runtime_feature_snapshot.get("feature_snapshot_hash"),
+        "market_snapshot_hash": runtime_feature_snapshot.get("market_snapshot_hash"),
+        "runtime_data_availability_report_hash": runtime_feature_snapshot.get(
+            "runtime_data_availability_report_hash"
+        ),
+        "provider_contract_hash": runtime_feature_snapshot.get("provider_contract_hash"),
         "replay_fingerprint": replay_fingerprint,
         "strategy_parameters_hash": request_fields.get("strategy_parameters_hash") or sha256_prefixed({}),
         "approved_profile_hash_unavailable_reason": "safe_hold_approved_profile_not_required",
@@ -291,6 +294,9 @@ def _evaluate_safe_hold_decision(
         "boundary": dict(boundary),
         "replay_fingerprint": dict(replay_fingerprint),
         "strategy_evaluation_provenance": dict(result.provenance),
+        "runtime_feature_snapshot": dict(runtime_feature_snapshot),
+        "feature_snapshot_hash": runtime_feature_snapshot.get("feature_snapshot_hash"),
+        "market_snapshot_hash": runtime_feature_snapshot.get("market_snapshot_hash"),
         **request_fields,
     }
     return SafeHoldRuntimeDecisionResult(
@@ -320,14 +326,47 @@ class SafeHoldRuntimeDecisionAdapter:
         conn,
         request,
     ) -> RuntimeStrategyDecisionResult | None:
-        candle = _latest_runtime_candle(conn, through_ts_ms=request.through_ts_ms)
-        if candle is None:
+        from bithumb_bot.runtime_strategy_set import RuntimeMarketScope, RuntimeStrategySet, RuntimeStrategySpec
+
+        pair = str(getattr(request, "pair", "") or settings.PAIR)
+        interval = str(getattr(request, "interval", "") or settings.INTERVAL)
+        spec = RuntimeStrategySpec(
+            strategy_name=SAFE_HOLD_STRATEGY_NAME,
+            pair=pair,
+            interval=interval,
+            parameters={},
+        )
+        strategy_set = RuntimeStrategySet(
+            strategies=(spec,),
+            source="safe_hold_compatibility_provider",
+            market_scope=RuntimeMarketScope(pair=pair, interval=interval),
+        )
+        resolver = RuntimeDataRequirementResolver()
+        provider = SQLiteRuntimeDataProvider(conn, resolver=resolver)
+        report = provider.preflight(strategy_set, through_ts_ms=request.through_ts_ms)
+        if not report.ok:
             return None
-        candle_ts, market_price = candle
+        requirements = resolver.resolve_for_strategy_set(strategy_set)
+        feature_snapshot = provider.snapshot(request, requirements)
+        if feature_snapshot is None:
+            return None
+        return self.decide_feature_snapshot(request, feature_snapshot)
+
+    def decide_feature_snapshot(
+        self,
+        request,
+        feature_snapshot: RuntimeFeatureSnapshot,
+    ) -> RuntimeStrategyDecisionResult | None:
+        payload = feature_snapshot.feature_payload
+        candle_ts = int(payload.get("candle_ts") or 0)
+        if candle_ts <= 0:
+            return None
+        market_price = float(payload.get("market_price") or payload.get("last_close") or 0.0)
         return _evaluate_safe_hold_decision(
             candle_ts=candle_ts,
             market_price=market_price,
             request=request,
+            feature_snapshot=feature_snapshot,
         )
 
     def typed_authority_required(self) -> bool:

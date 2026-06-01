@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
+from bithumb_bot.runtime_data_provider import RuntimeDataRequirementResolver, SQLiteRuntimeDataProvider
 from bithumb_bot.research.strategy_spec import StrategyParameterSchema, StrategySpec
 from bithumb_bot.strategy_authoring import (
     ReplayCompatibleStrategyExtension,
@@ -170,18 +172,38 @@ class ReplayThresholdRuntimeReplayStrategy:
 
     def decide(self, conn: Any, *, through_ts_ms: int) -> Any | None:
         from bithumb_bot.strategy.base import StrategyDecision
+        from bithumb_bot.runtime_strategy_set import RuntimeMarketScope, RuntimeStrategySet, RuntimeStrategySpec
 
-        query = "SELECT ts, close FROM candles WHERE pair=? AND interval=? AND ts<=? ORDER BY ts DESC LIMIT 1"
-        row = conn.execute(query, (self.market, self.interval, int(through_ts_ms))).fetchone()
-        if row is None:
+        spec = RuntimeStrategySpec(
+            strategy_name=REPLAY_THRESHOLD_STRATEGY_NAME,
+            pair=self.market,
+            interval=self.interval,
+            parameters=dict(self.parameters or {}),
+        )
+        strategy_set = RuntimeStrategySet(
+            strategies=(spec,),
+            source="replay_threshold_provider",
+            market_scope=RuntimeMarketScope(pair=self.market, interval=self.interval),
+        )
+        resolver = RuntimeDataRequirementResolver()
+        provider = SQLiteRuntimeDataProvider(conn, resolver=resolver)
+        report = provider.preflight(strategy_set, through_ts_ms=int(through_ts_ms))
+        if not report.ok:
             return None
-        candle_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
-        close = float(row["close"]) if hasattr(row, "keys") else float(row[1])
-        count_row = conn.execute(
-            "SELECT COUNT(*) FROM candles WHERE pair=? AND interval=? AND ts<=?",
-            (self.market, self.interval, candle_ts),
-        ).fetchone()
-        candle_index = int(count_row[0]) - 1 if count_row is not None else 0
+        snapshot = provider.snapshot(
+            SimpleNamespace(
+                pair=self.market,
+                interval=self.interval,
+                through_ts_ms=int(through_ts_ms),
+            ),
+            resolver.resolve_for_strategy_set(strategy_set),
+        )
+        if snapshot is None:
+            return None
+        feature_payload = snapshot.feature_payload
+        candle_ts = int(feature_payload.get("candle_ts") or 0)
+        close = float(feature_payload.get("last_close") or feature_payload.get("market_price") or 0.0)
+        candle_index = int(feature_payload.get("candle_index") or 0)
         material = _decision_material(
             market=self.market,
             interval=self.interval,

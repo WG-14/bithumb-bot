@@ -139,6 +139,7 @@ def _attach_decision_projection_observability(
         "snapshot_projector_version",
         "snapshot_projector_hash",
         "market_snapshot_hash",
+        "feature_snapshot_hash",
         "market_feature_hash",
         "canonical_feature_projection_hash",
         "final_exit_decision_input_hash",

@@ -724,7 +724,9 @@ def runtime_decision_to_canonical_event(
         }
     )
     payload.update(execution_evidence["observability"])
-    payload["feature_snapshot_hash"] = canonical_payload_hash(payload["feature_snapshot"])
+    payload["feature_snapshot_hash"] = str(
+        context.get("feature_snapshot_hash") or canonical_payload_hash(payload["feature_snapshot"])
+    )
     payload["strategy_behavior_payload"] = {
         "strategy_name": payload["strategy_name"],
         "strategy_version": payload["strategy_version"],

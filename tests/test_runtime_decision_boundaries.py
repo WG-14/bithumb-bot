@@ -631,22 +631,35 @@ def test_runtime_decision_gateway_accepts_explicit_collector_adapter_resolver_wi
         RuntimeStrategySpec,
     )
 
-    bundle = RuntimeDecisionGateway(
-        collector=RuntimeStrategyDecisionCollector(
-            adapter_resolver=lambda strategy_name: (
-                _UnitPromotionAdapter()
-                if str(strategy_name).strip().lower() == "canary_non_sma"
-                else None
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_schema(conn)
+        _insert_candles(
+            conn,
+            pair=settings.PAIR,
+            interval=settings.INTERVAL,
+            base_ts=1_700_001_000_000,
+        )
+        conn.commit()
+        bundle = RuntimeDecisionGateway(
+            collector=RuntimeStrategyDecisionCollector(
+                adapter_resolver=lambda strategy_name: (
+                    _UnitPromotionAdapter()
+                    if str(strategy_name).strip().lower() == "canary_non_sma"
+                    else None
+                ),
             ),
-        ),
-    ).decide_bundle(
-        None,
-        strategy_set=RuntimeStrategySet(
-            source="unit",
-            strategies=(RuntimeStrategySpec("canary_non_sma"),),
-        ),
-        through_ts_ms=1_700_003_000_000,
-    )
+        ).decide_bundle(
+            conn,
+            strategy_set=RuntimeStrategySet(
+                source="unit",
+                strategies=(RuntimeStrategySpec("canary_non_sma"),),
+            ),
+            through_ts_ms=1_700_003_000_000,
+        )
+    finally:
+        conn.close()
 
     assert bundle is not None
     result = bundle.results[0]
@@ -801,7 +814,7 @@ def test_run_loop_uses_decision_coordinator_for_decisions() -> None:
     run_loop = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run_loop")
     run_loop_source = ast.get_source_segment(source, run_loop) or ""
 
-    assert "DecisionCoordinator()" in run_loop_source
+    assert "DecisionCoordinator(" in run_loop_source
     assert ".decide_cycle(" in run_loop_source
     assert "RuntimeDecisionGateway().decide_bundle(" not in run_loop_source
     assert "record_strategy_decision(" not in run_loop_source
@@ -1070,14 +1083,12 @@ def test_research_kernel_marks_missing_sma_policy_metadata_non_comparable() -> N
     run = run_decision_event_backtest(
         dataset=dataset,
         strategy_name="sma_with_filter",
-        parameter_values={
-            "SMA_SHORT": 1,
-            "SMA_LONG": 2,
-            "SMA_FILTER_VOL_WINDOW": 1,
-            "SMA_FILTER_OVEREXT_LOOKBACK": 1,
-            "BUY_FRACTION": 1.0,
-            "MAX_ORDER_KRW": 100_000.0,
-        },
+            parameter_values={
+                "SMA_SHORT": 1,
+                "SMA_LONG": 2,
+                "SMA_FILTER_VOL_WINDOW": 1,
+                "SMA_FILTER_OVEREXT_LOOKBACK": 1,
+            },
         fee_rate=0.0,
         slippage_bps=0.0,
         decision_events=(event,),

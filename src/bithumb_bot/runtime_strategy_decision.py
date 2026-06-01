@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, runtime_checkable
 
 from .config import settings, validate_live_strategy_selection
+from .runtime_data_provider import RuntimeFeatureSnapshot
 from .strategy_policy_contract import StrategyDecisionV2
 
 
@@ -117,6 +118,12 @@ class RuntimeDecisionAdapter(Protocol):
         self,
         conn,
         request: RuntimeDecisionRequest,
+    ) -> RuntimeStrategyDecisionResult | None: ...
+
+    def decide_feature_snapshot(
+        self,
+        request: RuntimeDecisionRequest,
+        feature_snapshot: RuntimeFeatureSnapshot,
     ) -> RuntimeStrategyDecisionResult | None: ...
 
     def typed_authority_required(self) -> bool: ...
@@ -243,7 +250,12 @@ class DecisionRunner:
         parameter_source: str = "runtime_override",
         runtime_strategy_spec: object | None = None,
     ) -> RuntimeStrategyDecisionResult | None:
-        from .runtime_strategy_set import RuntimeDecisionRequestBuilder, RuntimeStrategySpec
+        from .runtime_strategy_set import (
+            RuntimeDecisionRequestBuilder,
+            RuntimeMarketScope,
+            RuntimeStrategySet,
+            RuntimeStrategySpec,
+        )
 
         if runtime_strategy_spec is not None:
             if not isinstance(runtime_strategy_spec, RuntimeStrategySpec):
@@ -273,7 +285,32 @@ class DecisionRunner:
             spec,
             through_ts_ms=through_ts_ms,
         )
-        result = adapter.decide(conn, request)
+        from .runtime_data_provider import (
+            RuntimeDataRequirementResolver,
+            SQLiteRuntimeDataProvider,
+        )
+
+        provider = SQLiteRuntimeDataProvider(conn)
+        strategy_set = RuntimeStrategySet(
+            strategies=(spec,),
+            source="DecisionRunner",
+            market_scope=RuntimeMarketScope(pair=spec.pair, interval=spec.interval),
+        )
+        requirements = RuntimeDataRequirementResolver().resolve_for_strategy_set(strategy_set)
+        preflight = provider.preflight(
+            strategy_set,
+            through_ts_ms=through_ts_ms,
+        )
+        if not preflight.ok:
+            raise RuntimeError(";".join(preflight.reasons))
+        feature_snapshot = provider.snapshot(request, requirements)
+        if feature_snapshot is None:
+            return None
+        feature_decider = getattr(adapter, "decide_feature_snapshot", None)
+        if callable(feature_decider):
+            result = feature_decider(request, feature_snapshot)
+        else:
+            result = adapter.decide(conn, request)
         if result is not None:
             _attach_runtime_request_metadata(result, request)
         return result
