@@ -85,7 +85,14 @@ def test_canary_non_sma_plugin_runtime_envelope_and_planner(tmp_path: Path) -> N
         from bithumb_bot.runtime_strategy_set import RuntimeDecisionRequestBuilder, RuntimeStrategySpec
 
         request = RuntimeDecisionRequestBuilder().build_for_spec(
-            RuntimeStrategySpec(strategy_name="canary_non_sma"),
+            RuntimeStrategySpec(
+                strategy_name="canary_non_sma",
+                parameters={
+                    "CANARY_ORDER_START_INDEX": 0,
+                    "CANARY_ORDER_SIDE": "BUY",
+                    "CANARY_ORDER_REASON": "architecture_canary",
+                },
+            ),
             through_ts_ms=through_ts,
         )
         result = adapter.decide(conn, request)

@@ -445,13 +445,12 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
 
         if spec.runtime_contract_hash and not str(spec.runtime_contract_hash).startswith("sha256:"):
             issues.append(f"{spec.strategy_name}:runtime_contract_hash_invalid")
-        if strategy_set.source != "STRATEGY_NAME" or not live_like:
-            try:
-                request_builder.materialize_instance(spec)
-            except Exception as exc:
-                issues.append(
-                    f"{instance_id}:runtime_strategy_materialization_failed:{type(exc).__name__}:{exc}"
-                )
+        try:
+            request_builder.materialize_instance(spec)
+        except Exception as exc:
+            issues.append(
+                f"{instance_id}:runtime_strategy_materialization_failed:{type(exc).__name__}:{exc}"
+            )
 
     if issues:
         raise LiveModeValidationError(

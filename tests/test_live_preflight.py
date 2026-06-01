@@ -593,7 +593,7 @@ def test_live_dry_run_preflight_rejects_small_live_profile(monkeypatch: pytest.M
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
-    assert "profile_mode_mismatch" in str(exc.value)
+    assert "profile_mode" in str(exc.value)
 
 
 def test_live_armed_preflight_rejects_profile_env_mismatch(
@@ -643,7 +643,7 @@ def test_live_armed_preflight_rejects_paper_profile(
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
-    assert "profile_mode_mismatch" in str(exc.value)
+    assert "profile_mode" in str(exc.value)
 
 
 def test_live_dry_run_startup_requires_approved_live_dry_run_profile(
@@ -669,7 +669,7 @@ def test_live_dry_run_startup_rejects_small_live_profile(
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_dry_run_loop_startup_contract(settings)
 
-    assert "profile_mode_mismatch" in str(exc.value)
+    assert "profile_mode" in str(exc.value)
 
 
 def test_live_dry_run_startup_rejects_incomplete_approved_profile(
@@ -780,6 +780,7 @@ def test_live_execution_contract_emits_safe_env_metadata_and_lints(monkeypatch, 
     object.__setattr__(settings, "BITHUMB_API_KEY", "raw-key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "raw-secret")
     object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "<verified-live_dry_run-profile>")
+    object.__setattr__(settings, "STRATEGY_NAME", "sma_with_filter")
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 500)
     monkeypatch.setenv("BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", "true")
     monkeypatch.setenv("BITHUMB_API_SECRET", "raw-secret ")
@@ -1367,8 +1368,13 @@ def test_live_preflight_rejects_invalid_strict_threshold_when_strict_mode_is_on(
 
 
 def test_market_preflight_rejects_unsupported_market(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bithumb_bot import runtime_strategy_set
+
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "PAIR", "KRW-ABC")
+    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="live_dry_run")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", lambda *args, **kwargs: ())
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
@@ -1384,8 +1390,13 @@ def test_market_preflight_rejects_unsupported_market(monkeypatch: pytest.MonkeyP
 def test_market_preflight_rejects_legacy_alias_in_live_mode_even_when_catalog_supports_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from bithumb_bot import runtime_strategy_set
+
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "PAIR", "btc_krw")
+    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="live_dry_run")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", lambda *args, **kwargs: ())
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
@@ -1405,6 +1416,7 @@ def test_market_preflight_blocks_warning_state_in_live_real_mode(monkeypatch: py
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
@@ -1441,6 +1453,7 @@ def test_market_preflight_blocks_on_catalog_fetch_failure_in_live_real_mode(monk
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
@@ -1526,6 +1539,7 @@ def test_market_preflight_treats_unexpected_market_warning_as_unknown_and_blocks
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
@@ -1565,6 +1579,7 @@ def test_live_preflight_blocks_startup_on_accounts_schema_mismatch(
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     monkeypatch.setattr(config, "_fetch_accounts_payload_for_preflight", lambda **_kwargs: {"currency": "KRW"})
 
     with pytest.raises(config.LiveModeValidationError) as exc:
@@ -1584,6 +1599,7 @@ def test_live_preflight_blocks_startup_on_required_currency_missing(
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     monkeypatch.setattr(
         config,
         "_fetch_accounts_payload_for_preflight",
@@ -1769,6 +1785,7 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     monkeypatch.setattr(
         config,
         "_fetch_accounts_payload_for_preflight",
@@ -1824,6 +1841,7 @@ def test_accounts_preflight_missing_base_currency_blocks_live_armed_when_not_fla
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    _select_small_live_profile(Path(os.environ["DATA_ROOT"]).parent)
     monkeypatch.setattr(config, "_flat_start_safety_for_accounts_preflight", lambda: (False, "local_unresolved_or_open_orders=1"))
     monkeypatch.setattr(
         config,

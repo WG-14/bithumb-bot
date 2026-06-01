@@ -1211,6 +1211,236 @@ def test_runtime_strategy_set_preflight_rejects_pair_mismatch() -> None:
     assert "runtime_strategy_pair_mismatch" in str(exc.value)
 
 
+def _live_single_strategy_cfg(
+    *,
+    profile_path: str = "",
+    live_dry_run: bool = True,
+    live_real_order_armed: bool = False,
+    runtime_strategy_set_json: str = "",
+) -> object:
+    return replace(
+        settings,
+        MODE="live",
+        LIVE_DRY_RUN=live_dry_run,
+        LIVE_REAL_ORDER_ARMED=live_real_order_armed,
+        STRATEGY_NAME="sma_with_filter",
+        PAIR="KRW-BTC",
+        INTERVAL="1m",
+        APPROVED_STRATEGY_PROFILE_PATH=profile_path,
+        STRATEGY_APPROVED_PROFILE_PATH="",
+        RUNTIME_STRATEGY_SET_JSON=runtime_strategy_set_json,
+        ACTIVE_STRATEGIES="",
+        STRATEGY_PARAMETERS_JSON="",
+    )
+
+
+@pytest.fixture
+def _clear_runtime_strategy_source_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RUNTIME_STRATEGY_SET_JSON", raising=False)
+    monkeypatch.delenv("ACTIVE_STRATEGIES", raising=False)
+    monkeypatch.delenv("STRATEGY_PARAMETERS_JSON", raising=False)
+    monkeypatch.delenv("APPROVED_STRATEGY_PROFILE_PATH", raising=False)
+    monkeypatch.delenv("STRATEGY_APPROVED_PROFILE_PATH", raising=False)
+
+
+@pytest.mark.parametrize(
+    ("live_dry_run", "live_real_order_armed"),
+    ((True, False), (False, True)),
+)
+def test_live_like_single_strategy_name_preflight_materializes_missing_profile(
+    _clear_runtime_strategy_source_env: None,
+    live_dry_run: bool,
+    live_real_order_armed: bool,
+) -> None:
+    cfg = _live_single_strategy_cfg(
+        live_dry_run=live_dry_run,
+        live_real_order_armed=live_real_order_armed,
+    )
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+
+    msg = str(exc.value)
+    assert "source=STRATEGY_NAME" in msg
+    assert "approved_profile_required_for_live_compatible_runtime_strategy:sma_with_filter" in msg
+
+
+def test_live_like_single_strategy_name_preflight_surfaces_profile_hash_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    _clear_runtime_strategy_source_env: None,
+) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    def _materialize(self: object, spec: RuntimeStrategySpec) -> None:
+        raise RuntimeError(f"approved_profile_hash_mismatch_for_runtime_strategy:{spec.strategy_name}")
+
+    monkeypatch.setattr(
+        runtime_strategy_set.RuntimeDecisionRequestBuilder,
+        "materialize_instance",
+        _materialize,
+    )
+
+    cfg = _live_single_strategy_cfg(profile_path="/tmp/profile.json")
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+
+    msg = str(exc.value)
+    assert "source=STRATEGY_NAME" in msg
+    assert "runtime_strategy_materialization_failed" in msg
+    assert "approved_profile_hash_mismatch_for_runtime_strategy:sma_with_filter" in msg
+
+
+def test_live_like_single_strategy_name_preflight_rejects_profile_runtime_parameter_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    _clear_runtime_strategy_source_env: None,
+) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    profile = {
+        "profile_mode": "live_dry_run",
+        "profile_content_hash": "sha256:profile",
+        "strategy_parameters": _complete_sma_parameters(),
+    }
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profile)
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "runtime_contract_from_settings",
+        lambda cfg: {
+            "mode": "live",
+            "live_dry_run": True,
+            "live_real_order_armed": False,
+            "profile_selector": "/tmp/profile.json",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "strategy_parameters": _complete_sma_parameters(SMA_SHORT=99),
+        },
+    )
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "diff_profile_to_runtime",
+        lambda profile_payload, runtime, profile_path=None: (
+            {"field": "strategy_parameters.SMA_SHORT"},
+        ),
+    )
+
+    cfg = _live_single_strategy_cfg(profile_path="/tmp/profile.json")
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+
+    msg = str(exc.value)
+    assert "source=STRATEGY_NAME" in msg
+    assert "runtime_strategy_materialization_failed" in msg
+    assert "approved_profile_runtime_parameter_mismatch:sma_with_filter" in msg
+
+
+def test_live_like_single_strategy_name_preflight_rejects_missing_runtime_bound_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+    _clear_runtime_strategy_source_env: None,
+) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    params = _complete_sma_parameters()
+    params.pop("SMA_FILTER_OVEREXT_LOOKBACK")
+    profile = {
+        "profile_mode": "live_dry_run",
+        "profile_content_hash": "sha256:profile",
+        "strategy_parameters": params,
+    }
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profile)
+
+    cfg = _live_single_strategy_cfg(profile_path="/tmp/profile.json")
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+
+    msg = str(exc.value)
+    assert "source=STRATEGY_NAME" in msg
+    assert "runtime_strategy_parameters_missing_runtime_bound:sma_with_filter" in msg
+
+
+def test_live_like_single_strategy_name_preflight_accepts_valid_approved_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    _clear_runtime_strategy_source_env: None,
+) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    profile_params = _complete_sma_parameters()
+    profile = {
+        "profile_mode": "live_dry_run",
+        "profile_content_hash": "sha256:profile",
+        "strategy_parameters": profile_params,
+    }
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profile)
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "runtime_contract_from_settings",
+        lambda cfg: {
+            "mode": "live",
+            "live_dry_run": True,
+            "live_real_order_armed": False,
+            "profile_selector": "",
+            "strategy_name": "sma_with_filter",
+            "market": "KRW-BTC",
+            "interval": "1m",
+            "strategy_parameters": dict(profile_params),
+        },
+    )
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", lambda *args, **kwargs: ())
+
+    validate_runtime_strategy_set_selection(_live_single_strategy_cfg(profile_path="/tmp/profile.json"))
+
+
+@pytest.mark.parametrize(
+    "runtime_strategy_set_json",
+    (
+        "",
+        json.dumps(
+            {
+                "strategies": [
+                    {
+                        "strategy_name": "sma_with_filter",
+                        "pair": "KRW-BTC",
+                        "interval": "1m",
+                    }
+                ]
+            }
+        ),
+    ),
+)
+def test_strategy_name_and_runtime_strategy_set_json_preflight_both_materialize(
+    monkeypatch: pytest.MonkeyPatch,
+    _clear_runtime_strategy_source_env: None,
+    runtime_strategy_set_json: str,
+) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    calls: list[str] = []
+
+    def _materialize(self: object, spec: RuntimeStrategySpec) -> None:
+        calls.append(spec.strategy_name)
+        raise RuntimeError("unit_materialization_probe")
+
+    monkeypatch.setattr(
+        runtime_strategy_set.RuntimeDecisionRequestBuilder,
+        "materialize_instance",
+        _materialize,
+    )
+
+    cfg = _live_single_strategy_cfg(
+        profile_path="/tmp/profile.json",
+        runtime_strategy_set_json=runtime_strategy_set_json,
+    )
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+
+    assert calls == ["sma_with_filter"]
+    assert "unit_materialization_probe" in str(exc.value)
+
+
 def test_normalized_runtime_strategy_set_manifest_materializes_active_instances() -> None:
     left = RuntimeStrategySpec(
         "canary_non_sma",
