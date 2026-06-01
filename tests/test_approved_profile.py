@@ -223,6 +223,7 @@ def _candidate() -> dict[str, object]:
 
 def _promotion(**overrides) -> dict[str, object]:
     candidate = _candidate()
+    decision_report_path, decision_report_hash = _write_source_decision_equivalence_report(candidate)
     promotion = {
         "strategy_name": candidate["strategy_name"],
         "strategy_profile_id": "exp1_candidate_001",
@@ -247,11 +248,92 @@ def _promotion(**overrides) -> dict[str, object]:
             "blocked_regimes": ["downtrend_normal_vol_unknown"],
             "missing_policy_behavior": "fail_closed",
         },
+        "decision_equivalence_report_path": str(decision_report_path),
+        "decision_equivalence_content_hash": decision_report_hash,
+        "decision_equivalence_status": "verified",
         "generated_at": "2026-05-04T00:00:00+00:00",
     }
     promotion.update(overrides)
     promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
     return promotion
+
+
+def _write_source_decision_equivalence_report(candidate: dict[str, object]) -> tuple[Path, str]:
+    path = Path("/tmp") / "bithumb_bot_test_source_decision_equivalence.json"
+    plugin = resolve_research_strategy_plugin(str(candidate["strategy_name"]))
+    report: dict[str, object] = {
+        "schema_version": 2,
+        "comparison_contract_version": "canonical_decision_v2",
+        "canonical_schema": True,
+        "canonical_v2_schema": True,
+        "legacy_schema": False,
+        "promotion_grade_comparison": True,
+        "ok": True,
+        "outcome": "PASS_POSITIVE_EQUIVALENCE",
+        "reason_codes": [],
+        "profile_content_hash": candidate["candidate_profile_hash"],
+        "market": "KRW-BTC",
+        "interval": "1m",
+        "data_fingerprint": candidate["dataset_content_hash"],
+        "dataset_content_hash": candidate["dataset_content_hash"],
+        "research_decision_count": 1,
+        "runtime_decision_count": 1,
+        "matched_decision_count": 1,
+        "mismatched_decision_count": 0,
+        "mismatch_count": 0,
+        "missing_research_decisions": [],
+        "missing_runtime_decisions": [],
+        "mismatches": [],
+        "canonical_missing_field_count": 0,
+        "canonical_missing_fields_by_decision": {},
+        "canonical_incomplete_decision_count": 0,
+        "canonical_validation": [],
+        "binding_validation": [],
+        "artifact_binding_validation": [],
+        "research_export_content_hash": "sha256:research",
+        "runtime_export_content_hash": "sha256:runtime",
+        "research_export_source": "research",
+        "runtime_export_source": "runtime_replay",
+        "research_export_path": "/tmp/research_decisions.json",
+        "runtime_export_path": "/tmp/runtime_decisions.json",
+        "research_strategy_plugin_contract_hash": candidate["strategy_plugin_contract_hash"],
+        "runtime_strategy_plugin_contract_hash": candidate["strategy_plugin_contract_hash"],
+        "strategy_decision_contract_version": plugin.decision_contract_version,
+        "repo_owned_export_artifacts": True,
+        "legacy_or_unverified_export": False,
+        "claims_scope": {
+            "positive_equivalence_state_classes": ["flat_no_dust_no_position"],
+            "unsupported_state_classes": [],
+            "promotion_claim": "positive_decision_equivalence_for_explicitly_modeled_state_classes_only",
+            "full_lifecycle_equivalence_supported": False,
+            "submit_plan_equivalence_supported": True,
+            "signal_equivalence_supported": True,
+            "execution_plan_equivalence_supported": True,
+            "position_lifecycle_equivalence_supported": False,
+            "fail_closed_unmodeled_state_count": 0,
+        },
+        "execution_equivalence": {
+            "submit_plan_equivalence_supported": True,
+            "submit_plan_equivalence_ok": True,
+        },
+        "state_coverage_matrix": {
+            "flat_no_dust_no_position": {
+                "research_decision_count": 1,
+                "runtime_decision_count": 1,
+                "positive_equivalence_supported": True,
+                "fail_closed_expected": False,
+                "supported_decision_count": 2,
+                "unsupported_decision_count": 0,
+                "mismatch_count": 0,
+                "representative_reason_codes": [],
+            }
+        },
+        "policy_input_hash_coverage": {"ok": True, "checked_decision_count": 2, "missing_by_decision": {}},
+        "execution_plan_coverage": {"ok": True, "checked_decision_count": 2, "missing_by_decision": {}},
+    }
+    report["content_hash"] = compute_decision_equivalence_hash(report)
+    path.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+    return path.resolve(), str(report["content_hash"])
 
 
 def _validation_run_for_promotion(
@@ -320,6 +402,21 @@ def test_promotion_or_profile_refuses_pending_validation_run_promotion(tmp_path:
 
     with pytest.raises(ApprovedProfileError, match="validation_run_not_verified"):
         verify_promotion_artifact(promotion)
+
+
+def test_approved_profile_generation_rejects_source_without_decision_equivalence(tmp_path: Path) -> None:
+    promotion = _promotion(decision_equivalence_report_path="", decision_equivalence_content_hash="")
+    promotion_path = tmp_path / "promotion_missing_decision_equivalence.json"
+    write_json_atomic(promotion_path, promotion)
+
+    with pytest.raises(ApprovedProfileError, match="decision_equivalence_report_missing"):
+        build_approved_profile(
+            promotion=promotion,
+            mode="paper",
+            source_promotion_path=str(promotion_path),
+            market="KRW-BTC",
+            interval="1m",
+        )
 
 
 def test_promotion_artifact_rejects_research_compatibility_fallback_marker() -> None:
@@ -762,8 +859,9 @@ def _attach_decision_equivalence_report(
     report_path = tmp_path / f"decision_equivalence_{len(list(tmp_path.glob('decision_equivalence_*.json')))}.json"
     report = {
         "schema_version": 2,
-        "comparison_contract_version": "canonical_decision_v1",
+        "comparison_contract_version": "canonical_decision_v2",
         "canonical_schema": True,
+        "canonical_v2_schema": True,
         "legacy_schema": False,
         "promotion_grade_comparison": True,
         "ok": True,
@@ -784,12 +882,49 @@ def _attach_decision_equivalence_report(
         "missing_research_decisions": [],
         "missing_runtime_decisions": [],
         "mismatches": [],
+        "policy_input_hash_coverage": {
+            "ok": True,
+            "checked_decision_count": 40,
+            "required_fields": [
+                "candle_ts",
+                "through_ts_ms",
+                "decision_input_bundle_hash",
+                "policy_input_hash",
+                "policy_decision_hash",
+                "policy_contract_hash",
+                "final_exit_decision_input_hash",
+                "final_signal",
+                "exit_rule",
+                "exit_evaluations_hash",
+            ],
+            "required_one_of_groups": [["market_feature_hash", "canonical_feature_projection_hash"]],
+            "missing_by_decision": {},
+        },
+        "execution_plan_coverage": {
+            "ok": True,
+            "checked_decision_count": 40,
+            "required_fields": [
+                "execution_submit_plan_hash",
+                "final_action",
+                "submit_expected",
+                "submit_plan_source",
+                "submit_plan_authority",
+                "execution_engine",
+            ],
+            "required_one_of_groups": [],
+            "missing_by_decision": {},
+        },
         "canonical_incomplete_decision_count": 0,
         "canonical_missing_field_count": 0,
         "canonical_missing_fields_by_decision": {},
         "binding_validation": [],
+        "artifact_binding_validation": [],
         "research_export_content_hash": "sha256:research_export",
         "runtime_export_content_hash": "sha256:runtime_export",
+        "research_export_source": "research",
+        "runtime_export_source": "runtime_replay",
+        "research_export_path": str((tmp_path / "research_decisions.json").resolve()),
+        "runtime_export_path": str((tmp_path / "runtime_decisions.json").resolve()),
         "research_strategy_plugin_contract_hash": profile.get("strategy_plugin_contract_hash"),
         "runtime_strategy_plugin_contract_hash": profile.get("strategy_plugin_contract_hash"),
         "strategy_decision_contract_version": (
@@ -813,6 +948,10 @@ def _attach_decision_equivalence_report(
                 "non_flat_dust_reserved_exit_residue_and_recovery_states_fail_closed_until_explicitly_modeled",
                 "fail_closed_unmodeled_state_is_not_full_lifecycle_equivalence_evidence",
             ],
+        },
+        "execution_equivalence": {
+            "submit_plan_equivalence_supported": True,
+            "submit_plan_equivalence_ok": True,
         },
         "state_coverage_matrix": {
             "flat_no_dust_no_position": {

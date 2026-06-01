@@ -178,6 +178,9 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "candidate_regime_policy_equivalence_evidence_status": candidate.get(
             "candidate_regime_policy_equivalence_evidence_status"
         ),
+        "decision_equivalence_report_path": candidate.get("decision_equivalence_report_path"),
+        "decision_equivalence_content_hash": candidate.get("decision_equivalence_content_hash"),
+        "decision_equivalence_status": candidate.get("decision_equivalence_status"),
         "candidate_profile_evidence_contract_hash": candidate.get(
             "candidate_profile_evidence_contract_hash"
         ),
@@ -355,6 +358,9 @@ def build_candidate_behavior_profile(candidate: dict[str, Any]) -> dict[str, Any
         "candidate_regime_policy_equivalence_evidence_hash",
         "candidate_regime_policy_equivalence_evidence_path",
         "candidate_regime_policy_equivalence_evidence_status",
+        "decision_equivalence_report_path",
+        "decision_equivalence_content_hash",
+        "decision_equivalence_status",
         "candidate_profile_evidence_contract_hash",
         "candidate_regime_policy_limitation_reasons",
         "acceptance_gate_result",
@@ -696,6 +702,47 @@ def _extend_production_bound_decision_evidence_reasons(
             add(field_name + "_missing")
     if str(candidate.get("order_rules_hash") or "") == "sha256:" + "0" * 64:
         add("order_rules_hash_empty")
+    _extend_decision_equivalence_evidence_reasons(candidate, reasons, prefix=prefix)
+
+
+def _extend_decision_equivalence_evidence_reasons(
+    candidate: dict[str, Any],
+    reasons: list[str],
+    *,
+    prefix: str = "",
+) -> None:
+    def add(reason: str) -> None:
+        if prefix:
+            reasons.append(prefix + reason)
+        reasons.append(reason)
+
+    path_value = str(candidate.get("decision_equivalence_report_path") or "").strip()
+    hash_value = str(candidate.get("decision_equivalence_content_hash") or "").strip()
+    if not path_value:
+        add("decision_equivalence_report_missing")
+        return
+    if not hash_value.startswith("sha256:"):
+        add("decision_equivalence_content_hash_missing")
+        return
+    try:
+        with Path(path_value).expanduser().open("r", encoding="utf-8") as handle:
+            report = json.load(handle)
+    except OSError:
+        add("decision_equivalence_report_missing")
+        return
+    except json.JSONDecodeError:
+        add("decision_equivalence_status_not_pass")
+        return
+    if not isinstance(report, dict):
+        add("decision_equivalence_status_not_pass")
+        return
+    from bithumb_bot.decision_equivalence import validate_decision_equivalence_report
+
+    for reason in validate_decision_equivalence_report(report, expected_hash=hash_value):
+        add(reason)
+    status = str(candidate.get("decision_equivalence_status") or "").strip().lower()
+    if status and status not in {"pass", "passed", "verified", "ok"}:
+        add("decision_equivalence_status_not_pass")
 
 
 def _valid_prefixed_hash(value: object) -> bool:
@@ -1684,6 +1731,9 @@ def promote_candidate(
         "walk_forward_evidence_source": "walk_forward_report.json" if walk_forward_required else None,
         "walk_forward_candidate_profile_hash": walk_forward.profile_hash if walk_forward else None,
         "walk_forward_candidate_profile_verified": bool(walk_forward),
+        "decision_equivalence_report_path": candidate.get("decision_equivalence_report_path"),
+        "decision_equivalence_content_hash": candidate.get("decision_equivalence_content_hash"),
+        "decision_equivalence_status": candidate.get("decision_equivalence_status"),
         "final_holdout_required_for_promotion": bool(policy["effective_final_holdout_required"]),
         "final_holdout_present": candidate.get("final_holdout_present") is True,
         "final_holdout_metrics": candidate.get("final_holdout_metrics"),

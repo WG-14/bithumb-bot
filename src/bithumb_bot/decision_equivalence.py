@@ -76,6 +76,10 @@ CANONICAL_EQUIVALENCE_FIELDS_V2 = tuple(
         "typed_execution_summary_evidence",
         "execution_submit_plan_evidence",
         "typed_no_submit_proof",
+        "market_regime",
+        "regime_decision",
+        "regime_block_reason",
+        "decision_input_bundle_payload_hash",
     }
 )
 CANONICAL_EQUIVALENCE_FIELDS = CANONICAL_EQUIVALENCE_FIELDS_V2
@@ -143,6 +147,33 @@ class DecisionExportArtifact:
     strategy_plugin_contract: dict[str, Any]
     strategy_plugin_contract_hash: str
     strategy_decision_contract_version: str
+    path: str = ""
+
+
+DECISION_EQUIVALENCE_POLICY_INPUT_COVERAGE_FIELDS = (
+    "candle_ts",
+    "through_ts_ms",
+    "decision_input_bundle_hash",
+    "policy_input_hash",
+    "policy_decision_hash",
+    "policy_contract_hash",
+    "final_exit_decision_input_hash",
+    "final_signal",
+    "exit_rule",
+    "exit_evaluations_hash",
+)
+DECISION_EQUIVALENCE_FEATURE_COVERAGE_ONE_OF = (
+    "market_feature_hash",
+    "canonical_feature_projection_hash",
+)
+DECISION_EQUIVALENCE_EXECUTION_PLAN_COVERAGE_FIELDS = (
+    "execution_submit_plan_hash",
+    "final_action",
+    "submit_expected",
+    "submit_plan_source",
+    "submit_plan_authority",
+    "execution_engine",
+)
 
 
 def compare_decision_equivalence(
@@ -244,6 +275,7 @@ def compare_decision_equivalence(
                     "reason_code": "decision_field_mismatch",
                     "fields": field_mismatches,
                     "state_classes": state_classes,
+                    "drift_diagnostics": _drift_diagnostics(left, right),
                 }
             )
     mismatch_items.extend(
@@ -339,6 +371,20 @@ def compare_decision_equivalence(
         "missing_research_decisions": missing_research,
         "missing_runtime_decisions": missing_runtime,
         "mismatches": mismatch_items,
+        "comparison_fields": list(comparison_fields),
+        "required_policy_input_coverage_fields": list(DECISION_EQUIVALENCE_POLICY_INPUT_COVERAGE_FIELDS),
+        "required_feature_coverage_one_of": list(DECISION_EQUIVALENCE_FEATURE_COVERAGE_ONE_OF),
+        "required_execution_plan_coverage_fields": list(DECISION_EQUIVALENCE_EXECUTION_PLAN_COVERAGE_FIELDS),
+        "policy_input_hash_coverage": _field_coverage(
+            normalized_research + normalized_runtime,
+            fields=DECISION_EQUIVALENCE_POLICY_INPUT_COVERAGE_FIELDS,
+            one_of_groups=(DECISION_EQUIVALENCE_FEATURE_COVERAGE_ONE_OF,),
+        ),
+        "execution_plan_coverage": _field_coverage(
+            normalized_research + normalized_runtime,
+            fields=DECISION_EQUIVALENCE_EXECUTION_PLAN_COVERAGE_FIELDS,
+            one_of_groups=(),
+        ),
         "canonical_missing_field_count": sum(len(fields) for fields in canonical_missing_fields_by_decision.values()),
         "canonical_missing_fields_by_decision": canonical_missing_fields_by_decision,
         "canonical_incomplete_decision_count": canonical_incomplete_decision_count,
@@ -415,6 +461,8 @@ def compare_decision_export_artifacts(
             "runtime_export_content_hash": runtime_artifact.content_hash,
             "research_export_source": research_artifact.source,
             "runtime_export_source": runtime_artifact.source,
+            "research_export_path": research_artifact.path,
+            "runtime_export_path": runtime_artifact.path,
             "research_strategy_plugin_contract_hash": research_artifact.strategy_plugin_contract_hash,
             "runtime_strategy_plugin_contract_hash": runtime_artifact.strategy_plugin_contract_hash,
             "strategy_decision_contract_version": research_artifact.strategy_decision_contract_version,
@@ -506,6 +554,7 @@ def promotion_grade_decision_equivalence_fail_reasons(report: dict[str, Any]) ->
         reasons.append("decision_equivalence_artifact_binding_validation_nonempty")
     if report.get("reason_codes"):
         reasons.append("decision_equivalence_reason_codes_nonempty")
+    reasons.extend(decision_equivalence_report_semantic_fail_reasons(report))
     claims_scope = report.get("claims_scope")
     if not isinstance(claims_scope, dict):
         reasons.append("decision_equivalence_claims_scope_missing")
@@ -531,10 +580,98 @@ def promotion_grade_decision_equivalence_fail_reasons(report: dict[str, Any]) ->
     return tuple(sorted(set(reasons)))
 
 
+def decision_equivalence_report_semantic_fail_reasons(report: dict[str, Any]) -> tuple[str, ...]:
+    """Return fail-closed reasons for source promotion/profile evidence use."""
+    reasons: list[str] = []
+    if report.get("ok") is not True or report.get("outcome") != "PASS_POSITIVE_EQUIVALENCE":
+        reasons.append("decision_equivalence_status_not_pass")
+    if report.get("promotion_grade_comparison") is not True:
+        reasons.append("decision_equivalence_status_not_pass")
+    if report.get("repo_owned_export_artifacts") is not True or report.get("legacy_or_unverified_export") is True:
+        reasons.append("decision_equivalence_not_repo_owned_actual_exports")
+    if str(report.get("research_export_source") or "") != "research":
+        reasons.append("decision_equivalence_not_repo_owned_actual_exports")
+    if str(report.get("runtime_export_source") or "") != "runtime_replay":
+        reasons.append("decision_equivalence_not_repo_owned_actual_exports")
+    if not str(report.get("research_export_content_hash") or "").startswith("sha256:"):
+        reasons.append("decision_equivalence_not_repo_owned_actual_exports")
+    if not str(report.get("runtime_export_content_hash") or "").startswith("sha256:"):
+        reasons.append("decision_equivalence_not_repo_owned_actual_exports")
+    if not _coverage_ok(report.get("policy_input_hash_coverage")):
+        reasons.append("decision_equivalence_missing_policy_hash_coverage")
+    if not _coverage_ok(report.get("execution_plan_coverage")):
+        reasons.append("decision_equivalence_missing_execution_plan_coverage")
+    claims_scope = report.get("claims_scope")
+    if not isinstance(claims_scope, dict) or claims_scope.get("signal_equivalence_supported") is not True:
+        reasons.append("decision_equivalence_missing_policy_hash_coverage")
+    execution_equivalence = report.get("execution_equivalence")
+    if (
+        not isinstance(execution_equivalence, dict)
+        or execution_equivalence.get("submit_plan_equivalence_supported") is not True
+        or execution_equivalence.get("submit_plan_equivalence_ok") is not True
+    ):
+        reasons.append("decision_equivalence_missing_execution_plan_coverage")
+    return tuple(sorted(set(reasons)))
+
+
+def validate_decision_equivalence_report(
+    report: dict[str, Any],
+    *,
+    expected_hash: str | None = None,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    recorded_hash = str(report.get(DECISION_EQUIVALENCE_HASH_FIELD) or "").strip()
+    actual_hash = compute_decision_equivalence_hash(report)
+    if not recorded_hash.startswith("sha256:"):
+        reasons.append("decision_equivalence_content_hash_missing")
+    elif recorded_hash != actual_hash:
+        reasons.append("decision_equivalence_report_hash_mismatch")
+    if expected_hash is not None:
+        expected = str(expected_hash or "").strip()
+        if not expected.startswith("sha256:"):
+            reasons.append("decision_equivalence_content_hash_missing")
+        elif recorded_hash != expected or actual_hash != expected:
+            reasons.append("decision_equivalence_report_hash_mismatch")
+    reasons.extend(promotion_grade_decision_equivalence_fail_reasons(report))
+    return tuple(sorted(set(reasons)))
+
+
 def require_promotion_grade_decision_equivalence(report: dict[str, Any]) -> None:
     reasons = promotion_grade_decision_equivalence_fail_reasons(report)
     if reasons:
         raise ValueError("decision_equivalence_not_promotion_grade:" + ",".join(reasons))
+
+
+def _coverage_ok(value: object) -> bool:
+    return isinstance(value, dict) and value.get("ok") is True
+
+
+def _field_coverage(
+    decisions: list[dict[str, Any]],
+    *,
+    fields: tuple[str, ...],
+    one_of_groups: tuple[tuple[str, ...], ...],
+) -> dict[str, Any]:
+    missing: dict[str, list[str]] = {}
+    for decision in decisions:
+        key = _decision_key(decision)
+        missing_fields = [
+            field
+            for field in fields
+            if (decision.get(field) is None if field == "exit_rule" else _execution_required_missing(decision.get(field)))
+        ]
+        for group in one_of_groups:
+            if not any(not _execution_required_missing(decision.get(field)) for field in group):
+                missing_fields.append("|".join(group))
+        if missing_fields:
+            missing[key] = missing_fields
+    return {
+        "ok": not missing,
+        "checked_decision_count": len(decisions),
+        "required_fields": list(fields),
+        "required_one_of_groups": [list(group) for group in one_of_groups],
+        "missing_by_decision": missing,
+    }
 
 
 def _missing_canonical_fields(report: dict[str, Any]) -> tuple[str, ...]:
@@ -642,6 +779,7 @@ def load_decision_export_artifact(
         strategy_plugin_contract=dict(plugin_contract),
         strategy_plugin_contract_hash=plugin_contract_hash,
         strategy_decision_contract_version=strategy_decision_contract_version,
+        path=str(Path(path).expanduser().resolve()),
     )
 
 
@@ -917,6 +1055,64 @@ def _timestamp_only_diagnostics(
                 }
             )
     return diagnostics
+
+
+def _drift_diagnostics(research: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    def pick(payload: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in payload:
+                return payload.get(key)
+        strategy_payload = payload.get("strategy_specific_payload")
+        if isinstance(strategy_payload, dict):
+            for key in keys:
+                if key in strategy_payload:
+                    return strategy_payload.get(key)
+        feature_snapshot = payload.get("feature_snapshot")
+        if isinstance(feature_snapshot, dict):
+            for key in keys:
+                if key in feature_snapshot:
+                    return feature_snapshot.get(key)
+        behavior = payload.get("strategy_behavior_payload")
+        if isinstance(behavior, dict):
+            nested = behavior.get("strategy_specific_payload")
+            if isinstance(nested, dict):
+                for key in keys:
+                    if key in nested:
+                        return nested.get(key)
+        return None
+
+    def side(payload: dict[str, Any]) -> dict[str, Any]:
+        position_authority = payload.get("position_authority") if isinstance(payload.get("position_authority"), dict) else {}
+        submit_evidence = (
+            payload.get("execution_submit_plan_evidence")
+            if isinstance(payload.get("execution_submit_plan_evidence"), dict)
+            else {}
+        )
+        return {
+            "previous_cross_state": pick(payload, "previous_cross_state"),
+            "allow_initial_cross": pick(payload, "allow_initial_cross"),
+            "gap_ratio": pick(payload, "gap_ratio"),
+            "volatility_ratio": pick(payload, "volatility_ratio", "range_ratio"),
+            "overextended_ratio": pick(payload, "overextended_ratio", "overextended_abs_return_ratio"),
+            "market_regime_snapshot": pick(payload, "market_regime_snapshot", "current_market_regime_snapshot"),
+            "position_terminal_state": position_authority.get("terminal_state") or payload.get("terminal_state"),
+            "position_effective_flat": payload.get("effective_flat"),
+            "position_dust_state": payload.get("dust_state"),
+            "fee_authority_hash": payload.get("fee_authority_hash"),
+            "fee_authority": payload.get("fee_authority"),
+            "order_rules_hash": payload.get("order_rules_hash"),
+            "order_rules": payload.get("order_rules"),
+            "execution_intent": payload.get("execution_intent")
+            or payload.get("execution_intent_v2")
+            or submit_evidence,
+            "final_signal": payload.get("final_signal"),
+            "policy_input_hash": payload.get("policy_input_hash"),
+            "policy_decision_hash": payload.get("policy_decision_hash"),
+            "decision_input_bundle_hash": payload.get("decision_input_bundle_hash"),
+            "execution_submit_plan_hash": payload.get("execution_submit_plan_hash"),
+        }
+
+    return {"research": side(research), "runtime": side(runtime)}
 
 
 def _decisions_by_timestamp(decisions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

@@ -28,7 +28,10 @@ from .promotion_provenance import (
     payload_has_promotion_provenance_markers,
     validate_promotion_artifact_provenance,
 )
-from .decision_equivalence import compute_decision_equivalence_hash
+from .decision_equivalence import (
+    compute_decision_equivalence_hash,
+    validate_decision_equivalence_report,
+)
 from .research.hashing import content_hash_payload, sha256_prefixed
 from .research.lineage import validate_lineage_artifact, LineageValidationError
 from .research.promotion_gate import build_candidate_profile
@@ -367,6 +370,7 @@ def verify_promotion_artifact(payload: dict[str, Any]) -> dict[str, Any]:
     live_regime_policy = payload.get("live_regime_policy")
     if not isinstance(live_regime_policy, dict):
         raise ApprovedProfileError("promotion_regime_policy_missing")
+    _validate_source_promotion_decision_equivalence(payload)
     _verify_validation_run_binding_for_promotion(payload)
     return payload
 
@@ -429,6 +433,28 @@ def _verify_validation_run_binding_for_promotion(payload: dict[str, Any]) -> Non
         and validation_promotion_hash != promotion_hash
     ):
         raise ApprovedProfileError("validation_run_promotion_artifact_hash_mismatch")
+
+
+def _validate_source_promotion_decision_equivalence(payload: dict[str, Any]) -> None:
+    path = str(payload.get("decision_equivalence_report_path") or "").strip()
+    expected_hash = str(payload.get("decision_equivalence_content_hash") or "").strip()
+    if not path:
+        raise ApprovedProfileError("decision_equivalence_report_missing")
+    if not expected_hash.startswith("sha256:"):
+        raise ApprovedProfileError("decision_equivalence_content_hash_missing")
+    try:
+        resolved = resolve_runtime_artifact_path(path, label="decision_equivalence")
+        report = _load_json(resolved)
+    except ApprovedProfileError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ApprovedProfileError(f"decision_equivalence_report_invalid:{exc}") from exc
+    reasons = validate_decision_equivalence_report(report, expected_hash=expected_hash)
+    if reasons:
+        raise ApprovedProfileError(",".join(reasons))
+    status = str(payload.get("decision_equivalence_status") or "").strip().lower()
+    if status and status not in {"pass", "passed", "verified", "ok"}:
+        raise ApprovedProfileError("decision_equivalence_status_not_pass")
 
 
 def _candidate_like_from_promotion(payload: dict[str, Any]) -> dict[str, Any]:
@@ -614,6 +640,9 @@ def build_approved_profile(
         "validation_run_path": verified_promotion.get("validation_run_path"),
         "validation_run_hash": verified_promotion.get("validation_run_hash"),
         "validation_run_binding_hash": verified_promotion.get("validation_run_binding_hash"),
+        "decision_equivalence_report_path": verified_promotion.get("decision_equivalence_report_path"),
+        "decision_equivalence_content_hash": verified_promotion.get("decision_equivalence_content_hash"),
+        "decision_equivalence_status": verified_promotion.get("decision_equivalence_status"),
         "repository_version": repository_version or verified_promotion.get("repository_version") or "unknown",
         "strategy_name": verified_promotion.get("strategy_name"),
         "strategy_spec": promotion_source.get("strategy_spec"),
@@ -771,6 +800,10 @@ def validate_approved_profile(profile: dict[str, Any]) -> dict[str, Any]:
         raise ApprovedProfileError("effective_strategy_parameters_hash_mismatch")
     if not isinstance(profile.get("strategy_parameter_source_map"), dict):
         raise ApprovedProfileError("strategy_parameter_source_map_missing")
+    if not str(profile.get("decision_equivalence_report_path") or "").strip():
+        raise ApprovedProfileError("decision_equivalence_report_missing")
+    if not str(profile.get("decision_equivalence_content_hash") or "").startswith("sha256:"):
+        raise ApprovedProfileError("decision_equivalence_content_hash_missing")
     _validate_strategy_plugin_contract(profile)
     if not isinstance(profile.get("exit_policy"), dict):
         raise ApprovedProfileError("exit_policy_missing")
@@ -966,6 +999,9 @@ def verify_profile_source_artifact(profile: dict[str, Any]) -> dict[str, Any]:
             if not _values_equal(validated.get(key), promotion.get(key)):
                 raise ApprovedProfileError(f"source_promotion_{key}_mismatch")
     for key in (
+        "decision_equivalence_report_path",
+        "decision_equivalence_content_hash",
+        "decision_equivalence_status",
         "candidate_regime_policy_equivalence_evidence_hash",
         "candidate_regime_policy_equivalence_evidence_path",
         "candidate_profile_evidence_contract_hash",
@@ -2226,5 +2262,14 @@ def _validate_decision_equivalence_evidence(
         raise ApprovedProfileError(f"{label}_decision_equivalence_research_export_hash_missing")
     if not str(report.get("runtime_export_content_hash") or "").startswith("sha256:"):
         raise ApprovedProfileError(f"{label}_decision_equivalence_runtime_export_hash_missing")
+    for reason in validate_decision_equivalence_report(report, expected_hash=hash_value):
+        if reason == "decision_equivalence_missing_policy_hash_coverage":
+            raise ApprovedProfileError(f"{label}_decision_equivalence_missing_policy_hash_coverage")
+        if reason == "decision_equivalence_missing_execution_plan_coverage":
+            raise ApprovedProfileError(f"{label}_decision_equivalence_missing_execution_plan_coverage")
+        if reason == "decision_equivalence_not_repo_owned_actual_exports":
+            raise ApprovedProfileError(f"{label}_decision_equivalence_unverified_export")
+        if reason == "decision_equivalence_status_not_pass":
+            raise ApprovedProfileError(f"{label}_decision_equivalence_not_ok")
     if report.get("ok") is not True:
         raise ApprovedProfileError(f"{label}_decision_equivalence_not_ok")

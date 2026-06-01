@@ -221,6 +221,18 @@ def _compare(research: dict[str, object], runtime: dict[str, object]):
     )
 
 
+def _mark_repo_owned_report(report: dict[str, object]) -> dict[str, object]:
+    report["repo_owned_export_artifacts"] = True
+    report["legacy_or_unverified_export"] = False
+    report["research_export_source"] = "research"
+    report["runtime_export_source"] = "runtime_replay"
+    report["research_export_content_hash"] = "sha256:research-export"
+    report["runtime_export_content_hash"] = "sha256:runtime-export"
+    report["research_export_path"] = "/tmp/research_decisions.json"
+    report["runtime_export_path"] = "/tmp/runtime_decisions.json"
+    return report
+
+
 def _complete_lifecycle_evidence() -> CanonicalLifecycleEvidenceBundle:
     return CanonicalLifecycleEvidenceBundle(
         research_simulated_fills=(
@@ -423,6 +435,72 @@ def test_canonical_v2_feature_snapshot_hash_is_diagnostic_not_equivalence_author
     assert "decision_feature_mismatch" not in result.report["reason_codes"]
 
 
+def test_canonical_v2_feature_drift_exposes_structured_diagnostics() -> None:
+    result = _compare(
+        _decision_v2(
+            market_feature_hash="sha256:research_feature",
+            strategy_specific_payload={
+                "previous_cross_state": "below",
+                "allow_initial_cross": False,
+                "gap_ratio": 0.01,
+                "volatility_ratio": 0.02,
+                "overextended_ratio": 0.03,
+                "market_regime_snapshot": {"composite_regime": "uptrend_normal_vol_unknown"},
+            },
+            execution_intent={"side": "BUY"},
+            position_authority={
+                "state_class": "flat_no_dust_no_position",
+                "unsupported_reason": "",
+                "terminal_state": "flat",
+                "position_state_hash": "sha256:position",
+                "order_rules_hash": "sha256:order_rules",
+                "fee_authority_hash": "sha256:fee_authority",
+            },
+        ),
+        _decision_v2(
+            market_feature_hash="sha256:runtime_feature",
+            strategy_specific_payload={
+                "previous_cross_state": "above",
+                "allow_initial_cross": True,
+                "gap_ratio": 0.04,
+                "volatility_ratio": 0.05,
+                "overextended_ratio": 0.06,
+                "market_regime_snapshot": {"composite_regime": "downtrend_normal_vol_unknown"},
+            },
+            execution_intent={"side": "SELL"},
+            position_authority={
+                "state_class": "flat_no_dust_no_position",
+                "unsupported_reason": "",
+                "terminal_state": "flat",
+                "position_state_hash": "sha256:position",
+                "order_rules_hash": "sha256:order_rules",
+                "fee_authority_hash": "sha256:fee_authority",
+            },
+        ),
+    )
+
+    assert result.ok is False
+    mismatch = result.report["mismatches"][0]
+    diagnostics = mismatch["drift_diagnostics"]
+    assert diagnostics["research"]["previous_cross_state"] == "below"
+    assert diagnostics["runtime"]["allow_initial_cross"] is True
+    assert diagnostics["research"]["gap_ratio"] == 0.01
+    assert diagnostics["runtime"]["volatility_ratio"] == 0.05
+    assert diagnostics["research"]["overextended_ratio"] == 0.03
+    assert diagnostics["runtime"]["market_regime_snapshot"]["composite_regime"] == "downtrend_normal_vol_unknown"
+    assert diagnostics["research"]["position_terminal_state"] == "flat"
+    assert diagnostics["research"]["position_effective_flat"] is True
+    assert diagnostics["research"]["position_dust_state"] == "flat"
+    assert diagnostics["research"]["fee_authority_hash"] == "sha256:fee_authority"
+    assert diagnostics["research"]["order_rules_hash"] == "sha256:order_rules"
+    assert diagnostics["research"]["execution_intent"]["side"] == "BUY"
+    assert diagnostics["runtime"]["final_signal"] == "BUY"
+    assert diagnostics["research"]["policy_input_hash"] == VALID_SHA256
+    assert diagnostics["research"]["policy_decision_hash"] == VALID_SHA256
+    assert diagnostics["research"]["decision_input_bundle_hash"] == VALID_SHA256
+    assert diagnostics["research"]["execution_submit_plan_hash"].startswith("sha256:")
+
+
 @pytest.mark.parametrize(
     ("field", "reason"),
     [
@@ -502,8 +580,7 @@ def test_signal_match_but_execution_submit_plan_mismatch_fails_execution_equival
 
 
 def test_promotion_grade_equivalence_gate_accepts_positive_canonical_v2_export_report() -> None:
-    report = dict(_compare(_decision_v2(), _decision_v2()).report)
-    report["repo_owned_export_artifacts"] = True
+    report = _mark_repo_owned_report(dict(_compare(_decision_v2(), _decision_v2()).report))
 
     require_promotion_grade_decision_equivalence(report)
     assert promotion_grade_decision_equivalence_fail_reasons(report) == ()
@@ -1533,7 +1610,7 @@ def test_promotion_grade_gate_accepts_complete_typed_lifecycle_evidence_when_oth
         data_fingerprint="sha256:data",
         lifecycle_evidence=_complete_lifecycle_evidence(),
     ).report
-    report["repo_owned_export_artifacts"] = True
+    report = _mark_repo_owned_report(dict(report))
 
     require_promotion_grade_decision_equivalence(report)
 

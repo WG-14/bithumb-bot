@@ -36,6 +36,7 @@ from bithumb_bot.research.strategy_spec import (
     materialized_strategy_parameters_hash,
     strategy_parameter_source_map,
 )
+from bithumb_bot.research.strategy_registry import resolve_research_strategy_plugin
 from bithumb_bot.research import validation_pipeline as pipeline
 from bithumb_bot.research.validation_pipeline import validation_run_binding_hash, validation_run_content_hash
 from bithumb_bot.approved_profile import build_approved_profile, verify_promotion_artifact
@@ -480,6 +481,13 @@ def _production_candidate(*, attach_stress_suite: bool = True, **overrides):
     _attach_effective_parameter_contract(payload)
     if attach_stress_suite:
         _attach_stress_suite(payload)
+    if "decision_equivalence_report_path" not in overrides:
+        decision_path = _decision_equivalence_report_for_candidate(payload, Path("/tmp"))
+        with decision_path.open("r", encoding="utf-8") as handle:
+            decision_report = json.load(handle)
+        payload["decision_equivalence_report_path"] = str(decision_path.resolve())
+        payload["decision_equivalence_content_hash"] = decision_report["content_hash"]
+        payload["decision_equivalence_status"] = "verified"
     explicit_hash = overrides.get("candidate_profile_hash")
     payload.pop("candidate_profile_hash", None)
     payload["candidate_profile_hash"] = explicit_hash or sha256_prefixed(build_candidate_profile(payload))
@@ -513,8 +521,9 @@ def _attach_effective_parameter_contract(payload: dict[str, object]) -> None:
 def _decision_equivalence_report_for_candidate(candidate: dict[str, object], tmp_path: Path) -> Path:
     report = {
         "schema_version": 2,
-        "comparison_contract_version": "canonical_decision_v1",
+        "comparison_contract_version": "canonical_decision_v2",
         "canonical_schema": True,
+        "canonical_v2_schema": True,
         "legacy_schema": False,
         "promotion_grade_comparison": True,
         "ok": True,
@@ -540,6 +549,15 @@ def _decision_equivalence_report_for_candidate(candidate: dict[str, object], tmp
         "artifact_binding_validation": [],
         "research_export_content_hash": "sha256:research-export",
         "runtime_export_content_hash": "sha256:runtime-export",
+        "research_export_source": "research",
+        "runtime_export_source": "runtime_replay",
+        "research_export_path": str((tmp_path / "research_decisions.json").resolve()),
+        "runtime_export_path": str((tmp_path / "runtime_decisions.json").resolve()),
+        "research_strategy_plugin_contract_hash": candidate.get("strategy_plugin_contract_hash"),
+        "runtime_strategy_plugin_contract_hash": candidate.get("strategy_plugin_contract_hash"),
+        "strategy_decision_contract_version": resolve_research_strategy_plugin(
+            str(candidate.get("strategy_name") or "sma_with_filter")
+        ).decision_contract_version,
         "repo_owned_export_artifacts": True,
         "legacy_or_unverified_export": False,
         "outcome": "PASS_POSITIVE_EQUIVALENCE",
@@ -548,7 +566,9 @@ def _decision_equivalence_report_for_candidate(candidate: dict[str, object], tmp
             "unsupported_state_classes": [],
             "promotion_claim": "positive_decision_equivalence_for_explicitly_modeled_state_classes_only",
             "full_lifecycle_equivalence_supported": False,
+            "submit_plan_equivalence_supported": True,
             "signal_equivalence_supported": True,
+            "execution_plan_equivalence_supported": True,
             "position_lifecycle_equivalence_supported": False,
             "fail_closed_unmodeled_state_count": 0,
             "limitations": ["candle_only_execution_equivalence"],
@@ -563,6 +583,12 @@ def _decision_equivalence_report_for_candidate(candidate: dict[str, object], tmp
                 "representative_reason_codes": [],
             }
         },
+        "execution_equivalence": {
+            "submit_plan_equivalence_supported": True,
+            "submit_plan_equivalence_ok": True,
+        },
+        "policy_input_hash_coverage": {"ok": True, "checked_decision_count": 24, "missing_by_decision": {}},
+        "execution_plan_coverage": {"ok": True, "checked_decision_count": 24, "missing_by_decision": {}},
         "generated_at": "2026-05-04T00:00:00+00:00",
     }
     report["content_hash"] = compute_decision_equivalence_hash(report)
@@ -619,6 +645,47 @@ def test_promotion_requires_candidate_regime_policy_equivalence_when_policy_affe
 
 def test_candidate_regime_policy_equivalence_evidence_required_for_production_bound_promotion() -> None:
     test_promotion_requires_candidate_regime_policy_equivalence_when_policy_affects_entries()
+
+
+def test_production_bound_candidate_rejects_missing_decision_equivalence_evidence() -> None:
+    candidate = _production_candidate(decision_equivalence_report_path="")
+    candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
+
+    allowed, reasons = validate_backtest_candidate_for_promotion(candidate)
+
+    assert not allowed
+    assert "decision_equivalence_report_missing" in reasons
+
+
+def test_production_bound_candidate_rejects_failed_decision_equivalence_evidence(tmp_path: Path) -> None:
+    candidate = _production_candidate()
+    report_path = _decision_equivalence_report_for_candidate(candidate, tmp_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["ok"] = False
+    report["outcome"] = "FAIL_ACTUAL_DRIFT"
+    report["content_hash"] = compute_decision_equivalence_hash(report)
+    write_json_atomic(report_path, report)
+    candidate["decision_equivalence_report_path"] = str(report_path.resolve())
+    candidate["decision_equivalence_content_hash"] = report["content_hash"]
+    candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
+
+    allowed, reasons = validate_backtest_candidate_for_promotion(candidate)
+
+    assert not allowed
+    assert "decision_equivalence_status_not_pass" in reasons
+
+
+def test_production_bound_candidate_rejects_decision_equivalence_hash_mismatch(tmp_path: Path) -> None:
+    candidate = _production_candidate()
+    report_path = _decision_equivalence_report_for_candidate(candidate, tmp_path)
+    candidate["decision_equivalence_report_path"] = str(report_path.resolve())
+    candidate["decision_equivalence_content_hash"] = "sha256:bad"
+    candidate["candidate_profile_hash"] = sha256_prefixed(build_candidate_profile(candidate))
+
+    allowed, reasons = validate_backtest_candidate_for_promotion(candidate)
+
+    assert not allowed
+    assert "decision_equivalence_report_hash_mismatch" in reasons
 
 
 def test_backtest_candidate_smoke_markers_fail_closed_for_promotion() -> None:

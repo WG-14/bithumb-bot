@@ -13,6 +13,7 @@ from bithumb_bot.broker.order_rules import DerivedOrderConstraints, RuleResoluti
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.decision_equivalence import (
     compare_decision_export_artifacts,
+    compute_decision_equivalence_hash,
     load_decision_export_artifact,
 )
 from bithumb_bot.execution_reality_contract import build_execution_reality_contract
@@ -443,6 +444,51 @@ def _write_open_exposure_replay_db(path: Path) -> None:
         conn.close()
 
 
+def _write_open_exposure_validation_only_replay_db(path: Path) -> None:
+    conn = ensure_db(str(path))
+    try:
+        closes = [
+            100_000_000.0,
+            99_000_000.0,
+            98_000_000.0,
+            97_000_000.0,
+            96_000_000.0,
+            98_000_000.0,
+            99_000_000.0,
+            100_000_000.0,
+            101_000_000.0,
+            102_000_000.0,
+        ]
+        for index, close in enumerate(closes):
+            conn.execute(
+                """
+                INSERT INTO candles(ts, pair, interval, open, high, low, close, volume)
+                VALUES (?, 'KRW-BTC', '1m', ?, ?, ?, ?, 1.0)
+                """,
+                (_ts("2023-01-02", index), close, close, close, close),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _write_validation_only_replay_db(path: Path) -> None:
+    conn = ensure_db(str(path))
+    try:
+        closes = [100.0, 99.0, 98.0, 97.0, 96.0, 95.0, 94.0, 93.0, 92.0, 91.0]
+        for index, close in enumerate(closes):
+            conn.execute(
+                """
+                INSERT INTO candles(ts, pair, interval, open, high, low, close, volume)
+                VALUES (?, 'KRW-BTC', '1m', ?, ?, ?, ?, 1.0)
+                """,
+                (_ts("2023-01-02", index), close, close, close, close),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _insert_runtime_open_exposure_lot(path: Path) -> None:
     conn = ensure_db(str(path))
     try:
@@ -591,6 +637,17 @@ def _write_golden_profile(tmp_path: Path, manifest_payload: dict[str, object], d
         },
         "generated_at": "2026-05-04T00:00:00+00:00",
     }
+    decision_report = _promotion_decision_equivalence_report(
+        profile_hash=str(candidate["candidate_profile_hash"]),
+        dataset_hash=snapshot.content_hash(),
+        plugin_hash=str(candidate["strategy_plugin_contract_hash"]),
+        decision_contract_version=str(plugin.decision_contract_version),
+    )
+    decision_report_path = tmp_path / "promotion_decision_equivalence.json"
+    decision_report_path.write_text(json.dumps(decision_report, sort_keys=True), encoding="utf-8")
+    promotion["decision_equivalence_report_path"] = str(decision_report_path.resolve())
+    promotion["decision_equivalence_content_hash"] = decision_report["content_hash"]
+    promotion["decision_equivalence_status"] = "verified"
     promotion["content_hash"] = sha256_prefixed(content_hash_payload(promotion))
     promotion_path = tmp_path / "promotion.json"
     promotion_path.write_text(json.dumps(promotion, sort_keys=True), encoding="utf-8")
@@ -605,6 +662,87 @@ def _write_golden_profile(tmp_path: Path, manifest_payload: dict[str, object], d
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(json.dumps(profile, sort_keys=True), encoding="utf-8")
     return profile_path, selected_candidate_id, snapshot.content_hash()
+
+
+def _promotion_decision_equivalence_report(
+    *,
+    profile_hash: str,
+    dataset_hash: str,
+    plugin_hash: str,
+    decision_contract_version: str,
+) -> dict[str, object]:
+    report: dict[str, object] = {
+        "schema_version": 2,
+        "comparison_contract_version": "canonical_decision_v2",
+        "canonical_schema": True,
+        "canonical_v2_schema": True,
+        "legacy_schema": False,
+        "promotion_grade_comparison": True,
+        "ok": True,
+        "outcome": "PASS_POSITIVE_EQUIVALENCE",
+        "reason_codes": [],
+        "profile_content_hash": profile_hash,
+        "market": "KRW-BTC",
+        "interval": "1m",
+        "data_fingerprint": dataset_hash,
+        "dataset_content_hash": dataset_hash,
+        "research_decision_count": 1,
+        "runtime_decision_count": 1,
+        "matched_decision_count": 1,
+        "mismatched_decision_count": 0,
+        "mismatch_count": 0,
+        "missing_research_decisions": [],
+        "missing_runtime_decisions": [],
+        "mismatches": [],
+        "canonical_missing_field_count": 0,
+        "canonical_missing_fields_by_decision": {},
+        "canonical_incomplete_decision_count": 0,
+        "canonical_validation": [],
+        "binding_validation": [],
+        "artifact_binding_validation": [],
+        "research_export_content_hash": "sha256:research",
+        "runtime_export_content_hash": "sha256:runtime",
+        "research_export_source": "research",
+        "runtime_export_source": "runtime_replay",
+        "research_export_path": str((Path("/tmp") / "research_decisions.json").resolve()),
+        "runtime_export_path": str((Path("/tmp") / "runtime_decisions.json").resolve()),
+        "research_strategy_plugin_contract_hash": plugin_hash,
+        "runtime_strategy_plugin_contract_hash": plugin_hash,
+        "strategy_decision_contract_version": decision_contract_version,
+        "repo_owned_export_artifacts": True,
+        "legacy_or_unverified_export": False,
+        "claims_scope": {
+            "positive_equivalence_state_classes": ["flat_no_dust_no_position"],
+            "unsupported_state_classes": [],
+            "promotion_claim": "positive_decision_equivalence_for_explicitly_modeled_state_classes_only",
+            "full_lifecycle_equivalence_supported": False,
+            "submit_plan_equivalence_supported": True,
+            "signal_equivalence_supported": True,
+            "execution_plan_equivalence_supported": True,
+            "position_lifecycle_equivalence_supported": False,
+            "fail_closed_unmodeled_state_count": 0,
+        },
+        "execution_equivalence": {
+            "submit_plan_equivalence_supported": True,
+            "submit_plan_equivalence_ok": True,
+        },
+        "state_coverage_matrix": {
+            "flat_no_dust_no_position": {
+                "research_decision_count": 1,
+                "runtime_decision_count": 1,
+                "positive_equivalence_supported": True,
+                "fail_closed_expected": False,
+                "supported_decision_count": 2,
+                "unsupported_decision_count": 0,
+                "mismatch_count": 0,
+                "representative_reason_codes": [],
+            }
+        },
+        "policy_input_hash_coverage": {"ok": True, "checked_decision_count": 2, "missing_by_decision": {}},
+        "execution_plan_coverage": {"ok": True, "checked_decision_count": 2, "missing_by_decision": {}},
+    }
+    report["content_hash"] = compute_decision_equivalence_hash(report)
+    return report
 
 
 def test_research_export_profile_binding_rejects_candidate_identity_mismatch(tmp_path: Path) -> None:
@@ -670,6 +808,8 @@ def test_repo_owned_export_replay_artifacts_can_pass_positive_equivalence(
 ) -> None:
     db_path = tmp_path / "candles.sqlite"
     _write_golden_db(db_path)
+    runtime_db_path = tmp_path / "runtime_same_tape.sqlite"
+    _write_validation_only_replay_db(runtime_db_path)
     manifest_payload = _golden_manifest()
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest_payload, sort_keys=True), encoding="utf-8")
@@ -739,7 +879,7 @@ def test_repo_owned_export_replay_artifacts_can_pass_positive_equivalence(
         ) == 0
         assert profile_cli.cmd_runtime_replay_decisions(
             profile_path=str(profile_path),
-            db_path=str(db_path),
+            db_path=str(runtime_db_path),
             through_ts_list_path=str(through_ts_path),
             out_path=str(runtime_path),
         ) == 0
@@ -785,12 +925,14 @@ def test_repo_owned_export_replay_artifacts_can_pass_positive_equivalence(
     assert result.report["runtime_export_content_hash"].startswith("sha256:")
 
 
-def test_repo_owned_export_replay_open_exposure_positive_equivalence(
+def test_repo_owned_export_replay_open_exposure_policy_drift_fails_closed(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "open_exposure.sqlite"
     _write_open_exposure_replay_db(db_path)
+    runtime_db_path = tmp_path / "open_exposure_runtime_same_tape.sqlite"
+    _write_open_exposure_validation_only_replay_db(runtime_db_path)
     manifest_payload = _golden_manifest()
     manifest_payload["parameter_space"]["SMA_FILTER_OVEREXT_LOOKBACK"] = [7]  # type: ignore[index]
     manifest_payload["parameter_space"]["STRATEGY_EXIT_RULES"] = [""]  # type: ignore[index]
@@ -860,10 +1002,10 @@ def test_repo_owned_export_replay_open_exposure_positive_equivalence(
             out_path=str(research_path),
             profile_path=str(profile_path),
         ) == 0
-        _insert_runtime_open_exposure_lot(db_path)
+        _insert_runtime_open_exposure_lot(runtime_db_path)
         assert profile_cli.cmd_runtime_replay_decisions(
             profile_path=str(profile_path),
-            db_path=str(db_path),
+            db_path=str(runtime_db_path),
             through_ts_list_path=str(through_ts_path),
             out_path=str(runtime_path),
         ) == 0
@@ -888,9 +1030,9 @@ def test_repo_owned_export_replay_open_exposure_positive_equivalence(
     assert {decision["position_authority"]["state_class"] for decision in runtime_artifact.decisions} == {  # type: ignore[index]
         "open_exposure"
     }
-    assert result.ok is True, result.report
-    assert result.report["outcome"] == "PASS_POSITIVE_EQUIVALENCE"
-    assert "open_exposure" in result.report["claims_scope"]["positive_equivalence_state_classes"]
-    assert result.report["state_coverage_matrix"]["open_exposure"]["positive_equivalence_supported"] is True
-    assert result.report["state_coverage_matrix"]["open_exposure"]["fail_closed_expected"] is False
-    assert result.report["claims_scope"]["fail_closed_unmodeled_state_count"] == 0
+    assert result.ok is False
+    assert result.report["outcome"] in {"FAIL_ACTUAL_DRIFT", "FAIL_INCOMPLETE_CANONICAL_PAYLOAD"}
+    assert "canonical_promotion_strategy_evaluation_provenance_missing" in result.report["reason_codes"]
+    assert "policy_input_hash_mismatch" in result.report["reason_codes"]
+    assert "policy_decision_hash_mismatch" in result.report["reason_codes"]
+    assert result.report["mismatches"][0]["drift_diagnostics"]["research"]["position_terminal_state"] == "open_exposure"
