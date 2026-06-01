@@ -3,6 +3,7 @@
 import json
 import math
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -464,6 +465,64 @@ def test_live_preflight_rejects_multi_active_strategies_without_structured_contr
     assert "ACTIVE_STRATEGIES:live_multi_strategy_requires_runtime_strategy_set_json" in msg
 
 
+def test_live_multi_strategy_requires_spec_bound_approved_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_strategy_set_json = json.dumps(
+        {
+            "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": settings.INTERVAL},
+            "strategies": [
+                {"strategy_name": "safe_hold", "strategy_instance_id": "left"},
+                {"strategy_name": "safe_hold", "strategy_instance_id": "right"},
+            ],
+        }
+    )
+    cfg = replace(
+        settings,
+        MODE="live",
+        PAIR="KRW-BTC",
+        LIVE_DRY_RUN=True,
+        LIVE_REAL_ORDER_ARMED=False,
+        APPROVED_STRATEGY_PROFILE_PATH="",
+        STRATEGY_APPROVED_PROFILE_PATH="",
+        RUNTIME_STRATEGY_SET_JSON=runtime_strategy_set_json,
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_runtime_strategy_set_selection(cfg)
+
+    assert "live_multi_strategy_requires_spec_bound_approved_profiles" in str(exc.value)
+
+
+def test_global_profile_selector_rejected_for_live_multi_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_strategy_set_json = json.dumps(
+        {
+            "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": settings.INTERVAL},
+            "strategies": [
+                {"strategy_name": "safe_hold", "strategy_instance_id": "left"},
+                {"strategy_name": "safe_hold", "strategy_instance_id": "right"},
+            ],
+        }
+    )
+    cfg = replace(
+        settings,
+        MODE="live",
+        PAIR="KRW-BTC",
+        LIVE_DRY_RUN=True,
+        LIVE_REAL_ORDER_ARMED=False,
+        APPROVED_STRATEGY_PROFILE_PATH="/runtime/global-profile.json",
+        STRATEGY_APPROVED_PROFILE_PATH="",
+        RUNTIME_STRATEGY_SET_JSON=runtime_strategy_set_json,
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_runtime_strategy_set_selection(cfg)
+
+    assert "global_profile_selector_rejected_for_live_multi_strategy" in str(exc.value)
+
+
 def test_live_preflight_rejects_invalid_runtime_strategy_set_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -476,6 +535,37 @@ def test_live_preflight_rejects_invalid_runtime_strategy_set_json(
     msg = str(exc.value)
     assert "runtime_strategy_set_selection_failed" in msg
     assert "runtime_strategy_set_json_must_be_list" in msg
+
+
+def test_runtime_strategy_set_rejects_multi_pair_until_pair_scoped_runtime_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_strategy_set_json = json.dumps(
+        {
+            "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": settings.INTERVAL},
+            "strategies": [
+                {
+                    "strategy_name": "safe_hold",
+                    "pair": "KRW-ETH",
+                    "interval": settings.INTERVAL,
+                }
+            ],
+        }
+    )
+    cfg = replace(
+        settings,
+        MODE="paper",
+        PAIR="KRW-BTC",
+        RUNTIME_STRATEGY_SET_JSON=runtime_strategy_set_json,
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_runtime_strategy_set_selection(cfg)
+
+    msg = str(exc.value)
+    assert "multi_pair_runtime_unsupported" in msg
+    assert "settings_pair=KRW-BTC" in msg
+    assert "spec_pair=KRW-ETH" in msg
 
 
 def test_runtime_strategy_set_preflight_accepts_valid_single_strategy(

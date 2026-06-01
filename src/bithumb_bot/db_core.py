@@ -3394,7 +3394,7 @@ def replay_execution_submit_plan_hash(conn: sqlite3.Connection, execution_plan_i
 
 
 def _strategy_contribution_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": 1,
         "strategy_instance_id": str(row["strategy_instance_id"] or ""),
         "strategy_name": str(row["strategy_name"] or ""),
@@ -3405,8 +3405,20 @@ def _strategy_contribution_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "preference_hash": str(row["preference_hash"] or ""),
         "desired_exposure_krw": row["desired_exposure_krw"],
         "risk_budget_krw": row["risk_budget_krw"],
+        "max_target_exposure_krw": row["risk_budget_krw"],
+        "risk_budget_semantics": "deprecated_alias_for_max_target_exposure_cap",
         "reason": str(row["reason"] or ""),
     }
+    raw_json = str(row["contribution_json"] or "").strip()
+    if raw_json:
+        try:
+            stored_payload = json.loads(raw_json)
+        except json.JSONDecodeError:
+            stored_payload = None
+        if isinstance(stored_payload, dict):
+            for key in ("max_target_exposure_krw", "risk_budget_semantics"):
+                payload[key] = stored_payload.get(key, payload[key])
+    return payload
 
 
 def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -3414,6 +3426,7 @@ def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "schema_version": 1,
         "pair": str(row["pair"] or ""),
         "target_exposure_krw": row["target_exposure_krw"],
+        "max_target_exposure_krw": row["target_exposure_krw"],
         "target_qty": row["target_qty"],
         "allocator_policy_name": "",
         "allocator_policy_version": "",
@@ -3424,6 +3437,7 @@ def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "conflict_resolution": _json_loads_object(str(row["conflict_resolution_json"] or "{}")),
         "authoritative": bool(row["authoritative"]),
         "fail_closed_reason": str(row["fail_closed_reason"] or ""),
+        "risk_budget_semantics": "risk_budget_krw_is_deprecated_alias_for_max_target_exposure_krw",
     }
     target_json = _json_loads_object(str(row["target_json"] or "{}"))
     for key in (
@@ -3433,6 +3447,8 @@ def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "strategy_contribution_hash",
         "allocation_input_hash",
         "reason",
+        "max_target_exposure_krw",
+        "risk_budget_semantics",
     ):
         payload[key] = target_json.get(key, payload[key])
     payload["final_portfolio_target_hash"] = sha256_prefixed(payload)

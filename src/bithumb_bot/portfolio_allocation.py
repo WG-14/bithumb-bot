@@ -19,6 +19,7 @@ class StrategyContribution:
     preference_hash: str
     desired_exposure_krw: float | None
     risk_budget_krw: float | None
+    max_target_exposure_krw: float | None
     reason: str
     schema_version: int = 1
 
@@ -34,6 +35,8 @@ class StrategyContribution:
             "preference_hash": self.preference_hash,
             "desired_exposure_krw": self.desired_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
+            "max_target_exposure_krw": self.max_target_exposure_krw,
+            "risk_budget_semantics": "deprecated_alias_for_max_target_exposure_cap",
             "reason": self.reason,
         }
 
@@ -51,6 +54,7 @@ class PortfolioAllocatorConfig:
     conflict_policy: str = "fail_closed_equal_priority"
     strategy_priorities: Mapping[str, int] = field(default_factory=dict)
     strategy_weights: Mapping[str, float] = field(default_factory=dict)
+    risk_budget_semantics: str = "risk_budget_krw_is_deprecated_alias_for_max_target_exposure_krw"
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -77,6 +81,7 @@ class PortfolioAllocatorConfig:
             "conflict_policy": self.conflict_policy,
             "strategy_priorities": dict(sorted(self.strategy_priorities.items())),
             "strategy_weights": dict(sorted(self.strategy_weights.items())),
+            "risk_budget_semantics": self.risk_budget_semantics,
         }
 
     def content_hash(self) -> str:
@@ -242,6 +247,7 @@ class PortfolioAllocator:
             preference_hash=preference.content_hash(),
             desired_exposure_krw=preference.desired_exposure_krw,
             risk_budget_krw=preference.risk_budget_krw,
+            max_target_exposure_krw=preference.risk_budget_krw,
             reason=preference.reason,
         )
 
@@ -336,8 +342,8 @@ class PortfolioAllocator:
             return max(0.0, float(self.config.target_exposure_krw))
         weighted_total = 0.0
         weight_total = 0.0
-        risk_budget_total = 0.0
-        risk_budget_present = False
+        exposure_cap_total = 0.0
+        exposure_cap_present = False
         for item in contributions:
             weight = max(0.0, float(item.weight))
             exposure = (
@@ -348,11 +354,11 @@ class PortfolioAllocator:
             weighted_total += exposure * weight
             weight_total += weight
             if item.risk_budget_krw is not None:
-                risk_budget_present = True
-                risk_budget_total += max(0.0, float(item.risk_budget_krw))
+                exposure_cap_present = True
+                exposure_cap_total += max(0.0, float(item.risk_budget_krw))
         target = weighted_total / weight_total if weight_total > 0.0 else 0.0
-        if risk_budget_present:
-            target = min(target, risk_budget_total)
+        if exposure_cap_present:
+            target = min(target, exposure_cap_total)
         return max(0.0, float(target))
 
     def _blocked_decision(

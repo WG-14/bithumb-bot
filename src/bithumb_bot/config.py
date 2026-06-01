@@ -369,6 +369,8 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
         RuntimeDecisionRequestBuilder,
         RuntimeStrategySetResolver,
         derive_strategy_instance_id,
+        validate_runtime_strategy_set_market_scope,
+        validate_runtime_strategy_set_profile_binding,
     )
 
     try:
@@ -384,6 +386,8 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
         issues.append(
             "ACTIVE_STRATEGIES:live_multi_strategy_requires_runtime_strategy_set_json"
         )
+    issues.extend(validate_runtime_strategy_set_market_scope(strategy_set, cfg))
+    issues.extend(validate_runtime_strategy_set_profile_binding(strategy_set, cfg))
     active_instance_ids: set[str] = set()
     request_builder = RuntimeDecisionRequestBuilder(settings_obj=cfg)
     for spec in strategy_set.active_strategies:
@@ -394,7 +398,7 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
         if str(spec.pair) != str(cfg.PAIR):
             issues.append(
                 f"{instance_id}:runtime_strategy_pair_mismatch:"
-                f"spec_pair={spec.pair}:settings_pair={cfg.PAIR}"
+                f"multi_pair_runtime_unsupported:settings_pair={cfg.PAIR}:spec_pair={spec.pair}"
             )
         try:
             plugin = resolve_research_strategy_plugin(spec.strategy_name)
@@ -410,8 +414,8 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
                 live_real_order_armed=bool(cfg.LIVE_REAL_ORDER_ARMED),
                 approved_profile_path=(
                     str(spec.approved_profile_path or "").strip()
-                    or str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
-                    or str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+                    or ("" if strategy_set.multi_strategy_enabled else str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip())
+                    or ("" if strategy_set.multi_strategy_enabled else str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip())
                 ),
                 require_promotion_runtime=True,
                 require_runtime_replay=live_like,

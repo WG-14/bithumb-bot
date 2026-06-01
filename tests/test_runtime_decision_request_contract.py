@@ -1070,12 +1070,17 @@ def test_sma_runtime_replay_strategy_fails_closed_for_incomplete_profile() -> No
         build_runtime_replay_strategy(profile)
 
 
-def test_missing_runtime_parameters_fail_closed_without_settings_compat() -> None:
-    with pytest.raises(RuntimeError, match="runtime_strategy_parameters_missing:canary_non_sma"):
-        RuntimeDecisionRequestBuilder().build_for_spec(
-            RuntimeStrategySpec("canary_non_sma", pair="KRW-BTC", interval="1m"),
-            through_ts_ms=1_700_000_180_000,
-        )
+def test_missing_runtime_parameters_use_audited_paper_legacy_settings_compat() -> None:
+    request = RuntimeDecisionRequestBuilder().build_for_spec(
+        RuntimeStrategySpec("canary_non_sma", pair="KRW-BTC", interval="1m"),
+        through_ts_ms=1_700_000_180_000,
+    )
+
+    assert request.parameter_source == "paper_legacy_compat:runtime_parameter_adapter_from_settings"
+    assert request.runtime_strategy_spec.legacy_compatibility_used is True
+    assert request.runtime_strategy_spec.parameter_authority_audit["legacy_fallback"] == (
+        "runtime_parameter_adapter.from_settings"
+    )
 
 
 def test_request_builder_uses_strategy_parameters_json_source() -> None:
@@ -1086,8 +1091,74 @@ def test_request_builder_uses_strategy_parameters_json_source() -> None:
         through_ts_ms=1_700_000_180_000,
     )
 
-    assert request.parameter_source == "strategy_parameters_json"
+    assert request.parameter_source == "paper_legacy_compat:strategy_parameters_json"
+    assert request.runtime_strategy_spec.legacy_compatibility_used is True
     assert dict(request.parameters) == _complete_canary_parameters()
+
+
+def test_strict_runtime_rejects_global_strategy_parameters_json_fallback() -> None:
+    cfg = replace(
+        settings,
+        MODE="live",
+        LIVE_DRY_RUN=True,
+        LIVE_REAL_ORDER_ARMED=False,
+        STRATEGY_PARAMETERS_JSON=json.dumps(_complete_canary_parameters()),
+    )
+
+    with pytest.raises(RuntimeError, match="strict_runtime_rejects_strategy_parameters_json_fallback"):
+        RuntimeDecisionRequestBuilder(settings_obj=cfg).build_for_spec(
+            RuntimeStrategySpec("canary_non_sma", pair="KRW-BTC", interval="1m"),
+            through_ts_ms=1_700_000_180_000,
+        )
+
+
+def test_strict_runtime_rejects_plugin_from_settings_fallback() -> None:
+    cfg = replace(
+        settings,
+        MODE="live",
+        LIVE_DRY_RUN=True,
+        LIVE_REAL_ORDER_ARMED=False,
+        STRATEGY_PARAMETERS_JSON="",
+    )
+
+    with pytest.raises(RuntimeError, match="strict_runtime_rejects_plugin_from_settings_fallback"):
+        RuntimeDecisionRequestBuilder(settings_obj=cfg).build_for_spec(
+            RuntimeStrategySpec("canary_non_sma", pair="KRW-BTC", interval="1m"),
+            through_ts_ms=1_700_000_180_000,
+        )
+
+
+def test_new_strategy_plugin_runs_from_runtime_strategy_set_without_config_change(tmp_path: Path) -> None:
+    config_source = Path("src/bithumb_bot/config.py").read_text(encoding="utf-8-sig")
+    assert "CANARY_ORDER_" not in config_source
+
+    runtime_strategy_json = json.dumps(
+        {
+            "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": "1m"},
+            "strategies": [
+                {
+                    "strategy_name": "canary_non_sma",
+                    "parameters": _complete_canary_parameters(CANARY_ORDER_REASON="runtime_set_only"),
+                }
+            ],
+        }
+    )
+    cfg = replace(settings, RUNTIME_STRATEGY_SET_JSON=runtime_strategy_json, STRATEGY_PARAMETERS_JSON="")
+    from bithumb_bot.runtime_strategy_set import RuntimeStrategySetResolver
+
+    strategy_set = RuntimeStrategySetResolver(settings_obj=cfg).resolve()
+    spec = strategy_set.active_strategies[0]
+    request = RuntimeDecisionRequestBuilder(settings_obj=cfg).build_for_spec(
+        spec,
+        through_ts_ms=1_700_000_180_000,
+    )
+    result = CanaryNonSmaRuntimeDecisionAdapter().decide(_conn(), request)
+
+    assert request.strategy_name == "canary_non_sma"
+    assert request.parameters["CANARY_ORDER_REASON"] == "runtime_set_only"
+    assert "SMA_SHORT" not in request.parameters
+    assert result is not None
+    assert result.decision.strategy_name == "canary_non_sma"
 
 
 def test_promotion_runtime_paths_do_not_import_legacy_sma_settings_config() -> None:
@@ -1471,6 +1542,9 @@ def test_normalized_runtime_strategy_set_manifest_materializes_active_instances(
     )
 
     assert manifest["single_pair_runtime_enforced"] is True
+    assert manifest["market_scope"]["mode"] == "single_pair"
+    assert manifest["execution_config_hash"].startswith("sha256:")
+    assert manifest["risk_config_hash"].startswith("sha256:")
     assert manifest["active_strategy_count"] == 2
     assert str(manifest["runtime_strategy_set_manifest_hash"]).startswith("sha256:")
     instances = manifest["active_instances"]
@@ -1499,8 +1573,53 @@ def test_normalized_runtime_strategy_set_manifest_materializes_active_instances(
             "plugin_contract_hash",
             "strategy_version",
             "runtime_adapter_config",
+            "parameter_authority_audit",
+            "legacy_compatibility_used",
         ):
             assert key in item
+    assert len(manifest["strategy_instance_profile_bindings"]) == 2
+
+
+def test_runtime_manifest_replays_decision_request_hashes_exactly() -> None:
+    spec = RuntimeStrategySpec(
+        "canary_non_sma",
+        parameters=_complete_canary_parameters(CANARY_ORDER_REASON="manifest_replay"),
+    )
+    strategy_set = RuntimeStrategySet(source="unit", strategies=(spec,))
+    manifest = normalized_runtime_strategy_set_manifest(strategy_set=strategy_set)
+    request = RuntimeDecisionRequestBuilder().build_for_spec(spec, through_ts_ms=1_700_000_180_000)
+
+    instance = manifest["active_instances"][0]
+    assert instance["strategy_instance_id"] == request.strategy_instance_id
+    assert instance["strategy_parameters_hash"] == request.strategy_parameters_hash
+    assert instance["runtime_contract_hash"] == request.runtime_contract_hash
+    assert instance["plugin_contract_hash"] == request.plugin_contract_hash
+    assert str(manifest["runtime_strategy_set_manifest_hash"]).startswith("sha256:")
+
+
+def test_decision_bundle_all_results_match_manifest_strategy_instances() -> None:
+    left = RuntimeStrategySpec(
+        "canary_non_sma",
+        strategy_instance_id="left_canary",
+        parameters=_complete_canary_parameters(CANARY_ORDER_REASON="left"),
+    )
+    right = RuntimeStrategySpec("safe_hold", strategy_instance_id="right_hold")
+    strategy_set = RuntimeStrategySet(source="unit", strategies=(left, right))
+    manifest = normalized_runtime_strategy_set_manifest(strategy_set=strategy_set)
+    results = []
+    for spec in strategy_set.active_strategies:
+        request = RuntimeDecisionRequestBuilder().build_for_spec(spec, through_ts_ms=1_700_000_180_000)
+        result = _RuntimeResult(spec.strategy_name)
+        result.decision = replace(result.decision, strategy_name=spec.strategy_name)
+        results.append(_attach_unit_request_metadata(result, request))
+
+    bundle = RuntimeStrategyDecisionResultBundle(strategy_set=strategy_set, results=tuple(results))
+    bundle_payload = bundle.as_dict()
+
+    assert bundle_payload["runtime_strategy_set_manifest_hash"] == manifest["runtime_strategy_set_manifest_hash"]
+    assert {item["strategy_instance_id"] for item in bundle_payload["results"]} == {
+        item["strategy_instance_id"] for item in manifest["active_instances"]
+    }
 
 
 def test_runtime_strategy_set_dump_cli_validates_and_prints_manifest(

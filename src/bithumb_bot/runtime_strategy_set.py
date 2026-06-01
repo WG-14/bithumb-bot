@@ -54,6 +54,7 @@ class RuntimeStrategySpec:
     priority: int = 100
     weight: float = 1.0
     desired_exposure_krw: float | None = None
+    max_target_exposure_krw: float | None = None
     risk_budget_krw: float | None = None
     parameters: Mapping[str, object] | None = None
     runtime_adapter_config: Mapping[str, object] | None = None
@@ -78,8 +79,13 @@ class RuntimeStrategySpec:
         if weight <= 0.0:
             raise ValueError("runtime_strategy_weight_must_be_positive")
         risk_budget = _optional_float(self.risk_budget_krw)
+        max_target_exposure = _optional_float(self.max_target_exposure_krw)
         if risk_budget is not None and risk_budget < 0.0:
             raise ValueError("runtime_strategy_risk_budget_must_be_non_negative")
+        if max_target_exposure is not None and max_target_exposure < 0.0:
+            raise ValueError("runtime_strategy_max_target_exposure_must_be_non_negative")
+        if max_target_exposure is None:
+            max_target_exposure = risk_budget
         desired_exposure = _optional_float(self.desired_exposure_krw)
         if desired_exposure is not None and desired_exposure < 0.0:
             raise ValueError("runtime_strategy_desired_exposure_must_be_non_negative")
@@ -89,6 +95,7 @@ class RuntimeStrategySpec:
         object.__setattr__(self, "priority", int(self.priority))
         object.__setattr__(self, "weight", weight)
         object.__setattr__(self, "desired_exposure_krw", desired_exposure)
+        object.__setattr__(self, "max_target_exposure_krw", max_target_exposure)
         object.__setattr__(self, "risk_budget_krw", risk_budget)
         object.__setattr__(
             self,
@@ -126,7 +133,9 @@ class RuntimeStrategySpec:
             "priority": int(self.priority),
             "weight": float(self.weight),
             "desired_exposure_krw": self.desired_exposure_krw,
+            "max_target_exposure_krw": self.max_target_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
+            "risk_budget_semantics": "deprecated_alias_for_max_target_exposure_cap",
             "parameters": dict(self.parameters or {}),
             "runtime_adapter_config": dict(self.runtime_adapter_config or {}),
             "approved_profile_path": self.approved_profile_path,
@@ -135,6 +144,69 @@ class RuntimeStrategySpec:
             "runtime_contract_hash": self.runtime_contract_hash,
             "strategy_version": self.strategy_version,
         }
+
+
+@dataclass(frozen=True)
+class RuntimeMarketScope:
+    mode: str = "single_pair"
+    pair: str | None = None
+    interval: str | None = None
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode or "").strip().lower() or "single_pair"
+        if mode != "single_pair":
+            raise ValueError(f"runtime_market_scope_mode_unsupported:{mode}")
+        pair = str(self.pair or settings.PAIR).strip()
+        interval = str(self.interval or settings.INTERVAL).strip()
+        if not pair:
+            raise ValueError("runtime_market_scope_pair_missing")
+        if not interval:
+            raise ValueError("runtime_market_scope_interval_missing")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "pair", pair)
+        object.__setattr__(self, "interval", interval)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": int(self.schema_version),
+            "mode": self.mode,
+            "pair": self.pair,
+            "interval": self.interval,
+        }
+
+
+@dataclass(frozen=True)
+class ParameterAuthority:
+    raw_parameters: Mapping[str, object]
+    materialized_parameters: Mapping[str, object]
+    parameter_source: str
+    approved_profile_path: str | None
+    approved_profile_hash: str | None
+    strategy_parameters_hash: str
+    source_audit_metadata: Mapping[str, object]
+    legacy_compatibility_used: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "raw_parameters",
+            MappingProxyType({str(key): value for key, value in dict(self.raw_parameters).items()}),
+        )
+        object.__setattr__(
+            self,
+            "materialized_parameters",
+            MappingProxyType(
+                {str(key): value for key, value in dict(self.materialized_parameters).items()}
+            ),
+        )
+        object.__setattr__(
+            self,
+            "source_audit_metadata",
+            MappingProxyType(
+                {str(key): value for key, value in dict(self.source_audit_metadata).items()}
+            ),
+        )
 
 
 def _runtime_strategy_identity_hash(payload: Mapping[str, object]) -> str:
@@ -189,6 +261,8 @@ class RuntimeStrategyInstance:
     strategy_version: str | None
     runtime_contract: Mapping[str, object]
     runtime_adapter_config: Mapping[str, object]
+    parameter_authority_audit: Mapping[str, object] | None = None
+    legacy_compatibility_used: bool = False
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -240,7 +314,9 @@ class RuntimeStrategyInstance:
             "priority": int(self.spec.priority),
             "weight": float(self.spec.weight),
             "desired_exposure_krw": self.spec.desired_exposure_krw,
+            "max_target_exposure_krw": self.spec.max_target_exposure_krw,
             "risk_budget_krw": self.spec.risk_budget_krw,
+            "risk_budget_semantics": "deprecated_alias_for_max_target_exposure_cap",
             "parameter_source": self.parameter_source,
             "parameters_raw": dict(self.parameters_raw),
             "parameters_materialized": dict(self.parameters_materialized),
@@ -251,6 +327,8 @@ class RuntimeStrategyInstance:
             "plugin_contract_hash": self.plugin_contract_hash,
             "strategy_version": self.strategy_version,
             "runtime_adapter_config": dict(self.runtime_adapter_config),
+            "parameter_authority_audit": dict(self.parameter_authority_audit or {}),
+            "legacy_compatibility_used": bool(self.legacy_compatibility_used),
         }
 
 
@@ -258,9 +336,11 @@ class RuntimeStrategyInstance:
 class RuntimeStrategySet:
     strategies: tuple[RuntimeStrategySpec, ...]
     source: str
+    market_scope: RuntimeMarketScope | None = None
     schema_version: int = 1
 
     def __post_init__(self) -> None:
+        scope = self.market_scope or RuntimeMarketScope()
         active = tuple(item for item in self.strategies if item.enabled)
         if not active:
             raise ValueError("runtime_strategy_set_empty")
@@ -280,6 +360,7 @@ class RuntimeStrategySet:
                 )
             ),
         )
+        object.__setattr__(self, "market_scope", scope)
 
     @property
     def active_strategies(self) -> tuple[RuntimeStrategySpec, ...]:
@@ -307,6 +388,8 @@ class RuntimeStrategySet:
         return {
             "schema_version": int(self.schema_version),
             "source": self.source,
+            "market_scope": self.market_scope.as_dict() if self.market_scope else None,
+            "single_pair_runtime_enforced": True,
             "multi_strategy_enabled": self.multi_strategy_enabled,
             "strategies": [item.as_dict() for item in self.strategies],
             "active_strategies": [item.as_dict() for item in self.active_strategies],
@@ -332,9 +415,11 @@ class RuntimeStrategySetResolver:
             or ""
         ).strip()
         if raw_json:
+            specs, market_scope = self._load_json_strategy_set(raw_json)
             return RuntimeStrategySet(
-                strategies=tuple(self._spec_from_mapping(item) for item in self._load_json_specs(raw_json)),
+                strategies=tuple(self._spec_from_mapping(item) for item in specs),
                 source="RUNTIME_STRATEGY_SET_JSON",
+                market_scope=market_scope,
             )
         raw_active = str(
             self._env_getter("ACTIVE_STRATEGIES")
@@ -349,15 +434,28 @@ class RuntimeStrategySetResolver:
                     if name.strip()
                 ),
                 source="ACTIVE_STRATEGIES",
+                market_scope=RuntimeMarketScope(
+                    pair=str(getattr(self._settings, "PAIR", "")),
+                    interval=str(getattr(self._settings, "INTERVAL", "")),
+                ),
             )
         return RuntimeStrategySet(
             strategies=(self._default_spec(str(getattr(self._settings, "STRATEGY_NAME", ""))),),
             source="STRATEGY_NAME",
+            market_scope=RuntimeMarketScope(
+                pair=str(getattr(self._settings, "PAIR", "")),
+                interval=str(getattr(self._settings, "INTERVAL", "")),
+            ),
         )
 
-    def _load_json_specs(self, raw_json: str) -> list[Mapping[str, object]]:
+    def _load_json_strategy_set(self, raw_json: str) -> tuple[list[Mapping[str, object]], RuntimeMarketScope]:
         payload = json.loads(raw_json)
+        market_scope_payload: Mapping[str, object] = {}
         if isinstance(payload, Mapping):
+            raw_scope = payload.get("market_scope", {})
+            if raw_scope is not None and not isinstance(raw_scope, Mapping):
+                raise ValueError("runtime_market_scope_must_be_object")
+            market_scope_payload = raw_scope if isinstance(raw_scope, Mapping) else {}
             payload = payload.get("strategies", ())
         if not isinstance(payload, list):
             raise ValueError("runtime_strategy_set_json_must_be_list")
@@ -366,7 +464,14 @@ class RuntimeStrategySetResolver:
             if not isinstance(item, Mapping):
                 raise ValueError("runtime_strategy_set_json_item_must_be_object")
             specs.append(item)
-        return specs
+        return (
+            specs,
+            RuntimeMarketScope(
+                mode=str(market_scope_payload.get("mode", "single_pair")),
+                pair=str(market_scope_payload.get("pair") or getattr(self._settings, "PAIR", "")),
+                interval=str(market_scope_payload.get("interval") or getattr(self._settings, "INTERVAL", "")),
+            ),
+        )
 
     def _default_spec(self, strategy_name: str) -> RuntimeStrategySpec:
         target = getattr(self._settings, "TARGET_EXPOSURE_KRW", None)
@@ -395,6 +500,10 @@ class RuntimeStrategySetResolver:
             priority=int(payload.get("priority", default.priority)),
             weight=float(payload.get("weight", default.weight)),
             desired_exposure_krw=payload.get("desired_exposure_krw", default.desired_exposure_krw),
+            max_target_exposure_krw=payload.get(
+                "max_target_exposure_krw",
+                payload.get("exposure_cap_krw", default.max_target_exposure_krw),
+            ),
             risk_budget_krw=payload.get("risk_budget_krw", default.risk_budget_krw),
             parameters=payload.get("parameters") if isinstance(payload.get("parameters"), Mapping) else None,
             runtime_adapter_config=(
@@ -423,6 +532,160 @@ class RuntimeStrategySetResolver:
                 or default.strategy_version
             ),
         )
+
+
+@dataclass(frozen=True)
+class ParameterAuthorityResolver:
+    settings_obj: object = settings
+
+    def resolve(
+        self,
+        spec: RuntimeStrategySpec,
+        *,
+        profile: Mapping[str, object] | None,
+        approved_profile_path: str | None,
+        approved_profile_hash: str | None,
+    ) -> ParameterAuthority:
+        if profile is not None:
+            raw_parameters = dict(profile["strategy_parameters"])
+            parameter_source = spec.parameter_source or "strict_profile"
+            legacy_used = False
+            audit = {
+                "authority": "approved_profile",
+                "parameter_source": parameter_source,
+                "approved_profile_path": approved_profile_path,
+                "approved_profile_hash": approved_profile_hash,
+                "legacy_compatibility_used": False,
+            }
+        else:
+            raw_parameters, parameter_source, legacy_used, audit = self._raw_parameters_for_spec(spec)
+        materialized = self._materialize_parameters(spec, raw_parameters)
+        strategy_parameters_hash = materialized_strategy_parameters_hash(materialized)
+        return ParameterAuthority(
+            raw_parameters=raw_parameters,
+            materialized_parameters=materialized,
+            parameter_source=parameter_source,
+            approved_profile_path=approved_profile_path,
+            approved_profile_hash=approved_profile_hash,
+            strategy_parameters_hash=strategy_parameters_hash,
+            source_audit_metadata=audit,
+            legacy_compatibility_used=legacy_used,
+        )
+
+    def _raw_parameters_for_spec(
+        self,
+        spec: RuntimeStrategySpec,
+    ) -> tuple[dict[str, object], str, bool, dict[str, object]]:
+        if spec.parameters:
+            source = spec.parameter_source or "runtime_strategy_spec"
+            return (
+                dict(spec.parameters),
+                source,
+                False,
+                {
+                    "authority": "runtime_strategy_spec",
+                    "parameter_source": source,
+                    "legacy_compatibility_used": False,
+                },
+            )
+        if spec.strategy_name == "safe_hold":
+            source = spec.parameter_source or "runtime_builtin_no_parameters"
+            return (
+                {},
+                source,
+                False,
+                {
+                    "authority": "runtime_builtin",
+                    "parameter_source": source,
+                    "legacy_compatibility_used": False,
+                },
+            )
+        strict = self._strict_runtime_mode()
+        raw_json = str(getattr(self.settings_obj, "STRATEGY_PARAMETERS_JSON", "") or "").strip()
+        if raw_json:
+            if strict:
+                raise RuntimeError(
+                    f"strict_runtime_rejects_strategy_parameters_json_fallback:{spec.strategy_name}"
+                )
+            if str(spec.parameter_source or "").strip() not in {"", "paper_legacy_compat"}:
+                raise RuntimeError(
+                    f"runtime_strategy_parameters_missing:{spec.strategy_name}"
+                )
+            try:
+                payload = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"strategy_parameters_json_invalid:{exc}") from exc
+            if not isinstance(payload, Mapping):
+                raise RuntimeError("strategy_parameters_json_must_be_object")
+            source = "paper_legacy_compat:strategy_parameters_json"
+            return (
+                {str(key): value for key, value in payload.items()},
+                source,
+                True,
+                {
+                    "authority": "paper_legacy_compat",
+                    "parameter_source": source,
+                    "legacy_fallback": "STRATEGY_PARAMETERS_JSON",
+                    "legacy_compatibility_used": True,
+                },
+            )
+        try:
+            plugin = resolve_research_strategy_plugin(spec.strategy_name)
+        except ResearchStrategyRegistryError:
+            plugin = None
+        if plugin is not None and plugin.runtime_parameter_adapter is not None:
+            if strict:
+                raise RuntimeError(
+                    "approved_profile_required_for_live_compatible_runtime_strategy:"
+                    f"{spec.strategy_name};"
+                    f"strict_runtime_rejects_plugin_from_settings_fallback:{spec.strategy_name}"
+                )
+            source = "paper_legacy_compat:runtime_parameter_adapter_from_settings"
+            return (
+                dict(plugin.runtime_parameter_adapter.from_settings(self.settings_obj)),
+                source,
+                True,
+                {
+                    "authority": "paper_legacy_compat",
+                    "parameter_source": source,
+                    "legacy_fallback": "runtime_parameter_adapter.from_settings",
+                    "legacy_compatibility_used": True,
+                },
+            )
+        raise RuntimeError(f"runtime_strategy_parameters_missing:{spec.strategy_name}")
+
+    def _materialize_parameters(
+        self,
+        spec: RuntimeStrategySpec,
+        raw_parameters: Mapping[str, object],
+    ) -> dict[str, object]:
+        if spec.strategy_name == "safe_hold":
+            if raw_parameters:
+                raise RuntimeError("runtime_strategy_parameters_unsupported:safe_hold")
+            return {}
+        raw = {str(key): value for key, value in dict(raw_parameters or {}).items()}
+        required_runtime_bound = set(runtime_bound_behavior_parameter_names(spec.strategy_name))
+        missing_runtime_bound = sorted(required_runtime_bound - set(raw))
+        if missing_runtime_bound:
+            raise RuntimeError(
+                f"runtime_strategy_parameters_missing_runtime_bound:{spec.strategy_name}:"
+                + ",".join(missing_runtime_bound)
+            )
+        parameters = materialize_strategy_parameters(spec.strategy_name, raw)
+        try:
+            plugin = resolve_research_strategy_plugin(spec.strategy_name)
+        except ResearchStrategyRegistryError as exc:
+            raise RuntimeError(f"runtime_strategy_plugin_unsupported:{spec.strategy_name}") from exc
+        unexpected = sorted(set(parameters) - set(plugin.spec.accepted_parameter_names))
+        if unexpected:
+            raise RuntimeError(
+                f"runtime_strategy_parameters_unsupported:{spec.strategy_name}:"
+                + ",".join(unexpected)
+            )
+        return parameters
+
+    def _strict_runtime_mode(self) -> bool:
+        return str(getattr(self.settings_obj, "MODE", "") or "").strip().lower() == "live"
 
 
 @dataclass(frozen=True)
@@ -456,15 +719,17 @@ class RuntimeDecisionRequestBuilder:
                     f"approved_profile_hash_mismatch_for_runtime_strategy:{spec.strategy_name}"
                 )
             approved_profile_hash = profile_hash
-            raw_parameters = dict(profile["strategy_parameters"])
-            parameter_source = spec.parameter_source or "strict_profile"
         else:
-            self._require_profile_for_live_compatible_runtime(spec)
             approved_profile_hash = spec.approved_profile_hash
-            raw_parameters, parameter_source = self._parameters_for_spec(spec)
 
-        parameters = self._materialize_parameters(spec, raw_parameters)
-        strategy_parameters_hash = materialized_strategy_parameters_hash(parameters)
+        authority = ParameterAuthorityResolver(settings_obj=self.settings_obj).resolve(
+            spec,
+            profile=profile,
+            approved_profile_path=approved_profile_path,
+            approved_profile_hash=approved_profile_hash,
+        )
+        parameters = dict(authority.materialized_parameters)
+        strategy_parameters_hash = authority.strategy_parameters_hash
         try:
             settings_runtime_contract = runtime_contract_from_settings(cfg)
         except (ResearchStrategyRegistryError, ApprovedProfileError):
@@ -521,10 +786,10 @@ class RuntimeDecisionRequestBuilder:
         return RuntimeStrategyInstance(
             spec=spec,
             strategy_instance_id=strategy_instance_id,
-            parameters_raw=raw_parameters,
+            parameters_raw=dict(authority.raw_parameters),
             parameters_materialized=parameters,
             strategy_parameters_hash=strategy_parameters_hash,
-            parameter_source=parameter_source,
+            parameter_source=authority.parameter_source,
             approved_profile_path=approved_profile_path,
             approved_profile_hash=approved_profile_hash,
             runtime_contract_hash=runtime_contract_hash,
@@ -532,6 +797,8 @@ class RuntimeDecisionRequestBuilder:
             strategy_version=strategy_version,
             runtime_contract=runtime_contract,
             runtime_adapter_config=dict(spec.runtime_adapter_config or {}),
+            parameter_authority_audit=dict(authority.source_audit_metadata),
+            legacy_compatibility_used=authority.legacy_compatibility_used,
         )
 
     def build_for_spec(
@@ -582,75 +849,6 @@ class RuntimeDecisionRequestBuilder:
             strategy_version=instance.strategy_version,
             request_hash=request_hash,
         )
-
-    def _parameters_for_spec(self, spec: RuntimeStrategySpec) -> tuple[dict[str, object], str]:
-        if spec.parameters:
-            return dict(spec.parameters), spec.parameter_source or "runtime_strategy_spec"
-        raw_json = str(getattr(self.settings_obj, "STRATEGY_PARAMETERS_JSON", "") or "").strip()
-        if raw_json:
-            try:
-                payload = json.loads(raw_json)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(f"strategy_parameters_json_invalid:{exc}") from exc
-            if not isinstance(payload, Mapping):
-                raise RuntimeError("strategy_parameters_json_must_be_object")
-            return (
-                {str(key): value for key, value in payload.items()},
-                spec.parameter_source or "strategy_parameters_json",
-            )
-        if spec.strategy_name == "safe_hold":
-            return {}, spec.parameter_source or "runtime_builtin_no_parameters"
-        try:
-            plugin = resolve_research_strategy_plugin(spec.strategy_name)
-        except ResearchStrategyRegistryError:
-            plugin = None
-        if plugin is not None and plugin.runtime_parameter_adapter is not None:
-            return (
-                dict(plugin.runtime_parameter_adapter.from_settings(self.settings_obj)),
-                spec.parameter_source or "runtime_parameter_adapter_from_settings",
-            )
-        raise RuntimeError(f"runtime_strategy_parameters_missing:{spec.strategy_name}")
-
-    def _materialize_parameters(
-        self,
-        spec: RuntimeStrategySpec,
-        raw_parameters: Mapping[str, object],
-    ) -> dict[str, object]:
-        if spec.strategy_name == "safe_hold":
-            if raw_parameters:
-                raise RuntimeError("runtime_strategy_parameters_unsupported:safe_hold")
-            return {}
-        raw = {str(key): value for key, value in dict(raw_parameters or {}).items()}
-        required_runtime_bound = set(runtime_bound_behavior_parameter_names(spec.strategy_name))
-        missing_runtime_bound = sorted(required_runtime_bound - set(raw))
-        if missing_runtime_bound:
-            raise RuntimeError(
-                f"runtime_strategy_parameters_missing_runtime_bound:{spec.strategy_name}:"
-                + ",".join(missing_runtime_bound)
-            )
-        parameters = materialize_strategy_parameters(spec.strategy_name, raw)
-        try:
-            plugin = resolve_research_strategy_plugin(spec.strategy_name)
-        except ResearchStrategyRegistryError as exc:
-            raise RuntimeError(f"runtime_strategy_plugin_unsupported:{spec.strategy_name}") from exc
-        unexpected = sorted(set(parameters) - set(plugin.spec.accepted_parameter_names))
-        if unexpected:
-            raise RuntimeError(
-                f"runtime_strategy_parameters_unsupported:{spec.strategy_name}:"
-                + ",".join(unexpected)
-            )
-        return parameters
-
-    def _require_profile_for_live_compatible_runtime(self, spec: RuntimeStrategySpec) -> None:
-        mode = str(getattr(self.settings_obj, "MODE", "") or "").strip().lower()
-        if mode != "live":
-            return
-        live_dry_run = bool(getattr(self.settings_obj, "LIVE_DRY_RUN", False))
-        live_real_order_armed = bool(getattr(self.settings_obj, "LIVE_REAL_ORDER_ARMED", False))
-        if live_dry_run or live_real_order_armed:
-            raise RuntimeError(
-                f"approved_profile_required_for_live_compatible_runtime_strategy:{spec.strategy_name}"
-            )
 
 
 @dataclass(frozen=True)
@@ -907,6 +1105,130 @@ def collect_runtime_strategy_decisions(
     )
 
 
+def _stable_settings_hash(settings_obj: object, field_names: tuple[str, ...]) -> str:
+    return sha256_prefixed(
+        {
+            name: getattr(settings_obj, name, None)
+            for name in field_names
+        }
+    )
+
+
+def execution_config_hash(settings_obj: object = settings) -> str:
+    return _stable_settings_hash(
+        settings_obj,
+        (
+            "EXECUTION_ENGINE",
+            "EXECUTION_FILL_REFERENCE_POLICY",
+            "EXECUTION_DECISION_GUARD_MS",
+            "EXECUTION_MAX_QUOTE_WAIT_MS",
+            "EXECUTION_MISSING_QUOTE_POLICY",
+            "EXECUTION_MIN_REALITY_LEVEL_FOR_PROMOTION",
+            "EXECUTION_ALLOW_SAME_CANDLE_CLOSE_FILL",
+            "EXECUTION_QUOTE_SOURCE",
+            "EXECUTION_QUOTE_AGE_LIMIT_MS",
+            "EXECUTION_TOP_OF_BOOK_REQUIRED",
+            "EXECUTION_TOP_OF_BOOK_IS_FULL_DEPTH",
+            "EXECUTION_DEPTH_REQUIRED",
+            "EXECUTION_TRADE_TICK_REQUIRED",
+            "EXECUTION_QUEUE_POSITION_REQUIRED",
+            "EXECUTION_MARKET_IMPACT_REQUIRED",
+            "EXECUTION_INTRA_CANDLE_PATH_AVAILABLE",
+            "EXECUTION_REALITY_LEVEL",
+            "EXECUTION_LATENCY_MODEL_TYPE",
+            "EXECUTION_LATENCY_MS",
+            "EXECUTION_PARTIAL_FILL_MODEL_TYPE",
+            "EXECUTION_PARTIAL_FILL_RATE",
+            "EXECUTION_ORDER_FAILURE_MODEL_TYPE",
+            "EXECUTION_ORDER_FAILURE_RATE",
+            "EXECUTION_FEE_SOURCE",
+            "EXECUTION_SLIPPAGE_SOURCE",
+            "EXECUTION_CALIBRATION_REQUIRED",
+            "EXECUTION_CALIBRATION_ARTIFACT_HASH",
+        ),
+    )
+
+
+def risk_config_hash(settings_obj: object = settings) -> str:
+    return _stable_settings_hash(
+        settings_obj,
+        (
+            "MAX_ORDER_KRW",
+            "TARGET_EXPOSURE_KRW",
+            "MAX_DAILY_LOSS_KRW",
+            "MAX_DAILY_ORDER_COUNT",
+            "MAX_ORDERBOOK_SPREAD_BPS",
+            "MAX_MARKET_SLIPPAGE_BPS",
+            "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS",
+            "TARGET_HOLD_POLICY",
+            "REQUIRE_BROKER_LOCAL_CONVERGENCE",
+            "BLOCK_ON_OPEN_ORDER",
+            "BLOCK_ON_SUBMIT_UNKNOWN",
+            "RESIDUAL_INVENTORY_MODE",
+            "RESIDUAL_LIVE_SELL_MODE",
+            "RESIDUAL_BUY_SIZING_MODE",
+        ),
+    )
+
+
+def validate_runtime_strategy_set_market_scope(
+    strategy_set: RuntimeStrategySet,
+    settings_obj: object = settings,
+) -> tuple[str, ...]:
+    issues: list[str] = []
+    settings_pair = str(getattr(settings_obj, "PAIR", "") or "").strip()
+    settings_interval = str(getattr(settings_obj, "INTERVAL", "") or "").strip()
+    scope = strategy_set.market_scope or RuntimeMarketScope(pair=settings_pair, interval=settings_interval)
+    if scope.mode != "single_pair":
+        issues.append(f"multi_pair_runtime_unsupported:market_scope_mode={scope.mode}")
+    if scope.pair != settings_pair:
+        issues.append(
+            "runtime_strategy_pair_mismatch:multi_pair_runtime_unsupported:"
+            f"settings_pair={settings_pair}:market_scope_pair={scope.pair}"
+        )
+    if scope.interval != settings_interval:
+        issues.append(
+            "runtime_strategy_interval_mismatch:single_interval_runtime_unsupported:"
+            f"settings_interval={settings_interval}:market_scope_interval={scope.interval}"
+        )
+    for spec in strategy_set.active_strategies:
+        if str(spec.pair) != settings_pair:
+            issues.append(
+                "runtime_strategy_pair_mismatch:multi_pair_runtime_unsupported:"
+                f"settings_pair={settings_pair}:spec_pair={spec.pair}:strategy={spec.strategy_name}"
+            )
+        if str(spec.interval) != settings_interval:
+            issues.append(
+                "runtime_strategy_interval_mismatch:single_interval_runtime_unsupported:"
+                f"settings_interval={settings_interval}:spec_interval={spec.interval}:strategy={spec.strategy_name}"
+            )
+    return tuple(issues)
+
+
+def validate_runtime_strategy_set_profile_binding(
+    strategy_set: RuntimeStrategySet,
+    settings_obj: object = settings,
+) -> tuple[str, ...]:
+    if str(getattr(settings_obj, "MODE", "") or "").strip().lower() != "live":
+        return ()
+    if not strategy_set.multi_strategy_enabled:
+        return ()
+    global_profile = (
+        str(getattr(settings_obj, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+        or str(getattr(settings_obj, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+    )
+    issues: list[str] = []
+    if global_profile:
+        issues.append("global_profile_selector_rejected_for_live_multi_strategy")
+    for spec in strategy_set.active_strategies:
+        instance_id = derive_strategy_instance_id(spec)
+        if not str(spec.approved_profile_path or "").strip():
+            issues.append(f"{instance_id}:live_multi_strategy_requires_spec_bound_approved_profiles:path")
+        if not str(spec.approved_profile_hash or "").strip():
+            issues.append(f"{instance_id}:live_multi_strategy_requires_spec_bound_approved_profiles:hash")
+    return tuple(issues)
+
+
 def normalized_runtime_strategy_set_manifest(
     *,
     strategy_set: RuntimeStrategySet | None = None,
@@ -919,18 +1241,45 @@ def normalized_runtime_strategy_set_manifest(
     authority.
     """
     resolved = strategy_set or RuntimeStrategySetResolver(settings_obj=settings_obj).resolve()
+    profile_issues = validate_runtime_strategy_set_profile_binding(resolved, settings_obj)
+    if profile_issues:
+        raise RuntimeError("; ".join(profile_issues))
+    market_issues = validate_runtime_strategy_set_market_scope(resolved, settings_obj)
+    if market_issues:
+        raise RuntimeError("; ".join(market_issues))
     builder = RuntimeDecisionRequestBuilder(settings_obj=settings_obj)
     active_instances = tuple(builder.materialize_instance(spec) for spec in resolved.active_strategies)
+    market_scope = resolved.market_scope or RuntimeMarketScope(
+        pair=str(getattr(settings_obj, "PAIR", "")),
+        interval=str(getattr(settings_obj, "INTERVAL", "")),
+    )
     payload = {
         "schema_version": 1,
         "authority_label": "RuntimeStrategySetManifest",
         "authority_scope": "operator_reproducibility_manifest",
         "source": resolved.source,
         "runtime_pair": str(getattr(settings_obj, "PAIR", "")),
+        "runtime_interval": str(getattr(settings_obj, "INTERVAL", "")),
         "single_pair_runtime_enforced": True,
+        "market_scope": market_scope.as_dict(),
         "multi_strategy_enabled": resolved.multi_strategy_enabled,
         "active_strategy_count": len(active_instances),
+        "active_strategy_pairs": sorted({instance.pair for instance in active_instances}),
+        "active_strategy_intervals": sorted({instance.interval for instance in active_instances}),
         "active_instances": [instance.as_dict() for instance in active_instances],
+        "execution_config_hash": execution_config_hash(settings_obj),
+        "risk_config_hash": risk_config_hash(settings_obj),
     }
+    payload["strategy_instance_profile_bindings"] = [
+        {
+            "strategy_instance_id": instance.strategy_instance_id,
+            "approved_profile_path": instance.approved_profile_path,
+            "approved_profile_hash": instance.approved_profile_hash,
+            "plugin_contract_hash": instance.plugin_contract_hash,
+            "strategy_parameters_hash": instance.strategy_parameters_hash,
+            "runtime_contract_hash": instance.runtime_contract_hash,
+        }
+        for instance in active_instances
+    ]
     payload["runtime_strategy_set_manifest_hash"] = sha256_prefixed(payload)
     return payload

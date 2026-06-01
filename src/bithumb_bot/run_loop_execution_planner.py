@@ -778,7 +778,7 @@ class ExecutionPlanner:
                             strategy_instance_id=strategy_instance_id,
                             desired_exposure_krw=spec.desired_exposure_krw,
                             desired_weight=spec.weight,
-                            risk_budget_krw=spec.risk_budget_krw,
+                            risk_budget_krw=spec.max_target_exposure_krw,
                             metadata=result_metadata,
                         )
                     )

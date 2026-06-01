@@ -507,6 +507,29 @@ def test_weights_and_risk_budgets_affect_buy_target_deterministically() -> None:
     assert decision.contributions[0].risk_budget_krw is not None
 
 
+def test_risk_budget_is_not_silent_exposure_cap_without_declared_semantics() -> None:
+    first = strategy_decision_to_preference(
+        _decision(final_signal="BUY", strategy_name="strategy_a"),
+        pair="KRW-BTC",
+        desired_exposure_krw=100_000.0,
+        desired_weight=1.0,
+        risk_budget_krw=60_000.0,
+    )
+    decision = _allocate((first,))
+    target = decision.target_for_pair("KRW-BTC")
+
+    assert target is not None
+    assert target.target_exposure_krw == pytest.approx(60_000.0)
+    payload = decision.as_dict()
+    assert payload["targets"][0]["risk_budget_semantics"] == (
+        "risk_budget_krw_is_deprecated_alias_for_max_target_exposure_krw"
+    )
+    assert payload["contributions"][0]["max_target_exposure_krw"] == pytest.approx(60_000.0)
+    assert payload["contributions"][0]["risk_budget_semantics"] == (
+        "deprecated_alias_for_max_target_exposure_cap"
+    )
+
+
 def test_target_delta_typed_planning_uses_allocator_portfolio_target(monkeypatch: pytest.MonkeyPatch) -> None:
     old_engine = settings.EXECUTION_ENGINE
     old_pair = settings.PAIR

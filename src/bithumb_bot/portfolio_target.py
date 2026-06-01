@@ -44,6 +44,7 @@ class PortfolioTarget:
             "schema_version": int(self.schema_version),
             "pair": self.pair,
             "target_exposure_krw": self.target_exposure_krw,
+            "max_target_exposure_krw": self.target_exposure_krw,
             "target_qty": self.target_qty,
             "allocator_policy_name": self.allocator_policy_name,
             "allocator_policy_version": self.allocator_policy_version,
@@ -54,6 +55,7 @@ class PortfolioTarget:
             "conflict_resolution": dict(self.conflict_resolution),
             "authoritative": bool(self.authoritative),
             "fail_closed_reason": self.fail_closed_reason,
+            "risk_budget_semantics": "risk_budget_krw_is_deprecated_alias_for_max_target_exposure_krw",
         }
 
     def content_hash(self) -> str:
