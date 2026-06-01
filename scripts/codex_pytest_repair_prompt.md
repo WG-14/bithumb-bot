@@ -164,7 +164,7 @@ This is the project’s intended full-suite validation command.
 - If a test expectation appears wrong, stale, or inconsistent with repository safety contracts, change tests only when visible failure evidence proves the mismatch.
 - When in doubt, preserve production safety and report the test/contract conflict instead of weakening production behavior.
 - If safe completion remains possible, continue the focused cluster loop through the known failure-cluster backlog.
-- After all known clusters from the latest full-suite output have focused verification, run the final validation command:
+- After all known clusters from the latest full-suite output have either focused verification or a clearly reported blocker, run the final validation command only if safe completion remains possible:
 
   ```bash
   uv run pytest -q
