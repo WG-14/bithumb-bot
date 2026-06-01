@@ -1165,12 +1165,15 @@ def _runtime_replay_target_state_resolver(
     reference_price: float | None,
     raw_signal: str,
     updated_ts: int,
+    settings_obj: object | None = None,
+    runtime_pair: str | None = None,
 ) -> dict[str, object]:
     previous_exposure: float | None = None
     try:
+        pair = str(runtime_pair or readiness_payload.get("pair") or "")
         row = conn.execute(
             "SELECT target_exposure_krw FROM target_position_state WHERE pair=?",
-            (str(readiness_payload.get("pair") or ""),),
+            (pair,),
         ).fetchone()
         if row is not None:
             previous_exposure = float(row[0])

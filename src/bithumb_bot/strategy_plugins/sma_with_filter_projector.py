@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from bithumb_bot.core.sma_policy import _stable_hash
-from bithumb_bot.market_regime import classify_market_regime_from_arrays
 from bithumb_bot.market_regime.thresholds import MarketRegimeThresholds
 from bithumb_bot.research.dataset_snapshot import DatasetSnapshot
 from bithumb_bot.research.strategy_spec import materialized_strategy_parameters_hash
 from bithumb_bot.strategy_decision_input import StrategyDecisionInputBundle
 from bithumb_bot.strategy_policy_contract import PositionSnapshot
+from bithumb_bot.strategy_plugins import sma_with_filter_events
 
 from .sma_with_filter_assembly import (
     MaterializationMode,
@@ -339,7 +339,7 @@ class SmaWithFilterSnapshotProjector:
         through_ts_ms: int | None,
         allow_initial_cross: bool,
     ) -> SmaWithFilterCanonicalFeatureProjection | None:
-        candles = dataset.candles[: int(candle_index) + 1]
+        candles = dataset.candles
         if not candles:
             return None
         return self.project_features_from_arrays(
@@ -376,10 +376,13 @@ class SmaWithFilterSnapshotProjector:
         long_n = int(materialized.values["SMA_LONG"])
         if short_n <= 0 or long_n <= 0 or short_n >= long_n:
             raise ValueError("sma_feature_projection_invalid_window")
-        if len(closes) < long_n + 1 or len(ts_list) != len(closes):
+        if len(ts_list) != len(closes):
             return None
-        end_prev = len(closes) - 1
-        end_curr = len(closes)
+        index = len(closes) - 1 if candle_index is None else int(candle_index)
+        if index < long_n or index >= len(closes):
+            return None
+        end_prev = index
+        end_curr = index + 1
         prev_s = _sma(closes, short_n, end_prev)
         prev_l = _sma(closes, long_n, end_prev)
         curr_s = _sma(closes, short_n, end_curr)
@@ -395,8 +398,7 @@ class SmaWithFilterSnapshotProjector:
         overextended_max_return_ratio = float(materialized.values["SMA_FILTER_OVEREXT_MAX_RETURN_RATIO"])
         min_gap_ratio = float(materialized.values["SMA_FILTER_GAP_MIN_RATIO"])
         min_volatility_ratio = float(materialized.values["SMA_FILTER_VOL_MIN_RANGE_RATIO"])
-        index = len(closes) - 1
-        market_regime_snapshot = classify_market_regime_from_arrays(
+        market_regime_snapshot = sma_with_filter_events.classify_market_regime_from_arrays(
             closes=[float(value) for value in closes],
             highs=[float(value) for value in highs],
             lows=[float(value) for value in lows],
@@ -415,10 +417,10 @@ class SmaWithFilterSnapshotProjector:
             overextended_max_return_ratio=overextended_max_return_ratio,
         ).as_dict()
         return SmaWithFilterCanonicalFeatureProjection(
-            candle_index=int(index if candle_index is None else candle_index),
-            candle_ts=int(ts_list[-1]),
+            candle_index=int(index),
+            candle_ts=int(ts_list[index]),
             through_ts_ms=None if through_ts_ms is None else int(through_ts_ms),
-            closes=tuple(float(value) for value in closes),
+            closes=tuple(float(value) for value in closes[:end_curr]),
             prev_s=float(prev_s),
             prev_l=float(prev_l),
             curr_s=float(curr_s),

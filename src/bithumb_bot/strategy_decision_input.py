@@ -42,11 +42,16 @@ TRANSIENT_PROVENANCE_FIELDS = frozenset(
         "event_signal_authority",
         "event_feature_authority",
         "runtime_projection_evidence",
+        "canonical_feature_projection",
         "policy_materialization_mode",
         "candidate_regime_policy_enforced",
         "previous_cross_state",
         "canonical_feature_projection_hash",
         "market_feature_hash",
+        "feature_snapshot_hash",
+        "provider_contract_hash",
+        "runtime_data_availability_report_hash",
+        "source_schema_hash",
     }
 )
 

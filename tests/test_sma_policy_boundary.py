@@ -60,6 +60,7 @@ from bithumb_bot import runtime_strategy_decision
 from bithumb_bot.runtime_adapters import sma_with_filter as runtime_sma_adapter
 from bithumb_bot.runtime_strategy_set import (
     RuntimeDecisionGateway,
+    RuntimeMarketScope,
     RuntimeStrategySet,
     RuntimeStrategySpec,
 )
@@ -1084,10 +1085,12 @@ def _build_candle_db(closes: list[float]) -> sqlite3.Connection:
     )
     base_ts = 1_700_000_000_000
     for idx, close in enumerate(closes):
-        conn.execute(
-            "INSERT INTO candles(ts, pair, interval, high, low, volume, close) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (base_ts + idx * 60_000, "BTC_KRW", "1m", close, close, 1.0, close),
-        )
+        ts = base_ts + idx * 60_000
+        for pair in ("BTC_KRW", "KRW-BTC"):
+            conn.execute(
+                "INSERT INTO candles(ts, pair, interval, high, low, volume, close) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ts, pair, "1m", close, close, 1.0, close),
+            )
     conn.commit()
     return conn
 
@@ -1449,6 +1452,7 @@ def test_sma_research_promotion_backtest_and_runtime_gateway_paths_share_canonic
                             parameter_source="path_level_golden_fixture",
                     ),
                 ),
+                market_scope=RuntimeMarketScope(pair="BTC_KRW", interval="1m"),
                 source="path_level_golden_fixture",
             ),
             through_ts_ms=target_ts,

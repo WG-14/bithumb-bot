@@ -6341,7 +6341,7 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
 
     try:
         broker = BithumbBroker()
-        halt_reason, canceled_ok, unresolved = perform_panic_stop_cleanup(
+        cleanup = perform_panic_stop_cleanup(
             broker,
             reason_code="KILL_SWITCH",
             reason_detail="panic stop requested by operator",
@@ -6349,6 +6349,9 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
             flatten_trigger="panic-stop",
             attempt_flatten=bool(flatten),
         )
+        halt_reason = cleanup.halt_reason
+        canceled_ok = bool(cleanup.canceled_ok)
+        unresolved = bool(cleanup.unresolved)
     except Exception as exc:
         reason_detail = f"panic stop cleanup failed ({type(exc).__name__}): {exc}"
         runtime_state.disable_trading_until(

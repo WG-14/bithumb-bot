@@ -290,7 +290,7 @@ def test_required_data_preflight_fails_before_backtest_when_manifest_lacks_top_o
         }
     )
 
-    with pytest.raises(ResearchValidationError, match="research_data_capability_missing:orderbook_top"):
+    with pytest.raises(ResearchValidationError, match="research_data_requirement_top_of_book_missing"):
         _validate_strategy_data_requirements(manifest)
 
 

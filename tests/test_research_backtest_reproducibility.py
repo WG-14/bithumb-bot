@@ -2065,7 +2065,9 @@ def test_decision_hash_changes_when_portfolio_policy_changes() -> None:
 
     assert baseline.retained_detail_summary["decision_hash"] != changed.retained_detail_summary["decision_hash"]
     assert baseline.decisions[0]["portfolio_policy_hash"] == baseline_manifest.portfolio_policy_hash()
-    assert baseline.decisions[0]["decision_contract_hash"] == baseline.decisions[0]["replay_fingerprint_hash"]
+    assert baseline.decisions[0]["decision_contract_hash"].startswith("sha256:")
+    assert baseline.decisions[0]["replay_fingerprint_hash"].startswith("sha256:")
+    assert baseline.decisions[0]["decision_contract_hash"] != baseline.decisions[0]["replay_fingerprint_hash"]
 
 
 def test_research_engine_has_no_hidden_portfolio_policy_constants() -> None:

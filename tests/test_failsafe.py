@@ -71,6 +71,7 @@ def _apply_legacy_test_overrides(runner: Runner) -> None:
     safety_controller = replace(
         app.safety_controller,
         flatten_position=lambda **kwargs: engine_legacy_module.flatten_btc_position(**kwargs),
+        exposure_snapshot=engine_legacy_module._get_exposure_snapshot,
         legacy_cancel_open_orders=getattr(engine_legacy_module, "_attempt_open_order_cancellation", None),
     )
     runner.container = replace(
@@ -84,6 +85,10 @@ def _apply_legacy_test_overrides(runner: Runner) -> None:
         notification_service=notification_service,
         notification_adapter=app.notification_adapter.__class__(notification_service),
         safety_controller=safety_controller,
+        decision_coordinator=replace(
+            app.decision_coordinator,
+            record_strategy_decision_fn=engine_legacy_module.record_strategy_decision,
+        ),
         startup_controller=replace(
             app.startup_controller,
             startup_gate_evaluator=engine_legacy_module.evaluate_startup_safety_gate,
@@ -469,6 +474,7 @@ class _LoopConn:
                 self.portfolio_target_rows[target_hash] = {
                     "id": len(self.portfolio_target_rows) + 1,
                     "pair": params[1],
+                    "final_portfolio_target_hash": target_hash,
                 }
             return _Rows(None, rowcount=1)
 
@@ -502,6 +508,14 @@ class _LoopConn:
             assert params is not None
             row = self.execution_plan_rows.get((int(params[0]), str(params[1])))
             return _Rows(None if row is None else {"id": row["id"]})
+
+        if "SELECT final_portfolio_target_hash" in q and "FROM portfolio_target" in q:
+            return _Rows(
+                [
+                    {"final_portfolio_target_hash": str(row["final_portfolio_target_hash"])}
+                    for row in self.portfolio_target_rows.values()
+                ]
+            )
 
         if "FROM candles" in q:
             return _Rows({"ts": 10_000, "close": 100.0})

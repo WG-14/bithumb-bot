@@ -469,7 +469,7 @@ def build_sma_with_filter_runtime_decision_from_feature_snapshot(
     request_metadata = {
         **dict(boundary_telemetry or {}),
         "feature_snapshot_hash": payload.get("feature_snapshot_hash"),
-        "market_snapshot_hash": payload.get("market_snapshot_hash"),
+        "runtime_data_market_snapshot_hash": payload.get("market_snapshot_hash"),
         "runtime_data_contract_hash": payload.get("runtime_data_contract_hash"),
         "provider_contract_hash": payload.get("provider_contract_hash"),
         "runtime_data_availability_report_hash": payload.get("runtime_data_availability_report_hash"),
@@ -581,9 +581,13 @@ def build_sma_with_filter_runtime_decision_from_feature_snapshot(
         "materialization_mode": materialized.mode.value,
         "policy_materialization_mode": materialized.mode.value,
         "legacy_defaults_used": list(materialized.legacy_defaults_used),
-        "market_snapshot_hash": decision_input_bundle.market_snapshot_hash,
-        "market_feature_hash": decision_input_bundle.market_feature_hash,
-        "canonical_feature_projection_hash": decision_input_bundle.market_feature_hash,
+        "market_snapshot_hash": replay_fingerprint.get("market_snapshot_hash", decision_input_bundle.market_snapshot_hash),
+        "market_feature_hash": replay_fingerprint.get("market_feature_hash", decision_input_bundle.market_feature_hash),
+        "canonical_feature_projection_hash": replay_fingerprint.get(
+            "market_feature_hash",
+            decision_input_bundle.market_feature_hash,
+        ),
+        "feature_snapshot_hash": replay_fingerprint.get("market_feature_hash", decision_input_bundle.market_feature_hash),
         "final_exit_decision_input_hash": final_policy_decision.as_trace().get("final_exit_decision_input_hash"),
         "position_snapshot_hash": decision_input_bundle.position_snapshot_hash,
         "execution_constraints_hash": decision_input_bundle.execution_constraints_hash,
@@ -881,6 +885,7 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
         )
     )
     final_policy_decision = final_policy_result.decision
+    replay_fingerprint = dict(final_policy_result.replay_fingerprint)
     policy_decision = final_policy_decision
     entry_decision = policy_decision.entry_decision
     base_signal = policy_decision.raw_signal
@@ -1096,9 +1101,13 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
         "materialization_mode": materialized.mode.value,
         "policy_materialization_mode": materialized.mode.value,
         "legacy_defaults_used": list(materialized.legacy_defaults_used),
-        "market_snapshot_hash": decision_input_bundle.market_snapshot_hash,
-        "market_feature_hash": decision_input_bundle.market_feature_hash,
-        "canonical_feature_projection_hash": decision_input_bundle.market_feature_hash,
+        "market_snapshot_hash": replay_fingerprint.get("market_snapshot_hash", decision_input_bundle.market_snapshot_hash),
+        "market_feature_hash": replay_fingerprint.get("market_feature_hash", decision_input_bundle.market_feature_hash),
+        "canonical_feature_projection_hash": replay_fingerprint.get(
+            "market_feature_hash",
+            decision_input_bundle.market_feature_hash,
+        ),
+        "feature_snapshot_hash": replay_fingerprint.get("market_feature_hash", decision_input_bundle.market_feature_hash),
         "final_exit_decision_input_hash": final_policy_decision.as_trace().get("final_exit_decision_input_hash"),
         "position_snapshot_hash": decision_input_bundle.position_snapshot_hash,
         "execution_constraints_hash": decision_input_bundle.execution_constraints_hash,

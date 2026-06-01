@@ -10,6 +10,7 @@ import pytest
 
 import bithumb_bot.config as _config_module
 from bithumb_bot.config import settings
+from bithumb_bot.compat.sma_runtime_compat import legacy_default_strategy_name
 from bithumb_bot.paths import PathConfig, PathManager
 
 
@@ -175,6 +176,7 @@ def _restore_global_settings_state(tmp_path: Path):
     _strategy_registry.reload_research_strategy_plugins_for_tests()
     _validation_protocol._CANDIDATE_SCENARIO_WORKER_CONTEXT = None
     object.__setattr__(settings, "DB_PATH", str(test_path_manager.primary_db_path()))
+    object.__setattr__(settings, "STRATEGY_NAME", legacy_default_strategy_name())
     original = {key: getattr(settings, key) for key in keys if hasattr(settings, key)}
     _order_rules._cached_rules.clear()
     try:

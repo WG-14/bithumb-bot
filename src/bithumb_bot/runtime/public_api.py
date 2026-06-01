@@ -11,8 +11,14 @@ from .app_container import create_default_runtime_app
 @dataclass(frozen=True)
 class RuntimeHealthQuery:
     state_snapshot: Callable[[], object] = runtime_state.snapshot
+    app_factory: Callable[[], Any] = create_default_runtime_app
 
     def get_status(self) -> dict[str, float | int | bool | str | None]:
+        app = self.app_factory()
+        startup_gate_reason = app.runtime_gate_api.startup_safety_gate()
+        RuntimeRecoveryCommand(self.app_factory).try_clear_stale_halts(
+            startup_gate_reason=startup_gate_reason,
+        )
         state = self.state_snapshot()
         return {
             "last_candle_age_sec": state.last_candle_age_sec,
@@ -60,7 +66,12 @@ class RuntimeResumeQuery:
     runtime_gate_api_factory: Callable[[], RuntimeGateApi]
 
     def evaluate_eligibility(self):
-        return self.runtime_gate_api_factory().resume_eligibility()
+        runtime_gate_api = self.runtime_gate_api_factory()
+        startup_gate = getattr(runtime_gate_api, "startup_safety_gate", None)
+        RuntimeRecoveryCommand().try_clear_stale_halts(
+            startup_gate_reason=startup_gate() if callable(startup_gate) else None,
+        )
+        return runtime_gate_api.resume_eligibility()
 
 
 @dataclass(frozen=True)

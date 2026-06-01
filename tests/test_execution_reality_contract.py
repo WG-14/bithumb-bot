@@ -1085,6 +1085,8 @@ def test_profile_runtime_execution_contract_mismatch_is_reason_coded() -> None:
         },
         "execution_calibration_artifact_hash": "sha256:calibration",
         "execution_calibration_artifact_hashes": ["sha256:calibration"],
+        "decision_equivalence_report_path": "decision_equivalence.json",
+        "decision_equivalence_content_hash": "sha256:decision-equivalence",
         "deployment_tier": "paper_candidate",
         "execution_reality_contract": profile_contract,
         "execution_contract_hash": profile_contract["execution_contract_hash"],

@@ -11,12 +11,8 @@ from .execution_service import (
     TypedExecutionPlanningInput,
     build_typed_execution_decision_summary,
 )
-from .runtime_sma_snapshot_builder import (
-    build_sma_with_filter_runtime_decision_from_normalized_db,
-    decide_sma_with_filter_snapshot_from_db as _runtime_snapshot_from_db,
-    decide_sma_with_filter_runtime_snapshot_from_db as _runtime_typed_snapshot_from_db,
-    RuntimeSmaDecisionResult,
-)
+from . import runtime_sma_snapshot_builder
+from .runtime_sma_snapshot_builder import RuntimeSmaDecisionResult
 from .strategy.base import StrategyDecision
 from .strategy.sma_policy_strategy import SmaWithFilterStrategy
 
@@ -111,6 +107,34 @@ class ReadOnlyPositionStateNormalizer:
         return 0
 
 
+def _runtime_snapshot_from_db(
+    conn: sqlite3.Connection,
+    strategy: SmaWithFilterStrategy,
+    *,
+    through_ts_ms: int | None = None,
+) -> StrategyDecision | None:
+    return runtime_sma_snapshot_builder.decide_sma_with_filter_snapshot_from_db(
+        conn,
+        strategy,
+        through_ts_ms=through_ts_ms,
+    )
+
+
+def _runtime_typed_snapshot_from_db(
+    conn: sqlite3.Connection,
+    strategy: SmaWithFilterStrategy,
+    *,
+    through_ts_ms: int | None = None,
+    boundary_telemetry: dict[str, object] | None = None,
+) -> RuntimeSmaDecisionResult | None:
+    return runtime_sma_snapshot_builder.decide_sma_with_filter_runtime_snapshot_from_db(
+        conn,
+        strategy,
+        through_ts_ms=through_ts_ms,
+        boundary_telemetry=boundary_telemetry,
+    )
+
+
 def decide_sma_with_filter_snapshot_from_db(
     conn: sqlite3.Connection,
     strategy: SmaWithFilterStrategy,
@@ -156,7 +180,7 @@ def build_sma_with_filter_replay_bundle(
     previous_target_exposure_krw: float | None = None,
 ) -> dict[str, Any] | None:
     """Build structured read-only replay material for one SMA decision."""
-    typed_result = build_sma_with_filter_runtime_decision_from_normalized_db(
+    typed_result = runtime_sma_snapshot_builder.build_sma_with_filter_runtime_decision_from_normalized_db(
         conn,
         strategy,
         through_ts_ms=int(through_ts_ms),

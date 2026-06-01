@@ -2173,7 +2173,11 @@ class LiveSignalExecutionService:
             primary_plan,
             compatibility_signal=request.signal,
         )
-        if invariant_error == "execution_signal_submit_plan_mismatch":
+        if (
+            invariant_error == "execution_signal_submit_plan_mismatch"
+            and _execution_engine() == "target_delta"
+            and str(settings.MODE).lower() == "live"
+        ):
             _log_live_submit_plan_block(
                 reason=invariant_error,
                 field_name="execution_submit_plan",

@@ -74,9 +74,17 @@ class SafetyController:
         attempt_flatten: bool = False,
     ) -> SafetyDecision:
         halt_state = self.state_snapshot()
+        startup_gate_order_unresolved = (
+            reason.code == "STARTUP_SAFETY_GATE"
+            and bool(unresolved)
+            and "unresolved_open_orders=0" not in reason.detail
+            and "unresolved_open_orders=" in reason.detail
+        )
         _resume_allowed, resume_blockers = self.resume_evaluator()
         latest_client_order_id, latest_exchange_order_id = self.latest_order_identifiers()
-        operator_action_required = bool(getattr(halt_state, "halt_operator_action_required", False))
+        operator_action_required = bool(getattr(halt_state, "halt_operator_action_required", False)) or bool(
+            startup_gate_order_unresolved
+        )
         open_order_count = self.count_open_orders()
         position_summary = self.position_summary()
         recommended_commands = recommended_operator_commands(
@@ -98,7 +106,8 @@ class SafetyController:
             unresolved=unresolved,
             operator_action_required=operator_action_required,
             force_resume_allowed=force_resume_allowed,
-            open_orders_present=bool(getattr(halt_state, "halt_open_orders_present", False)),
+            open_orders_present=bool(getattr(halt_state, "halt_open_orders_present", False))
+            or bool(startup_gate_order_unresolved),
             position_present=bool(getattr(halt_state, "halt_position_present", False)),
             unresolved_order_count=int(getattr(halt_state, "unresolved_open_order_count", 0) or 0),
             primary_blocker_code=primary_blocker_code,

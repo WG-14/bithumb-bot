@@ -166,16 +166,22 @@ def prepare_db_path_for_connection(path: str, *, mode: str | None = None) -> str
     return resolved
 
 
-class LiveModeValidationError(ValueError):
-    pass
+LiveModeValidationError = globals().get(
+    "LiveModeValidationError",
+    type("LiveModeValidationError", (ValueError,), {}),
+)
 
 
-class ModeValidationError(ValueError):
-    pass
+ModeValidationError = globals().get(
+    "ModeValidationError",
+    type("ModeValidationError", (ValueError,), {}),
+)
 
 
-class MarketPreflightValidationError(ValueError):
-    pass
+MarketPreflightValidationError = globals().get(
+    "MarketPreflightValidationError",
+    type("MarketPreflightValidationError", (ValueError,), {}),
+)
 
 
 class AccountsPreflightValidationError(ValueError):
@@ -388,12 +394,12 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
     )
     from .runtime_strategy_decision import get_runtime_decision_adapter
     from .runtime_strategy_set import (
-        RuntimeDecisionRequestBuilder,
         RuntimeStrategySetResolver,
         derive_strategy_instance_id,
         validate_runtime_strategy_set_market_scope,
         validate_runtime_strategy_set_profile_binding,
     )
+    from . import runtime_strategy_set as runtime_strategy_set_module
 
     try:
         strategy_set = RuntimeStrategySetResolver(settings_obj=cfg).resolve()
@@ -411,7 +417,7 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
     issues.extend(validate_runtime_strategy_set_market_scope(strategy_set, cfg))
     issues.extend(validate_runtime_strategy_set_profile_binding(strategy_set, cfg))
     active_instance_ids: set[str] = set()
-    request_builder = RuntimeDecisionRequestBuilder(settings_obj=cfg)
+    request_builder = runtime_strategy_set_module.RuntimeDecisionRequestBuilder(settings_obj=cfg)
     for spec in strategy_set.active_strategies:
         instance_id = derive_strategy_instance_id(spec)
         if instance_id in active_instance_ids:
@@ -1451,7 +1457,6 @@ def _bot_related_env_keys() -> set[str]:
         "BITHUMB_",
         "LIVE_",
         "PAPER_",
-        "SMA_",
         "STRATEGY_",
         "EXECUTION_",
         "NOTIFIER_",

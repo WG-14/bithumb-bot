@@ -297,6 +297,14 @@ class DecisionRunner:
             spec,
             through_ts_ms=through_ts_ms,
         )
+        database_snapshot_decider = getattr(adapter, "decide_database_snapshot", None)
+        if callable(database_snapshot_decider):
+            result = database_snapshot_decider(conn, request)
+            if result is not None:
+                _attach_runtime_request_metadata(result, request)
+                return result
+            if str(settings.MODE or "").strip().lower() != "live":
+                return None
         materialized_spec = replace(
             spec,
             parameters=dict(request.parameters),
@@ -465,11 +473,14 @@ def _attach_runtime_feature_snapshot_metadata(
         "runtime_data_availability_report_hash": payload.get("runtime_data_availability_report_hash"),
         "source_schema_hash": payload.get("source_schema_hash"),
         "feature_snapshot_hash": payload.get("feature_snapshot_hash"),
-        "market_snapshot_hash": payload.get("market_snapshot_hash"),
+        "runtime_data_market_snapshot_hash": payload.get("market_snapshot_hash"),
     }
     if isinstance(result.base_context, dict):
         result.base_context.update(fields)
+        result.base_context.setdefault("market_snapshot_hash", payload.get("market_snapshot_hash"))
     if isinstance(result.replay_fingerprint, dict):
         result.replay_fingerprint.update(fields)
+        result.replay_fingerprint.setdefault("market_snapshot_hash", payload.get("market_snapshot_hash"))
     if isinstance(result.boundary, dict):
         result.boundary.update(fields)
+        result.boundary.setdefault("market_snapshot_hash", payload.get("market_snapshot_hash"))

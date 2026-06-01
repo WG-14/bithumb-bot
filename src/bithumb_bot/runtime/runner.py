@@ -161,6 +161,13 @@ class Runner:
         startup_notification_hashes = list(startup_result.as_dict().get("operator_event_hashes", []))
         if startup_result.operator_event:
             c.notification_adapter.send_event(startup_result.operator_event)
+        halt_transition = startup_result.as_dict().get("halt_transition", {})
+        halt_evidence = halt_transition.get("evidence", {}) if isinstance(halt_transition, dict) else {}
+        operator_event = halt_evidence.get("operator_event", {}) if isinstance(halt_evidence, dict) else {}
+        if isinstance(operator_event, dict) and operator_event:
+            c.notification_adapter.send_event(operator_event)
+            if operator_event.get("event_hash"):
+                startup_notification_hashes.append(str(operator_event.get("event_hash")))
         self._record_artifact(
             "startup",
             candle_ts=None,
@@ -432,6 +439,30 @@ class Runner:
                 candle_ts=closed_candle_ts_ms,
                 startup_state="READY",
             )
+        if decision_result.persistence_status == "failed":
+            _log_loop_event(
+                logging.WARNING,
+                "[RUN] decision_persistence_failed_retryable",
+                symbol=c.settings_obj.PAIR,
+                interval=c.settings_obj.INTERVAL,
+                candle_ts=decision_result.candle_ts,
+                reason="decision_persistence_failed_retryable",
+            )
+            return self._record_artifact(
+                "skip:decision_persistence_failed_retryable",
+                candle_ts=decision_result.candle_ts,
+                startup_state="READY",
+                strategy_decision_hash=decision_result.strategy_decision_hash,
+                runtime_strategy_decision_bundle_id=decision_result.runtime_strategy_decision_bundle_id,
+                runtime_strategy_decision_bundle_hash=decision_result.runtime_strategy_decision_bundle_hash,
+                portfolio_allocation_decision_id=decision_result.portfolio_allocation_decision_id,
+                portfolio_allocation_decision_hash=decision_result.portfolio_allocation_decision_hash,
+                portfolio_target_id=decision_result.portfolio_target_id,
+                portfolio_target_hash=decision_result.portfolio_target_hash,
+                execution_plan_id=decision_result.execution_plan_id,
+                execution_plan_bundle_hash=decision_result.execution_plan_bundle_hash,
+                execution_submit_plan_hash=decision_result.execution_submit_plan_hash,
+            )
         execution_result = c.execution_coordinator.execute_cycle(
             candle_ts=decision_result.candle_ts,
             decision_id=decision_result.decision_id,
@@ -454,6 +485,31 @@ class Runner:
         )
         if execution_result.mark_processed_allowed:
             self.runtime_checkpoint.apply(candle_ts_ms=decision_result.candle_ts, now_epoch_sec=now)
+            _log_loop_event(
+                logging.INFO,
+                "[RUN] processed closed candle",
+                symbol=c.settings_obj.PAIR,
+                interval=c.settings_obj.INTERVAL,
+                candle_ts=decision_result.candle_ts,
+                signal=str(decision_result.signal or "HOLD"),
+            )
+        if execution_result.submitted and execution_result.trade:
+            trade = dict(execution_result.trade)
+            _log_loop_event(
+                logging.INFO,
+                "[RUN] trade_applied",
+                symbol=c.settings_obj.PAIR,
+                interval=c.settings_obj.INTERVAL,
+                candle_ts=decision_result.candle_ts,
+                signal_ts=trade.get("signal_ts", trade.get("candle_ts", decision_result.candle_ts)),
+                client_order_id=trade.get("client_order_id"),
+                exchange_order_id=trade.get("exchange_order_id"),
+                side=trade.get("side"),
+                submit_qty=f"{float(trade.get('submit_qty', trade.get('qty', 0.0)) or 0.0):.3f}",
+                filled_qty=f"{float(trade.get('filled_qty', 0.0) or 0.0):.3f}",
+                post_trade_cash=f"{float(trade.get('post_trade_cash', trade.get('cash', 0.0)) or 0.0):.0f}",
+                post_trade_asset=f"{float(trade.get('post_trade_asset', trade.get('asset', 0.0)) or 0.0):.8f}",
+            )
         artifact = self._record_artifact(
             "checkpoint:processed",
             candle_ts=decision_result.candle_ts,

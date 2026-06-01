@@ -31,6 +31,12 @@ from ..runtime.runner import _get_exposure_snapshot
 def compute_signal(*_args, **_kwargs):
     raise RuntimeError("legacy_compute_signal_unavailable")
 
+
+def reconcile_with_broker(broker):
+    from ..recovery import reconcile_with_broker as _reconcile_with_broker
+
+    return _reconcile_with_broker(broker)
+
 __all__ = [
     "BithumbBroker",
     "RuntimeDecisionGateway",
@@ -48,6 +54,7 @@ __all__ = [
     "parse_interval_sec",
     "record_harmless_dust_exit_suppression",
     "record_strategy_decision",
+    "reconcile_with_broker",
     "run_loop_execution_planner",
     "time",
     "_get_exposure_snapshot",

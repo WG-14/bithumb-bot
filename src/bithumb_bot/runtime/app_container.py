@@ -95,6 +95,25 @@ class TimeScheduler:
         time.sleep(seconds)
 
 
+def _close_guard_ms(interval_sec: int) -> int:
+    interval_ms = max(1, int(interval_sec)) * 1000
+    return max(2_000, min(30_000, interval_ms // 20))
+
+
+def _is_closed_candle(*, candle_ts_ms: int, now_ms: int, interval_sec: int) -> bool:
+    interval_ms = max(1, int(interval_sec)) * 1000
+    close_ready_ts_ms = int(candle_ts_ms) + interval_ms + _close_guard_ms(interval_sec)
+    return int(now_ms) >= close_ready_ts_ms
+
+
+def _select_latest_closed_candle(conn, **kwargs):
+    return _runtime_select_latest_closed_candle(
+        conn,
+        **kwargs,
+        is_closed_candle=_is_closed_candle,
+    )
+
+
 def _identity(value: object) -> str:
     if hasattr(value, "__module__") and hasattr(value, "__qualname__"):
         return f"{getattr(value, '__module__')}.{getattr(value, '__qualname__')}"
@@ -428,7 +447,7 @@ def create_default_runtime_app(settings_obj=settings) -> RuntimeAppContainer:
         broker_factory=broker_factory,
         market_sync=cmd_sync,
         candle_reader=select_latest_candle,
-        closed_candle_selector=_runtime_select_latest_closed_candle,
+        closed_candle_selector=_select_latest_closed_candle,
         runtime_state_store=state_store,
         decision_coordinator=decision_coordinator,
         execution_coordinator=execution_coordinator,

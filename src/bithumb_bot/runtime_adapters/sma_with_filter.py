@@ -219,6 +219,11 @@ class SmaWithFilterRuntimeDecisionAdapter:
             return True
         return True
 
+    def decide_database_snapshot(self, conn, request) -> RuntimeStrategyDecisionResult | None:
+        if str(settings.MODE or "").strip().lower() == "live":
+            return None
+        return decide_sma_with_filter_for_diagnostics(conn, request)
+
     def legacy_diagnostic_signal(
         self,
         conn,
@@ -259,20 +264,24 @@ def compute_sma_with_filter_signal(
         ),
         through_ts_ms=through_ts_ms,
     )
-    result = decide_sma_with_filter_for_diagnostics(conn, request)
+    from bithumb_bot import runtime_sma_snapshot_builder
+
+    strategy = SmaWithFilterRuntimeConfig.from_runtime_request(request).build_strategy()
+    result = runtime_sma_snapshot_builder.build_sma_with_filter_runtime_decision_from_normalized_db(
+        conn,
+        strategy,
+        through_ts_ms=through_ts_ms,
+    )
     if result is None:
         return None
     _attach_runtime_request_metadata(result, request)
     payload = result.as_legacy_dict()
-    payload.setdefault("strategy", result.decision.strategy_name)
+    payload["strategy"] = "sma_with_filter"
     return payload
 
 
 def decide_sma_with_filter_for_diagnostics(conn, request) -> RuntimeStrategyDecisionResult | None:
     """Compatibility-only DB wrapper, excluded from promotion adapter contract."""
-    from bithumb_bot.runtime_data_provider import RuntimeDataRequirementResolver, SQLiteRuntimeDataProvider
-    from bithumb_bot.runtime_strategy_set import RuntimeMarketScope, RuntimeStrategySet, RuntimeStrategySpec
-
     runtime_instance = getattr(request, "runtime_strategy_spec", None)
     runtime_adapter_config = (
         dict(getattr(runtime_instance, "runtime_adapter_config", {}) or {})
@@ -296,26 +305,18 @@ def decide_sma_with_filter_for_diagnostics(conn, request) -> RuntimeStrategyDeci
     )
     if hasattr(request, "observability_fields"):
         boundary_telemetry.update(request.observability_fields())
-    spec = RuntimeStrategySpec(
-        strategy_name="sma_with_filter",
-        pair=strategy.pair,
-        interval=strategy.interval,
-        parameters=dict(getattr(request, "parameters", {}) or {}),
-    )
-    strategy_set = RuntimeStrategySet(
-        strategies=(spec,),
-        source="sma_diagnostic_provider",
-        market_scope=RuntimeMarketScope(pair=strategy.pair, interval=strategy.interval),
-    )
-    resolver = RuntimeDataRequirementResolver()
-    provider = SQLiteRuntimeDataProvider(conn, resolver=resolver)
-    report = provider.preflight(strategy_set, through_ts_ms=request.through_ts_ms)
-    if not report.ok:
-        return None
-    feature_snapshot = provider.snapshot(request, resolver.resolve_for_strategy_set(strategy_set))
-    if feature_snapshot is None:
-        return None
-    return SmaWithFilterRuntimeDecisionAdapter().decide_feature_snapshot(
-        request,
-        feature_snapshot,
-    )
+    try:
+        return decide_sma_with_filter_runtime_snapshot_from_db(
+            conn,
+            strategy,
+            through_ts_ms=request.through_ts_ms,
+            boundary_telemetry=boundary_telemetry,
+        )
+    except TypeError as exc:
+        if "boundary_telemetry" not in str(exc):
+            raise
+        return decide_sma_with_filter_runtime_snapshot_from_db(
+            conn,
+            strategy,
+            through_ts_ms=request.through_ts_ms,
+        )

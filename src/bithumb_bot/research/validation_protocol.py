@@ -4838,7 +4838,7 @@ def _validate_strategy_data_requirements(manifest: ExperimentManifest) -> None:
     ]
     if missing:
         reason = ",".join(missing)
-        if missing == ["top_of_book"]:
+        if missing in (["top_of_book"], ["orderbook_top"]):
             raise ResearchValidationError("research_data_requirement_top_of_book_missing")
         raise ResearchValidationError(f"research_data_capability_missing:{reason}")
 

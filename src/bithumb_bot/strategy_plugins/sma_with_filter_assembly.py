@@ -474,6 +474,11 @@ class SmaWithFilterPolicyAssembly:
         materialized_payload = materialized.materialized_payload()
         execution_payload = execution_context.policy_input_payload()
         exit_policy_payload = exit_policy_config.policy_input_payload()
+        strategy_parameter_values = {
+            name: materialized.values[name]
+            for name in spec.accepted_parameter_names
+            if name in materialized.values
+        }
         return {
             "schema_version": 1,
             "strategy_name": self.strategy_name,
@@ -502,7 +507,7 @@ class SmaWithFilterPolicyAssembly:
             },
             "exit_policy": exit_policy_payload,
             "exit_policy_hash": _stable_hash(exit_policy_payload),
-            "declared_exit_policy": exit_policy_from_parameters(self.strategy_name, materialized.values),
+            "declared_exit_policy": exit_policy_from_parameters(self.strategy_name, strategy_parameter_values),
         }
 
     def build_replay_fingerprint_payload(
