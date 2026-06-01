@@ -19,6 +19,16 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: uv sync --dev
+      - name: Run config contract and text hygiene gates
+        run: |
+          source .venv/bin/activate
+          python3 tools/check_text_hygiene.py
+          python3 tools/check_env_drift.py
+          python3 tools/generate_config_docs.py --check
+          python3 tools/generate_env_example.py --check
+          python3 -m pytest tests/test_text_hygiene.py tests/test_config_contract.py -q
+          python3 -m pytest tests/test_live_preflight.py::test_live_execution_contract_emits_safe_env_metadata_and_lints tests/test_live_preflight.py::test_live_execution_contract_log_emits_redacted_fingerprint -q
+          python3 -m pytest tests/test_operator_commands.py::test_cmd_signal_no_data_output_is_clean_and_actionable tests/test_operator_commands.py::test_cmd_explain_no_data_output_is_clean_and_actionable tests/test_operator_commands.py::test_cmd_status_missing_candle_output_is_clean_and_actionable -q
       - name: Run focused safety regressions
         run: >
           uv run pytest -q

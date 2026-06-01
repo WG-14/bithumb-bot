@@ -2,6 +2,8 @@ from .config import (
     LiveModeValidationError,
     ModeValidationError,
     PATH_MANAGER,
+    config_contract_metadata,
+    live_env_contract_lint_findings,
     settings,
     log_live_execution_contract,
     validate_live_dry_run_loop_startup_contract,
@@ -78,6 +80,7 @@ from .approved_profile import (
     profile_runtime_cost_match_status,
 )
 from .fee_authority import build_fee_authority_snapshot
+from .config_spec import SPEC_BY_NAME
 from .compat.sma_legacy_adapter import _compute_required_entry_edge_ratio
 from .broker.order_rules import (
     build_buy_price_none_diagnostic_fields,
@@ -864,6 +867,9 @@ CONFIG_DUMP_FIELDS = (
 
 
 def _is_secret_config_key(key: str) -> bool:
+    spec = SPEC_BY_NAME.get(str(key or ""))
+    if spec is not None:
+        return bool(spec.secret)
     lowered = str(key or "").lower()
     return any(token in lowered for token in ("secret", "token", "password", "private", "webhook", "api_key"))
 
@@ -956,6 +962,27 @@ def cmd_config_dump(*, masked: bool = False) -> None:
         "profile_runtime_cost_match_reason": profile_cost_status.get("reason"),
         "profile_runtime_cost_operator_next_step": profile_cost_status.get("operator_next_step") or "none",
     }
+    contract_metadata = config_contract_metadata(settings)
+    payload.update(
+        {
+            "config_schema_version": contract_metadata.get("config_schema_version"),
+            "config_spec_hash": contract_metadata.get("config_spec_hash"),
+            "settings_effective_hash": contract_metadata.get("settings_effective_hash"),
+            "generated_docs_hash": contract_metadata.get("generated_docs_hash"),
+            "env_example_hash": contract_metadata.get("env_example_hash"),
+            "unknown_env_keys": ",".join(str(item) for item in contract_metadata.get("unknown_env_keys") or []) or "none",
+            "deprecated_env_keys": ",".join(str(item) for item in contract_metadata.get("deprecated_env_keys") or []) or "none",
+            "settings_explicit_keys": ",".join(str(item) for item in contract_metadata.get("settings_explicit_keys") or []) or "none",
+            "settings_defaulted_keys": ",".join(str(item) for item in contract_metadata.get("settings_defaulted_keys") or []) or "none",
+        }
+    )
+    lint_findings = live_env_contract_lint_findings(settings)
+    payload["config_lint_reason_codes"] = (
+        ",".join(str(item.get("reason_code")) for item in lint_findings if item.get("reason_code")) or "none"
+    )
+    payload["config_lint_recommended_actions"] = (
+        ",".join(str(item.get("recommended_action")) for item in lint_findings if item.get("recommended_action")) or "none"
+    )
     for key in CONFIG_DUMP_FIELDS:
         payload[key] = _masked_config_value(key, getattr(settings, key, os.getenv(key, "")), masked=masked)
 

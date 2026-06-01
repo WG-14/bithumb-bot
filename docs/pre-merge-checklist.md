@@ -2,6 +2,8 @@
 
 Run these repository-local checks before merging changes that touch config,
 operator output, docs, templates, live safety, or runtime contracts.
+The `safety-regression` GitHub Actions workflow runs the same targeted gate
+commands after `uv sync --dev` and virtualenv activation.
 
 ```bash
 python3 tools/check_text_hygiene.py

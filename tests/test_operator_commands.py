@@ -9261,11 +9261,20 @@ def test_config_dump_uses_cli_bootstrap_env_file_and_masks_secrets(tmp_path):
     assert "env_source_key=BITHUMB_ENV_FILE" in completed.stdout
     assert "MAX_DAILY_ORDER_COUNT=3" in completed.stdout
     assert "EXECUTION_ENGINE=target_delta" in completed.stdout
+    assert "config_schema_version=config_spec_v1" in completed.stdout
+    assert "config_spec_hash=sha256:" in completed.stdout
+    assert "settings_effective_hash=sha256:" in completed.stdout
+    assert "generated_docs_hash=sha256:" in completed.stdout
+    assert "env_example_hash=sha256:" in completed.stdout
+    assert "unknown_env_keys=none" in completed.stdout
+    assert "deprecated_env_keys=none" in completed.stdout
+    assert "config_lint_reason_codes=none" in completed.stdout
     assert "BITHUMB_API_KEY=<set>" in completed.stdout
     assert "BITHUMB_API_SECRET=<set>" in completed.stdout
     assert "SLACK_WEBHOOK_URL=<set>" in completed.stdout
     assert "abc123" not in completed.stdout
     assert "secret123" not in completed.stdout
+    assert "https://hooks.example.invalid/token" not in completed.stdout
 
 
 def test_direct_python_import_is_not_supported_config_check_path_documented():
