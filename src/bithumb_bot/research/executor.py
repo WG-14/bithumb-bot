@@ -193,3 +193,28 @@ def sort_work_results_deterministically(results: Iterable[ResearchWorkResult]) -
             str(result.work_unit.split_name),
         ),
     )
+
+
+def canonical_work_results_payload(results: Iterable[ResearchWorkResult]) -> list[dict[str, Any]]:
+    return [
+        {
+            "work_unit_hash": result.work_unit_hash,
+            "work_result_input_hash": result.work_unit.work_result_input_hash,
+            "candidate_index": int(result.candidate_index),
+            "candidate_id": result.candidate_id,
+            "scenario_index": int(result.scenario_index),
+            "scenario_id": result.scenario_id,
+            "split_name": result.work_unit.split_name,
+            "status": result.status,
+            "failure_reason": result.failure_reason,
+            "failure_evidence_hash": (
+                sha256_prefixed(result.failure_evidence) if result.failure_evidence is not None else None
+            ),
+            "content_hash": result.content_hash,
+        }
+        for result in sort_work_results_deterministically(results)
+    ]
+
+
+def canonical_work_results_content_hash(results: Iterable[ResearchWorkResult]) -> str:
+    return sha256_prefixed(canonical_work_results_payload(results))

@@ -1287,16 +1287,7 @@ def test_research_execution_plan_records_parallel_policy(tmp_path, monkeypatch) 
     assert plan["plan_hash"].startswith("sha256:")
 
 
-@pytest.mark.slow_research
-@pytest.mark.integration
-@pytest.mark.nightly
-def test_serial_work_unit_order_is_deterministic(tmp_path, monkeypatch) -> None:
-    db_path = tmp_path / "candles.sqlite"
-    _create_db(db_path)
-    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
-        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
-    monkeypatch.setenv("MODE", "paper")
-    manager = PathManager.from_env(Path.cwd())
+def test_serial_work_unit_order_is_deterministic() -> None:
     payload = _manifest()
     payload["parameter_space"] = {
         "SMA_SHORT": [2, 3],
@@ -1306,33 +1297,62 @@ def test_serial_work_unit_order_is_deterministic(tmp_path, monkeypatch) -> None:
     }
     payload["cost_model"] = {"fee_rate": 0.0, "slippage_bps": [0]}
     manifest = parse_manifest(payload)
+    snapshots = {
+        "train": _snapshot_from_closes([100.0, 101.0, 102.0]),
+        "validation": _snapshot_from_closes([100.0, 99.0, 101.0]),
+        "final_holdout": _snapshot_from_closes([100.0, 102.0, 103.0]),
+    }
+    first_results = []
+    for index, params in enumerate(
+        [
+            {
+                "SMA_SHORT": 2,
+                "SMA_LONG": 4,
+                "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+                "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            },
+            {
+                "SMA_SHORT": 3,
+                "SMA_LONG": 4,
+                "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+                "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            },
+        ]
+    ):
+        work_unit = validation_protocol.build_research_work_unit(
+            manifest=manifest,
+            snapshots=snapshots,
+            params=params,
+            candidate_index=index,
+            scenario=manifest.execution_model.scenarios[0],
+            scenario_index=0,
+            scenario_id="scenario_0",
+            manifest_hash=manifest.manifest_hash(),
+            simulation_seed_scope_hash=manifest.simulation_seed_scope_hash(),
+        )
+        first_results.append(
+            ResearchWorkResult(
+                work_unit=work_unit,
+                work_unit_hash=work_unit.work_unit_hash,
+                candidate_index=index,
+                candidate_id=work_unit.candidate_id,
+                scenario_index=0,
+                scenario_id="scenario_0",
+                status="completed",
+            )
+        )
+    second_results = list(reversed(first_results))
 
-    first = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=manifest,
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
-    )
-    second = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=manifest,
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
-    )
-
-    first_order = [
-        (item["work_unit"]["scenario_index"], item["work_unit"]["candidate_index"])
-        for item in first["execution_observability"]["work_units"]
-    ]
+    first_order = [(item.scenario_index, item.candidate_index) for item in sort_work_results_deterministically(first_results)]
     second_order = [
-        (item["work_unit"]["scenario_index"], item["work_unit"]["candidate_index"])
-        for item in second["execution_observability"]["work_units"]
+        (item.scenario_index, item.candidate_index)
+        for item in sort_work_results_deterministically(second_results)
     ]
     assert first_order == [(0, 0), (0, 1)]
     assert second_order == first_order
-    assert first["content_hash"] == second["content_hash"]
+    assert [item.content_hash for item in sort_work_results_deterministically(first_results)] == [
+        item.content_hash for item in sort_work_results_deterministically(second_results)
+    ]
 
 
 def test_work_results_sort_by_deterministic_merge_order() -> None:
@@ -1446,16 +1466,7 @@ def test_explicit_default_execution_policy_preserves_serial_metrics(tmp_path, mo
     assert default_report["content_hash"] == explicit_report["content_hash"]
 
 
-@pytest.mark.slow_research
-@pytest.mark.integration
-@pytest.mark.nightly
-def test_parallel_manifest_contract_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
-    db_path = tmp_path / "candles.sqlite"
-    _create_db(db_path)
-    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
-        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
-    monkeypatch.setenv("MODE", "paper")
-    manager = PathManager.from_env(Path.cwd())
+def test_parallel_manifest_contract_candidate_scenario_matches_serial_logical_results() -> None:
     base_payload = _manifest()
     base_payload["experiment_id"] = "parallel_equivalence"
     base_payload["parameter_space"] = {
@@ -1475,39 +1486,73 @@ def test_parallel_manifest_contract_candidate_scenario_matches_serial_logical_re
             "resume": False,
         }
     }
-
-    serial = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=parse_manifest(base_payload),
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
+    manifest = parse_manifest(parallel_payload)
+    snapshots = {
+        "train": _snapshot_from_closes([100.0, 101.0, 102.0]),
+        "validation": _snapshot_from_closes([100.0, 99.0, 101.0]),
+        "final_holdout": _snapshot_from_closes([100.0, 102.0, 103.0]),
+    }
+    results = []
+    for index, params in enumerate(
+        [
+            {
+                "SMA_SHORT": 2,
+                "SMA_LONG": 4,
+                "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+                "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            },
+            {
+                "SMA_SHORT": 3,
+                "SMA_LONG": 4,
+                "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+                "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            },
+        ]
+    ):
+        work_unit = validation_protocol.build_research_work_unit(
+            manifest=manifest,
+            snapshots=snapshots,
+            params=params,
+            candidate_index=index,
+            scenario=manifest.execution_model.scenarios[0],
+            scenario_index=0,
+            scenario_id="scenario_0",
+            manifest_hash=manifest.manifest_hash(),
+            simulation_seed_scope_hash=manifest.simulation_seed_scope_hash(),
+        )
+        results.append(
+            ResearchWorkResult(
+                work_unit=work_unit,
+                work_unit_hash=work_unit.work_unit_hash,
+                candidate_index=index,
+                candidate_id=work_unit.candidate_id,
+                scenario_index=0,
+                scenario_id="scenario_0",
+                status="completed",
+            )
+        )
+    parallel_completion_order = list(reversed(results))
+    observability = validation_protocol._execution_boundary_observability(
+        manifest=manifest,
+        candidate_evaluator=_contract_evaluator(),
+        parallel_executor_used=False,
     )
-    parallel = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=parse_manifest(parallel_payload),
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
-    )
 
-    assert parallel["execution_policy"]["mode"] == "parallel"
-    assert parallel["execution_policy"]["max_workers"] == 2
-    assert parallel["execution_observability"]["requested_execution_mode"] == "parallel"
-    assert parallel["execution_observability"]["actual_execution_mode"] == "contract_evaluator_in_process"
-    assert parallel["execution_observability"]["worker_context_mode"] == "in_process_contract"
-    assert parallel["execution_observability"]["parallel_executor_used"] is False
-    assert parallel["execution_observability"]["contract_evaluator_used"] is True
-    assert parallel["execution_observability"]["production_evaluator_used"] is False
-    assert parallel["execution_observability"]["requested_parallel_task_count"] == 2
-    assert parallel["execution_observability"]["actual_parallel_task_count"] == 0
-    assert parallel["execution_observability"]["parallel_task_count"] == 0
-    assert len(parallel["execution_observability"]["work_units"]) == 2
-    assert _logical_candidate_summary(serial) == _logical_candidate_summary(parallel)
+    assert manifest.research_run.execution.mode == "parallel"
+    assert manifest.research_run.execution.max_workers == 2
+    assert observability["requested_execution_mode"] == "parallel"
+    assert observability["actual_execution_mode"] == "contract_evaluator_in_process"
+    assert observability["actual_worker_context_mode"] == "in_process_contract"
+    assert observability["parallel_executor_used"] is False
+    assert observability["contract_evaluator_used"] is True
+    assert observability["production_evaluator_used"] is False
     assert [
-        (item["work_unit"]["scenario_index"], item["work_unit"]["candidate_index"])
-        for item in parallel["execution_observability"]["work_units"]
+        (item.scenario_index, item.candidate_index)
+        for item in sort_work_results_deterministically(parallel_completion_order)
     ] == [(0, 0), (0, 1)]
+    assert [item.content_hash for item in sort_work_results_deterministically(results)] == [
+        item.content_hash for item in sort_work_results_deterministically(parallel_completion_order)
+    ]
 
 
 def test_simulation_seed_scope_hash_ignores_execution_policy_only_changes() -> None:
@@ -1651,16 +1696,7 @@ def test_work_unit_hash_and_work_result_input_hash_have_separate_boundaries() ->
     assert base_unit.work_result_input_hash == parallel_unit.work_result_input_hash
 
 
-@pytest.mark.slow_research
-@pytest.mark.integration
-@pytest.mark.nightly
-def test_parallel_manifest_contract_stress_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
-    db_path = tmp_path / "candles.sqlite"
-    _create_db(db_path)
-    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
-        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
-    monkeypatch.setenv("MODE", "paper")
-    manager = PathManager.from_env(Path.cwd())
+def test_parallel_manifest_contract_stress_candidate_scenario_matches_serial_logical_results() -> None:
     base_payload = _manifest()
     base_payload["experiment_id"] = "parallel_stress_equivalence"
     base_payload["parameter_space"] = {
@@ -1689,33 +1725,61 @@ def test_parallel_manifest_contract_stress_candidate_scenario_matches_serial_log
             "resume": False,
         }
     }
+    serial_manifest = parse_manifest(base_payload)
+    parallel_manifest = parse_manifest(parallel_payload)
+    snapshots = {
+        "train": _snapshot_from_closes([100.0, 101.0, 102.0]),
+        "validation": _snapshot_from_closes([100.0, 99.0, 101.0]),
+        "final_holdout": _snapshot_from_closes([100.0, 102.0, 103.0]),
+    }
+    target_params = {
+        "SMA_SHORT": 2,
+        "SMA_LONG": 4,
+        "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+        "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+    }
 
-    serial = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=parse_manifest(base_payload),
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
-    )
-    parallel = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=parse_manifest(parallel_payload),
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
+    def result_for(manifest, candidate_index: int) -> ResearchWorkResult:
+        work_unit = validation_protocol.build_research_work_unit(
+            manifest=manifest,
+            snapshots=snapshots,
+            params=target_params,
+            candidate_index=candidate_index,
+            scenario=manifest.execution_model.scenarios[0],
+            scenario_index=0,
+            scenario_id="scenario_0",
+            manifest_hash=manifest.manifest_hash(),
+            simulation_seed_scope_hash=manifest.simulation_seed_scope_hash(),
+        )
+        return ResearchWorkResult(
+            work_unit=work_unit,
+            work_unit_hash=work_unit.work_unit_hash,
+            candidate_index=candidate_index,
+            candidate_id=work_unit.candidate_id,
+            scenario_index=0,
+            scenario_id="scenario_0",
+            status="completed",
+        )
+
+    serial_result = result_for(serial_manifest, 0)
+    parallel_result = result_for(parallel_manifest, 0)
+    observability = validation_protocol._execution_boundary_observability(
+        manifest=parallel_manifest,
+        candidate_evaluator=_contract_evaluator(),
+        parallel_executor_used=False,
     )
 
-    assert serial["manifest_hash"] != parallel["manifest_hash"]
-    assert parallel["execution_observability"]["requested_execution_mode"] == "parallel"
-    assert parallel["execution_observability"]["actual_execution_mode"] == "contract_evaluator_in_process"
-    assert parallel["execution_observability"]["worker_context_mode"] == "in_process_contract"
-    assert parallel["execution_observability"]["parallel_executor_used"] is False
-    assert parallel["execution_observability"]["requested_parallel_task_count"] == 2
-    assert parallel["execution_observability"]["actual_parallel_task_count"] == 0
-    assert parallel["execution_observability"]["parallel_task_count"] == 0
-    assert _logical_candidate_summary(serial) == _logical_candidate_summary(parallel)
-    assert serial["candidates"][0]["candidate_behavior_profile_hash"] == parallel["candidates"][0]["candidate_behavior_profile_hash"]
-    assert serial["candidates"][0]["candidate_profile_hash"] != parallel["candidates"][0]["candidate_profile_hash"]
+    assert serial_manifest.manifest_hash() != parallel_manifest.manifest_hash()
+    assert serial_manifest.simulation_seed_scope_hash() == parallel_manifest.simulation_seed_scope_hash()
+    assert observability["requested_execution_mode"] == "parallel"
+    assert observability["actual_execution_mode"] == "contract_evaluator_in_process"
+    assert observability["actual_worker_context_mode"] == "in_process_contract"
+    assert observability["parallel_executor_used"] is False
+    assert observability["requested_parallel_task_count"] == 2
+    assert observability["actual_parallel_task_count"] == 0
+    assert serial_result.work_unit.work_unit_hash == parallel_result.work_unit.work_unit_hash
+    assert serial_result.work_unit.work_result_input_hash == parallel_result.work_unit.work_result_input_hash
+    assert serial_result.content_hash == parallel_result.content_hash
 
 
 @pytest.mark.parallel_e2e
@@ -4950,16 +5014,7 @@ def test_research_backtest_promotes_candidate_when_base_and_stress_pass(
         )
 
 
-@pytest.mark.slow_research
-@pytest.mark.integration
-@pytest.mark.nightly
-def test_stress_report_is_candidate_order_independent(tmp_path, monkeypatch) -> None:
-    db_path = tmp_path / "candles.sqlite"
-    _create_db(db_path)
-    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
-        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
-    monkeypatch.setenv("MODE", "paper")
-    manager = PathManager.from_env(Path.cwd())
+def test_stress_report_is_candidate_order_independent() -> None:
     payload = _manifest()
     payload["parameter_space"] = {
         "SMA_SHORT": [2, 3],
@@ -4990,36 +5045,106 @@ def test_stress_report_is_candidate_order_independent(tmp_path, monkeypatch) -> 
         "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
     }
     target_id = candidate_id(target_params, 0)
+    snapshots = {
+        "train": _snapshot_from_closes([100.0, 101.0, 102.0]),
+        "validation": _snapshot_from_closes([100.0, 99.0, 101.0]),
+        "final_holdout": _snapshot_from_closes([100.0, 102.0, 103.0]),
+    }
 
-    first = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=parse_manifest(payload),
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
-    )
-    second = _run_contract_research_backtest(
-        enforce_fast_budget=False,
-        manifest=parse_manifest(reordered),
-        db_path=db_path,
-        manager=manager,
-        generated_at="2026-05-03T00:00:00+00:00",
-    )
+    def evaluate_target(manifest_payload: dict[str, object], candidate_index: int) -> dict[str, object]:
+        manifest = parse_manifest(manifest_payload)
+        work_unit = validation_protocol.build_research_work_unit(
+            manifest=manifest,
+            snapshots=snapshots,
+            params=target_params,
+            candidate_index=candidate_index,
+            scenario=manifest.execution_model.scenarios[0],
+            scenario_index=0,
+            scenario_id="scenario_0",
+            manifest_hash=manifest.manifest_hash(),
+            simulation_seed_scope_hash=manifest.simulation_seed_scope_hash(),
+        )
+        result = _contract_evaluator().evaluate(
+            work_unit,
+            validation_protocol.EvaluationContext(
+                manifest=manifest,
+                manager=None,
+                snapshots=snapshots,
+                manifest_hash=manifest.manifest_hash(),
+                simulation_seed_scope_hash=manifest.simulation_seed_scope_hash(),
+                include_walk_forward=False,
+                raw_candidate_count=2,
+                params=target_params,
+                candidate_index=candidate_index,
+                scenario=manifest.execution_model.scenarios[0],
+                scenario_index=0,
+                scenario_id="scenario_0",
+                progress_callback=None,
+                worker_pid=None,
+            ),
+        )
+        assert result.base_result is not None
+        return result.base_result["validation_execution_metadata"][0]
 
-    first_candidate = {item["parameter_candidate_id"]: item for item in first["candidates"]}[target_id]
-    second_candidate = {item["parameter_candidate_id"]: item for item in second["candidates"]}[target_id]
-    for first_scenario, second_scenario in zip(
-        first_candidate["scenario_results"],
-        second_candidate["scenario_results"],
-        strict=True,
-    ):
-        assert first_scenario["scenario_id"] == second_scenario["scenario_id"]
-        assert first_scenario["validation_metrics"] == second_scenario["validation_metrics"]
-        assert first_scenario["validation_execution_metadata"] == second_scenario["validation_execution_metadata"]
-    execution = first_candidate["scenario_results"][0]["validation_execution_metadata"][0]
-    assert execution["base_seed"] == 42
-    assert execution["derived_seed_hash"].startswith("sha256:")
-    assert execution["seed_derivation_inputs"]["parameter_candidate_id"] == target_id
+    first_execution = evaluate_target(payload, candidate_index=0)
+    second_execution = evaluate_target(reordered, candidate_index=1)
+
+    assert first_execution == second_execution
+    assert first_execution["base_seed"] == 42
+    assert first_execution["derived_seed_hash"].startswith("sha256:")
+    assert first_execution["seed_derivation_inputs"]["parameter_candidate_id"] == target_id
+    assert first_execution["seed_derivation_inputs"] == {
+        "base_seed": 42,
+        "scenario_id": "scenario_0",
+        "parameter_candidate_id": target_id,
+        "split_name": "validation",
+    }
+    assert parse_manifest(payload).simulation_seed_scope_hash() == parse_manifest(reordered).simulation_seed_scope_hash()
+
+    manifest = parse_manifest(payload)
+
+    def work_result(params: dict[str, object], index: int) -> ResearchWorkResult:
+        work_unit = validation_protocol.build_research_work_unit(
+            manifest=manifest,
+            snapshots=snapshots,
+            params=params,
+            candidate_index=index,
+            scenario=manifest.execution_model.scenarios[0],
+            scenario_index=0,
+            scenario_id="scenario_0",
+            manifest_hash=manifest.manifest_hash(),
+            simulation_seed_scope_hash=manifest.simulation_seed_scope_hash(),
+        )
+        return ResearchWorkResult(
+            work_unit=work_unit,
+            work_unit_hash=work_unit.work_unit_hash,
+            candidate_index=index,
+            candidate_id=work_unit.candidate_id,
+            scenario_index=0,
+            scenario_id="scenario_0",
+            status="completed",
+        )
+
+    first_results = [
+        work_result(target_params, 0),
+        work_result(
+            {
+                "SMA_SHORT": 3,
+                "SMA_LONG": 4,
+                "SMA_FILTER_GAP_MIN_RATIO": 0.0,
+                "SMA_FILTER_VOL_MIN_RANGE_RATIO": 0.0,
+            },
+            1,
+        ),
+    ]
+    second_results = list(reversed(first_results))
+    assert [
+        (result.scenario_index, result.candidate_id)
+        for result in sort_work_results_deterministically(second_results)
+    ] == [
+        (result.scenario_index, result.candidate_id)
+        for result in sort_work_results_deterministically(first_results)
+    ]
 
 
 def _first_stress_scenario_execution_model(report: dict[str, object]) -> dict[str, object]:

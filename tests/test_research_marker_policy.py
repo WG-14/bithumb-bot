@@ -85,6 +85,49 @@ def test_unmarked_real_runner():
     assert any("without an expensive marker" in violation for violation in violations)
 
 
+def test_policy_rejects_marked_production_research_entrypoint_missing_inventory(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_marked_runner.py"
+    test_file.write_text(
+        """
+import pytest
+from bithumb_bot.research.validation_protocol import run_research_backtest
+
+@pytest.mark.research_e2e
+def test_marked_real_runner():
+    run_research_backtest(manifest=None, db_path=None, manager=None)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any("direct production runner test missing E2E inventory entry" in violation for violation in violations)
+
+
+def test_policy_rejects_stale_inventory_entries(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_no_runner.py"
+    test_file.write_text(
+        """
+def test_no_real_runner():
+    assert True
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(
+        tmp_path / "inventory.json",
+        [_inventory_entry(f"{test_file.as_posix()}::test_no_real_runner")],
+    )
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any("stale inventory entry without direct production runner call" in violation for violation in violations)
+
+
 def test_policy_classifies_real_kernel_entrypoints(tmp_path: Path) -> None:
     test_root = tmp_path / "tests"
     test_root.mkdir()
@@ -412,6 +455,34 @@ def test_marked_budget_bypass():
 
     assert any("test_unmarked_budget_bypass disables the fast research workload budget" in violation for violation in violations)
     assert not any("test_marked_budget_bypass" in violation for violation in violations)
+
+
+def test_policy_requires_excluded_marker_for_disabled_walk_forward_fast_budget(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_walk_forward_fast_budget_bypass.py"
+    test_file.write_text(
+        """
+import pytest
+
+def test_unmarked_walk_forward_budget_bypass():
+    _run_contract_research_walk_forward(enforce_fast_budget=False)
+
+@pytest.mark.nightly
+def test_marked_walk_forward_budget_bypass():
+    _run_contract_research_walk_forward(enforce_fast_budget=False)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any(
+        "test_unmarked_walk_forward_budget_bypass disables the fast research workload budget" in violation
+        for violation in violations
+    )
+    assert not any("test_marked_walk_forward_budget_bypass" in violation for violation in violations)
 
 
 def test_inventory_validation_rejects_missing_cost_metadata(tmp_path: Path) -> None:

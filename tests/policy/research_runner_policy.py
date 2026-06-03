@@ -248,7 +248,7 @@ def discover_fast_budget_bypasses(test_root: Path) -> Iterable[FastBudgetBypass]
             for call in ast.walk(node):
                 if not isinstance(call, ast.Call):
                     continue
-                if _call_name(call) != "_run_contract_research_backtest":
+                if _call_name(call) not in APPROVED_CONTRACT_HELPERS:
                     continue
                 if not any(keyword.arg == "enforce_fast_budget" and _is_false(keyword.value) for keyword in call.keywords):
                     continue
