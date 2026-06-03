@@ -42,6 +42,9 @@ APPROVED_CONTRACT_HELPERS = {
     "_run_contract_research_walk_forward",
 }
 
+# These helpers are production-path wrappers for fast-tier runtime guard
+# regression tests only. They must be called from tests that set
+# BITHUMB_TEST_TIER=fast and assert the guard failure before runner IO starts.
 APPROVED_FAST_TIER_GUARD_HELPERS = {
     "_call_production_research_backtest",
     "_call_production_research_walk_forward",
@@ -185,6 +188,7 @@ def discover_policy_violations(
             )
 
     violations.extend(validate_contract_helpers(test_root))
+    violations.extend(validate_fast_tier_guard_helper_usage(test_root))
     return sorted(set(violations))
 
 
@@ -306,6 +310,41 @@ def validate_contract_helpers(test_root: Path) -> list[str]:
                     violations.append(
                         f"{display_path}:{node.lineno}:{node.name} must validate workload immediately after the report"
                     )
+    return violations
+
+
+def validate_fast_tier_guard_helper_usage(test_root: Path) -> list[str]:
+    violations: list[str] = []
+    for path in _iter_test_files(test_root):
+        display_path = _display_path(path)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        parent_by_id = _parent_map(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+                continue
+            guard_calls = [
+                call
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call) and _call_name(call) in APPROVED_FAST_TIER_GUARD_HELPERS
+            ]
+            if not guard_calls:
+                continue
+            markers = frozenset(_decorator_marker_names(node) | _class_marker_names(node, parent_by_id))
+            if markers & EXPENSIVE_RESEARCH_MARKERS:
+                violations.append(
+                    f"{display_path}:{node.lineno}:{node.name} uses a fast-tier guard helper with an "
+                    "expensive marker; guard helpers are default-fast early-failure tests only"
+                )
+            if not _sets_fast_test_tier(node):
+                violations.append(
+                    f"{display_path}:{node.lineno}:{node.name} uses a fast-tier guard helper without "
+                    "setting BITHUMB_TEST_TIER=fast"
+                )
+            if not _asserts_guard_failure(node):
+                violations.append(
+                    f"{display_path}:{node.lineno}:{node.name} uses a fast-tier guard helper without "
+                    "asserting the production evaluator fast-tier guard failure"
+                )
     return violations
 
 
@@ -606,6 +645,53 @@ def _is_bounded_dataset_unpack(node: ast.AST, bounded_mappings: set[str]) -> boo
 
 def _is_false(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value is False
+
+
+def _sets_fast_test_tier(node: ast.FunctionDef) -> bool:
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        if _call_name(call) != "setenv" or len(call.args) < 2:
+            continue
+        name = _string_constant(call.args[0])
+        value = _string_constant(call.args[1])
+        if name == "BITHUMB_TEST_TIER" and value == "fast":
+            return True
+    return False
+
+
+def _asserts_guard_failure(node: ast.FunctionDef) -> bool:
+    for item in ast.walk(node):
+        if not isinstance(item, ast.With):
+            continue
+        for context in item.items:
+            expr = context.context_expr
+            if not isinstance(expr, ast.Call) or _call_name(expr) != "raises":
+                continue
+            has_research_error = any(_name_or_attr(arg) == "ResearchValidationError" for arg in expr.args)
+            has_guard_match = any(
+                keyword.arg == "match"
+                and isinstance(_string_constant(keyword.value), str)
+                and "production_evaluator_blocked" in (_string_constant(keyword.value) or "")
+                for keyword in expr.keywords
+            )
+            if has_research_error and has_guard_match:
+                return True
+    return False
+
+
+def _string_constant(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _name_or_attr(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
 
 
 def _positive_number(value: object, *, allow_zero: bool = False) -> bool:

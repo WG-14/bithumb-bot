@@ -497,6 +497,69 @@ def test_marked_walk_forward_budget_bypass():
     assert not any("test_marked_walk_forward_budget_bypass" in violation for violation in violations)
 
 
+def test_policy_rejects_arbitrary_production_runner_wrapper(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_arbitrary_wrapper.py"
+    test_file.write_text(
+        """
+from bithumb_bot.research.validation_protocol import run_research_backtest
+
+def _call_real_research_backtest(**kwargs):
+    return run_research_backtest(**kwargs)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any("_call_real_research_backtest wraps a production research runner" in violation for violation in violations)
+
+
+def test_policy_limits_guard_helpers_to_fast_tier_guard_failure_tests(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_guard_helper_scope.py"
+    test_file.write_text(
+        """
+import pytest
+from bithumb_bot.research.validation_protocol import ResearchValidationError, run_research_backtest
+
+def _call_production_research_backtest(**kwargs):
+    return run_research_backtest(**kwargs)
+
+def test_guard_helper_without_fast_tier_is_rejected():
+    with pytest.raises(ResearchValidationError, match="run_research_backtest_production_evaluator_blocked"):
+        _call_production_research_backtest(manifest=None, db_path=None, manager=None)
+
+def test_guard_helper_without_guard_assertion_is_rejected(monkeypatch):
+    monkeypatch.setenv("BITHUMB_TEST_TIER", "fast")
+    _call_production_research_backtest(manifest=None, db_path=None, manager=None)
+
+@pytest.mark.research_e2e
+def test_guard_helper_with_expensive_marker_is_rejected(monkeypatch):
+    monkeypatch.setenv("BITHUMB_TEST_TIER", "fast")
+    with pytest.raises(ResearchValidationError, match="run_research_backtest_production_evaluator_blocked"):
+        _call_production_research_backtest(manifest=None, db_path=None, manager=None)
+
+def test_guard_helper_fast_tier_early_failure_is_allowed(monkeypatch):
+    monkeypatch.setenv("BITHUMB_TEST_TIER", "fast")
+    with pytest.raises(ResearchValidationError, match="run_research_backtest_production_evaluator_blocked"):
+        _call_production_research_backtest(manifest=None, db_path=None, manager=None)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any("test_guard_helper_without_fast_tier_is_rejected" in violation for violation in violations)
+    assert any("test_guard_helper_without_guard_assertion_is_rejected" in violation for violation in violations)
+    assert any("test_guard_helper_with_expensive_marker_is_rejected" in violation for violation in violations)
+    assert not any("test_guard_helper_fast_tier_early_failure_is_allowed" in violation for violation in violations)
+
+
 def test_inventory_validation_rejects_missing_cost_metadata(tmp_path: Path) -> None:
     inventory = _write_inventory(
         tmp_path / "inventory.json",
@@ -583,6 +646,41 @@ def test_fast_research_workload_budget_rejects_secondary_audit_artifact_and_hash
         assert_fast_research_workload(snapshot_report)
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "estimated_audit_stream_rows",
+        "estimated_artifact_write_count",
+        "estimated_hash_payload_bytes",
+        "estimated_snapshot_hash_count",
+    ],
+)
+@pytest.mark.parametrize("value", [None, "0"])
+def test_fast_research_workload_budget_rejects_unknown_secondary_numeric_costs(field: str, value: object) -> None:
+    report = minimal_research_report()
+    report["workload_estimate"][field] = value
+
+    with pytest.raises(AssertionError, match=field):
+        assert_fast_research_workload(report)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "estimated_audit_stream_rows",
+        "estimated_artifact_write_count",
+        "estimated_hash_payload_bytes",
+        "estimated_snapshot_hash_count",
+    ],
+)
+def test_fast_research_workload_budget_rejects_missing_secondary_numeric_costs(field: str) -> None:
+    report = minimal_research_report()
+    del report["workload_estimate"][field]
+
+    with pytest.raises(AssertionError, match=field):
+        assert_fast_research_workload(report)
+
+
 def test_fast_research_workload_budget_rejects_production_evaluator_and_real_parallel_executor() -> None:
     production_report = minimal_research_report()
     production_report["workload_estimate"]["uses_production_evaluator"] = True
@@ -593,3 +691,53 @@ def test_fast_research_workload_budget_rejects_production_evaluator_and_real_par
     parallel_report["workload_estimate"]["uses_real_parallel_executor"] = True
     with pytest.raises(AssertionError):
         assert_fast_research_workload(parallel_report)
+
+
+@pytest.mark.parametrize("value", [None, "false"])
+def test_fast_research_workload_budget_rejects_unknown_production_evaluator_status(value: object) -> None:
+    report = minimal_research_report()
+    report["workload_estimate"]["uses_production_evaluator"] = value
+
+    with pytest.raises(AssertionError, match="uses_production_evaluator"):
+        assert_fast_research_workload(report)
+
+
+def test_fast_research_workload_budget_rejects_missing_production_evaluator_status() -> None:
+    report = minimal_research_report()
+    del report["workload_estimate"]["uses_production_evaluator"]
+
+    with pytest.raises(AssertionError, match="uses_production_evaluator"):
+        assert_fast_research_workload(report)
+
+
+@pytest.mark.parametrize("value", [None, "false"])
+def test_fast_research_workload_budget_rejects_unknown_real_parallel_executor_status(value: object) -> None:
+    report = minimal_research_report()
+    report["workload_estimate"]["uses_real_parallel_executor"] = value
+
+    with pytest.raises(AssertionError, match="uses_real_parallel_executor"):
+        assert_fast_research_workload(report)
+
+
+def test_fast_research_workload_budget_rejects_missing_real_parallel_executor_status() -> None:
+    report = minimal_research_report()
+    del report["workload_estimate"]["uses_real_parallel_executor"]
+
+    with pytest.raises(AssertionError, match="uses_real_parallel_executor"):
+        assert_fast_research_workload(report)
+
+
+def test_fast_research_workload_budget_allows_explicitly_allowed_production_and_parallel_use() -> None:
+    report = minimal_research_report()
+    report["workload_estimate"]["uses_production_evaluator"] = True
+    report["workload_estimate"]["uses_real_parallel_executor"] = True
+
+    assert_fast_research_workload(
+        report,
+        allow_production_evaluator=True,
+        allow_real_parallel_executor=True,
+    )
+
+
+def test_minimal_contract_report_passes_fast_research_workload_budget() -> None:
+    assert_fast_research_workload(minimal_research_report())

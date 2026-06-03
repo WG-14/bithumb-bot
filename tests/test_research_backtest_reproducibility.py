@@ -160,10 +160,16 @@ def _run_contract_research_walk_forward(**kwargs: object) -> dict[str, object]:
 
 
 def _call_production_research_backtest(**kwargs: object) -> dict[str, object]:
+    # Production-path wrapper for fast-tier guard regression tests only.
+    # It must be used only where BITHUMB_TEST_TIER=fast is set and the
+    # production-evaluator guard is asserted before DB or tick execution starts.
     return run_research_backtest(**kwargs)  # type: ignore[arg-type]
 
 
 def _call_production_research_walk_forward(**kwargs: object) -> dict[str, object]:
+    # Production-path wrapper for fast-tier guard regression tests only.
+    # It must be used only where BITHUMB_TEST_TIER=fast is set and the
+    # production-evaluator guard is asserted before DB or tick execution starts.
     return run_research_walk_forward(**kwargs)  # type: ignore[arg-type]
 
 
@@ -1187,6 +1193,7 @@ def test_research_backtest_report_includes_execution_plan_and_observability(tmp_
 
 
 def test_contract_research_backtest_wrapper_enforces_fast_budget(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BITHUMB_TEST_TIER", "fast")
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
     for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
@@ -1211,19 +1218,26 @@ def test_contract_research_backtest_wrapper_enforces_fast_budget(tmp_path, monke
         )
 
 
-def test_fast_tier_blocks_production_research_runners_before_io(tmp_path, monkeypatch) -> None:
+def _install_fast_tier_unreachable_runner_sentinels(monkeypatch) -> None:
+    def fail_if_reached(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("fast-tier production-evaluator guard must fire before runner work starts")
+
+    monkeypatch.setattr(validation_protocol, "load_dataset_split", fail_if_reached)
+    monkeypatch.setattr(validation_protocol, "_load_walk_forward_snapshots", fail_if_reached)
+    monkeypatch.setattr(validation_protocol, "write_research_report", fail_if_reached)
+    monkeypatch.setattr(validation_protocol, "resolve_research_strategy", fail_if_reached)
+    monkeypatch.setattr(validation_protocol, "_evaluate_candidates", fail_if_reached)
+
+
+def test_fast_tier_blocks_production_backtest_before_io_and_tick_execution(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("BITHUMB_TEST_TIER", "fast")
     monkeypatch.setenv("MODE", "paper")
     for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
         monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
     manager = PathManager.from_env(Path.cwd())
     manifest = parse_manifest(_manifest())
-
-    def fail_if_loaded(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("dataset loading must not start in fast-tier production-evaluator guard test")
-
-    monkeypatch.setattr(validation_protocol, "load_dataset_split", fail_if_loaded)
-    monkeypatch.setattr(validation_protocol, "_load_walk_forward_snapshots", fail_if_loaded)
+    _install_fast_tier_unreachable_runner_sentinels(monkeypatch)
+    progress_events: list[dict[str, object]] = []
 
     with pytest.raises(ResearchValidationError, match="run_research_backtest_production_evaluator_blocked"):
         _call_production_research_backtest(
@@ -1231,8 +1245,18 @@ def test_fast_tier_blocks_production_research_runners_before_io(tmp_path, monkey
             db_path=tmp_path / "missing.sqlite",
             manager=manager,
             generated_at="2026-05-03T00:00:00+00:00",
+            progress_callback=progress_events.append,
         )
 
+    assert progress_events == []
+
+
+def test_fast_tier_blocks_production_walk_forward_before_io_and_tick_execution(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BITHUMB_TEST_TIER", "fast")
+    monkeypatch.setenv("MODE", "paper")
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    manager = PathManager.from_env(Path.cwd())
     walk_payload = _manifest()
     walk_payload["walk_forward"] = {
         "train_window_days": 1,
@@ -1240,13 +1264,19 @@ def test_fast_tier_blocks_production_research_runners_before_io(tmp_path, monkey
         "step_days": 1,
         "min_windows": 1,
     }
+    _install_fast_tier_unreachable_runner_sentinels(monkeypatch)
+    progress_events: list[dict[str, object]] = []
+
     with pytest.raises(ResearchValidationError, match="run_research_walk_forward_production_evaluator_blocked"):
         _call_production_research_walk_forward(
             manifest=parse_manifest(walk_payload),
             db_path=tmp_path / "missing.sqlite",
             manager=manager,
             generated_at="2026-05-03T00:00:00+00:00",
+            progress_callback=progress_events.append,
         )
+
+    assert progress_events == []
 
 
 def test_fast_tier_allows_bounded_contract_evaluator_path(tmp_path, monkeypatch) -> None:
@@ -1268,6 +1298,7 @@ def test_fast_tier_allows_bounded_contract_evaluator_path(tmp_path, monkeypatch)
     assert report["workload_estimate"]["uses_production_evaluator"] is False
     assert report["workload_estimate"]["uses_real_parallel_executor"] is False
     assert report["execution_observability"]["contract_evaluator_used"] is True
+    assert_fast_research_workload(report)
 
 
 def test_research_execution_plan_counts_multiple_candidates_and_scenarios(tmp_path, monkeypatch) -> None:
@@ -1329,6 +1360,73 @@ def test_research_execution_plan_counts_multiple_candidates_and_scenarios(tmp_pa
     assert plan["workload_estimate"]["uses_real_parallel_executor"] is None
     assert plan["deterministic_merge_order"] == "scenario_index,candidate_index,split_name"
     assert plan["plan_hash"] == later_plan["plan_hash"]
+
+
+def test_report_workload_estimate_fallback_counts_candidate_and_scenario_growth(tmp_path) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    payload = _manifest()
+    payload["cost_model"] = {"fee_rate": 0.0, "slippage_bps": [0, 1]}
+    manifest = parse_manifest(payload)
+    snapshots = tuple(
+        validation_protocol.load_dataset_split(db_path=db_path, manifest=manifest, split_name=split_name)
+        for split_name in ("train", "validation", "final_holdout")
+    )
+    execution_observability = {
+        "production_evaluator_used": False,
+        "parallel_executor_used": False,
+    }
+
+    one_candidate = validation_protocol._report_workload_estimate(
+        manifest=manifest,
+        snapshots=snapshots,
+        candidates=[{"candidate_id": "candidate_001"}],
+        report_kind="backtest",
+        execution_plan=None,
+        execution_observability=execution_observability,
+    )
+    two_candidates = validation_protocol._report_workload_estimate(
+        manifest=manifest,
+        snapshots=snapshots,
+        candidates=[{"candidate_id": "candidate_001"}, {"candidate_id": "candidate_002"}],
+        report_kind="backtest",
+        execution_plan=None,
+        execution_observability=execution_observability,
+    )
+
+    snapshot_candles = sum(len(snapshot.candles) for snapshot in snapshots)
+    assert one_candidate["scenario_count"] == 2
+    assert one_candidate["estimated_tick_events"] == snapshot_candles * 1 * 2
+    assert two_candidates["estimated_tick_events"] == snapshot_candles * 2 * 2
+    assert two_candidates["estimated_tick_events"] > one_candidate["estimated_tick_events"]
+    assert two_candidates["estimated_artifact_write_count"] > one_candidate["estimated_artifact_write_count"]
+    assert two_candidates["estimated_hash_payload_bytes"] > one_candidate["estimated_hash_payload_bytes"]
+    assert two_candidates["estimated_audit_stream_rows"] == one_candidate["estimated_audit_stream_rows"] == 0
+    assert two_candidates["uses_production_evaluator"] is False
+    assert two_candidates["uses_real_parallel_executor"] is False
+
+    audit_payload = dict(payload)
+    audit_payload["research_run"] = {"audit_trail": {"mode": "complete_external"}}
+    audit_manifest = parse_manifest(audit_payload)
+    audit_one_candidate = validation_protocol._report_workload_estimate(
+        manifest=audit_manifest,
+        snapshots=snapshots,
+        candidates=[{"candidate_id": "candidate_001"}],
+        report_kind="backtest",
+        execution_plan=None,
+        execution_observability=execution_observability,
+    )
+    audit_two_candidates = validation_protocol._report_workload_estimate(
+        manifest=audit_manifest,
+        snapshots=snapshots,
+        candidates=[{"candidate_id": "candidate_001"}, {"candidate_id": "candidate_002"}],
+        report_kind="backtest",
+        execution_plan=None,
+        execution_observability=execution_observability,
+    )
+    assert audit_one_candidate["estimated_audit_stream_rows"] == snapshot_candles * 1 * 2 * 3
+    assert audit_two_candidates["estimated_audit_stream_rows"] == snapshot_candles * 2 * 2 * 3
+    assert audit_two_candidates["estimated_audit_stream_rows"] > audit_one_candidate["estimated_audit_stream_rows"]
 
 
 def test_research_execution_plan_records_parallel_policy(tmp_path, monkeypatch) -> None:

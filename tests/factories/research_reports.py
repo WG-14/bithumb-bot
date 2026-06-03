@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
+from numbers import Real
 from typing import Any
 
 from bithumb_bot.market_regime import MARKET_REGIME_VERSION
@@ -437,26 +439,44 @@ def assert_fast_research_workload(
         "uses_real_parallel_executor",
     ):
         assert key in estimate, f"research workload_estimate missing {key}"
-    assert int(estimate["estimated_strategy_runs"]) <= max_strategy_runs
-    assert int(estimate["estimated_tick_events"]) <= max_tick_events
+    def required_int(key: str) -> int:
+        value = estimate[key]
+        assert isinstance(value, Real) and not isinstance(value, bool), (
+            f"research workload_estimate {key} must be a known numeric value"
+        )
+        assert isfinite(float(value)), f"research workload_estimate {key} must be finite"
+        assert int(value) == value, f"research workload_estimate {key} must be an integer value"
+        assert int(value) >= 0, f"research workload_estimate {key} must be non-negative"
+        return int(value)
+
+    assert required_int("estimated_strategy_runs") <= max_strategy_runs
+    assert required_int("estimated_tick_events") <= max_tick_events
     if not allow_complete_external_audit:
         assert estimate.get("audit_mode") != "complete_external"
-    assert int(estimate.get("walk_forward_window_count") or 0) <= max_walk_forward_windows
+    assert required_int("walk_forward_window_count") <= max_walk_forward_windows
     if not allow_full_report_detail:
         assert estimate.get("report_detail") == "summary"
     if not allow_full_decisions_external_jsonl:
         assert estimate.get("full_decisions_external_jsonl") is not True
-    assert int(estimate["estimated_audit_stream_rows"]) <= max_audit_stream_rows
-    assert int(estimate["estimated_artifact_write_count"]) <= max_artifact_write_count
-    assert int(estimate["estimated_hash_payload_bytes"]) <= max_hash_payload_bytes
-    assert int(estimate["estimated_snapshot_hash_count"]) <= max_snapshot_hash_count
+    assert required_int("estimated_audit_stream_rows") <= max_audit_stream_rows
+    assert required_int("estimated_artifact_write_count") <= max_artifact_write_count
+    assert required_int("estimated_hash_payload_bytes") <= max_hash_payload_bytes
+    assert required_int("estimated_snapshot_hash_count") <= max_snapshot_hash_count
+    uses_production_evaluator = estimate["uses_production_evaluator"]
+    uses_real_parallel_executor = estimate["uses_real_parallel_executor"]
+    assert isinstance(uses_production_evaluator, bool), (
+        "research workload_estimate uses_production_evaluator must be an explicit bool"
+    )
+    assert isinstance(uses_real_parallel_executor, bool), (
+        "research workload_estimate uses_real_parallel_executor must be an explicit bool"
+    )
     if not allow_production_evaluator:
-        assert estimate.get("uses_production_evaluator") is not True
+        assert uses_production_evaluator is False
     if not allow_real_parallel_executor:
-        assert estimate.get("uses_real_parallel_executor") is not True
+        assert uses_real_parallel_executor is False
     matrix_size = (
-        int(estimate["candidate_count"])
-        * int(estimate["scenario_count"])
-        * int(estimate["split_count"])
+        required_int("candidate_count")
+        * required_int("scenario_count")
+        * required_int("split_count")
     )
     assert matrix_size <= max_matrix_size

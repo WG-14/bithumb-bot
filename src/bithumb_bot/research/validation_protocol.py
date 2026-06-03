@@ -3896,6 +3896,7 @@ def _report_workload_estimate(
         scenario_count = len(manifest.execution_model.scenarios)
         split_count = len(snapshots)
         work_unit_count = len(candidates) * scenario_count
+        estimated_tick_events = snapshot_candles * len(candidates) * scenario_count
         audit_mode = manifest.research_run.audit_trail.mode
         full_decisions = manifest.research_run.artifact_policy.full_decisions_external_jsonl
         estimate = {
@@ -3914,7 +3915,7 @@ def _report_workload_estimate(
                 include_walk_forward=report_kind == "walk_forward",
                 walk_forward_split_count=sum(1 for snapshot in snapshots if snapshot.split_name.startswith("window_")),
             ),
-            "estimated_tick_events": snapshot_candles,
+            "estimated_tick_events": estimated_tick_events,
             "approx_snapshot_candle_count": snapshot_candles,
             "audit_mode": audit_mode,
             "report_detail": manifest.research_run.report_detail,

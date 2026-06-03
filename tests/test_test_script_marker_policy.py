@@ -60,6 +60,15 @@ def test_research_nightly_script_uses_canonical_marker_expression() -> None:
     assert f'-m "{CANONICAL_RESEARCH_NIGHTLY_MARKER_EXPR}"' in text
 
 
+def test_fast_pr_script_exports_fast_test_tier_before_pytest() -> None:
+    text = Path("scripts/run_fast_pr_tests.sh").read_text(encoding="utf-8")
+
+    export_index = text.index("export BITHUMB_TEST_TIER=fast")
+    pytest_index = text.index("uv run pytest")
+
+    assert export_index < pytest_index
+
+
 def test_default_fast_excluded_research_markers_match_script_expressions() -> None:
     expected = set(DEFAULT_FAST_EXCLUDED_RESEARCH_MARKERS)
     assert "research_kernel" in expected
