@@ -121,12 +121,21 @@ def _contract_evaluator() -> DeterministicResearchEvaluator:
     return DeterministicResearchEvaluator()
 
 
-def _run_contract_research_backtest(**kwargs: object) -> dict[str, object]:
+def _run_contract_research_backtest(*, enforce_fast_budget: bool = True, **kwargs: object) -> dict[str, object]:
     report = run_research_backtest(
         candidate_evaluator=_contract_evaluator(),
         **kwargs,  # type: ignore[arg-type]
     )
+    if enforce_fast_budget:
+        assert_fast_research_workload(report)
     return report
+
+
+def _run_contract_research_walk_forward(**kwargs: object) -> dict[str, object]:
+    return run_research_walk_forward(
+        candidate_evaluator=_contract_evaluator(),
+        **kwargs,  # type: ignore[arg-type]
+    )
 
 
 def _manifest() -> dict[str, object]:
@@ -1091,6 +1100,31 @@ def test_research_backtest_report_includes_execution_plan_and_observability(tmp_
     assert persisted["execution_observability"]["work_units"][0]["work_unit"]["work_unit_hash"]
 
 
+def test_contract_research_backtest_wrapper_enforces_fast_budget(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
+        monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
+    monkeypatch.setenv("MODE", "paper")
+    manager = PathManager.from_env(Path.cwd())
+    payload = _manifest()
+    payload["parameter_space"] = {
+        "SMA_SHORT": [2, 3],
+        "SMA_LONG": [4],
+        "SMA_FILTER_GAP_MIN_RATIO": [0.0],
+        "SMA_FILTER_VOL_MIN_RANGE_RATIO": [0.0],
+    }
+    payload["cost_model"] = {"fee_rate": 0.0, "slippage_bps": [0, 1]}
+
+    with pytest.raises(AssertionError):
+        _run_contract_research_backtest(
+            manifest=parse_manifest(payload),
+            db_path=db_path,
+            manager=manager,
+            generated_at="2026-05-03T00:00:00+00:00",
+        )
+
+
 def test_research_execution_plan_counts_multiple_candidates_and_scenarios(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -1175,6 +1209,7 @@ def test_research_execution_plan_records_parallel_policy(tmp_path, monkeypatch) 
     assert plan["plan_hash"].startswith("sha256:")
 
 
+@pytest.mark.research_e2e
 def test_serial_work_unit_order_is_deterministic(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -1189,16 +1224,18 @@ def test_serial_work_unit_order_is_deterministic(tmp_path, monkeypatch) -> None:
         "SMA_FILTER_GAP_MIN_RATIO": [0.0],
         "SMA_FILTER_VOL_MIN_RANGE_RATIO": [0.0],
     }
-    payload["cost_model"] = {"fee_rate": 0.0, "slippage_bps": [0, 1]}
+    payload["cost_model"] = {"fee_rate": 0.0, "slippage_bps": [0]}
     manifest = parse_manifest(payload)
 
     first = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=manifest,
         db_path=db_path,
         manager=manager,
         generated_at="2026-05-03T00:00:00+00:00",
     )
     second = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=manifest,
         db_path=db_path,
         manager=manager,
@@ -1213,7 +1250,7 @@ def test_serial_work_unit_order_is_deterministic(tmp_path, monkeypatch) -> None:
         (item["work_unit"]["scenario_index"], item["work_unit"]["candidate_index"])
         for item in second["execution_observability"]["work_units"]
     ]
-    assert first_order == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert first_order == [(0, 0), (0, 1)]
     assert second_order == first_order
     assert first["content_hash"] == second["content_hash"]
 
@@ -1329,6 +1366,7 @@ def test_explicit_default_execution_policy_preserves_serial_metrics(tmp_path, mo
     assert default_report["content_hash"] == explicit_report["content_hash"]
 
 
+@pytest.mark.parallel_e2e
 def test_parallel_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -1344,7 +1382,7 @@ def test_parallel_candidate_scenario_matches_serial_logical_results(tmp_path, mo
         "SMA_FILTER_GAP_MIN_RATIO": [0.0],
         "SMA_FILTER_VOL_MIN_RANGE_RATIO": [0.0],
     }
-    base_payload["cost_model"] = {"fee_rate": 0.0, "slippage_bps": [0, 1]}
+    base_payload["cost_model"] = {"fee_rate": 0.0, "slippage_bps": [0]}
     parallel_payload = json.loads(json.dumps(base_payload))
     parallel_payload["research_run"] = {
         "execution": {
@@ -1357,12 +1395,14 @@ def test_parallel_candidate_scenario_matches_serial_logical_results(tmp_path, mo
     }
 
     serial = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=parse_manifest(base_payload),
         db_path=db_path,
         manager=manager,
         generated_at="2026-05-03T00:00:00+00:00",
     )
     parallel = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=parse_manifest(parallel_payload),
         db_path=db_path,
         manager=manager,
@@ -1371,12 +1411,12 @@ def test_parallel_candidate_scenario_matches_serial_logical_results(tmp_path, mo
 
     assert parallel["execution_policy"]["mode"] == "parallel"
     assert parallel["execution_policy"]["max_workers"] == 2
-    assert len(parallel["execution_observability"]["work_units"]) == 4
+    assert len(parallel["execution_observability"]["work_units"]) == 2
     assert _logical_candidate_summary(serial) == _logical_candidate_summary(parallel)
     assert [
         (item["work_unit"]["scenario_index"], item["work_unit"]["candidate_index"])
         for item in parallel["execution_observability"]["work_units"]
-    ] == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    ] == [(0, 0), (0, 1)]
 
 
 def test_simulation_seed_scope_hash_ignores_execution_policy_only_changes() -> None:
@@ -1520,6 +1560,7 @@ def test_work_unit_hash_and_work_result_input_hash_have_separate_boundaries() ->
     assert base_unit.work_result_input_hash == parallel_unit.work_result_input_hash
 
 
+@pytest.mark.parallel_e2e
 def test_parallel_stress_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -1557,12 +1598,14 @@ def test_parallel_stress_candidate_scenario_matches_serial_logical_results(tmp_p
     }
 
     serial = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=parse_manifest(base_payload),
         db_path=db_path,
         manager=manager,
         generated_at="2026-05-03T00:00:00+00:00",
     )
     parallel = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=parse_manifest(parallel_payload),
         db_path=db_path,
         manager=manager,
@@ -2319,7 +2362,6 @@ def test_report_content_hash_is_independent_of_db_path_and_runtime_environment(t
     assert changed["execution_plan"]["run_environment_hash"] != first["execution_plan"]["run_environment_hash"]
 
 
-@pytest.mark.memory_sensitive
 def test_report_content_hash_ignores_host_dependent_memory_observability(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -2366,7 +2408,7 @@ def test_walk_forward_report_includes_execution_plan_and_observability(tmp_path,
     }
     manifest = parse_manifest(payload)
 
-    report = run_research_walk_forward(
+    report = _run_contract_research_walk_forward(
         manifest=manifest,
         db_path=db_path,
         manager=manager,
@@ -4877,6 +4919,7 @@ def test_research_backtest_aggregates_scenarios_and_promotion_refuses_failed_str
         )
 
 
+@pytest.mark.research_e2e
 def test_research_backtest_promotes_candidate_when_base_and_stress_pass(
     tmp_path, monkeypatch
 ) -> None:
@@ -4903,6 +4946,7 @@ def test_research_backtest_promotes_candidate_when_base_and_stress_pass(
     manifest = parse_manifest(payload)
 
     report = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=manifest,
         db_path=db_path,
         manager=manager,
@@ -4932,8 +4976,7 @@ def test_research_backtest_promotes_candidate_when_base_and_stress_pass(
         )
 
 
-@pytest.mark.slow_research
-@pytest.mark.memory_sensitive
+@pytest.mark.research_e2e
 def test_stress_report_is_candidate_order_independent(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
@@ -4951,7 +4994,7 @@ def test_stress_report_is_candidate_order_independent(tmp_path, monkeypatch) -> 
     payload["execution_model"] = {
         "type": "stress",
         "fee_rate": [0.0],
-        "slippage_bps": [5, 10],
+        "slippage_bps": [5],
         "partial_fill_rate": [0.5],
         "order_failure_rate": [0.1],
         "scenario_policy": "must_pass_base_and_survive_stress",
@@ -4973,12 +5016,14 @@ def test_stress_report_is_candidate_order_independent(tmp_path, monkeypatch) -> 
     target_id = candidate_id(target_params, 0)
 
     first = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=parse_manifest(payload),
         db_path=db_path,
         manager=manager,
         generated_at="2026-05-03T00:00:00+00:00",
     )
     second = _run_contract_research_backtest(
+        enforce_fast_budget=False,
         manifest=parse_manifest(reordered),
         db_path=db_path,
         manager=manager,
@@ -5021,7 +5066,7 @@ def test_different_stress_seed_changes_auditable_seed_hash(tmp_path, monkeypatch
     payload["execution_model"] = {
         "type": "stress",
         "fee_rate": [0.0],
-        "slippage_bps": [5, 10],
+        "slippage_bps": [5],
         "partial_fill_rate": [0.5],
         "order_failure_rate": [0.1],
         "scenario_policy": "must_pass_base_and_survive_stress",

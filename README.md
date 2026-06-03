@@ -260,13 +260,16 @@ The rendered units use `BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@` so the env fil
 
 ## Test Groups
 
+- Default PR fast suite:
+  - `./scripts/run_fast_pr_tests.sh`
+  - `uv run pytest -q -m "not research_e2e and not nightly and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not memory_sensitive"`
 - Fast regression set:
   - `uv run pytest -q -m fast_regression`
 - Slow integration/live-like set:
   - `uv run pytest -q -m slow_integration`
-- Slow/resource-sensitive research checks:
-  - `uv run pytest -q -m "slow_research or memory_sensitive or resource_guard"`
+- Dedicated research E2E/resource checks:
+  - `uv run pytest -q -m "research_e2e or audit_e2e or walk_forward_e2e or parallel_e2e or nightly or memory_sensitive or resource_guard"`
 - Known research resource high-water RSS regression reproduction:
   - `uv run pytest -q --tb=short --maxfail=1 tests/test_research_backtest_reproducibility.py::test_tiny_three_day_sma_backtest_completes_structurally tests/test_research_backtest_reproducibility.py::test_stress_report_is_candidate_order_independent tests/test_research_strategy_canary.py::test_buy_and_hold_full_research_backtest_report_contains_common_kernel_fields`
 
-Prefer the fast regression set first. Keep the slow set separate unless you are validating restart, recovery, live-like execution paths, or research resource guard behavior. The three-test research command guards against process peak/high-water memory from earlier work affecting later candidate resource decisions.
+Prefer the default PR fast suite first. It must not include full research matrices, complete-external audit research runs, walk-forward E2E, serial/parallel real comparisons, or memory-sensitive checks. Keep the dedicated research E2E/resource set separate unless you are validating restart, recovery, live-like execution paths, walk-forward, complete-external audit binding, serial/parallel research execution, or research resource guard behavior. The three-test research command guards against process peak/high-water memory from earlier work affecting later candidate resource decisions.

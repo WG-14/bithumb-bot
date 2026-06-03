@@ -15,14 +15,22 @@ python3 -m pytest tests/test_live_preflight.py::test_live_execution_contract_emi
 python3 -m pytest tests/test_operator_commands.py::test_cmd_signal_no_data_output_is_clean_and_actionable tests/test_operator_commands.py::test_cmd_explain_no_data_output_is_clean_and_actionable tests/test_operator_commands.py::test_cmd_status_missing_candle_output_is_clean_and_actionable -q
 ```
 
-The full-suite gate is:
+The default PR fast-suite gate is:
 
 ```bash
-uv run pytest -q
+uv run pytest -q -m "not research_e2e and not nightly and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not memory_sensitive"
 ```
 
-When working through `scripts/run_codex_pipeline.sh`, do not run the full-suite
-command directly. Use the dedicated full-pytest repair pipeline instead:
+The script form is:
+
+```bash
+./scripts/run_fast_pr_tests.sh
+```
+
+This fast suite must not include full research matrices, complete-external audit
+research runs, walk-forward E2E, serial/parallel real research comparisons, or
+memory-sensitive checks. Run full/nightly research validation through the
+dedicated full-pytest pipeline instead:
 
 ```bash
 ./scripts/run_codex_pytest_pipeline.sh

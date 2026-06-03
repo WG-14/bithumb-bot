@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# 실패한 테스트가 있어도 다음 진단 명령을 계속 실행하기 위해 set -e는 쓰지 않음
+# Keep running later diagnostics even if an earlier command fails.
 set -u
 set -o pipefail
 
@@ -25,15 +25,15 @@ run() {
   echo
   echo "---- RESULT: exit_code=$status elapsed=$((end - start))s ----"
 
-  # 실패해도 다음 명령 계속 실행
+  # Continue diagnostics after failures.
   return 0
 }
 
-run "fast suite excluding slow/memory tests" \
-  uv run pytest -q -m "not slow_research and not slow_integration and not memory_sensitive"
+run "default PR fast suite" \
+  uv run pytest -q -m "not research_e2e and not nightly and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not memory_sensitive"
 
-run "slow_research or memory_sensitive durations" \
-  uv run pytest -q -m "slow_research or memory_sensitive" --durations=50 --durations-min=0
+run "research E2E or memory-sensitive durations" \
+  uv run pytest -q -m "research_e2e or audit_e2e or walk_forward_e2e or parallel_e2e or nightly or memory_sensitive" --durations=50 --durations-min=0
 
 run "research backtest reproducibility durations" \
   uv run pytest -q tests/test_research_backtest_reproducibility.py --durations=50 --durations-min=0
@@ -41,14 +41,14 @@ run "research backtest reproducibility durations" \
 run "research walk forward durations" \
   uv run pytest -q tests/test_research_walk_forward.py --durations=20 --durations-min=0
 
-run "collect count: slow_research" \
-  bash -lc 'uv run pytest --collect-only -q -m "slow_research" | awk "/::/ {n++} END {print n+0}"'
+run "collect count: research E2E classes" \
+  bash -lc 'uv run pytest --collect-only -q -m "research_e2e or audit_e2e or walk_forward_e2e or parallel_e2e or nightly" | awk "/::/ {n++} END {print n+0}"'
 
 run "collect count: memory_sensitive" \
   bash -lc 'uv run pytest --collect-only -q -m "memory_sensitive" | awk "/::/ {n++} END {print n+0}"'
 
-run "collect count: fast suite excluding slow/memory" \
-  bash -lc 'uv run pytest --collect-only -q -m "not slow_research and not slow_integration and not memory_sensitive" | awk "/::/ {n++} END {print n+0}"'
+run "collect count: default PR fast suite" \
+  bash -lc 'uv run pytest --collect-only -q -m "not research_e2e and not nightly and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not memory_sensitive" | awk "/::/ {n++} END {print n+0}"'
 
 run "cProfile: stress order independence test" \
   uv run python -m cProfile -o /tmp/stress_order.prof -m pytest -q \

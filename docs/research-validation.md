@@ -245,9 +245,18 @@ keeps memory checks aligned with the same execution events that can trip runtime
 or trade-count limits, and every split report includes the applied resource
 policy and memory sampling policy.
 
-Slow or resource-sensitive research tests are marked with `slow_research`,
-`memory_sensitive`, and `resource_guard`. The focused reproduction for the
-historical order-dependent high-water RSS regression is:
+Default PR validation excludes real research E2E, complete-external audit E2E,
+walk-forward E2E, serial/parallel E2E, nightly, and memory-sensitive tests:
+
+```bash
+uv run pytest -q -m "not research_e2e and not nightly and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not memory_sensitive"
+```
+
+Research tests that run real strategy/kernel or full research pipeline work use
+specific markers such as `research_kernel`, `research_e2e`, `audit_e2e`,
+`walk_forward_e2e`, `parallel_e2e`, `nightly`, `memory_sensitive`, and
+`resource_guard`. The focused reproduction for the historical order-dependent
+high-water RSS regression is:
 
 ```bash
 uv run pytest -q --tb=short --maxfail=1 \

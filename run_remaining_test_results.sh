@@ -23,7 +23,7 @@ run() {
   echo
   echo "---- RESULT: exit_code=$status elapsed=$((end - start))s ----"
 
-  # 실패해도 다음 명령 계속 실행
+  # Continue diagnostics after failures.
   return 0
 }
 
@@ -33,14 +33,14 @@ run "research backtest reproducibility durations" \
 run "research walk forward durations" \
   uv run pytest -q tests/test_research_walk_forward.py --durations=20 --durations-min=0
 
-run "collect count: slow_research" \
-  bash -lc 'uv run pytest --collect-only -q -m "slow_research" | grep "::" | wc -l'
+run "collect count: research E2E classes" \
+  bash -lc 'uv run pytest --collect-only -q -m "research_e2e or audit_e2e or walk_forward_e2e or parallel_e2e or nightly" | grep "::" | wc -l'
 
 run "collect count: memory_sensitive" \
   bash -lc 'uv run pytest --collect-only -q -m "memory_sensitive" | grep "::" | wc -l'
 
-run "collect count: fast suite excluding slow/memory" \
-  bash -lc 'uv run pytest --collect-only -q -m "not slow_research and not slow_integration and not memory_sensitive" | grep "::" | wc -l'
+run "collect count: default PR fast suite" \
+  bash -lc 'uv run pytest --collect-only -q -m "not research_e2e and not nightly and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not memory_sensitive" | grep "::" | wc -l'
 
 run "cProfile: stress order independence test" \
   uv run python -m cProfile -o /tmp/stress_order.prof -m pytest -q \

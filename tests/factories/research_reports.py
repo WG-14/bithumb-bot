@@ -390,6 +390,18 @@ def assert_fast_research_workload(report: dict[str, Any], *, max_strategy_runs: 
         execution_plan = report.get("execution_plan")
         estimate = execution_plan.get("workload_estimate") if isinstance(execution_plan, dict) else None
     assert isinstance(estimate, dict), "research report must expose workload_estimate"
+    for key in (
+        "candidate_count",
+        "scenario_count",
+        "split_count",
+        "walk_forward_window_count",
+        "estimated_strategy_runs",
+        "estimated_tick_events",
+        "approx_snapshot_candle_count",
+        "audit_mode",
+        "report_detail",
+    ):
+        assert key in estimate, f"research workload_estimate missing {key}"
     assert int(estimate["estimated_strategy_runs"]) <= max_strategy_runs
     assert estimate.get("audit_mode") != "complete_external"
     assert int(estimate.get("walk_forward_window_count") or 0) == 0

@@ -53,3 +53,5 @@ jobs:
           tests/test_operator_commands.py::test_main_pre_dispatch_blocks_live_write_command_without_preflight
           tests/test_operator_commands.py::test_cmd_run_blocks_before_lock_when_live_preflight_fails
           tests/test_deploy_systemd_units.py
+      - name: Run default PR fast suite
+        run: ./scripts/run_fast_pr_tests.sh

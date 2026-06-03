@@ -314,8 +314,6 @@ def test_validation_protocol_has_no_buy_and_hold_specific_branch() -> None:
 
 
 @pytest.mark.research_e2e
-@pytest.mark.slow_research
-@pytest.mark.memory_sensitive
 def test_buy_and_hold_full_research_backtest_report_contains_common_kernel_fields(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
