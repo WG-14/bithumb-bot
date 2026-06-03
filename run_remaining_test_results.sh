@@ -2,6 +2,9 @@
 set -u
 set -o pipefail
 
+FAST_MARKER_EXPR="not research_e2e and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not nightly and not slow_research and not memory_sensitive"
+RESEARCH_NIGHTLY_MARKER_EXPR="research_e2e or audit_e2e or walk_forward_e2e or parallel_e2e or nightly or slow_research or memory_sensitive"
+
 run() {
   local title="$1"
   shift
@@ -34,13 +37,13 @@ run "research walk forward durations" \
   uv run pytest -q tests/test_research_walk_forward.py --durations=20 --durations-min=0
 
 run "collect count: research E2E classes" \
-  bash -lc 'uv run pytest --collect-only -q -m "research_e2e or audit_e2e or walk_forward_e2e or parallel_e2e or nightly" | grep "::" | wc -l'
+  bash -lc "uv run pytest --collect-only -q -m '$RESEARCH_NIGHTLY_MARKER_EXPR' | grep '::' | wc -l"
 
 run "collect count: memory_sensitive" \
   bash -lc 'uv run pytest --collect-only -q -m "memory_sensitive" | grep "::" | wc -l'
 
 run "collect count: default PR fast suite" \
-  bash -lc 'uv run pytest --collect-only -q -m "not research_e2e and not nightly and not audit_e2e and not walk_forward_e2e and not parallel_e2e and not memory_sensitive" | grep "::" | wc -l'
+  bash -lc "uv run pytest --collect-only -q -m '$FAST_MARKER_EXPR' | grep '::' | wc -l"
 
 run "cProfile: stress order independence test" \
   uv run python -m cProfile -o /tmp/stress_order.prof -m pytest -q \

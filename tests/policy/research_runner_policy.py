@@ -39,6 +39,22 @@ APPROVED_CONTRACT_HELPERS = {
 
 INVENTORY_PATH = Path("tests/policy/research_e2e_inventory.json")
 
+SMALL_IN_MEMORY_DATASET_HELPERS = {
+    "_dataset_from_closes",
+    "_max_holding_dataset",
+    "_raw_buy_protective_exit_dataset",
+    "_research_dataset_from_closes",
+    "_sell_filter_block_dataset",
+    "_small_dataset_snapshot",
+    "_snapshot_from_closes",
+    "_stop_loss_dataset",
+}
+
+PATH_SCOPED_SMALL_IN_MEMORY_DATASET_HELPERS = {
+    Path("tests/test_orderbook_top_research.py"): {"_signal_dataset"},
+    Path("tests/test_research_strategy_canary.py"): {"_dataset"},
+}
+
 
 @dataclass(frozen=True)
 class RunnerCall:
@@ -196,15 +212,17 @@ def discover_real_kernel_calls(test_root: Path) -> Iterable[RunnerCall]:
             if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
                 continue
             markers = frozenset(_decorator_marker_names(node) | _class_marker_names(node, parent_by_id))
-            bounded_names = _bounded_dataset_names(node)
-            bounded_mappings = _bounded_dataset_mapping_names(node, bounded_names)
+            bounded_candle_names = _bounded_candle_names(node)
+            small_fixture_helpers = _small_fixture_helpers_for_path(display_path)
+            bounded_names = _bounded_dataset_names(node, bounded_candle_names, small_fixture_helpers)
+            bounded_mappings = _bounded_dataset_mapping_names(node, bounded_names, small_fixture_helpers)
             for call in ast.walk(node):
                 if not isinstance(call, ast.Call):
                     continue
                 entrypoint = _entrypoint_call_name(call, aliases)
                 if entrypoint is None:
                     continue
-                if _is_bounded_micro_kernel_call(call, bounded_names, bounded_mappings):
+                if _is_bounded_micro_kernel_call(call, bounded_names, bounded_mappings, bounded_candle_names, small_fixture_helpers):
                     continue
                 yield RunnerCall(
                     path=display_path,
@@ -355,35 +373,91 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def _bounded_dataset_names(node: ast.FunctionDef) -> set[str]:
+def _bounded_candle_names(node: ast.FunctionDef) -> set[str]:
     names: set[str] = set()
-    for statement in ast.walk(node):
-        if isinstance(statement, ast.Assign) and _is_bounded_dataset_expr(statement.value):
-            for target in statement.targets:
-                if isinstance(target, ast.Name):
+    changed = True
+    while changed:
+        changed = False
+        for statement in ast.walk(node):
+            value: ast.AST | None = None
+            targets: list[ast.AST] = []
+            if isinstance(statement, ast.Assign):
+                value = statement.value
+                targets = list(statement.targets)
+            elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+                value = statement.value
+                targets = [statement.target]
+            if value is None or not _is_bounded_candles_expr(value, names):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in names:
                     names.add(target.id)
-        elif isinstance(statement, ast.AnnAssign) and statement.value is not None and _is_bounded_dataset_expr(statement.value):
-            if isinstance(statement.target, ast.Name):
-                names.add(statement.target.id)
+                    changed = True
     return names
 
 
-def _bounded_dataset_mapping_names(node: ast.FunctionDef, bounded_names: set[str]) -> set[str]:
+def _small_fixture_helpers_for_path(path: Path) -> set[str]:
+    return SMALL_IN_MEMORY_DATASET_HELPERS | PATH_SCOPED_SMALL_IN_MEMORY_DATASET_HELPERS.get(path, set())
+
+
+def _bounded_dataset_names(
+    node: ast.FunctionDef,
+    bounded_candle_names: set[str],
+    small_fixture_helpers: set[str],
+) -> set[str]:
+    names: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for statement in ast.walk(node):
+            value: ast.AST | None = None
+            targets: list[ast.AST] = []
+            if isinstance(statement, ast.Assign):
+                value = statement.value
+                targets = list(statement.targets)
+            elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+                value = statement.value
+                targets = [statement.target]
+            if value is None or not _is_bounded_dataset_expr(value, names, bounded_candle_names, small_fixture_helpers):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in names:
+                    names.add(target.id)
+                    changed = True
+    return names
+
+
+def _bounded_dataset_mapping_names(
+    node: ast.FunctionDef,
+    bounded_names: set[str],
+    small_fixture_helpers: set[str],
+) -> set[str]:
     names: set[str] = set()
     for statement in ast.walk(node):
-        if isinstance(statement, ast.Assign) and _dict_has_bounded_dataset(statement.value, bounded_names):
+        if isinstance(statement, ast.Assign) and _dict_has_bounded_dataset(statement.value, bounded_names, small_fixture_helpers):
             for target in statement.targets:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
         elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
-            if _dict_has_bounded_dataset(statement.value, bounded_names) and isinstance(statement.target, ast.Name):
+            if _dict_has_bounded_dataset(statement.value, bounded_names, small_fixture_helpers) and isinstance(statement.target, ast.Name):
                 names.add(statement.target.id)
     return names
 
 
-def _is_bounded_micro_kernel_call(call: ast.Call, bounded_names: set[str], bounded_mappings: set[str]) -> bool:
+def _is_bounded_micro_kernel_call(
+    call: ast.Call,
+    bounded_names: set[str],
+    bounded_mappings: set[str],
+    bounded_candle_names: set[str],
+    small_fixture_helpers: set[str],
+) -> bool:
     dataset_keywords = [keyword for keyword in call.keywords if keyword.arg == "dataset"]
-    if len(dataset_keywords) == 1 and _is_bounded_dataset_expr(dataset_keywords[0].value, bounded_names):
+    if len(dataset_keywords) == 1 and _is_bounded_dataset_expr(
+        dataset_keywords[0].value,
+        bounded_names,
+        bounded_candle_names,
+        small_fixture_helpers,
+    ):
         return True
     for keyword in call.keywords:
         if keyword.arg is None and _is_bounded_dataset_unpack(keyword.value, bounded_mappings):
@@ -391,40 +465,81 @@ def _is_bounded_micro_kernel_call(call: ast.Call, bounded_names: set[str], bound
     return False
 
 
-def _is_bounded_dataset_expr(node: ast.AST, bounded_names: set[str] | None = None) -> bool:
+def _is_bounded_dataset_expr(
+    node: ast.AST,
+    bounded_names: set[str] | None = None,
+    bounded_candle_names: set[str] | None = None,
+    small_fixture_helpers: set[str] | None = None,
+) -> bool:
     bounded_names = bounded_names or set()
+    bounded_candle_names = bounded_candle_names or set()
+    small_fixture_helpers = small_fixture_helpers or SMALL_IN_MEMORY_DATASET_HELPERS
     if isinstance(node, ast.Name):
-        lowered = node.id.lower()
-        return node.id in bounded_names or lowered in {"dataset", "snapshot"} or lowered.endswith(("dataset", "snapshot"))
+        return node.id in bounded_names
     if isinstance(node, ast.Call):
         name = _call_name(node)
         if name == "DatasetSnapshot":
-            return _call_has_bounded_candles(node)
-        if name and any(token in name.lower() for token in ("dataset", "snapshot", "closes")):
+            return _call_has_bounded_candles(node, bounded_candle_names)
+        if name in small_fixture_helpers:
             return True
     return False
 
 
-def _call_has_bounded_candles(node: ast.Call) -> bool:
+def _call_has_bounded_candles(node: ast.Call, bounded_candle_names: set[str]) -> bool:
     for keyword in node.keywords:
         if keyword.arg != "candles":
             continue
-        value = keyword.value
-        if isinstance(value, (ast.Tuple, ast.List)):
-            return True
-        if isinstance(value, ast.Name):
-            return True
-        if isinstance(value, ast.Call) and _call_name(value) == "tuple":
-            return True
+        return _is_bounded_candles_expr(keyword.value, bounded_candle_names)
     return False
 
 
-def _dict_has_bounded_dataset(node: ast.AST, bounded_names: set[str]) -> bool:
+def _is_bounded_candles_expr(node: ast.AST, bounded_candle_names: set[str]) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in bounded_candle_names
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return True
+    if isinstance(node, ast.ListComp):
+        return _listcomp_iterates_bounded_literal(node, bounded_candle_names)
+    if isinstance(node, ast.Call):
+        name = _call_name(node)
+        if name == "tuple" and len(node.args) == 1:
+            return _is_bounded_candles_expr(node.args[0], bounded_candle_names)
+        if name == "list" and len(node.args) == 1:
+            return _is_bounded_candles_expr(node.args[0], bounded_candle_names)
+    if isinstance(node, ast.GeneratorExp):
+        return _generator_iterates_bounded_literal(node, bounded_candle_names)
+    return False
+
+
+def _listcomp_iterates_bounded_literal(node: ast.ListComp, bounded_candle_names: set[str]) -> bool:
+    return _generator_iterates_bounded_literal(node, bounded_candle_names)
+
+
+def _generator_iterates_bounded_literal(
+    node: ast.ListComp | ast.GeneratorExp,
+    bounded_candle_names: set[str],
+) -> bool:
+    if len(node.generators) != 1:
+        return False
+    generator = node.generators[0]
+    if _is_bounded_candles_expr(generator.iter, bounded_candle_names):
+        return True
+    if not isinstance(generator.iter, ast.Call):
+        return False
+    name = _call_name(generator.iter)
+    if name == "range":
+        return True
+    if name == "enumerate" and len(generator.iter.args) == 1:
+        return _is_bounded_candles_expr(generator.iter.args[0], bounded_candle_names)
+    return False
+
+
+def _dict_has_bounded_dataset(node: ast.AST, bounded_names: set[str], small_fixture_helpers: set[str]) -> bool:
     if not isinstance(node, ast.Dict):
         return False
     for key, value in zip(node.keys, node.values):
         if isinstance(key, ast.Constant) and key.value == "dataset":
-            return _is_bounded_dataset_expr(value, bounded_names)
+            return _is_bounded_dataset_expr(value, bounded_names, small_fixture_helpers=small_fixture_helpers)
     return False
 
 

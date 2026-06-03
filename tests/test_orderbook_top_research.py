@@ -1043,6 +1043,7 @@ def test_latency_changes_fill_reference_quote() -> None:
     assert slow.trades[0]["execution"]["latency_reference_policy_warning"] is None
 
 
+@pytest.mark.research_kernel
 def test_latency_adjusted_orderbook_loads_quote_after_latency_plus_wait(tmp_path: Path) -> None:
     db_path = tmp_path / "quotes.sqlite"
     conn = ensure_db(str(db_path))

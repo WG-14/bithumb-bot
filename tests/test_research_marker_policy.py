@@ -110,6 +110,143 @@ def test_bounded_micro_kernel():
     assert not any("test_bounded_micro_kernel" in violation for violation in violations)
 
 
+def test_policy_rejects_named_dataset_variables_without_bounded_origin(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_named_dataset.py"
+    test_file.write_text(
+        """
+from bithumb_bot.research.backtest_engine import run_sma_backtest
+
+def test_dataset_name_is_not_bounded():
+    dataset = load_dataset_split(manifest=None, split_name="train")
+    run_sma_backtest(dataset=dataset, parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+
+def test_snapshot_suffix_is_not_bounded():
+    tiny_snapshot = load_dataset_range(db_path="prod.sqlite", start=None, end=None)
+    run_sma_backtest(dataset=tiny_snapshot, parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any("test_dataset_name_is_not_bounded calls run_sma_backtest" in violation for violation in violations)
+    assert any("test_snapshot_suffix_is_not_bounded calls run_sma_backtest" in violation for violation in violations)
+
+
+def test_policy_rejects_non_allowlisted_dataset_helper_names(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_helper_names.py"
+    test_file.write_text(
+        """
+from bithumb_bot.research.backtest_engine import run_sma_backtest
+
+def test_make_dataset_name_is_not_bounded():
+    run_sma_backtest(dataset=make_dataset(), parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+
+def test_load_big_dataset_name_is_not_bounded():
+    run_sma_backtest(dataset=load_big_dataset(), parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+
+def test_make_snapshot_name_is_not_bounded():
+    run_sma_backtest(dataset=make_snapshot(), parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+
+def test_closes_helper_name_is_not_bounded():
+    run_sma_backtest(dataset=build_from_closes(), parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any("test_make_dataset_name_is_not_bounded calls run_sma_backtest" in violation for violation in violations)
+    assert any("test_load_big_dataset_name_is_not_bounded calls run_sma_backtest" in violation for violation in violations)
+    assert any("test_make_snapshot_name_is_not_bounded calls run_sma_backtest" in violation for violation in violations)
+    assert any("test_closes_helper_name_is_not_bounded calls run_sma_backtest" in violation for violation in violations)
+
+
+def test_policy_allows_direct_small_dataset_snapshot_and_derived_variable(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_direct_snapshot.py"
+    test_file.write_text(
+        """
+from bithumb_bot.research.backtest_engine import run_sma_backtest
+from bithumb_bot.research.dataset_snapshot import DatasetSnapshot
+
+def test_direct_small_snapshot_is_bounded():
+    run_sma_backtest(
+        dataset=DatasetSnapshot(candles=()),
+        parameter_values={},
+        fee_rate=0.0,
+        slippage_bps=0.0,
+    )
+
+def test_same_function_derived_snapshot_is_bounded():
+    candles = []
+    snapshot = DatasetSnapshot(candles=candles)
+    kwargs = {"dataset": snapshot}
+    run_sma_backtest(**kwargs, parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert violations == []
+
+
+def test_policy_allows_explicit_small_fixture_helper(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_allowlisted_helper.py"
+    test_file.write_text(
+        """
+from bithumb_bot.research.backtest_engine import run_sma_backtest
+
+def test_allowlisted_small_fixture_helper_is_bounded():
+    dataset = _small_dataset_snapshot()
+    run_sma_backtest(dataset=dataset, parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert violations == []
+
+
+def test_policy_allows_marked_unbounded_real_kernel_calls(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_marked_kernel.py"
+    test_file.write_text(
+        """
+import pytest
+from bithumb_bot.research.backtest_engine import run_sma_backtest
+
+@pytest.mark.research_kernel
+def test_research_kernel_marker_allows_unbounded_call():
+    run_sma_backtest(dataset=load_dataset_split(manifest=None, split_name="train"), parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+
+@pytest.mark.slow_research
+def test_expensive_marker_allows_unbounded_call():
+    run_sma_backtest(dataset=load_big_dataset(), parameter_values={}, fee_rate=0.0, slippage_bps=0.0)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(tmp_path / "inventory.json", [])
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert violations == []
+
+
 def test_policy_requires_excluded_marker_for_disabled_fast_budget(tmp_path: Path) -> None:
     test_root = tmp_path / "tests"
     test_root.mkdir()
