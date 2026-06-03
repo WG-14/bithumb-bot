@@ -1127,6 +1127,12 @@ def test_research_backtest_report_includes_execution_plan_and_observability(tmp_
 
     assert_fast_research_workload(report)
     assert report["execution_policy"]["mode"] == "serial"
+    assert report["execution_observability"]["requested_execution_mode"] == "serial"
+    assert report["execution_observability"]["actual_execution_mode"] == "contract_evaluator_in_process"
+    assert report["execution_observability"]["worker_context_mode"] == "in_process_contract"
+    assert report["execution_observability"]["parallel_executor_used"] is False
+    assert report["execution_observability"]["contract_evaluator_used"] is True
+    assert report["execution_observability"]["production_evaluator_used"] is False
     assert report["execution_plan"]["candidate_count"] == 1
     assert report["execution_plan"]["scenario_count"] == 1
     assert report["execution_plan"]["split_count"] == 3
@@ -1430,7 +1436,7 @@ def test_explicit_default_execution_policy_preserves_serial_metrics(tmp_path, mo
 @pytest.mark.slow_research
 @pytest.mark.integration
 @pytest.mark.nightly
-def test_parallel_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
+def test_parallel_manifest_contract_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
     for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
@@ -1474,6 +1480,15 @@ def test_parallel_candidate_scenario_matches_serial_logical_results(tmp_path, mo
 
     assert parallel["execution_policy"]["mode"] == "parallel"
     assert parallel["execution_policy"]["max_workers"] == 2
+    assert parallel["execution_observability"]["requested_execution_mode"] == "parallel"
+    assert parallel["execution_observability"]["actual_execution_mode"] == "contract_evaluator_in_process"
+    assert parallel["execution_observability"]["worker_context_mode"] == "in_process_contract"
+    assert parallel["execution_observability"]["parallel_executor_used"] is False
+    assert parallel["execution_observability"]["contract_evaluator_used"] is True
+    assert parallel["execution_observability"]["production_evaluator_used"] is False
+    assert parallel["execution_observability"]["requested_parallel_task_count"] == 2
+    assert parallel["execution_observability"]["actual_parallel_task_count"] == 0
+    assert parallel["execution_observability"]["parallel_task_count"] == 0
     assert len(parallel["execution_observability"]["work_units"]) == 2
     assert _logical_candidate_summary(serial) == _logical_candidate_summary(parallel)
     assert [
@@ -1626,7 +1641,7 @@ def test_work_unit_hash_and_work_result_input_hash_have_separate_boundaries() ->
 @pytest.mark.slow_research
 @pytest.mark.integration
 @pytest.mark.nightly
-def test_parallel_stress_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
+def test_parallel_manifest_contract_stress_candidate_scenario_matches_serial_logical_results(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
     for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
@@ -1678,8 +1693,13 @@ def test_parallel_stress_candidate_scenario_matches_serial_logical_results(tmp_p
     )
 
     assert serial["manifest_hash"] != parallel["manifest_hash"]
-    assert parallel["execution_observability"]["worker_context_mode"] == "worker_initializer"
-    assert parallel["execution_observability"]["parallel_task_count"] == 2
+    assert parallel["execution_observability"]["requested_execution_mode"] == "parallel"
+    assert parallel["execution_observability"]["actual_execution_mode"] == "contract_evaluator_in_process"
+    assert parallel["execution_observability"]["worker_context_mode"] == "in_process_contract"
+    assert parallel["execution_observability"]["parallel_executor_used"] is False
+    assert parallel["execution_observability"]["requested_parallel_task_count"] == 2
+    assert parallel["execution_observability"]["actual_parallel_task_count"] == 0
+    assert parallel["execution_observability"]["parallel_task_count"] == 0
     assert _logical_candidate_summary(serial) == _logical_candidate_summary(parallel)
     assert serial["candidates"][0]["candidate_behavior_profile_hash"] == parallel["candidates"][0]["candidate_behavior_profile_hash"]
     assert serial["candidates"][0]["candidate_profile_hash"] != parallel["candidates"][0]["candidate_profile_hash"]
@@ -1732,6 +1752,15 @@ def test_parallel_executor_uses_lightweight_tasks_with_worker_initializer(tmp_pa
     )
 
     assert report["execution_observability"]["worker_context_mode"] == "worker_initializer"
+    assert report["execution_observability"]["requested_execution_mode"] == "parallel"
+    assert report["execution_observability"]["actual_execution_mode"] == "parallel_worker_initializer"
+    assert report["execution_observability"]["actual_worker_context_mode"] == "worker_initializer"
+    assert report["execution_observability"]["parallel_executor_used"] is True
+    assert report["execution_observability"]["production_evaluator_used"] is True
+    assert report["execution_observability"]["contract_evaluator_used"] is False
+    assert report["execution_observability"]["requested_parallel_task_count"] == 2
+    assert report["execution_observability"]["actual_parallel_task_count"] == 2
+    assert report["execution_observability"]["parallel_task_count"] == 2
     assert captured_tasks
     assert all("snapshots" not in task for task in captured_tasks)
     assert all("manifest" not in task for task in captured_tasks)
@@ -2393,6 +2422,10 @@ def test_walk_forward_report_includes_execution_plan_and_observability(tmp_path,
     )
 
     assert report["execution_policy"]["mode"] == "serial"
+    assert report["execution_observability"]["requested_execution_mode"] == "serial"
+    assert report["execution_observability"]["actual_execution_mode"] == "contract_evaluator_in_process"
+    assert report["execution_observability"]["worker_context_mode"] == "in_process_contract"
+    assert report["execution_observability"]["parallel_executor_used"] is False
     assert report["execution_plan"]["split_names"] == [
         "train",
         "validation",
@@ -3318,6 +3351,13 @@ def test_research_sweep_continues_after_guard_failure_and_writes_candidate_artif
     )
 
     assert len(report["candidates"]) == 2
+    assert report["execution_policy"]["mode"] == "serial"
+    assert report["execution_observability"]["requested_execution_mode"] == "serial"
+    assert report["execution_observability"]["actual_execution_mode"] == "serial_production_evaluator"
+    assert report["execution_observability"]["worker_context_mode"] == "in_process_production"
+    assert report["execution_observability"]["parallel_executor_used"] is False
+    assert report["execution_observability"]["production_evaluator_used"] is True
+    assert report["execution_observability"]["contract_evaluator_used"] is False
     assert any("candidate_resource_limit_exceeded" in (candidate.get("gate_fail_reasons") or []) for candidate in report["candidates"])
     assert Path(report["artifact_paths"]["report_path"]).exists()
     assert Path(report["artifact_paths"]["derived_path"]).exists()
@@ -3393,6 +3433,13 @@ def test_parallel_research_failure_is_committed_by_main_process(tmp_path, monkey
     events = (root / "candidate_events.jsonl").read_text(encoding="utf-8").splitlines()
     failures = list((root / "candidate_failures").glob("candidate_*.json"))
     assert len(report["candidates"]) == 2
+    assert report["execution_policy"]["mode"] == "parallel"
+    assert report["execution_observability"]["requested_execution_mode"] == "parallel"
+    assert report["execution_observability"]["actual_execution_mode"] == "parallel_worker_initializer"
+    assert report["execution_observability"]["worker_context_mode"] == "worker_initializer"
+    assert report["execution_observability"]["parallel_executor_used"] is True
+    assert report["execution_observability"]["production_evaluator_used"] is True
+    assert report["execution_observability"]["contract_evaluator_used"] is False
     assert any(item["status"] == "failed" for item in report["execution_observability"]["work_units"])
     assert any('"stage":"candidate_failure"' in line for line in events)
     assert failures

@@ -228,12 +228,39 @@ research command from the manifest and dataset so fresh traces, report hashes,
 statistical evidence, and registry bindings are generated together; do not patch
 hashes or edit trace files by hand.
 
+`execution_policy.mode` is the manifest-declared requested execution policy. It
+records what the manifest asked for, such as `serial` or `parallel`; it is not
+proof that the run crossed a subprocess or worker-initializer boundary.
+
+Reports also expose `execution_observability.actual_execution_mode`, which is
+the evaluator/executor branch that actually ran. Stable values include
+`serial_production_evaluator`, `parallel_worker_initializer`, and
+`contract_evaluator_in_process`. Supporting fields include
+`requested_execution_mode`, `requested_max_workers`,
+`requested_work_unit_type`, `candidate_evaluator_kind`,
+`actual_worker_context_mode`, `parallel_executor_used`,
+`production_evaluator_used`, and `contract_evaluator_used`. The legacy
+`execution_observability.worker_context_mode` field remains for consumers, but
+it is now derived from the actual execution branch rather than the requested
+manifest mode.
+
+Injected fake or contract evaluators run in process through the contract
+evaluator path, even when the manifest requests `execution.mode=parallel`.
+Those reports must show requested mode `parallel` but actual mode
+`contract_evaluator_in_process`, with `parallel_executor_used=false`. Such runs
+are valid for fast contract/report validation and logical equivalence checks,
+but they are not evidence of real subprocess isolation or parallel worker
+initializer behavior. Real parallel executor evidence exists only when
+`actual_execution_mode=parallel_worker_initializer` and
+`parallel_executor_used=true`.
+
 Candidate subprocess isolation is implemented only when the report shows real
-`worker_process_evidence` for each candidate work unit. Production-bound promotion
-fails closed with `subprocess_candidate_isolation_missing` if required worker
-evidence is absent. Operators must not treat a completed in-process diagnostic
-run as implemented process isolation until each candidate/scenario/split has worker PID,
-exit, timeout/resource, seed, and terminal trace-status evidence.
+`worker_process_evidence` for each candidate work unit. Production-bound
+promotion fails closed with `subprocess_candidate_isolation_missing` if required
+worker evidence is absent. Operators must not treat a completed in-process
+diagnostic or contract run as implemented process isolation until each
+candidate/scenario/split has worker PID, exit, timeout/resource, seed, and
+terminal trace-status evidence.
 
 Research resource memory evidence is candidate-local. `max_rss_mb` is retained
 as the manifest field name, but reports declare `max_rss_mb_semantics` as

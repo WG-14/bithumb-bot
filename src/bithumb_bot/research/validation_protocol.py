@@ -137,6 +137,12 @@ class EvaluationContext:
     worker_pid: int | None = None
 
 
+@dataclass(frozen=True)
+class CandidateEvaluationResult:
+    candidates: list[dict[str, Any]]
+    execution_boundary: dict[str, Any]
+
+
 class CandidateScenarioEvaluator(Protocol):
     def evaluate(self, work_unit: ResearchWorkUnit, context: EvaluationContext) -> ResearchWorkResult:
         ...
@@ -613,6 +619,67 @@ def _validate_parallel_research_run_policy(manifest: ExperimentManifest) -> None
         raise ResearchValidationError("parallel_execution_full_decisions_external_jsonl_not_supported")
 
 
+def _candidate_evaluator_kind(candidate_evaluator: CandidateScenarioEvaluator | None) -> str:
+    return "production_evaluator" if candidate_evaluator is None else "injected_contract_evaluator"
+
+
+def _execution_boundary_observability(
+    *,
+    manifest: ExperimentManifest,
+    candidate_evaluator: CandidateScenarioEvaluator | None,
+    parallel_executor_used: bool,
+) -> dict[str, Any]:
+    evaluator_kind = _candidate_evaluator_kind(candidate_evaluator)
+    requested_mode = manifest.research_run.execution.mode
+    if parallel_executor_used:
+        actual_execution_mode = "parallel_worker_initializer"
+        actual_worker_context_mode = "worker_initializer"
+    elif candidate_evaluator is None:
+        actual_execution_mode = "serial_production_evaluator"
+        actual_worker_context_mode = "in_process_production"
+    else:
+        actual_execution_mode = "contract_evaluator_in_process"
+        actual_worker_context_mode = "in_process_contract"
+    requested_task_count = (
+        len(manifest.execution_model.scenarios) * len(iter_parameter_candidates(manifest.parameter_space))
+        if requested_mode == "parallel"
+        else 0
+    )
+    return {
+        "requested_execution_mode": requested_mode,
+        "requested_max_workers": manifest.research_run.execution.max_workers,
+        "requested_work_unit_type": manifest.research_run.execution.work_unit,
+        "candidate_evaluator_kind": evaluator_kind,
+        "actual_execution_mode": actual_execution_mode,
+        "actual_worker_context_mode": actual_worker_context_mode,
+        "parallel_executor_used": parallel_executor_used,
+        "production_evaluator_used": candidate_evaluator is None,
+        "contract_evaluator_used": candidate_evaluator is not None,
+        "requested_parallel_task_count": requested_task_count,
+        "actual_parallel_task_count": requested_task_count if parallel_executor_used else 0,
+    }
+
+
+def _execution_observability_payload(
+    *,
+    manifest: ExperimentManifest,
+    stage_timings: list[dict[str, Any]],
+    work_unit_observability: list[dict[str, Any]],
+    execution_boundary: dict[str, Any],
+    snapshots: dict[str, DatasetSnapshot],
+) -> dict[str, Any]:
+    return {
+        "stage_timings": stage_timings,
+        "work_units": work_unit_observability,
+        "worker_context_mode": execution_boundary["actual_worker_context_mode"],
+        "parallel_task_count": execution_boundary["actual_parallel_task_count"],
+        "max_workers": manifest.research_run.execution.max_workers,
+        "work_unit_type": manifest.research_run.execution.work_unit,
+        "approx_snapshot_candle_count": sum(len(snapshot.candles) for snapshot in snapshots.values()),
+        **execution_boundary,
+    }
+
+
 def run_research_backtest(
     *,
     manifest: ExperimentManifest,
@@ -729,7 +796,7 @@ def run_research_backtest(
         estimated_strategy_runs=execution_plan.payload["estimated_strategy_runs"],
     )
     stage_started = time.perf_counter()
-    candidates = _evaluate_candidates(
+    evaluation = _evaluate_candidates(
         manifest=manifest,
         manager=manager,
         snapshots=snapshots,
@@ -741,22 +808,15 @@ def run_research_backtest(
         progress_callback=progress_callback,
         candidate_evaluator=candidate_evaluator,
     )
+    candidates = evaluation.candidates
     stage_timings.append(_stage_timing("candidate_evaluation", stage_started, candidate_count=len(candidates)))
-    execution_observability = {
-        "stage_timings": stage_timings,
-        "work_units": work_unit_observability,
-        "worker_context_mode": (
-            "worker_initializer" if manifest.research_run.execution.mode == "parallel" else "in_process"
-        ),
-        "parallel_task_count": (
-            len(manifest.execution_model.scenarios) * len(iter_parameter_candidates(manifest.parameter_space))
-            if manifest.research_run.execution.mode == "parallel"
-            else 0
-        ),
-        "max_workers": manifest.research_run.execution.max_workers,
-        "work_unit_type": manifest.research_run.execution.work_unit,
-        "approx_snapshot_candle_count": sum(len(snapshot.candles) for snapshot in snapshots.values()),
-    }
+    execution_observability = _execution_observability_payload(
+        manifest=manifest,
+        stage_timings=stage_timings,
+        work_unit_observability=work_unit_observability,
+        execution_boundary=evaluation.execution_boundary,
+        snapshots=snapshots,
+    )
     report = _report_payload(
         manifest=manifest,
         snapshots=tuple(snapshots.values()),
@@ -926,7 +986,7 @@ def run_research_walk_forward(
         estimated_strategy_runs=execution_plan.payload["estimated_strategy_runs"],
     )
     stage_started = time.perf_counter()
-    candidates = _evaluate_candidates(
+    evaluation = _evaluate_candidates(
         manifest=manifest,
         manager=manager,
         snapshots=snapshots,
@@ -938,22 +998,15 @@ def run_research_walk_forward(
         progress_callback=progress_callback,
         candidate_evaluator=candidate_evaluator,
     )
+    candidates = evaluation.candidates
     stage_timings.append(_stage_timing("candidate_evaluation", stage_started, candidate_count=len(candidates)))
-    execution_observability = {
-        "stage_timings": stage_timings,
-        "work_units": work_unit_observability,
-        "worker_context_mode": (
-            "worker_initializer" if manifest.research_run.execution.mode == "parallel" else "in_process"
-        ),
-        "parallel_task_count": (
-            len(manifest.execution_model.scenarios) * len(iter_parameter_candidates(manifest.parameter_space))
-            if manifest.research_run.execution.mode == "parallel"
-            else 0
-        ),
-        "max_workers": manifest.research_run.execution.max_workers,
-        "work_unit_type": manifest.research_run.execution.work_unit,
-        "approx_snapshot_candle_count": sum(len(snapshot.candles) for snapshot in snapshots.values()),
-    }
+    execution_observability = _execution_observability_payload(
+        manifest=manifest,
+        stage_timings=stage_timings,
+        work_unit_observability=work_unit_observability,
+        execution_boundary=evaluation.execution_boundary,
+        snapshots=snapshots,
+    )
     report = _report_payload(
         manifest=manifest,
         snapshots=tuple(snapshots.values()),
@@ -1011,7 +1064,7 @@ def _evaluate_candidates(
     work_unit_observability: list[dict[str, Any]] | None = None,
     progress_callback: ProgressCallback | None = None,
     candidate_evaluator: CandidateScenarioEvaluator | None = None,
-) -> list[dict[str, Any]]:
+) -> CandidateEvaluationResult:
     raw_candidates = iter_parameter_candidates(manifest.parameter_space)
     aggregates: dict[str, dict[str, Any]] = {}
     manifest_hash = manifest.manifest_hash()
@@ -1080,7 +1133,13 @@ def _evaluate_candidates(
             )
 
     evaluator = candidate_evaluator or ProductionCandidateScenarioEvaluator()
-    if manifest.research_run.execution.mode == "parallel" and candidate_evaluator is None:
+    parallel_executor_used = manifest.research_run.execution.mode == "parallel" and candidate_evaluator is None
+    execution_boundary = _execution_boundary_observability(
+        manifest=manifest,
+        candidate_evaluator=candidate_evaluator,
+        parallel_executor_used=parallel_executor_used,
+    )
+    if parallel_executor_used:
         for task in work_tasks:
             _append_candidate_event(
                 manager=manager,
@@ -1832,7 +1891,10 @@ def _evaluate_candidates(
                 "gate_fail_reasons": candidate_payload.get("gate_fail_reasons") or [],
             },
         )
-    return sorted(rows, key=_candidate_rank_key)
+    return CandidateEvaluationResult(
+        candidates=sorted(rows, key=_candidate_rank_key),
+        execution_boundary=execution_boundary,
+    )
 
 
 def _normalize_failed_work_result_without_base(
