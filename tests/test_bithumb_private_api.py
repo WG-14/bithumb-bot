@@ -149,7 +149,6 @@ def _incident_paid_fee_fixture() -> dict[str, object]:
 @pytest.fixture(autouse=True)
 def _stub_canonical_market(monkeypatch):
     monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _market: "KRW-BTC")
-    monkeypatch.setattr("bithumb_bot.broker.order_rules.canonical_market_id", lambda _market: "KRW-BTC")
 
 
 @pytest.fixture(autouse=True)
