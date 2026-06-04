@@ -497,6 +497,75 @@
       "tier": "research_nightly"
     },
     {
+      "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_budget_overage_fails_fast_in_pipeline",
+      "markers": [
+        "audit_e2e"
+      ],
+      "reason": "verifies complete external audit artifact budget overage fails fast through a real production backtest pipeline",
+      "expected_workload": {
+        "strategy_count": 1,
+        "manifest_count": 1,
+        "strategy_canary_count": 0,
+        "estimated_strategy_runs": 1,
+        "estimated_tick_events": 4320,
+        "estimated_audit_stream_rows": 12960,
+        "estimated_artifact_write_count": 8,
+        "estimated_hash_payload_bytes": 557568,
+        "estimated_artifact_bytes": 7229440,
+        "estimated_artifact_file_count": 8
+      },
+      "duration_budget_seconds": 90,
+      "domain": "research_audit_budget",
+      "last_measured_seconds": 30,
+      "tier": "research_nightly"
+    },
+    {
+      "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_stream_row_budget_overage_fails_fast_in_pipeline",
+      "markers": [
+        "audit_e2e"
+      ],
+      "reason": "verifies complete external audit stream row budget overage fails fast through a real production backtest pipeline",
+      "expected_workload": {
+        "strategy_count": 1,
+        "manifest_count": 1,
+        "strategy_canary_count": 0,
+        "estimated_strategy_runs": 1,
+        "estimated_tick_events": 4320,
+        "estimated_audit_stream_rows": 12960,
+        "estimated_artifact_write_count": 8,
+        "estimated_hash_payload_bytes": 557568,
+        "estimated_artifact_bytes": 7229440,
+        "estimated_artifact_file_count": 8
+      },
+      "duration_budget_seconds": 90,
+      "domain": "research_audit_budget",
+      "last_measured_seconds": 30,
+      "tier": "research_nightly"
+    },
+    {
+      "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_stream_byte_budget_overage_fails_fast_in_pipeline",
+      "markers": [
+        "audit_e2e"
+      ],
+      "reason": "verifies complete external audit stream byte budget overage fails fast through a real production backtest pipeline",
+      "expected_workload": {
+        "strategy_count": 1,
+        "manifest_count": 1,
+        "strategy_canary_count": 0,
+        "estimated_strategy_runs": 1,
+        "estimated_tick_events": 4320,
+        "estimated_audit_stream_rows": 12960,
+        "estimated_artifact_write_count": 8,
+        "estimated_hash_payload_bytes": 557568,
+        "estimated_artifact_bytes": 7229440,
+        "estimated_artifact_file_count": 8
+      },
+      "duration_budget_seconds": 90,
+      "domain": "research_audit_budget",
+      "last_measured_seconds": 30,
+      "tier": "research_nightly"
+    },
+    {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_tiny_three_day_sma_backtest_completes_structurally",
       "tier": "research_nightly",
       "markers": [

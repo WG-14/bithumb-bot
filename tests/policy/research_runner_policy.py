@@ -52,6 +52,24 @@ APPROVED_FAST_TIER_GUARD_HELPERS = {
 
 INVENTORY_PATH = Path("tests/policy/research_e2e_inventory.json")
 
+EXPECTED_WORKLOAD_FIELDS = (
+    "strategy_count",
+    "manifest_count",
+    "strategy_canary_count",
+    "estimated_strategy_runs",
+    "estimated_tick_events",
+    "estimated_audit_stream_rows",
+    "estimated_artifact_write_count",
+    "estimated_hash_payload_bytes",
+    "estimated_artifact_bytes",
+    "estimated_artifact_file_count",
+)
+
+DEFAULT_REQUIRED_MARKER_BY_ENTRYPOINT = {
+    "run_research_backtest": "research_e2e",
+    "run_research_walk_forward": "walk_forward_e2e",
+}
+
 SMALL_IN_MEMORY_DATASET_HELPERS = {
     "_dataset_from_closes",
     "_max_holding_dataset",
@@ -119,6 +137,10 @@ def load_inventory(path: Path = INVENTORY_PATH) -> dict[str, dict[str, object]]:
         last_measured_seconds = item.get("last_measured_seconds")
         if not isinstance(nodeid, str) or not nodeid:
             raise AssertionError(f"{path} inventory entry missing nodeid")
+        if _is_unfilled_placeholder(nodeid):
+            raise AssertionError(f"{path} inventory entry has unfilled placeholder nodeid")
+        if _is_unfilled_placeholder(reason):
+            raise AssertionError(f"{path} inventory entry {nodeid} has unfilled placeholder reason")
         if not isinstance(reason, str) or not reason.strip():
             raise AssertionError(f"{path} inventory entry {nodeid} missing reason")
         if not isinstance(markers, list) or not markers:
@@ -128,37 +150,36 @@ def load_inventory(path: Path = INVENTORY_PATH) -> dict[str, dict[str, object]]:
             raise AssertionError(f"{path} inventory entry {nodeid} has malformed markers")
         if marker_set.isdisjoint(EXPENSIVE_RESEARCH_MARKERS):
             raise AssertionError(f"{path} inventory entry {nodeid} lacks an expensive marker")
-        if not isinstance(tier, str) or not tier.strip():
+        if not isinstance(tier, str) or not tier.strip() or _is_unfilled_placeholder(tier):
             raise AssertionError(f"{path} inventory entry {nodeid} missing tier")
         if not isinstance(expected_workload, dict) or not expected_workload:
             raise AssertionError(f"{path} inventory entry {nodeid} missing expected_workload")
         expected_workload = _normalized_expected_workload(expected_workload)
         item["expected_workload"] = expected_workload
-        for workload_field in (
-            "strategy_count",
-            "manifest_count",
-            "strategy_canary_count",
-            "estimated_strategy_runs",
-            "estimated_tick_events",
-            "estimated_audit_stream_rows",
-            "estimated_artifact_write_count",
-            "estimated_hash_payload_bytes",
-            "estimated_artifact_bytes",
-            "estimated_artifact_file_count",
-        ):
+        for workload_field in EXPECTED_WORKLOAD_FIELDS:
+            if _is_unfilled_placeholder(expected_workload.get(workload_field)):
+                raise AssertionError(
+                    f"{path} inventory entry {nodeid} has unfilled placeholder expected_workload.{workload_field}"
+                )
             if not _non_negative_number(expected_workload.get(workload_field)):
                 raise AssertionError(
                     f"{path} inventory entry {nodeid} missing expected_workload.{workload_field}"
                 )
+        if _is_unfilled_placeholder(duration_budget_seconds):
+            raise AssertionError(f"{path} inventory entry {nodeid} has unfilled placeholder duration_budget_seconds")
         if not _positive_number(duration_budget_seconds):
             raise AssertionError(f"{path} inventory entry {nodeid} missing duration_budget_seconds")
+        if _is_unfilled_placeholder(last_measured_seconds):
+            raise AssertionError(f"{path} inventory entry {nodeid} has unfilled placeholder last_measured_seconds")
         if not _positive_number(last_measured_seconds, allow_zero=True):
             raise AssertionError(f"{path} inventory entry {nodeid} missing last_measured_seconds")
         if not (
             isinstance(owner, str)
             and owner.strip()
+            and not _is_unfilled_placeholder(owner)
             or isinstance(domain, str)
             and domain.strip()
+            and not _is_unfilled_placeholder(domain)
         ):
             raise AssertionError(f"{path} inventory entry {nodeid} missing owner or domain")
         inventory[nodeid] = item
@@ -193,7 +214,11 @@ def discover_policy_violations(
 
     missing = sorted(direct_nodeids - inventory_nodeids)
     if missing:
-        violations.extend(f"direct production runner test missing E2E inventory entry: {nodeid}" for nodeid in missing)
+        direct_call_by_nodeid = {call.nodeid: call for call in direct_calls}
+        violations.extend(
+            _format_missing_inventory_violation(direct_call_by_nodeid[nodeid], inventory_path)
+            for nodeid in missing
+        )
 
     for call in direct_calls:
         if call.markers.isdisjoint(EXPENSIVE_RESEARCH_MARKERS):
@@ -229,6 +254,52 @@ def discover_policy_violations(
     violations.extend(validate_contract_helpers(test_root))
     violations.extend(validate_fast_tier_guard_helper_usage(test_root))
     return sorted(set(violations))
+
+
+def inventory_entry_skeleton_for_call(call: RunnerCall) -> dict[str, object]:
+    marker = _suggested_required_marker(call)
+    return {
+        "nodeid": call.nodeid,
+        "markers": [marker],
+        "reason": "__FILL_REASON_WHY_THIS_PRODUCTION_RESEARCH_ENTRYPOINT_MUST_RUN__",
+        "expected_workload": {
+            field: f"__FILL_{field.upper()}__"
+            for field in EXPECTED_WORKLOAD_FIELDS
+        },
+        "duration_budget_seconds": "__FILL_DURATION_BUDGET_SECONDS__",
+        "domain": "__FILL_OWNER_OR_DOMAIN__",
+        "last_measured_seconds": "__FILL_LAST_MEASURED_SECONDS__",
+        "tier": "research_nightly",
+    }
+
+
+def _format_missing_inventory_violation(call: RunnerCall, inventory_path: Path) -> str:
+    marker = _suggested_required_marker(call)
+    skeleton = json.dumps(inventory_entry_skeleton_for_call(call), indent=2, sort_keys=False)
+    return (
+        f"direct production runner test missing E2E inventory entry: {call.nodeid}\n"
+        f"  file: {call.path}\n"
+        f"  line: {call.line}\n"
+        f"  production_entrypoint: {call.entrypoint}\n"
+        f"  required_expensive_marker: {marker} "
+        f"(or another marker from {sorted(EXPENSIVE_RESEARCH_MARKERS)} that is present on the test)\n"
+        f"  inventory_file: {inventory_path.as_posix()}\n"
+        "  inventory_json_skeleton:\n"
+        f"{_indent_block(skeleton, '    ')}\n"
+        "  replace every __FILL_*__ placeholder with measured or reviewed conservative values; "
+        "unchanged placeholders fail policy validation"
+    )
+
+
+def _suggested_required_marker(call: RunnerCall) -> str:
+    present_expensive = sorted(call.markers & EXPENSIVE_RESEARCH_MARKERS)
+    if present_expensive:
+        return present_expensive[0]
+    return DEFAULT_REQUIRED_MARKER_BY_ENTRYPOINT.get(call.entrypoint, "research_e2e")
+
+
+def _indent_block(text: str, prefix: str) -> str:
+    return "\n".join(f"{prefix}{line}" for line in text.splitlines())
 
 
 def discover_expensive_research_tests(test_root: Path) -> Iterable[ExpensiveResearchTest]:
@@ -823,6 +894,10 @@ def _name_or_attr(node: ast.AST) -> str | None:
     if isinstance(node, ast.Attribute):
         return node.attr
     return None
+
+
+def _is_unfilled_placeholder(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("__FILL_") and value.endswith("__")
 
 
 def _positive_number(value: object, *, allow_zero: bool = False) -> bool:

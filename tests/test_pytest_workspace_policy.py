@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -175,3 +176,77 @@ def test_full_runner_requests_success_artifact_summary_before_cleanup() -> None:
     cleanup_index = text.index("bithumb_pytest_cleanup_workspace")
 
     assert setup_index < summary_index < cleanup_index
+
+
+def test_pytest_workspace_preflight_failure_writes_external_report(tmp_path: Path) -> None:
+    script = Path("scripts/lib/pytest_workspace.sh").resolve()
+    workspace_root = tmp_path / "workspace"
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f"source {script}; "
+                "bithumb_pytest_setup_workspace full; "
+                "if bithumb_pytest_run_preflight 'research test policy' false; then exit 99; fi; "
+                "report=\"$BITHUMB_PYTEST_WORKSPACE/preflight_failure.json\"; "
+                "test -f \"$report\"; "
+                "python3 - \"$report\" <<'PY'\n"
+                "import json, sys\n"
+                "payload = json.load(open(sys.argv[1], encoding='utf-8'))\n"
+                "assert payload['suite'] == 'full'\n"
+                "assert payload['failed_stage'] == 'research test policy'\n"
+                "assert payload['pytest_started'] is False\n"
+                "assert payload['status'] == 'preflight_failed'\n"
+                "assert payload['exit_code'] == 1\n"
+                "assert payload['workspace_root']\n"
+                "assert payload['retained_workspace_size_bytes'] >= 0\n"
+                "PY\n"
+            ),
+        ],
+        env={
+            **os.environ,
+            "BITHUMB_PYTEST_WORKSPACE_ROOT": str(workspace_root),
+            "BITHUMB_PYTEST_RUN_ID": "run-preflight-fail",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    output = proc.stdout + proc.stderr
+    assert "[PYTEST-PREFLIGHT] failed suite=full stage=research test policy exit_code=1" in output
+    assert "[PYTEST-PREFLIGHT] pytest did not start" in output
+    assert "preflight_failure.json" in output
+    report = workspace_root / "full" / "run-preflight-fail" / "preflight_failure.json"
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert Path(payload["workspace_root"]).resolve() == (workspace_root / "full" / "run-preflight-fail").resolve()
+    assert Path.cwd().resolve() not in report.resolve().parents
+
+
+def test_full_runner_uses_labeled_preflights_before_pytest_start() -> None:
+    text = Path("scripts/run_full_pytest_tests.sh").read_text(encoding="utf-8")
+    research_policy_index = text.index('bithumb_pytest_run_preflight "research test policy"')
+    strategy_guard_index = text.index('bithumb_pytest_run_preflight "strategy PR workload guard"')
+    budget_index = text.index('bithumb_pytest_run_preflight "research workload budget full"')
+    started_index = text.index("bithumb_pytest_mark_pytest_started")
+    pytest_index = text.index("uv run pytest -q")
+
+    assert research_policy_index < strategy_guard_index < budget_index < started_index < pytest_index
+
+
+def test_wsl_full_suite_disk_runbook_uses_official_runner() -> None:
+    text = Path("docs/pre-merge-checklist.md").read_text(encoding="utf-8")
+
+    assert "WSL full-suite disk regression check" in text
+    assert "./scripts/run_full_pytest_tests.sh" in text
+    assert "df -h /" in text
+    assert "du -sh /tmp /tmp/bithumb-bot-pytest-* /tmp/pytest-of-$USER" in text
+    assert "./scripts/check_repo_runtime_artifacts.sh" in text
+    assert "ext4.vhdx" in text
+    assert "preflight failure before pytest starts" in text
+    assert "pytest success with workspace cleanup" in text
+    assert "fstrim" in text
+    assert "compact vdisk" in text
+    assert "Do not use raw selector-less `uv run pytest -q`" in text

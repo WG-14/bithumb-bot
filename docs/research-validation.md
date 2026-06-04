@@ -327,6 +327,9 @@ path. Use the dedicated full pytest script or a later full pytest pipeline so
 pytest temporary data, WSL cleanup, and research artifact summaries are managed.
 Workspace controls are `BITHUMB_PYTEST_WORKSPACE_ROOT`,
 `BITHUMB_PYTEST_RUN_ID`, and `KEEP_BITHUMB_TEST_ARTIFACTS`.
+When a full-runner preflight fails, the runner prints the failed preflight
+stage, states that pytest did not start, prints the repo-external workspace path
+and retained size, and writes `preflight_failure.json` under that workspace.
 
 Research-run artifacts use run-wide accounting. A single research artifact
 context covers `data/<mode>/derived/research/<experiment_id>` and
@@ -385,7 +388,13 @@ Every test with `research_kernel`, `research_e2e`, `audit_e2e`,
 expected workload, duration budget, owner or domain, and last measured duration.
 The expected workload records suite-level growth dimensions: `strategy_count`,
 `manifest_count`, `strategy_canary_count`, `estimated_strategy_runs`,
-`estimated_tick_events`, and `estimated_audit_stream_rows`.
+`estimated_tick_events`, `estimated_audit_stream_rows`,
+`estimated_artifact_write_count`, `estimated_hash_payload_bytes`,
+`estimated_artifact_bytes`, and `estimated_artifact_file_count`.
+If `scripts/check_research_test_policy.py` reports a missing inventory entry,
+use the printed JSON skeleton as a schema guide only; replace every
+`__FILL_*__` placeholder with reviewed or measured values before committing.
+Unchanged placeholders fail policy validation.
 
 Every test that directly calls `run_research_backtest` or
 `run_research_walk_forward` without an approved deterministic contract helper

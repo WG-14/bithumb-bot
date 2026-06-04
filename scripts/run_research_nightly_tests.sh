@@ -13,9 +13,10 @@ bithumb_pytest_setup_workspace "research-nightly"
 status=0
 trap 'status=$?; rm -f "$duration_log"; bithumb_pytest_cleanup_workspace "$status"; exit "$status"' EXIT
 
-uv run python scripts/check_research_test_policy.py
-uv run python scripts/check_strategy_pr_workload_guard.py
-uv run python scripts/check_research_workload_budget.py --suite research-nightly
+bithumb_pytest_run_preflight "research test policy" uv run python scripts/check_research_test_policy.py
+bithumb_pytest_run_preflight "strategy PR workload guard" uv run python scripts/check_strategy_pr_workload_guard.py
+bithumb_pytest_run_preflight "research workload budget research-nightly" uv run python scripts/check_research_workload_budget.py --suite research-nightly
+bithumb_pytest_mark_pytest_started
 uv run pytest -q \
   -m "$RESEARCH_NIGHTLY_MARKER_EXPR" \
   --durations=100 \

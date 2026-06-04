@@ -8,7 +8,9 @@ import pytest
 from tests.factories.research_reports import assert_fast_research_workload, minimal_research_report
 from tests.policy.research_runner_policy import (
     DEFAULT_FAST_EXCLUDED_RESEARCH_MARKERS,
+    RunnerCall,
     discover_policy_violations,
+    inventory_entry_skeleton_for_call,
     load_inventory,
     research_workload_summary,
 )
@@ -16,6 +18,39 @@ from tests.policy.research_runner_policy import (
 
 def test_direct_production_research_entrypoints_have_expensive_markers() -> None:
     assert discover_policy_violations() == []
+
+
+def test_audit_budget_pipeline_inventory_entries_are_complete() -> None:
+    inventory = load_inventory()
+    nodeids = [
+        "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_budget_overage_fails_fast_in_pipeline",
+        "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_stream_byte_budget_overage_fails_fast_in_pipeline",
+        "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_stream_row_budget_overage_fails_fast_in_pipeline",
+    ]
+
+    for nodeid in nodeids:
+        entry = inventory[nodeid]
+        assert "audit_e2e" in entry["markers"]
+        assert entry["tier"] == "research_nightly"
+        assert entry["duration_budget_seconds"] > 0
+        assert entry["last_measured_seconds"] >= 0
+        assert entry.get("domain") == "research_audit_budget"
+        workload = entry["expected_workload"]
+        assert isinstance(workload, dict)
+        for key in (
+            "strategy_count",
+            "manifest_count",
+            "strategy_canary_count",
+            "estimated_strategy_runs",
+            "estimated_tick_events",
+            "estimated_audit_stream_rows",
+            "estimated_artifact_write_count",
+            "estimated_hash_payload_bytes",
+            "estimated_artifact_bytes",
+            "estimated_artifact_file_count",
+        ):
+            assert key in workload
+            assert isinstance(workload[key], (int, float))
 
 
 def _write_inventory(path: Path, entries: list[dict[str, object]]) -> Path:
@@ -118,6 +153,75 @@ def test_marked_real_runner():
     violations = discover_policy_violations(test_root, inventory_path=inventory)
 
     assert any("direct production runner test missing E2E inventory entry" in violation for violation in violations)
+    violation = "\n".join(violations)
+    assert f"{test_file.as_posix()}::test_marked_real_runner" in violation
+    assert f"file: {test_file.as_posix()}" in violation
+    assert "line:" in violation
+    assert "production_entrypoint: run_research_backtest" in violation
+    assert "required_expensive_marker: research_e2e" in violation
+    assert f"inventory_file: {inventory.as_posix()}" in violation
+    assert "inventory_json_skeleton:" in violation
+    assert '"expected_workload"' in violation
+    assert '"estimated_artifact_file_count"' in violation
+    assert "__FILL_DURATION_BUDGET_SECONDS__" in violation
+
+
+def test_inventory_skeleton_placeholders_are_rejected(tmp_path: Path) -> None:
+    call = RunnerCall(
+        path=Path("tests/test_missing.py"),
+        test_name="test_missing_inventory",
+        nodeid="tests/test_missing.py::test_missing_inventory",
+        line=10,
+        entrypoint="run_research_backtest",
+        markers=frozenset({"audit_e2e"}),
+    )
+    skeleton = inventory_entry_skeleton_for_call(call)
+    inventory = _write_inventory(tmp_path / "inventory.json", [skeleton])
+
+    with pytest.raises(AssertionError, match="unfilled placeholder"):
+        load_inventory(inventory)
+
+    assert skeleton["nodeid"] == call.nodeid
+    assert skeleton["markers"] == ["audit_e2e"]
+    workload = skeleton["expected_workload"]
+    assert isinstance(workload, dict)
+    assert set(workload) == {
+        "strategy_count",
+        "manifest_count",
+        "strategy_canary_count",
+        "estimated_strategy_runs",
+        "estimated_tick_events",
+        "estimated_audit_stream_rows",
+        "estimated_artifact_write_count",
+        "estimated_hash_payload_bytes",
+        "estimated_artifact_bytes",
+        "estimated_artifact_file_count",
+    }
+
+
+def test_policy_rejects_inventory_marker_not_present_on_test(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    test_file = test_root / "test_marker_mismatch.py"
+    test_file.write_text(
+        """
+import pytest
+from bithumb_bot.research.validation_protocol import run_research_backtest
+
+@pytest.mark.audit_e2e
+def test_marker_mismatch():
+    run_research_backtest(manifest=None, db_path=None, manager=None)
+""",
+        encoding="utf-8",
+    )
+    inventory = _write_inventory(
+        tmp_path / "inventory.json",
+        [_inventory_entry(f"{test_file.as_posix()}::test_marker_mismatch", markers=["research_e2e"])],
+    )
+
+    violations = discover_policy_violations(test_root, inventory_path=inventory)
+
+    assert any("inventory markers not present on test" in violation for violation in violations)
 
 
 def test_policy_rejects_stale_inventory_entries(tmp_path: Path) -> None:

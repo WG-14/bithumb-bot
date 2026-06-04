@@ -72,7 +72,59 @@ On WSL, local Linux, and CI, official runners keep pytest and generated
 research/test evidence outside the repository. Successful runs clean the run
 workspace by default. Failed tests, explicit keep-artifacts runs, and workspace
 budget overages preserve the workspace and print a size summary. The full
-runner prints the summary before successful cleanup.
+runner prints the summary before successful cleanup. Preflight failures are
+reported before pytest starts with the failed stage, workspace path, retained
+workspace size, and a JSON report under the repo-external pytest workspace.
+If a preflight fails and the retained workspace is zero bytes or only a few KB,
+that normally means pytest did not start and only preflight diagnostics were
+written.
+
+## WSL full-suite disk regression check
+
+Use the official full runner only:
+
+```bash
+df -h /
+du -sh /tmp /tmp/bithumb-bot-pytest-* /tmp/pytest-of-$USER 2>/dev/null || true
+./scripts/check_repo_runtime_artifacts.sh
+./scripts/run_full_pytest_tests.sh
+./scripts/check_repo_runtime_artifacts.sh
+df -h /
+du -sh /tmp /tmp/bithumb-bot-pytest-* /tmp/pytest-of-$USER 2>/dev/null || true
+```
+
+Do not use raw selector-less `uv run pytest -q` as the WSL full-suite disk
+check path. The raw command bypasses the official repo-external workspace,
+preflight labels, retained-workspace summaries, and cleanup policy.
+
+Interpretation:
+
+- `preflight failure before pytest starts`: fix the named preflight stage first.
+  The full runner prints `pytest did not start`, the workspace path, retained
+  size, and `preflight_failure.json`. A small zero-byte/KB retained workspace is
+  expected when only preflight diagnostics exist.
+- `pytest failure with retained workspace`: pytest started and failed. Inspect
+  the retained repo-external workspace and largest-file summary before cleanup.
+- `pytest success with workspace cleanup`: the full runner prints the final size
+  summary and removes the run workspace unless `KEEP_BITHUMB_TEST_ARTIFACTS=1`
+  is set.
+
+On Windows, check the WSL distribution `ext4.vhdx` size before and after the
+run from Windows Explorer or PowerShell. The VHDX may not shrink automatically
+even after files are deleted inside WSL. Use `sync` after Linux-side cleanup,
+then `sudo fstrim -av` when the WSL filesystem supports discard. Use
+`wsl --shutdown` before Windows-side compaction. `compact vdisk` is appropriate
+only after internal WSL free space has been reclaimed and no WSL distro is
+running.
+
+Solved criteria: repo artifact checks pass before and after, `/tmp` and the
+official `/tmp/bithumb-bot-pytest-*` workspace do not retain unexpected large
+files after a successful run, pytest success cleans the workspace, and any VHDX
+growth is explained by known retained artifacts or normal sparse-file behavior.
+Unresolved criteria: the repo artifact checker fails, a failed pytest workspace
+contains unexplained large files, `/tmp/pytest-of-$USER` grows unexpectedly, or
+`ext4.vhdx` keeps growing after WSL cleanup, `fstrim`, shutdown, and reviewed
+compaction.
 
 Research workload budgets are defined in
 `tests/policy/research_workload_budget_policy.json` and enforced by

@@ -12,7 +12,8 @@ trap 'status=$?; bithumb_pytest_cleanup_workspace "$status"; exit "$status"' EXI
 
 export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
 
-uv run python scripts/check_research_test_policy.py
-uv run python scripts/check_strategy_pr_workload_guard.py
-uv run python scripts/check_research_workload_budget.py --suite full
+bithumb_pytest_run_preflight "research test policy" uv run python scripts/check_research_test_policy.py
+bithumb_pytest_run_preflight "strategy PR workload guard" uv run python scripts/check_strategy_pr_workload_guard.py
+bithumb_pytest_run_preflight "research workload budget full" uv run python scripts/check_research_workload_budget.py --suite full
+bithumb_pytest_mark_pytest_started
 uv run pytest -q

@@ -4059,6 +4059,7 @@ def test_summary_zero_retention_writes_complete_external_audit_traces(tmp_path, 
     assert sum(1 for _ in equity_path.open("r", encoding="utf-8")) == validation_index["equity_row_count"]
 
 
+@pytest.mark.audit_e2e
 @pytest.mark.contract
 def test_research_backtest_audit_budget_overage_fails_fast_in_pipeline(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
@@ -4095,6 +4096,7 @@ def test_research_backtest_audit_budget_overage_fails_fast_in_pipeline(tmp_path,
     assert failure["path"]
 
 
+@pytest.mark.audit_e2e
 @pytest.mark.contract
 def test_research_backtest_audit_stream_row_budget_overage_fails_fast_in_pipeline(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
@@ -4133,6 +4135,7 @@ def test_research_backtest_audit_stream_row_budget_overage_fails_fast_in_pipelin
     assert "audit_equity_observability_failed" not in str(failure)
 
 
+@pytest.mark.audit_e2e
 @pytest.mark.contract
 def test_research_backtest_audit_stream_byte_budget_overage_fails_fast_in_pipeline(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
