@@ -155,6 +155,8 @@ def _run_contract_research_walk_forward(**kwargs: object) -> dict[str, object]:
         max_tick_events=20_000,
         max_matrix_size=10,
         max_walk_forward_windows=2,
+        max_hash_payload_bytes=2_000_000,
+        max_snapshot_hash_count=7,
     )
     return report
 

@@ -9246,6 +9246,7 @@ def test_config_dump_uses_cli_bootstrap_env_file_and_masks_secrets(tmp_path):
         "BITHUMB_ENV_FILE": str(env_file),
         "UV_CACHE_DIR": "/tmp/uv-cache",
     }
+    env.pop("BITHUMB_TEST_TIER", None)
 
     completed = subprocess.run(
         [sys.executable, "-m", "bithumb_bot", "config-dump", "--masked"],

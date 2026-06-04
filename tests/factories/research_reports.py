@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from math import isfinite
 from numbers import Real
@@ -460,7 +461,12 @@ def assert_fast_research_workload(
         assert estimate.get("full_decisions_external_jsonl") is not True
     assert required_int("estimated_audit_stream_rows") <= max_audit_stream_rows
     assert required_int("estimated_artifact_write_count") <= max_artifact_write_count
-    assert required_int("estimated_hash_payload_bytes") <= max_hash_payload_bytes
+    estimated_hash_payload_bytes = required_int("estimated_hash_payload_bytes")
+    assert estimated_hash_payload_bytes <= max_hash_payload_bytes, (
+        "research workload_estimate estimated_hash_payload_bytes exceeded budget: "
+        f"actual={estimated_hash_payload_bytes} max={max_hash_payload_bytes} "
+        f"estimate={json.dumps(estimate, sort_keys=True, default=repr)}"
+    )
     assert required_int("estimated_snapshot_hash_count") <= max_snapshot_hash_count
     uses_production_evaluator = estimate["uses_production_evaluator"]
     uses_real_parallel_executor = estimate["uses_real_parallel_executor"]
