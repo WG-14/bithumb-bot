@@ -119,6 +119,35 @@ def test_notify_tolerates_ntfy_delivery_exception(monkeypatch: pytest.MonkeyPatc
     assert "[NOTIFY] done" in out
 
 
+def test_notify_pytest_blocks_real_looking_ntfy_target_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NOTIFIER_ENABLED", "true")
+    monkeypatch.setenv("NTFY_TOPIC", "real-operator-topic")
+
+    with pytest.raises(notifier.PytestNotificationSafetyViolation, match="external ntfy transport is disabled in pytest"):
+        notifier.notify("blocked")
+
+    assert capsys.readouterr().out == ""
+
+
+def test_notify_pytest_blocks_real_looking_webhook_target_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NOTIFIER_ENABLED", "true")
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.invalid/operator-webhook")
+
+    with pytest.raises(
+        notifier.PytestNotificationSafetyViolation,
+        match="external notification transport is disabled in pytest",
+    ):
+        notifier.notify("blocked")
+
+    assert capsys.readouterr().out == ""
+
+
 def test_notify_uses_telegram_without_logging_secret(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     calls = []
 

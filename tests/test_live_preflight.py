@@ -11,6 +11,7 @@ import pytest
 from bithumb_bot.approved_profile import build_approved_profile, compute_approved_profile_hash
 from bithumb_bot import config
 from bithumb_bot.config import settings
+from bithumb_bot import notifier
 from bithumb_bot.execution_reality_contract import build_execution_reality_contract
 from bithumb_bot.decision_equivalence import compute_decision_equivalence_hash
 from bithumb_bot.research.hashing import content_hash_payload, sha256_prefixed
@@ -1557,6 +1558,39 @@ def test_live_preflight_delivers_order_rule_fallback_event_at_operator_boundary(
     assert fields["reason_code"] == "UNRECOVERABLE"
     assert "RuntimeError: exchange unavailable" in str(fields["reason_detail"])
     assert "order-rule auto-sync unavailable" in str(fields["fallback_risk"])
+
+
+def test_live_preflight_propagates_pytest_notification_safety_violation_from_order_rule_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch, stub_order_rules=False)
+    monkeypatch.setattr(order_rules, "get_effective_order_rules", _REAL_GET_EFFECTIVE_ORDER_RULES)
+    order_rules._cached_rules.clear()
+    object.__setattr__(
+        settings,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE",
+        config.LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK,
+    )
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: (_ for _ in ()).throw(RuntimeError("exchange unavailable")),
+    )
+
+    class BlockingOperatorNotificationService:
+        def send_event(self, event_name: str, /, **fields: object) -> None:
+            raise notifier.PytestNotificationSafetyViolation("blocked notification transport")
+
+    monkeypatch.setattr(
+        operator_notification_service,
+        "OperatorNotificationService",
+        lambda: BlockingOperatorNotificationService(),
+    )
+
+    with pytest.raises(notifier.PytestNotificationSafetyViolation, match="blocked notification transport") as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "failed to resolve order rules" not in str(exc.value)
 
 
 def test_live_preflight_passes_with_valid_auto_synced_order_rules(monkeypatch: pytest.MonkeyPatch) -> None:

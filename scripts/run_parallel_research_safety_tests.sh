@@ -14,6 +14,8 @@ export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
 
 PARALLEL_RESEARCH_SAFETY_MARKER_EXPR="parallel_e2e or memory_sensitive"
 
+bithumb_pytest_sanitize_unsafe_env "parallel research safety pytest runner"
+
 bithumb_pytest_run_preflight "research test policy" uv run python scripts/check_research_test_policy.py
 bithumb_pytest_mark_pytest_started
 if [[ -n "${PYTEST_BIN:-}" ]]; then

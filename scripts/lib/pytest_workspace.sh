@@ -7,6 +7,19 @@ BITHUMB_PYTEST_SUITE=""
 BITHUMB_PYTEST_PREFLIGHT_STAGE=""
 BITHUMB_PYTEST_STARTED=0
 
+BITHUMB_PYTEST_BROKER_PRIVATE_ENV_KEYS=(
+  BITHUMB_API_KEY
+  BITHUMB_API_SECRET
+)
+
+BITHUMB_PYTEST_EXTERNAL_NOTIFICATION_ENV_KEYS=(
+  NTFY_TOPIC
+  NOTIFIER_WEBHOOK_URL
+  SLACK_WEBHOOK_URL
+  TELEGRAM_BOT_TOKEN
+  TELEGRAM_CHAT_ID
+)
+
 bithumb_pytest_repo_root() {
   cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
 }
@@ -57,6 +70,26 @@ bithumb_pytest_setup_workspace() {
   echo "[PYTEST-WORKSPACE] suite=$suite_name run_id=$run_id"
   echo "[PYTEST-WORKSPACE] root=$BITHUMB_PYTEST_WORKSPACE"
   echo "[PYTEST-WORKSPACE] PYTEST_DEBUG_TEMPROOT=$PYTEST_DEBUG_TEMPROOT"
+}
+
+bithumb_pytest_sanitize_unsafe_env() {
+  local runner_name="${1:-pytest runner}"
+  local key
+
+  for key in "${BITHUMB_PYTEST_BROKER_PRIVATE_ENV_KEYS[@]}"; do
+    unset "$key"
+  done
+
+  if [[ "${BITHUMB_PYTEST_ALLOW_EXTERNAL_NOTIFICATIONS:-0}" == "1" ]]; then
+    echo "[PYTEST-SAFETY] broker-private env disabled for ${runner_name}; external notification env allowed by explicit opt-in"
+    return 0
+  fi
+
+  export NOTIFIER_ENABLED=false
+  for key in "${BITHUMB_PYTEST_EXTERNAL_NOTIFICATION_ENV_KEYS[@]}"; do
+    unset "$key"
+  done
+  echo "[PYTEST-SAFETY] unsafe inherited env disabled for ${runner_name}"
 }
 
 bithumb_pytest_preflight_report_path() {

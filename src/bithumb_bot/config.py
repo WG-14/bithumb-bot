@@ -1324,6 +1324,10 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 "; ".join(source_warnings),
             )
     except Exception as exc:
+        from .notifier import PytestNotificationSafetyViolation
+
+        if isinstance(exc, PytestNotificationSafetyViolation):
+            raise
         issues.append(f"failed to resolve order rules: {type(exc).__name__}: {exc}")
 
     if not issues:
