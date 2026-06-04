@@ -672,6 +672,7 @@ def _execution_boundary_observability(
     manifest: ExperimentManifest,
     candidate_evaluator: CandidateScenarioEvaluator | None,
     parallel_executor_used: bool,
+    process_runtime_observability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     evaluator_kind = _candidate_evaluator_kind(candidate_evaluator)
     requested_mode = manifest.research_run.execution.mode
@@ -689,9 +690,10 @@ def _execution_boundary_observability(
         if requested_mode == "parallel"
         else 0
     )
-    return {
+    payload = {
         "requested_execution_mode": requested_mode,
         "requested_max_workers": manifest.research_run.execution.max_workers,
+        "requested_process_start_method": manifest.research_run.execution.process_start_method,
         "requested_work_unit_type": manifest.research_run.execution.work_unit,
         "candidate_evaluator_kind": evaluator_kind,
         "actual_execution_mode": actual_execution_mode,
@@ -702,6 +704,9 @@ def _execution_boundary_observability(
         "requested_parallel_task_count": requested_task_count,
         "actual_parallel_task_count": requested_task_count if parallel_executor_used else 0,
     }
+    if process_runtime_observability is not None:
+        payload.update(process_runtime_observability)
+    return payload
 
 
 def _execution_observability_payload(
@@ -1199,6 +1204,7 @@ def _evaluate_candidates(
 
     evaluator = candidate_evaluator or ProductionCandidateScenarioEvaluator()
     parallel_executor_used = manifest.research_run.execution.mode == "parallel" and candidate_evaluator is None
+    process_runtime_observability: list[dict[str, Any]] = []
     execution_boundary = _execution_boundary_observability(
         manifest=manifest,
         candidate_evaluator=candidate_evaluator,
@@ -1231,8 +1237,18 @@ def _evaluate_candidates(
             tasks=work_tasks,
             worker=_candidate_scenario_worker_from_context,
             max_workers=manifest.research_run.execution.max_workers,
+            process_start_method=manifest.research_run.execution.process_start_method,
             initializer=_initialize_candidate_scenario_worker_context,
             initargs=(worker_context,),
+            runtime_observability_sink=process_runtime_observability,
+        )
+        execution_boundary = _execution_boundary_observability(
+            manifest=manifest,
+            candidate_evaluator=candidate_evaluator,
+            parallel_executor_used=parallel_executor_used,
+            process_runtime_observability=(
+                process_runtime_observability[-1] if process_runtime_observability else None
+            ),
         )
     else:
         raw_results = []

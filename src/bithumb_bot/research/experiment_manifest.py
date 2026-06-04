@@ -16,6 +16,7 @@ from bithumb_bot.risk_contract import RiskPolicy
 
 from .deployment_policy import DEPLOYMENT_TIERS, is_production_bound_target, normalize_deployment_tier
 from .hashing import sha256_prefixed
+from .process_runtime import ALLOWED_RESEARCH_START_METHODS
 from .strategy_spec import StrategySpecError, validate_parameter_space_against_strategy_spec
 from .audit_trail import AuditTrailPolicy as ResearchAuditTrailPolicy
 
@@ -509,6 +510,7 @@ class ResearchHeartbeatPolicy:
 class ResearchExecutionPolicy:
     mode: str = "serial"
     max_workers: int = 1
+    process_start_method: str = "auto_safe"
     work_unit: str = "candidate_scenario"
     deterministic_merge_order: str = "scenario_index,candidate_index,split_name"
     resume: bool = False
@@ -517,6 +519,7 @@ class ResearchExecutionPolicy:
         return {
             "mode": self.mode,
             "max_workers": self.max_workers,
+            "process_start_method": self.process_start_method,
             "work_unit": self.work_unit,
             "deterministic_merge_order": self.deterministic_merge_order,
             "resume": self.resume,
@@ -2719,7 +2722,7 @@ def _parse_research_execution(value: Any) -> ResearchExecutionPolicy:
         return ResearchExecutionPolicy()
     if not isinstance(value, dict):
         raise ManifestValidationError("research_run.execution must be an object")
-    allowed_fields = {"mode", "max_workers", "work_unit", "deterministic_merge_order", "resume"}
+    allowed_fields = {"mode", "max_workers", "process_start_method", "work_unit", "deterministic_merge_order", "resume"}
     unknown = sorted(set(value) - allowed_fields)
     if unknown:
         raise ManifestValidationError(f"research_run.execution unsupported fields: {','.join(unknown)}")
@@ -2731,6 +2734,12 @@ def _parse_research_execution(value: Any) -> ResearchExecutionPolicy:
         raise ManifestValidationError("serial execution currently supports only max_workers=1")
     if mode == "parallel" and max_workers < 2:
         raise ManifestValidationError("parallel execution requires max_workers>=2")
+    process_start_method = str(value.get("process_start_method") or "auto_safe").strip().lower()
+    if process_start_method not in ALLOWED_RESEARCH_START_METHODS:
+        raise ManifestValidationError(
+            "research_run.execution.process_start_method must be one of: "
+            f"{', '.join(ALLOWED_RESEARCH_START_METHODS)}"
+        )
     resume = bool(value.get("resume", False))
     if resume:
         raise ManifestValidationError("research_run.execution.resume is not supported yet")
@@ -2747,6 +2756,7 @@ def _parse_research_execution(value: Any) -> ResearchExecutionPolicy:
     return ResearchExecutionPolicy(
         mode=mode,
         max_workers=max_workers,
+        process_start_method=process_start_method,
         work_unit=work_unit,
         deterministic_merge_order=deterministic_merge_order,
         resume=resume,

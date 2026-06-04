@@ -16,4 +16,8 @@ bithumb_pytest_run_preflight "research test policy" uv run python scripts/check_
 bithumb_pytest_run_preflight "strategy PR workload guard" uv run python scripts/check_strategy_pr_workload_guard.py
 bithumb_pytest_run_preflight "research workload budget full" uv run python scripts/check_research_workload_budget.py --suite full
 bithumb_pytest_mark_pytest_started
-uv run pytest -q
+pytest_args=(-q)
+if [[ -n "${PYTEST_XDIST_WORKERS:-}" && "${PYTEST_XDIST_WORKERS:-0}" != "0" ]]; then
+  pytest_args+=(-n "$PYTEST_XDIST_WORKERS" --dist="${PYTEST_XDIST_DIST:-loadfile}")
+fi
+uv run pytest "${pytest_args[@]}"

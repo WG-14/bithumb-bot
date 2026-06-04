@@ -1125,6 +1125,7 @@ def test_research_execution_policy_defaults_to_serial() -> None:
     assert manifest.research_run.execution.as_dict() == {
         "mode": "serial",
         "max_workers": 1,
+        "process_start_method": "auto_safe",
         "work_unit": "candidate_scenario",
         "deterministic_merge_order": "scenario_index,candidate_index,split_name",
         "resume": False,
@@ -1164,7 +1165,41 @@ def test_research_execution_policy_accepts_parallel_max_workers_two() -> None:
 
     assert manifest.research_run.execution.mode == "parallel"
     assert manifest.research_run.execution.max_workers == 2
+    assert manifest.research_run.execution.process_start_method == "auto_safe"
     assert manifest.research_run.execution.as_dict()["isolation_semantics"] == "parallel_process_pool_per_worker_shared_within_worker"
+
+
+def test_research_execution_policy_accepts_and_serializes_process_start_method() -> None:
+    payload = _manifest()
+    payload["research_run"] = {
+        "execution": {
+            "mode": "parallel",
+            "max_workers": 2,
+            "process_start_method": "spawn",
+        }
+    }
+
+    manifest = parse_manifest(payload)
+
+    assert manifest.research_run.execution.process_start_method == "spawn"
+    assert manifest.research_run.execution.as_dict()["process_start_method"] == "spawn"
+
+
+def test_research_execution_policy_rejects_invalid_process_start_method() -> None:
+    payload = _manifest()
+    payload["research_run"] = {
+        "execution": {
+            "mode": "parallel",
+            "max_workers": 2,
+            "process_start_method": "implicit_fork",
+        }
+    }
+
+    with pytest.raises(
+        ManifestValidationError,
+        match="research_run.execution.process_start_method must be one of",
+    ):
+        parse_manifest(payload)
 
 
 def test_research_execution_policy_rejects_parallel_max_workers_one() -> None:
@@ -2075,11 +2110,41 @@ def test_parallel_executor_uses_lightweight_tasks_with_worker_initializer(tmp_pa
     captured_tasks: list[dict[str, object]] = []
     captured_context: dict[str, object] = {}
 
-    def fake_parallel_executor(*, tasks, worker, max_workers, initializer=None, initargs=()):
+    def fake_parallel_executor(
+        *,
+        tasks,
+        worker,
+        max_workers,
+        process_start_method="auto_safe",
+        initializer=None,
+        initargs=(),
+        runtime_observability_sink=None,
+    ):
         task_list = list(tasks)
         captured_tasks.extend(task_list)
         assert initializer is not None
         assert initargs
+        assert process_start_method == "auto_safe"
+        if runtime_observability_sink is not None:
+            runtime_observability_sink.append(
+                {
+                    "requested_process_start_method": process_start_method,
+                    "effective_process_start_method": "spawn",
+                    "available_process_start_methods": ["spawn"],
+                    "parent_pid": 1,
+                    "parent_thread_count_at_pool_create": 1,
+                    "platform_system": "Linux",
+                    "outer_parallel_context": None,
+                    "unsafe_fork_allowed": False,
+                    "research_max_workers_requested": max_workers,
+                    "research_max_workers_effective": max_workers,
+                    "process_budget": {
+                        "schema_version": 1,
+                        "research_max_workers_requested": max_workers,
+                        "research_max_workers_effective": max_workers,
+                    },
+                }
+            )
         captured_context.update(initargs[0])
         initializer(*initargs)
         return [worker(task) for task in task_list]
@@ -3795,6 +3860,20 @@ def test_parallel_research_failure_is_committed_by_main_process(tmp_path, monkey
     assert report["execution_observability"]["actual_execution_mode"] == "parallel_worker_initializer"
     assert report["execution_observability"]["worker_context_mode"] == "worker_initializer"
     assert report["execution_observability"]["parallel_executor_used"] is True
+    assert report["execution_observability"]["requested_process_start_method"] == "auto_safe"
+    assert report["execution_observability"]["effective_process_start_method"] in {"forkserver", "spawn"}
+    assert report["execution_observability"]["available_process_start_methods"]
+    assert report["execution_observability"]["parent_thread_count_at_pool_create"] >= 1
+    assert report["execution_observability"]["outer_parallel_context"] in {None, "pytest-xdist"}
+    assert report["execution_observability"]["unsafe_fork_allowed"] is False
+    assert report["execution_observability"]["research_max_workers_requested"] == 2
+    assert report["execution_observability"]["research_max_workers_effective"] == 2
+    assert report["execution_observability"]["process_budget"]["research_max_workers_requested"] == 2
+    assert report["run_environment"]["multiprocessing_policy"]["requested_process_start_method"] == "auto_safe"
+    assert (
+        report["execution_plan"]["run_environment"]["multiprocessing_policy"]["requested_process_start_method"]
+        == "auto_safe"
+    )
     assert report["execution_observability"]["production_evaluator_used"] is True
     assert report["execution_observability"]["contract_evaluator_used"] is False
     assert any(item["status"] == "failed" for item in report["execution_observability"]["work_units"])

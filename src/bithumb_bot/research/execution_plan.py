@@ -11,6 +11,7 @@ from .dataset_snapshot import DatasetQualityReport, DatasetSnapshot, combined_da
 from .experiment_manifest import ExecutionScenario, ExperimentManifest
 from .hashing import sha256_prefixed
 from .parameter_space import candidate_id, iter_parameter_candidates
+from .process_runtime import process_policy_observability
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ def build_research_execution_plan(
         ),
         "execution_mode": manifest.research_run.execution.mode,
         "max_workers": manifest.research_run.execution.max_workers,
+        "process_start_method": manifest.research_run.execution.process_start_method,
         "work_unit_type": manifest.research_run.execution.work_unit,
         "deterministic_merge_order": manifest.research_run.execution.deterministic_merge_order,
         "resume_enabled": manifest.research_run.execution.resume,
@@ -243,6 +245,10 @@ def build_run_environment(
         "cpu_count": os.cpu_count(),
         "effective_max_workers": manifest.research_run.execution.max_workers,
         "execution_mode": manifest.research_run.execution.mode,
+        "multiprocessing_policy": process_policy_observability(
+            requested_start_method=manifest.research_run.execution.process_start_method,
+            requested_max_workers=manifest.research_run.execution.max_workers,
+        ),
         "work_unit_type": manifest.research_run.execution.work_unit,
         "db_path_fingerprint": sha256_prefixed({"db_path": resolved_db_path}),
         "manifest_hash": manifest.manifest_hash(),

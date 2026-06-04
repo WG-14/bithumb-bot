@@ -237,12 +237,51 @@ the evaluator/executor branch that actually ran. Stable values include
 `serial_production_evaluator`, `parallel_worker_initializer`, and
 `contract_evaluator_in_process`. Supporting fields include
 `requested_execution_mode`, `requested_max_workers`,
-`requested_work_unit_type`, `candidate_evaluator_kind`,
-`actual_worker_context_mode`, `parallel_executor_used`,
+`requested_process_start_method`, `requested_work_unit_type`,
+`candidate_evaluator_kind`, `actual_worker_context_mode`, `parallel_executor_used`,
 `production_evaluator_used`, and `contract_evaluator_used`. The legacy
 `execution_observability.worker_context_mode` field remains for consumers, but
 it is now derived from the actual execution branch rather than the requested
 manifest mode.
+
+Parallel research process creation is an explicit run contract. The manifest
+field `research_run.execution.process_start_method` defaults to `auto_safe`.
+`auto_safe` and `auto` choose `forkserver` when it is usable, fall back to
+`spawn`, and use `fork` only when the diagnostic override
+`BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK=1` is set. Explicit `fork` is rejected
+unless that override is present. Library code does not call global
+`multiprocessing.set_start_method()`.
+
+Real parallel reports record the requested and effective process runtime in
+`execution_observability`: requested and effective start method, available
+start methods, parent PID, parent thread count at pool creation, platform,
+outer parallel context such as `pytest-xdist`, unsafe-fork override state,
+requested and effective research worker counts, and process-budget evidence.
+`execution_plan.run_environment.multiprocessing_policy` records the requested
+process policy and available start methods so the plan hash captures the
+declared reproducibility contract; effective values are recorded once the
+parallel pool is actually created.
+
+Nested parallelism is controlled by explicit caps. Set
+`BITHUMB_RESEARCH_MAX_WORKERS` to cap inner research workers. Set
+`BITHUMB_TOTAL_PROCESS_BUDGET` when an outer runner, such as xdist, should
+share a total process budget across workers. When `PYTEST_XDIST_WORKER` is
+present, reports record `outer_parallel_context=pytest-xdist`; if the outer
+worker count is not exposed by the environment, process-budget evidence records
+it as `unknown` rather than fabricating a value.
+
+Unsafe implicit `fork` is not a valid warning-suppression strategy. The focused
+parallel safety gate treats `DeprecationWarning` as an error and exercises the
+real research parallel path:
+
+```bash
+./scripts/run_parallel_research_safety_tests.sh
+```
+
+That script uses the external pytest workspace helper, runs focused resolver and
+parallel research tests with `-W error::DeprecationWarning`, uses xdist with a
+small worker count by default, and then runs
+`./scripts/check_repo_runtime_artifacts.sh`.
 
 Injected fake or contract evaluators run in process through the contract
 evaluator path, even when the manifest requests `execution.mode=parallel`.
@@ -325,6 +364,13 @@ Full-suite pytest validation should use:
 Raw selector-less `uv run pytest -q` is not the default local/PR validation
 path. Use the dedicated full pytest script or a later full pytest pipeline so
 pytest temporary data, WSL cleanup, and research artifact summaries are managed.
+Optional full-suite xdist validation is available through the full runner, not
+ad-hoc selector-less pytest:
+
+```bash
+PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=loadfile ./scripts/run_full_pytest_tests.sh
+```
+
 Workspace controls are `BITHUMB_PYTEST_WORKSPACE_ROOT`,
 `BITHUMB_PYTEST_RUN_ID`, and `KEEP_BITHUMB_TEST_ARTIFACTS`.
 When a full-runner preflight fails, the runner prints the failed preflight

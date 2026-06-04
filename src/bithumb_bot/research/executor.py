@@ -6,6 +6,7 @@ from typing import Any, Callable, Iterable
 
 from .execution_plan import ResearchWorkUnit
 from .hashing import sha256_prefixed
+from .process_runtime import resolve_research_process_runtime
 
 
 @dataclass(frozen=True)
@@ -104,12 +105,60 @@ def execute_research_work_units_parallel(
     tasks: Iterable[Any],
     worker: ResearchWorker,
     max_workers: int,
+    process_start_method: str = "auto_safe",
     initializer: Callable[..., None] | None = None,
     initargs: tuple[Any, ...] = (),
+    runtime_observability_sink: list[dict[str, Any]] | None = None,
 ) -> list[ResearchWorkResult]:
     results: list[ResearchWorkResult] = []
     task_list = list(tasks)
-    with ProcessPoolExecutor(max_workers=int(max_workers), initializer=initializer, initargs=initargs) as pool:
+    runtime = resolve_research_process_runtime(
+        requested_start_method=process_start_method,
+        requested_max_workers=int(max_workers),
+    )
+    try:
+        results = _execute_with_runtime(
+            task_list=task_list,
+            worker=worker,
+            initializer=initializer,
+            initargs=initargs,
+            runtime=runtime,
+        )
+    except PermissionError:
+        if runtime.requested_start_method not in {"auto_safe", "auto"} or runtime.effective_start_method != "forkserver":
+            raise
+        runtime = resolve_research_process_runtime(
+            requested_start_method=process_start_method,
+            requested_max_workers=int(max_workers),
+            unavailable_start_methods=("forkserver",),
+        )
+        results = _execute_with_runtime(
+            task_list=task_list,
+            worker=worker,
+            initializer=initializer,
+            initargs=initargs,
+            runtime=runtime,
+        )
+    if runtime_observability_sink is not None:
+        runtime_observability_sink.append(runtime.observability_payload())
+    return results
+
+
+def _execute_with_runtime(
+    *,
+    task_list: list[Any],
+    worker: ResearchWorker,
+    initializer: Callable[..., None] | None,
+    initargs: tuple[Any, ...],
+    runtime: Any,
+) -> list[ResearchWorkResult]:
+    results: list[ResearchWorkResult] = []
+    with ProcessPoolExecutor(
+        max_workers=runtime.max_workers_effective,
+        mp_context=runtime.mp_context(),
+        initializer=initializer,
+        initargs=initargs,
+    ) as pool:
         future_to_task = {pool.submit(worker, task): task for task in task_list}
         for completion_order, future in enumerate(as_completed(future_to_task)):
             task = future_to_task[future]
