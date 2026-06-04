@@ -41,7 +41,7 @@ from bithumb_bot.fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
 )
-from tests.support.live_auth import TEST_BITHUMB_API_KEY, TEST_BITHUMB_API_SECRET
+from tests.support.live_auth import TEST_BITHUMB_API_KEY, TEST_BITHUMB_API_SECRET, configure_bithumb_test_auth
 from bithumb_bot.execution_models import OrderIntent
 from bithumb_bot.dust import build_position_state_model
 from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_exit_qty
@@ -4453,6 +4453,7 @@ def test_reconcile_records_stray_remote_open_order(tmp_path):
 def test_bithumb_get_fills_strict_blocks_material_missing_fee_trade_and_salvage_observes(monkeypatch):
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    configure_bithumb_test_auth(settings)
     broker = BithumbBroker()
     broker.dry_run = False
     payload = {
@@ -11359,6 +11360,7 @@ def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(
         object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
         object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
         object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+        configure_bithumb_test_auth(settings)
 
         broker = BithumbBroker()
         monkeypatch.setattr(broker, "_market", lambda: "KRW-BTC")

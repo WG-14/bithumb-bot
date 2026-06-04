@@ -99,7 +99,7 @@ def _ts(day: str, minute: int) -> int:
     return int(base.timestamp() * 1000) + minute * 60_000
 
 
-def _create_db(path: Path) -> None:
+def _create_db(path: Path, *, minutes_per_day: int = 24 * 60) -> None:
     conn = sqlite3.connect(path)
     try:
         conn.execute(
@@ -118,7 +118,7 @@ def _create_db(path: Path) -> None:
         )
         pattern = [100, 99, 98, 97, 99, 102, 105, 104, 103, 100, 98, 96]
         for day in ("2023-01-01", "2023-01-02", "2023-01-03"):
-            for index in range(24 * 60):
+            for index in range(minutes_per_day):
                 close = pattern[index % len(pattern)]
                 conn.execute(
                     """
@@ -4628,7 +4628,7 @@ def test_registry_validate_revalidates_audit_trace_and_refuses_missing_stream(tm
 @pytest.mark.walk_forward_e2e
 def test_walk_forward_complete_external_audit_traces_all_windows(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
-    _create_db(db_path)
+    _create_db(db_path, minutes_per_day=220)
     for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT"):
         monkeypatch.setenv(key, str(tmp_path / f"{key.lower()}_root"))
     monkeypatch.setenv("MODE", "paper")
@@ -4642,7 +4642,14 @@ def test_walk_forward_complete_external_audit_traces_all_windows(tmp_path, monke
         "step_days": 1,
         "min_windows": 1,
     }
-    payload["research_run"] = {"artifact_policy": {"full_decisions_external_jsonl": True}}
+    payload["research_run"] = {
+        "artifact_policy": {"full_decisions_external_jsonl": True},
+        "resource_limits": {
+            # Keep complete external walk-forward trace coverage explicit while
+            # bounding this reduced fixture just above the default 128 MiB audit cap.
+            "max_audit_stream_bytes": 136 * 1024 * 1024,
+        },
+    }
 
     report = run_research_walk_forward(
         manifest=parse_manifest(payload),

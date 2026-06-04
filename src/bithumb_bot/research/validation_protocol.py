@@ -2183,7 +2183,7 @@ def _evaluate_candidate_base_result(
             parameter_candidate_id=param_candidate_id,
             parameter_stability_score=None,
             progress_callback=progress_callback,
-            artifact_context=context.artifact_context,
+            artifact_context=artifact_context,
         )
         if include_walk_forward
         else None

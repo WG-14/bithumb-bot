@@ -11,6 +11,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.execution import apply_fill_and_trade
 from bithumb_bot.oms import create_order
+from tests.support.live_auth import configure_bithumb_test_auth
 
 
 pytestmark = pytest.mark.fast_regression
@@ -800,6 +801,7 @@ def test_myorder_stream_and_rest_fill_contract_parity(monkeypatch) -> None:
             },
         ],
     }
+    configure_bithumb_test_auth(settings)
     broker = BithumbBroker()
     broker.dry_run = False
     monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: _configure_payload)

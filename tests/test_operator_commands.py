@@ -42,6 +42,7 @@ from bithumb_bot.config import (
     validate_live_real_order_execution_preflight,
 )
 from bithumb_bot.execution_order_rules import ExecutionOrderRules
+from tests.support.live_auth import configure_bithumb_test_auth
 from bithumb_bot.db_core import (
     ensure_db,
     get_fee_gap_accounting_repair_summary,
@@ -7234,6 +7235,7 @@ def test_flatten_position_no_position_safe_noop(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
+    configure_bithumb_test_auth(settings)
     monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     cmd_flatten_position(dry_run=False)

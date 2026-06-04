@@ -16,6 +16,7 @@ from bithumb_bot.db_core import (
 from bithumb_bot.execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.recovery import reconcile_with_broker
 from bithumb_bot import runtime_state
+from tests.support.live_auth import configure_bithumb_test_auth
 
 
 class _AvailableOnlyBalanceBroker:
@@ -63,6 +64,7 @@ def test_reconcile_allows_missing_base_currency_row_when_live_state_is_flat(tmp_
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
     object.__setattr__(settings, "BITHUMB_WS_MYASSET_ENABLED", False)
     object.__setattr__(settings, "START_CASH_KRW", 1000.0)
+    configure_bithumb_test_auth(settings)
 
     conn = ensure_db(str(db_path))
     try:
