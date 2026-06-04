@@ -57,6 +57,10 @@ DECLARED_ENV_NAMES: tuple[str, ...] = (
     "BITHUMB_ENV_FILE_LIVE",
     "BITHUMB_ENV_FILE_PAPER",
     "BITHUMB_ORDER_RPS_LIMIT",
+    "BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK",
+    "BITHUMB_RESEARCH_MAX_WORKERS",
+    "BITHUMB_RESEARCH_MP_START_METHOD",
+    "BITHUMB_TOTAL_PROCESS_BUDGET",
     "BITHUMB_PRIVATE_RPS_LIMIT",
     "BITHUMB_WS_MYASSET_ENABLED",
     "BITHUMB_WS_MYASSET_RECV_TIMEOUT_SEC",
@@ -219,6 +223,9 @@ DECLARED_ENV_NAMES: tuple[str, ...] = (
     "TARGET_HOLD_POLICY",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
+    "PYTEST_XDIST_WORKER",
+    "PYTEST_XDIST_WORKER_COUNT",
+    "PYTEST_XDIST_WORKERS",
     "XDG_STATE_HOME",
 )
 
@@ -252,6 +259,13 @@ LIVE_REQUIRED_KEYS = {
 INTERNAL_KEYS = {
     "BITHUMB_DEPLOY_COMMIT_SHA",
     "BITHUMB_DEPLOY_DIRTY",
+    "BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK",
+    "BITHUMB_RESEARCH_MAX_WORKERS",
+    "BITHUMB_RESEARCH_MP_START_METHOD",
+    "BITHUMB_TOTAL_PROCESS_BUDGET",
+    "PYTEST_XDIST_WORKER",
+    "PYTEST_XDIST_WORKER_COUNT",
+    "PYTEST_XDIST_WORKERS",
     "XDG_STATE_HOME",
 }
 
@@ -312,6 +326,10 @@ DESCRIPTIONS = {
 
 
 def _infer_type(name: str) -> str:
+    if name in {"BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK"}:
+        return "bool"
+    if name in {"BITHUMB_RESEARCH_MAX_WORKERS", "BITHUMB_TOTAL_PROCESS_BUDGET", "PYTEST_XDIST_WORKER_COUNT", "PYTEST_XDIST_WORKERS"}:
+        return "number"
     if name.endswith("_ENABLED") or name in {
         "KILL_SWITCH",
         "KILL_SWITCH_LIQUIDATE",
@@ -352,6 +370,10 @@ def _safety_tier_for(name: str) -> SafetyTier:
 
 
 def _category_for(name: str) -> str:
+    if name.startswith("BITHUMB_RESEARCH_") or name == "BITHUMB_TOTAL_PROCESS_BUDGET":
+        return "research"
+    if name.startswith("PYTEST_XDIST_"):
+        return "test_runtime"
     if name.endswith("_ROOT") or name in {"DB_PATH", "RUN_LOCK_PATH", "SNAPSHOT_ROOT", "BACKUP_DIR"}:
         return "storage"
     if name.startswith(("BITHUMB_", "LIVE_", "MAX_", "KILL_")):

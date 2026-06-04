@@ -2,7 +2,7 @@
 
 This file is generated from `src/bithumb_bot/config_spec.py`.
 Schema version: `config_spec_v1`
-Spec hash: `sha256:3b86d7ed4fda0ccbcd44d7d4528aedde2c55efe5e97f2e1e1e0c44bb8979caef`
+Spec hash: `sha256:a0248510bd0826b077a402d00c78e1360c37c7a06f13773ec9f0138f7818b357`
 
 | Name | Type | Scope | Default | Live required | Secret | Deprecated/Ignored | Safety | Validation | Description |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -26,6 +26,10 @@ Spec hash: `sha256:3b86d7ed4fda0ccbcd44d7d4528aedde2c55efe5e97f2e1e1e0c44bb8979c
 | `BITHUMB_ENV_FILE_PAPER` | string | bootstrap |  | no | no | no | P1 |  | BITHUMB_ENV_FILE_PAPER runtime configuration. |
 | `BITHUMB_ORDER_RPS_LIMIT` | string | common |  | no | no | no | P1 |  | BITHUMB_ORDER_RPS_LIMIT runtime configuration. |
 | `BITHUMB_PRIVATE_RPS_LIMIT` | string | common |  | no | no | no | P1 |  | BITHUMB_PRIVATE_RPS_LIMIT runtime configuration. |
+| `BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK` | bool | internal |  | no | no | no | internal |  | BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK runtime configuration. |
+| `BITHUMB_RESEARCH_MAX_WORKERS` | number | internal |  | no | no | no | internal |  | BITHUMB_RESEARCH_MAX_WORKERS runtime configuration. |
+| `BITHUMB_RESEARCH_MP_START_METHOD` | string | internal |  | no | no | no | internal |  | BITHUMB_RESEARCH_MP_START_METHOD runtime configuration. |
+| `BITHUMB_TOTAL_PROCESS_BUDGET` | number | internal |  | no | no | no | internal |  | BITHUMB_TOTAL_PROCESS_BUDGET runtime configuration. |
 | `BITHUMB_WS_MYASSET_ENABLED` | bool | common |  | no | no | no | P1 |  | BITHUMB_WS_MYASSET_ENABLED runtime configuration. |
 | `BITHUMB_WS_MYASSET_RECV_TIMEOUT_SEC` | number | common |  | no | no | no | P1 |  | BITHUMB_WS_MYASSET_RECV_TIMEOUT_SEC runtime configuration. |
 | `BITHUMB_WS_MYASSET_STALE_AFTER_MS` | number | common |  | no | no | no | P1 |  | BITHUMB_WS_MYASSET_STALE_AFTER_MS runtime configuration. |
@@ -150,6 +154,9 @@ Spec hash: `sha256:3b86d7ed4fda0ccbcd44d7d4528aedde2c55efe5e97f2e1e1e0c44bb8979c
 | `PAPER_FEE_RATE_ESTIMATE` | string | paper |  | no | no | no | P2 |  | PAPER_FEE_RATE_ESTIMATE runtime configuration. |
 | `PRETRADE_BALANCE_BUFFER_BPS` | number | common |  | no | no | no | P1 |  | PRETRADE_BALANCE_BUFFER_BPS runtime configuration. |
 | `PRE_TRADE_ECONOMICS_BLOCKING_ENABLED` | bool | common |  | no | no | no | P1 |  | PRE_TRADE_ECONOMICS_BLOCKING_ENABLED runtime configuration. |
+| `PYTEST_XDIST_WORKER` | string | internal |  | no | no | no | internal |  | PYTEST_XDIST_WORKER runtime configuration. |
+| `PYTEST_XDIST_WORKERS` | number | internal |  | no | no | no | internal |  | PYTEST_XDIST_WORKERS runtime configuration. |
+| `PYTEST_XDIST_WORKER_COUNT` | number | internal |  | no | no | no | internal |  | PYTEST_XDIST_WORKER_COUNT runtime configuration. |
 | `REQUIRE_BROKER_LOCAL_CONVERGENCE` | string | common |  | no | no | no | P1 |  | REQUIRE_BROKER_LOCAL_CONVERGENCE runtime configuration. |
 | `RESIDUAL_BUY_SIZING_MODE` | string | common |  | no | no | no | P1 |  | RESIDUAL_BUY_SIZING_MODE runtime configuration. |
 | `RESIDUAL_INVENTORY_MODE` | string | common |  | no | no | no | P1 |  | RESIDUAL_INVENTORY_MODE runtime configuration. |
