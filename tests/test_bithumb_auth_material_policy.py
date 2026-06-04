@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,11 @@ class ShortSecretUse:
     context: str
     line: int
     byte_length: int
+    value_hash_prefix: str
+
+
+def _secret_hash_prefix(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 SHORT_SECRET_ALLOWLIST_CONTEXTS = {
@@ -33,14 +39,12 @@ SHORT_SECRET_ALLOWLIST_CONTEXTS = {
         "test_bithumb_private_api.py",
         "test_private_api_rejects_short_secret_before_jwt_signing",
         "BithumbPrivateAPI.api_secret",
-        967,
-    ),
+    ): (1, _secret_hash_prefix("s")),
     (
         "test_live_preflight.py",
         "test_live_preflight_rejects_short_bithumb_api_secret",
         "settings.BITHUMB_API_SECRET",
-        1071,
-    ),
+    ): (24, _secret_hash_prefix("short-secret-lint-redact")),
 }
 
 
@@ -145,6 +149,7 @@ class _ShortBithumbSecretVisitor(ast.NodeVisitor):
                     context=context,
                     line=line,
                     byte_length=len(value.encode("utf-8")),
+                    value_hash_prefix=_secret_hash_prefix(value),
                 )
             )
         self.generic_visit(node)
@@ -164,8 +169,10 @@ def _short_secret_uses_from_tree(path: Path, tree: ast.AST) -> list[ShortSecretU
 def _unauthorized_short_secret_uses(path: Path) -> list[ShortSecretUse]:
     offenders: list[ShortSecretUse] = []
     for use in _short_secret_uses(path):
-        allow_key = (use.path, use.function, use.context, use.line)
-        if allow_key not in SHORT_SECRET_ALLOWLIST_CONTEXTS:
+        allow_key = (use.path, use.function, use.context)
+        expected = SHORT_SECRET_ALLOWLIST_CONTEXTS.get(allow_key)
+        observed = (use.byte_length, use.value_hash_prefix)
+        if expected != observed:
             offenders.append(use)
     return offenders
 

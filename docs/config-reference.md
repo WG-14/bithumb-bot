@@ -2,7 +2,7 @@
 
 This file is generated from `src/bithumb_bot/config_spec.py`.
 Schema version: `config_spec_v1`
-Spec hash: `sha256:091d36034ccb21f01648bc01e604d4bc7eb6bbc346ea3ece57b486ec1fd5ced0`
+Spec hash: `sha256:8ea24cde5e1e0c6ae87dfbdc9a2048d946e0b7015103afc0463c48b6647f68f7`
 
 | Name | Type | Scope | Default | Live required | Secret | Deprecated/Ignored | Safety | Validation | Description |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -26,6 +26,10 @@ Spec hash: `sha256:091d36034ccb21f01648bc01e604d4bc7eb6bbc346ea3ece57b486ec1fd5c
 | `BITHUMB_ENV_FILE_PAPER` | string | bootstrap |  | no | no | no | P1 |  | BITHUMB_ENV_FILE_PAPER runtime configuration. |
 | `BITHUMB_ORDER_RPS_LIMIT` | string | common |  | no | no | no | P1 |  | BITHUMB_ORDER_RPS_LIMIT runtime configuration. |
 | `BITHUMB_PRIVATE_RPS_LIMIT` | string | common |  | no | no | no | P1 |  | BITHUMB_PRIVATE_RPS_LIMIT runtime configuration. |
+| `BITHUMB_PYTEST_RUN_ID` | string | internal |  | no | no | no | internal |  | BITHUMB_PYTEST_RUN_ID runtime configuration. |
+| `BITHUMB_PYTEST_STARTED` | bool | internal |  | no | no | no | internal |  | BITHUMB_PYTEST_STARTED runtime configuration. |
+| `BITHUMB_PYTEST_SUITE` | string | internal |  | no | no | no | internal |  | BITHUMB_PYTEST_SUITE runtime configuration. |
+| `BITHUMB_PYTEST_SUMMARY_ON_SUCCESS` | bool | internal |  | no | no | no | internal |  | BITHUMB_PYTEST_SUMMARY_ON_SUCCESS runtime configuration. |
 | `BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK` | bool | internal |  | no | no | no | internal |  | BITHUMB_RESEARCH_ALLOW_UNSAFE_FORK runtime configuration. |
 | `BITHUMB_RESEARCH_MAX_WORKERS` | number | internal |  | no | no | no | internal |  | BITHUMB_RESEARCH_MAX_WORKERS runtime configuration. |
 | `BITHUMB_RESEARCH_MP_START_METHOD` | string | internal |  | no | no | no | internal |  | BITHUMB_RESEARCH_MP_START_METHOD runtime configuration. |
