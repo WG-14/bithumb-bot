@@ -1731,6 +1731,10 @@ def _target_delta_execution_submit_plan(*, side: str = "SELL", qty: float = 0.00
         extra_payload={
             "intent_type": "target_delta_rebalance",
             "strategy_context": "target_delta",
+            "portfolio_target_authoritative": True,
+            "portfolio_target_hash": "sha256:portfolio-target",
+            "allocation_decision_hash": "sha256:allocation",
+            "strategy_contribution_hash": "sha256:contribution",
             "target_qty": 0.0 if side == "SELL" else qty,
             "target_delta_qty": -qty if side == "SELL" else qty,
             "target_delta_side": side,

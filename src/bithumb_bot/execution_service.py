@@ -420,7 +420,9 @@ class ExecutionSubmitPlan:
         )
         return payload
 
-EXECUTION_SUBMIT_PLAN_VALID_SOURCES = frozenset(
+# Schema-known values are broad serialization compatibility values, not live
+# submit allowlists. Live authorization is decided by submit_authority_policy.py.
+EXECUTION_SUBMIT_PLAN_SCHEMA_KNOWN_SOURCES = frozenset(
     {
         "target_delta",
         "strategy_position",
@@ -428,7 +430,7 @@ EXECUTION_SUBMIT_PLAN_VALID_SOURCES = frozenset(
         "research_backtest",
     }
 )
-EXECUTION_SUBMIT_PLAN_VALID_AUTHORITIES = frozenset(
+EXECUTION_SUBMIT_PLAN_SCHEMA_KNOWN_AUTHORITIES = frozenset(
     {
         "canonical_target_delta_sizing",
         "configured_strategy_order_size",
@@ -505,10 +507,10 @@ def validate_execution_submit_plan_payload(
     if side not in {"BUY", "SELL", "HOLD", "NONE"}:
         raise ValueError(f"{field_name}_schema_invalid_side:{side or 'missing'}")
     source = str(plan.get("source") or "").strip()
-    if source not in EXECUTION_SUBMIT_PLAN_VALID_SOURCES:
+    if source not in EXECUTION_SUBMIT_PLAN_SCHEMA_KNOWN_SOURCES:
         raise ValueError(f"{field_name}_schema_invalid_source:{source or 'missing'}")
     authority = str(plan.get("authority") or "").strip()
-    if authority not in EXECUTION_SUBMIT_PLAN_VALID_AUTHORITIES:
+    if authority not in EXECUTION_SUBMIT_PLAN_SCHEMA_KNOWN_AUTHORITIES:
         raise ValueError(f"{field_name}_schema_invalid_authority:{authority or 'missing'}")
     proof_status = str(plan.get("pre_submit_proof_status") or "")
     if proof_status not in {"passed", "failed", "not_required"}:
