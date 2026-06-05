@@ -49,6 +49,7 @@ from bithumb_bot.strategy_preference import (
 )
 from bithumb_bot.runtime_strategy_set import (
     derive_strategy_instance_id,
+    ProfileAuthorityContext,
     RuntimeDecisionRequestBuilder,
     RuntimeMarketScope,
     RuntimeStrategyDecisionCollector,
@@ -186,27 +187,35 @@ def _runtime_result(
     candle_ts: int = 123,
     strategy_instance_id: str | None = None,
     spec: RuntimeStrategySpec | None = None,
+    request: object | None = None,
 ) -> _RuntimeResult:
     decision = _decision(final_signal=signal, strategy_name=name)
     request_spec = spec or RuntimeStrategySpec(name, strategy_instance_id=strategy_instance_id)
-    request = RuntimeDecisionRequestBuilder().build_for_spec(request_spec, through_ts_ms=candle_ts)
-    instance_id = request.strategy_instance_id
-    request_hash = request.request_hash
+    actual_request = request or RuntimeDecisionRequestBuilder().build_for_spec(
+        request_spec,
+        through_ts_ms=candle_ts,
+    )
+    instance_id = actual_request.strategy_instance_id
+    request_hash = actual_request.request_hash
+    authority_context = dict(actual_request.runtime_strategy_spec.profile_authority_context or {})
+    base_context = {
+        "strategy": name,
+        "signal": signal,
+        "reason": decision.final_reason,
+        "market_price": 100_000_000.0,
+        "runtime_decision_request_hash": request_hash,
+        "strategy_instance_id": instance_id,
+        "strategy_parameters_hash": actual_request.strategy_parameters_hash,
+        "approved_profile_hash": actual_request.approved_profile_hash,
+        "runtime_contract_hash": actual_request.runtime_contract_hash,
+        "plugin_contract_hash": actual_request.plugin_contract_hash,
+        "through_ts_ms": candle_ts,
+    }
+    if authority_context:
+        base_context["profile_authority_context"] = authority_context
     return _RuntimeResult(
         decision=decision,
-        base_context={
-            "strategy": name,
-            "signal": signal,
-            "reason": decision.final_reason,
-            "market_price": 100_000_000.0,
-            "runtime_decision_request_hash": request_hash,
-            "strategy_instance_id": instance_id,
-            "strategy_parameters_hash": request.strategy_parameters_hash,
-            "approved_profile_hash": request.approved_profile_hash,
-            "runtime_contract_hash": request.runtime_contract_hash,
-            "plugin_contract_hash": request.plugin_contract_hash,
-            "through_ts_ms": candle_ts,
-        },
+        base_context=base_context,
         candle_ts=candle_ts,
         market_price=100_000_000.0,
         policy_hashes={
@@ -219,13 +228,70 @@ def _runtime_result(
             "strategy_name": name,
             "runtime_decision_request_hash": request_hash,
             "strategy_instance_id": instance_id,
-            "strategy_parameters_hash": request.strategy_parameters_hash,
-            "approved_profile_hash": request.approved_profile_hash,
-            "runtime_contract_hash": request.runtime_contract_hash,
-            "plugin_contract_hash": request.plugin_contract_hash,
+            "strategy_parameters_hash": actual_request.strategy_parameters_hash,
+            "approved_profile_hash": actual_request.approved_profile_hash,
+            "runtime_contract_hash": actual_request.runtime_contract_hash,
+            "plugin_contract_hash": actual_request.plugin_contract_hash,
             "through_ts_ms": candle_ts,
         },
         boundary={"phase": "unit"},
+    )
+
+
+def _bind_unit_approved_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    *specs: RuntimeStrategySpec,
+) -> tuple[RuntimeStrategySpec, ...]:
+    from bithumb_bot import runtime_strategy_set
+
+    profiles: dict[str, dict[str, object]] = {}
+    bound_specs: list[RuntimeStrategySpec] = []
+    for idx, spec in enumerate(specs):
+        instance = str(spec.strategy_instance_id or f"{spec.strategy_name}_{idx}")
+        profile_path = f"/tmp/bithumb-bot-unit-approved-profiles/{instance}.json"
+        profile_hash = f"sha256:unit-profile-{instance}"
+        bound = replace(
+            spec,
+            approved_profile_path=profile_path,
+            approved_profile_hash=profile_hash,
+        )
+        profiles[profile_path] = {
+            "profile_mode": "small_live",
+            "profile_content_hash": profile_hash,
+            "strategy_parameters": dict(bound.parameters or {}),
+        }
+        bound_specs.append(bound)
+
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda path: profiles[str(path)])
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", lambda *args, **kwargs: ())
+    return tuple(bound_specs)
+
+
+def _unit_result_bundle(
+    strategy_set: RuntimeStrategySet,
+    result_specs: tuple[tuple[str, str, RuntimeStrategySpec], ...],
+) -> RuntimeStrategyDecisionResultBundle:
+    authority_context = ProfileAuthorityContext.for_strategy_set(strategy_set, settings_obj=settings)
+    builder_settings = replace(
+        settings,
+        MODE=authority_context.runtime_mode or settings.MODE,
+        LIVE_DRY_RUN=bool(authority_context.live_dry_run),
+        LIVE_REAL_ORDER_ARMED=bool(authority_context.live_real_order_armed),
+    )
+    request_builder = RuntimeDecisionRequestBuilder(settings_obj=builder_settings).with_authority_context(
+        authority_context
+    )
+    return RuntimeStrategyDecisionResultBundle(
+        strategy_set=strategy_set,
+        results=tuple(
+            _runtime_result(
+                signal,
+                name,
+                spec=spec,
+                request=request_builder.build_for_spec(spec, through_ts_ms=123),
+            )
+            for signal, name, spec in result_specs
+        ),
     )
 
 
@@ -1072,7 +1138,9 @@ def test_persist_target_position_state_uses_runtime_pair_not_global_pair(tmp_pat
     assert eth is None
 
 
-def test_live_performance_gate_uses_allocator_selected_contributions_not_global_strategy() -> None:
+def test_live_performance_gate_uses_allocator_selected_contributions_not_global_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 
     calls: list[tuple[str, str]] = []
@@ -1117,14 +1185,20 @@ def test_live_performance_gate_uses_allocator_selected_contributions_not_global_
             priority=10,
             parameters=_complete_canary_parameters(),
         )
-        hold_spec = RuntimeStrategySpec("safe_hold", strategy_instance_id="selected_hold", priority=10)
+        hold_spec = RuntimeStrategySpec(
+            "canary_non_sma",
+            strategy_instance_id="selected_hold",
+            priority=10,
+            parameters=_complete_canary_parameters(CANARY_ORDER_SIDE="HOLD", CANARY_ORDER_REASON="unit_hold"),
+        )
         loser_spec = RuntimeStrategySpec("sma_with_filter", strategy_instance_id="unselected_sell", priority=20, parameters=_complete_sma_parameters())
-        bundle = RuntimeStrategyDecisionResultBundle(
-            strategy_set=RuntimeStrategySet(source="unit", strategies=(buy_spec, hold_spec, loser_spec)),
-            results=(
-                _runtime_result("BUY", "canary_non_sma", spec=buy_spec),
-                _runtime_result("HOLD", "safe_hold", spec=hold_spec),
-                _runtime_result("SELL", "sma_with_filter", spec=loser_spec),
+        buy_spec, hold_spec, loser_spec = _bind_unit_approved_profiles(monkeypatch, buy_spec, hold_spec, loser_spec)
+        bundle = _unit_result_bundle(
+            RuntimeStrategySet(source="unit", strategies=(buy_spec, hold_spec, loser_spec)),
+            (
+                ("BUY", "canary_non_sma", buy_spec),
+                ("HOLD", "canary_non_sma", hold_spec),
+                ("SELL", "sma_with_filter", loser_spec),
             ),
         )
         result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
@@ -1141,7 +1215,9 @@ def test_live_performance_gate_uses_allocator_selected_contributions_not_global_
     assert result.persistence_context["performance_gate_scope"]["selected_signal"] == "BUY"
 
 
-def test_selected_buy_performance_gate_failure_blocks_before_submit_plan() -> None:
+def test_selected_buy_performance_gate_failure_blocks_before_submit_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 
     def _gate(_conn, *, strategy_name: str | None = None, pair: str | None = None):
@@ -1181,12 +1257,18 @@ def test_selected_buy_performance_gate_failure_blocks_before_submit_plan() -> No
             priority=10,
             parameters=_complete_canary_parameters(),
         )
-        hold_spec = RuntimeStrategySpec("safe_hold", strategy_instance_id="selected_hold", priority=10)
-        bundle = RuntimeStrategyDecisionResultBundle(
-            strategy_set=RuntimeStrategySet(source="unit", strategies=(buy_spec, hold_spec)),
-            results=(
-                _runtime_result("BUY", "canary_non_sma", spec=buy_spec),
-                _runtime_result("HOLD", "safe_hold", spec=hold_spec),
+        hold_spec = RuntimeStrategySpec(
+            "canary_non_sma",
+            strategy_instance_id="selected_hold",
+            priority=10,
+            parameters=_complete_canary_parameters(CANARY_ORDER_SIDE="HOLD", CANARY_ORDER_REASON="unit_hold"),
+        )
+        buy_spec, hold_spec = _bind_unit_approved_profiles(monkeypatch, buy_spec, hold_spec)
+        bundle = _unit_result_bundle(
+            RuntimeStrategySet(source="unit", strategies=(buy_spec, hold_spec)),
+            (
+                ("BUY", "canary_non_sma", buy_spec),
+                ("HOLD", "canary_non_sma", hold_spec),
             ),
         )
         result = planner.plan_runtime_strategy_results(object(), bundle, updated_ts=456)
@@ -1233,7 +1315,10 @@ def _insert_performance_lifecycle(
     )
 
 
-def test_selected_performance_gate_uses_real_strategy_instance_filter(tmp_path) -> None:
+def test_selected_performance_gate_uses_real_strategy_instance_filter(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 
     old_values = {
@@ -1306,11 +1391,12 @@ def test_selected_performance_gate_uses_real_strategy_instance_filter(tmp_path) 
             priority=20,
             parameters=_complete_canary_parameters(CANARY_ORDER_REASON="loser"),
         )
-        bundle = RuntimeStrategyDecisionResultBundle(
-            strategy_set=RuntimeStrategySet(source="unit", strategies=(selected, unselected)),
-            results=(
-                _runtime_result("BUY", "canary_non_sma", spec=selected),
-                _runtime_result("BUY", "canary_non_sma", spec=unselected),
+        selected, unselected = _bind_unit_approved_profiles(monkeypatch, selected, unselected)
+        bundle = _unit_result_bundle(
+            RuntimeStrategySet(source="unit", strategies=(selected, unselected)),
+            (
+                ("BUY", "canary_non_sma", selected),
+                ("BUY", "canary_non_sma", unselected),
             ),
         )
         result = planner.plan_runtime_strategy_results(conn, bundle, updated_ts=456)
@@ -1328,7 +1414,10 @@ def test_selected_performance_gate_uses_real_strategy_instance_filter(tmp_path) 
     assert result.persistence_context["blocking_strategy_instance_ids"] == []
 
 
-def test_selected_failing_instance_blocks_even_when_same_name_pair_history_passes(tmp_path) -> None:
+def test_selected_failing_instance_blocks_even_when_same_name_pair_history_passes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 
     old_values = {
@@ -1377,11 +1466,12 @@ def test_selected_failing_instance_blocks_even_when_same_name_pair_history_passe
             priority=20,
             parameters=_complete_canary_parameters(CANARY_ORDER_REASON="winner"),
         )
-        bundle = RuntimeStrategyDecisionResultBundle(
-            strategy_set=RuntimeStrategySet(source="unit", strategies=(selected, unselected)),
-            results=(
-                _runtime_result("BUY", "canary_non_sma", spec=selected),
-                _runtime_result("BUY", "canary_non_sma", spec=unselected),
+        selected, unselected = _bind_unit_approved_profiles(monkeypatch, selected, unselected)
+        bundle = _unit_result_bundle(
+            RuntimeStrategySet(source="unit", strategies=(selected, unselected)),
+            (
+                ("BUY", "canary_non_sma", selected),
+                ("BUY", "canary_non_sma", unselected),
             ),
         )
         result = planner.plan_runtime_strategy_results(conn, bundle, updated_ts=456)
