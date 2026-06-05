@@ -1,25 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local operator pytest repair pipeline:
-# 1. read scripts/codex_pytest_repair_prompt.md
-# 2. run Codex against this repository in Full Pytest Repair Mode
-# 3. commit and push Codex changes when files changed
-# 4. run smoke EC2 verification with live.verify.env when changes were pushed
-# 5. notify the final pipeline result through ntfy
-
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
 REQUEST_FILE="${CODEX_PYTEST_REQUEST_FILE:-${SCRIPT_DIR}/codex_pytest_repair_prompt.md}"
+FULL_SUITE_SCRIPT="${FULL_SUITE_SCRIPT:-${SCRIPT_DIR}/full_suite.sh}"
+PACKET_SCRIPT="${PACKET_SCRIPT:-${SCRIPT_DIR}/make_failure_packet.sh}"
 REMOTE_VERIFY_SCRIPT="${REMOTE_VERIFY_SCRIPT:-${SCRIPT_DIR}/remote_verify_live.sh}"
 NOTIFY_SCRIPT="${NOTIFY_SCRIPT:-${SCRIPT_DIR}/notify_ntfy.sh}"
+ARTIFACT_CHECK_SCRIPT="${ARTIFACT_CHECK_SCRIPT:-${SCRIPT_DIR}/check_repo_runtime_artifacts.sh}"
 CODEX_BIN="${CODEX_BIN:-codex}"
+CODEX_PYTEST_MAX_ITERATIONS="${CODEX_PYTEST_MAX_ITERATIONS:-3}"
+CODEX_PYTEST_WORK_DIR="${CODEX_PYTEST_WORK_DIR:-${TMPDIR:-/tmp}/bithumb-bot-codex-pytest}"
+CODEX_PYTEST_COMMIT_PUSH="${CODEX_PYTEST_COMMIT_PUSH:-1}"
+CODEX_PYTEST_REMOTE_VERIFY="${CODEX_PYTEST_REMOTE_VERIFY:-1}"
+REMOTE_VERIFY_MODE="${REMOTE_VERIFY_MODE:-smoke}"
+CODEX_PYTEST_ALLOW_DIRTY="${CODEX_PYTEST_ALLOW_DIRTY:-0}"
+CODEX_PYTEST_STRICT_MOCK_GUARD="${CODEX_PYTEST_STRICT_MOCK_GUARD:-0}"
 SSH_KEY="${BITHUMB_EC2_SSH_KEY:-${HOME}/.ssh/bithumb-bot-paper.pem}"
 EC2_TARGET="${BITHUMB_EC2_TARGET:-ec2-user@3.39.93.137}"
-REMOTE_VERIFY_MODE="smoke"
 
 stage="preflight"
+guard_dir=""
+last_signature=""
 
 notify() {
   local title="$1"
@@ -40,16 +44,6 @@ fail() {
   exit 1
 }
 
-on_error() {
-  local exit_code=$?
-  trap - ERR
-  local message="bithumb-bot Codex pytest pipeline failed during stage: ${stage}"
-  echo "[PYTEST-PIPELINE] ${message}" >&2
-  notify "bithumb-bot pytest pipeline failed" "high" "${message}"
-  exit "$exit_code"
-}
-trap on_error ERR
-
 run_stage() {
   stage="$1"
   shift
@@ -62,107 +56,260 @@ git_status_porcelain() {
   git status --porcelain=v1 --untracked-files=all
 }
 
-dirty_paths_except_request() {
-  local request_rel="$1"
-  git_status_porcelain | while IFS= read -r line; do
-    [[ -z "${line}" ]] && continue
-    local path="${line:3}"
-    if [[ "${path}" == *" -> "* ]]; then
-      path="${path##* -> }"
-    fi
-    if [[ "${path}" != "${request_rel}" ]]; then
-      printf '%s\n' "${line}"
-    fi
+cleanup_codex_pytest_guard() {
+  if [[ -n "${guard_dir}" && -d "${guard_dir}" ]]; then
+    rm -rf "${guard_dir}"
+  fi
+  guard_dir=""
+}
+
+on_error() {
+  local exit_code=$?
+  trap - ERR
+  cleanup_codex_pytest_guard
+  local message="bithumb-bot Codex pytest pipeline failed during stage: ${stage}"
+  echo "[PYTEST-PIPELINE] ${message}" >&2
+  notify "bithumb-bot pytest pipeline failed" "high" "${message}"
+  exit "${exit_code}"
+}
+trap on_error ERR
+trap cleanup_codex_pytest_guard EXIT
+
+install_codex_pytest_guard() {
+  local real_uv
+  real_uv="$(command -v uv || true)"
+  if [[ -z "${real_uv}" ]]; then
+    fail "uv binary not found; required for Codex focused pytest guard"
+  fi
+
+  guard_dir="$(mktemp -d "${CODEX_PYTEST_WORK_DIR%/}/guard.XXXXXX")"
+  cat > "${guard_dir}/uv" <<'GUARD'
+#!/usr/bin/env bash
+set -euo pipefail
+
+real_uv="${CODEX_PYTEST_REAL_UV:?}"
+
+guard_error() {
+  echo "[CODEX-PYTEST-GUARD] Pytest Repair Mode blocks selector-less full pytest." >&2
+  echo "[CODEX-PYTEST-GUARD] Full-suite validation belongs to the WSL wrapper." >&2
+  echo "[CODEX-PYTEST-GUARD] Do not run ./scripts/run_full_pytest_tests.sh inside Codex." >&2
+  echo "[CODEX-PYTEST-GUARD] $1" >&2
+  exit 125
+}
+
+is_pytest_path_selector() {
+  local arg="$1"
+  [[ "${arg}" == tests/*.py || "${arg}" == tests/*/*.py || "${arg}" == tests/*.py::* || "${arg}" == tests/*/*.py::* ]]
+}
+
+validate_pytest_args() {
+  local has_selector=0
+  local has_expression=0
+  local path_selector_count=0
+  local arg
+
+  for arg in "$@"; do
+    case "${arg}" in
+      -k|-m)
+        has_expression=1
+        ;;
+      tests|tests/)
+        guard_error "Broad tests target is blocked; use focused selectors from the failure packet."
+        ;;
+      -*)
+        ;;
+      *)
+        if is_pytest_path_selector "${arg}"; then
+          has_selector=1
+          path_selector_count=$((path_selector_count + 1))
+        elif [[ "${arg}" == tests/* ]]; then
+          guard_error "Only focused test files or test function selectors are allowed."
+        fi
+        ;;
+    esac
   done
+
+  if [[ "${has_selector}" -eq 0 && "${has_expression}" -eq 0 ]]; then
+    guard_error "Selector-less pytest is blocked."
+  fi
+
+  if [[ "${path_selector_count}" -gt 1 && "${has_expression}" -eq 0 ]]; then
+    guard_error "Multiple pytest path selectors require a focused -k or -m expression."
+  fi
+}
+
+if [[ "${1:-}" == "run" ]]; then
+  shift
+  if [[ "${1:-}" == "pytest" ]]; then
+    shift
+    validate_pytest_args "$@"
+    exec "${real_uv}" run pytest "$@"
+  fi
+  if [[ "${1:-}" == "python" && "${2:-}" == "-m" && "${3:-}" == "pytest" ]]; then
+    shift 3
+    validate_pytest_args "$@"
+    exec "${real_uv}" run python -m pytest "$@"
+  fi
+  if [[ "${1:-}" == "python" && ( "${2:-}" == "./scripts/run_full_pytest_tests.sh" || "${2:-}" == "scripts/run_full_pytest_tests.sh" ) ]]; then
+    guard_error "Full pytest runner is blocked inside Codex."
+  fi
+  exec "${real_uv}" run "$@"
+fi
+
+exec "${real_uv}" "$@"
+GUARD
+  chmod +x "${guard_dir}/uv"
+  export CODEX_PYTEST_REAL_UV="${real_uv}"
+  export PATH="${guard_dir}:${PATH}"
+}
+
+run_codex_pytest_repair_with_guard() {
+  local codex_input_file="$1"
+  cleanup_codex_pytest_guard
+  install_codex_pytest_guard
+  run_stage "run Codex focused pytest repair" \
+    "${CODEX_BIN}" exec --full-auto --cd "${PROJECT_ROOT}" - < "${codex_input_file}"
+  cleanup_codex_pytest_guard
+}
+
+detect_forbidden_repair_patterns() {
+  local forbidden_file strict_file
+  forbidden_file="${CODEX_PYTEST_WORK_DIR}/forbidden_repair_patterns.txt"
+  strict_file="${CODEX_PYTEST_WORK_DIR}/strict_mock_guard_patterns.txt"
+  mkdir -p "${CODEX_PYTEST_WORK_DIR}"
+
+  git diff -U0 -- '*.py' ':(exclude).git' \
+    | grep -E '^\+.*(pytest\.mark\.skip|pytest\.mark\.skipif|pytest\.mark\.xfail|@unittest\.skip|@unittest\.skipIf|@unittest\.skipUnless|xfail)' \
+    > "${forbidden_file}" || true
+
+  if [[ -s "${forbidden_file}" ]]; then
+    echo "[PYTEST-PIPELINE] forbidden skip/xfail additions:" >&2
+    cat "${forbidden_file}" >&2
+    fail "Codex added forbidden skip/xfail-style bypass patterns"
+  fi
+
+  if [[ "${CODEX_PYTEST_STRICT_MOCK_GUARD}" == "1" ]]; then
+    git diff -U0 -- '*.py' ':(exclude).git' \
+      | grep -E '^\+.*(MagicMock|Mock\(|patch\(|monkeypatch\.setattr)' \
+      > "${strict_file}" || true
+    if [[ -s "${strict_file}" ]]; then
+      echo "[PYTEST-PIPELINE] strict mock guard additions:" >&2
+      cat "${strict_file}" >&2
+      fail "Codex added mock/patch patterns while CODEX_PYTEST_STRICT_MOCK_GUARD=1"
+    fi
+  fi
+}
+
+complete_success() {
+  run_stage "final repo runtime artifact guard" "${ARTIFACT_CHECK_SCRIPT}"
+
+  if [[ -n "$(git_status_porcelain)" && "${CODEX_PYTEST_COMMIT_PUSH}" == "1" ]]; then
+    run_stage "git add ." git add .
+    run_stage "git commit -m pytest-repair" git commit -m "pytest-repair"
+    run_stage "git push" git push
+
+    if [[ "${CODEX_PYTEST_REMOTE_VERIFY}" == "1" ]]; then
+      if [[ "${REMOTE_VERIFY_MODE}" == "full" ]]; then
+        fail "REMOTE_VERIFY_MODE=full is out of scope for this pytest repair pipeline; use smoke or run remote full verification separately"
+      fi
+      if [[ ! -x "${REMOTE_VERIFY_SCRIPT}" ]]; then
+        fail "remote verify script is not executable: ${REMOTE_VERIFY_SCRIPT}"
+      fi
+      if [[ ! -f "${SSH_KEY}" ]]; then
+        fail "SSH key not found: ${SSH_KEY}"
+      fi
+
+      stage="EC2 smoke verification"
+      echo
+      echo "[PYTEST-PIPELINE] ${stage} (REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE})"
+      if ! ssh \
+          -i "${SSH_KEY}" \
+          -o BatchMode=yes \
+          -o StrictHostKeyChecking=accept-new \
+          "${EC2_TARGET}" \
+          "REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE} bash -s" < "${REMOTE_VERIFY_SCRIPT}"; then
+        fail "EC2 smoke verification failed with REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}"
+      fi
+    fi
+
+    notify "bithumb-bot pytest pipeline succeeded" "default" \
+      "WSL wrapper full-suite validation passed, changes were committed and pushed, and remote verification mode was ${REMOTE_VERIFY_MODE}."
+  else
+    notify "bithumb-bot pytest pipeline succeeded" "default" \
+      "WSL wrapper full-suite validation passed. Commit/push was skipped or no repository changes existed."
+  fi
+
+  echo
+  echo "[PYTEST-PIPELINE] success"
 }
 
 cd "${PROJECT_ROOT}"
-
-if [[ ! -f "${REQUEST_FILE}" ]]; then
-  fail "pytest repair prompt file not found: ${REQUEST_FILE}"
-fi
+mkdir -p "${CODEX_PYTEST_WORK_DIR}"
 
 if [[ ! -s "${REQUEST_FILE}" ]]; then
-  fail "pytest repair prompt file is empty: ${REQUEST_FILE}"
+  fail "pytest repair prompt file is missing or empty: ${REQUEST_FILE}"
 fi
-
-if [[ ! -x "${NOTIFY_SCRIPT}" ]]; then
-  fail "ntfy helper is not executable: ${NOTIFY_SCRIPT}"
-fi
-
+for required_script in "${FULL_SUITE_SCRIPT}" "${PACKET_SCRIPT}" "${ARTIFACT_CHECK_SCRIPT}" "${NOTIFY_SCRIPT}"; do
+  if [[ ! -x "${required_script}" ]]; then
+    fail "required script is not executable: ${required_script}"
+  fi
+done
 if [[ -z "${NTFY_TOPIC:-}" ]]; then
   fail "NTFY_TOPIC is required for success and failure notifications"
 fi
-
 if ! command -v "${CODEX_BIN}" >/dev/null 2>&1; then
   fail "Codex binary not found: ${CODEX_BIN}"
 fi
-
-request_rel="$(realpath --relative-to="${PROJECT_ROOT}" "${REQUEST_FILE}")"
-pre_existing_non_request="$(dirty_paths_except_request "${request_rel}")"
-
-if [[ -n "${pre_existing_non_request}" ]]; then
-  echo "[PYTEST-PIPELINE] refusing to run with pre-existing non-request changes:" >&2
-  printf '%s\n' "${pre_existing_non_request}" >&2
-  fail "refusing to run with pre-existing non-request changes"
+if [[ "${CODEX_PYTEST_COMMIT_PUSH}" == "1" && "${CODEX_PYTEST_REMOTE_VERIFY}" == "1" ]]; then
+  if [[ "${REMOTE_VERIFY_MODE}" == "full" ]]; then
+    fail "REMOTE_VERIFY_MODE=full is out of scope for this pytest repair pipeline; default smoke verification is required"
+  fi
+  if [[ ! -x "${REMOTE_VERIFY_SCRIPT}" ]]; then
+    fail "remote verify script is not executable: ${REMOTE_VERIFY_SCRIPT}"
+  fi
+  if [[ ! -f "${SSH_KEY}" ]]; then
+    fail "SSH key not found: ${SSH_KEY}"
+  fi
+fi
+if [[ "${CODEX_PYTEST_ALLOW_DIRTY}" != "1" && -n "$(git_status_porcelain)" ]]; then
+  echo "[PYTEST-PIPELINE] refusing to run with pre-existing repository changes:" >&2
+  git_status_porcelain >&2
+  fail "refusing to run with pre-existing repository changes"
 fi
 
-run_stage "run Codex pytest repair prompt from ${request_rel}" \
-  "${CODEX_BIN}" exec --full-auto --cd "${PROJECT_ROOT}" - < "${REQUEST_FILE}"
-
-post_codex_non_request="$(dirty_paths_except_request "${request_rel}")"
-
-run_stage "git status" git status
-run_stage "check repo runtime artifacts" ./scripts/check_repo_runtime_artifacts.sh
-
-if [[ -n "${post_codex_non_request}" ]]; then
-  run_stage "git add ." git add .
-  run_stage "git commit -m pytest-repair" git commit -m "pytest-repair"
-  run_stage "git push" git push
-else
-  stage="complete without repository changes"
+iteration=1
+while (( iteration <= CODEX_PYTEST_MAX_ITERATIONS )); do
+  export CODEX_PYTEST_ITERATION="${iteration}"
   echo
-  echo "[PYTEST-PIPELINE] ${stage}: Codex made no file changes"
-  notify "bithumb-bot pytest pipeline succeeded" "default" \
-    "Codex pytest repair made no file changes; commit, push, and EC2 smoke verification were skipped."
-  echo
-  echo "[PYTEST-PIPELINE] success"
-  exit 0
-fi
+  echo "[PYTEST-PIPELINE] iteration ${iteration}/${CODEX_PYTEST_MAX_ITERATIONS}"
 
-if [[ ! -x "${REMOTE_VERIFY_SCRIPT}" ]]; then
-  fail "remote verify script is not executable: ${REMOTE_VERIFY_SCRIPT}"
-fi
+  stage="WSL wrapper full-suite validation"
+  if "${FULL_SUITE_SCRIPT}"; then
+    complete_success
+    exit 0
+  fi
 
-if [[ ! -f "${SSH_KEY}" ]]; then
-  fail "SSH key not found: ${SSH_KEY}"
-fi
+  codex_input_file="$("${PACKET_SCRIPT}")"
+  packet_dir="$(dirname -- "${codex_input_file}")"
+  signature_file="${packet_dir}/failure_signature.sha256"
+  signature="$(<"${signature_file}")"
 
-stage="EC2 smoke verification"
-echo
-echo "[PYTEST-PIPELINE] ${stage} (REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE})"
-if ssh \
-    -i "${SSH_KEY}" \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=accept-new \
-    "${EC2_TARGET}" \
-    "REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE} bash -s" < "${REMOTE_VERIFY_SCRIPT}"; then
-  remote_verify_exit=0
-else
-  remote_verify_exit=$?
-fi
+  if [[ -n "${last_signature}" && "${signature}" == "${last_signature}" ]]; then
+    fail "same failure signature repeated twice: ${signature}"
+  fi
+  last_signature="${signature}"
 
-stage="complete"
-if [[ "${remote_verify_exit}" -eq 0 ]]; then
-  notify "bithumb-bot pytest pipeline succeeded" "default" \
-    "Codex pytest repair changes were committed, pushed, and passed EC2 smoke verification with REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}."
-  echo
-  echo "[PYTEST-PIPELINE] success"
-  exit 0
-fi
+  status_before="$(git_status_porcelain)"
+  run_codex_pytest_repair_with_guard "${codex_input_file}"
+  run_stage "post-Codex repo runtime artifact guard" "${ARTIFACT_CHECK_SCRIPT}"
+  detect_forbidden_repair_patterns
+  status_after="$(git_status_porcelain)"
 
-notify "bithumb-bot pytest pipeline failed" "high" \
-  "Codex pytest repair changes were committed and pushed, but EC2 smoke verification completed with one or more failed stages in REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}."
-echo
-echo "[PYTEST-PIPELINE] EC2 smoke verification completed with failed stages" >&2
-exit "${remote_verify_exit}"
+  if [[ "${status_after}" == "${status_before}" ]]; then
+    fail "Codex returned without changing repository state"
+  fi
+
+  iteration=$((iteration + 1))
+done
+
+fail "maximum Codex pytest repair iterations reached: ${CODEX_PYTEST_MAX_ITERATIONS}"
