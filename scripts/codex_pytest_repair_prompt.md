@@ -44,6 +44,7 @@ This task is limited to local code repair and focused local pytest validation.
 Do not run `./scripts/run_full_pytest_tests.sh`.
 Do not run `./scripts/check_repo_runtime_artifacts.sh`.
 Do not run the wrapper-owned validation command.
+Do not run `./scripts/full_suite.sh`.
 
 The WSL wrapper is the only authority allowed to run:
 
@@ -51,8 +52,13 @@ The WSL wrapper is the only authority allowed to run:
 PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=loadfile ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
 ```
 
-Do not modify this request file, `scripts/codex_pytest_repair_prompt.md`, unless the latest pytest failure directly targets this file.
-Do not modify pipeline scripts unless the latest pytest failure directly targets them.
+Do not modify this request file, `scripts/codex_pytest_repair_prompt.md`,
+unless the latest failure packet, wrapper log, pytest failure, preflight failure,
+collection/import/config error, or runtime artifact evidence directly targets this file.
+
+Do not modify pipeline scripts unless the latest failure packet, wrapper log,
+pytest failure, preflight failure, collection/import/config error, or runtime
+artifact evidence directly targets those scripts.
 
 Read the provided WSL failure packet first.
 
@@ -134,10 +140,27 @@ The project’s full validation command is owned by the WSL wrapper:
 PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=loadfile ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
 ```
 
+The wrapper normally invokes validation through:
+
+```bash
+./scripts/full_suite.sh
+```
+
+`full_suite.sh` records the full-suite log, runs `./scripts/run_full_pytest_tests.sh`,
+and runs `./scripts/check_repo_runtime_artifacts.sh` only after pytest succeeds.
+
 Codex must not run this command.
+Codex must not run `./scripts/full_suite.sh` directly.
 Codex must not run `./scripts/run_full_pytest_tests.sh`.
 Codex must not run `./scripts/check_repo_runtime_artifacts.sh`.
 Codex may run only focused pytest commands derived from the provided failure packet.
+
+If the failure packet contains a runtime artifact failure, Codex may repair the
+underlying cause, such as removing accidental repo-local generated artifacts or
+changing code that writes artifacts into the repository.
+
+However, Codex must not rerun `./scripts/check_repo_runtime_artifacts.sh`.
+The WSL wrapper will rerun the artifact guard after Codex returns.
 
 ### Allowed focused pytest examples
 

@@ -444,19 +444,57 @@ using the dedicated prompt file:
 scripts/codex_pytest_repair_prompt.md
 ```
 
-Only in Full Pytest Repair Mode may Codex run:
+Full-suite validation is still owned by the WSL wrapper, not Codex.
+
+The WSL wrapper owns:
+
+- running `scripts/full_suite.sh`
+- running the full pytest runner
+- running runtime artifact validation
+- generating the failure packet
+- deciding whether another repair iteration is needed
+
+Codex owns only:
+
+- reading the provided failure packet
+- summarizing visible failures before editing
+- grouping failures into likely repair clusters
+- making the smallest safe repair
+- running focused pytest commands derived from the failure packet
+- reporting changed files, focused validation, blockers, and residual risks
+
+Codex must not run selector-less full pytest, including:
 
 ```bash
+uv run pytest
 uv run pytest -q
+uv run pytest --quiet
 ```
+
+Codex must not run:
+
+```bash
+./scripts/run_full_pytest_tests.sh
+./scripts/check_repo_runtime_artifacts.sh
+./scripts/full_suite.sh
+```
+
+Codex may run only focused pytest commands directly traceable to the failure packet, such as:
+
+```bash
+uv run pytest tests/test_example.py -q
+uv run pytest tests/test_example.py::test_specific_case -q
+uv run pytest -k "specific_failure_name" -q
+```
+
+After Codex finishes the focused repair loop, control returns to the WSL wrapper.
+The wrapper is responsible for rerunning full-suite validation and runtime artifact validation.
 
 In Full Pytest Repair Mode, Codex must follow the pytest repair instructions in:
 
 ```text
 scripts/codex_pytest_repair_prompt.md
 ```
-
-Codex must run `uv run pytest -q`, repair failures if any, preserve the original patch intent, use focused tests only while debugging failure clusters, and rerun `uv run pytest -q` until it passes or a clear external blocker is reported.
 
 Full Pytest Repair Mode must not be used for unrelated feature work, broad cleanup, refactoring, or new task scope.
 
@@ -466,11 +504,14 @@ Repository-level mode rules override task prompts.
 
 If `scripts/codex_request.txt` conflicts with this file by asking for `uv run pytest -q`, the Default Patch Mode prohibition wins.
 
-To run full-suite pytest, use only:
+To request full-suite pytest validation, operators should use only:
 
 ```bash
 ./scripts/run_codex_pytest_pipeline.sh
 ```
+
+Inside that pipeline, the WSL wrapper runs full-suite validation.
+Codex must not invoke the full-suite command from inside the repair session.
 
 
 
@@ -543,7 +584,8 @@ Do not:
 - log secrets
 - make broad formatting-only changes during safety patches
 - trade safety for convenience
-- in Full Pytest Repair Mode, do not stop after partial debugging progress if a clean full-suite pass is still safely achievable
+- in Full Pytest Repair Mode, do not stop after partial debugging progress while known failure clusters remain safely repairable with focused tests
+- in Full Pytest Repair Mode, do not attempt final full-suite validation inside Codex; return control to the WSL wrapper
 - in any mode, do not use repeated full-suite reruns as a substitute for targeted diagnosis
 
 ## In Case of Ambiguity
