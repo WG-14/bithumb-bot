@@ -1277,6 +1277,9 @@ def _parse_risk_policy(value: Any, *, deployment_tier: str) -> RiskPolicy:
         "max_daily_loss_krw",
         "max_position_loss_pct",
         "max_daily_order_count",
+        "max_trade_count_per_day",
+        "max_drawdown_pct",
+        "cooldown_after_loss_min",
         "kill_switch",
         "max_open_positions",
         "unresolved_order_policy",
@@ -1318,6 +1321,18 @@ def _parse_risk_policy(value: Any, *, deployment_tier: str) -> RiskPolicy:
         max_daily_order_count=_positive_or_zero_int(
             value.get("max_daily_order_count", 0),
             "risk_policy.max_daily_order_count",
+        ),
+        max_trade_count_per_day=_positive_or_zero_int(
+            value.get("max_trade_count_per_day", 0),
+            "risk_policy.max_trade_count_per_day",
+        ),
+        max_drawdown_pct=_finite_non_negative_float(
+            value.get("max_drawdown_pct", 0.0),
+            "risk_policy.max_drawdown_pct",
+        ),
+        cooldown_after_loss_min=_positive_or_zero_int(
+            value.get("cooldown_after_loss_min", 0),
+            "risk_policy.cooldown_after_loss_min",
         ),
         kill_switch=bool(value.get("kill_switch", False)),
         max_open_positions=_positive_int(value.get("max_open_positions", 1), "risk_policy.max_open_positions"),

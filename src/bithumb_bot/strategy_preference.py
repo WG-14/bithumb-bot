@@ -55,6 +55,8 @@ class StrategyPreference:
     horizon: str = ""
     max_target_exposure_krw: float | None = None
     risk_budget_krw: float | None = None
+    risk_policy: Mapping[str, object] | None = None
+    risk_snapshot: Mapping[str, object] | None = None
     policy_hash: str = ""
     policy_contract_hash: str = ""
     policy_input_hash: str = ""
@@ -77,6 +79,16 @@ class StrategyPreference:
         max_target_exposure = _optional_float(self.max_target_exposure_krw)
         object.__setattr__(self, "risk_budget_krw", _optional_float(self.risk_budget_krw))
         object.__setattr__(self, "max_target_exposure_krw", max_target_exposure)
+        object.__setattr__(
+            self,
+            "risk_policy",
+            None if self.risk_policy is None else _stable_value(dict(self.risk_policy)),
+        )
+        object.__setattr__(
+            self,
+            "risk_snapshot",
+            None if self.risk_snapshot is None else _stable_value(dict(self.risk_snapshot)),
+        )
         object.__setattr__(
             self,
             "execution_intent_hint",
@@ -111,6 +123,8 @@ class StrategyPreference:
             "max_target_exposure_krw": self.max_target_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
             "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+            "strategy_risk_policy": self.risk_policy,
+            "strategy_risk_snapshot": self.risk_snapshot,
             "risk_decision": risk_decision,
             "risk_decision_hash": risk_decision["risk_decision_hash"],
             "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
@@ -168,6 +182,8 @@ def strategy_decision_to_preference(
     desired_weight: float | None = None,
     risk_budget_krw: float | None = None,
     max_target_exposure_krw: float | None = None,
+    risk_policy: Mapping[str, object] | None = None,
+    risk_snapshot: Mapping[str, object] | None = None,
     horizon: str = "",
     confidence: float | None = None,
     metadata: Mapping[str, object] | None = None,
@@ -193,6 +209,8 @@ def strategy_decision_to_preference(
         desired_weight=desired_weight,
         max_target_exposure_krw=max_target_exposure_krw,
         risk_budget_krw=risk_budget_krw,
+        risk_policy=risk_policy,
+        risk_snapshot=risk_snapshot,
         horizon=horizon,
         confidence=confidence,
         policy_hash=decision.policy_hash,

@@ -23,6 +23,9 @@ def _policy() -> RiskPolicy:
         max_daily_loss_krw=30_000.0,
         max_position_loss_pct=10.0,
         max_daily_order_count=2,
+        max_trade_count_per_day=4,
+        max_drawdown_pct=20.0,
+        cooldown_after_loss_min=15,
         kill_switch=False,
         max_open_positions=1,
         source="test_policy",
@@ -87,6 +90,9 @@ def _decisions(snapshot: RiskSnapshot, *, pre_submit: bool = False):
         ),
         (_snapshot(duplicate_entry=True, current_asset_qty=0.5), "DUPLICATE_ENTRY", False),
         (_snapshot(daily_order_count=2), "MAX_DAILY_ORDER_COUNT", False),
+        (_snapshot(daily_trade_count=4), "MAX_TRADE_COUNT_PER_DAY", False),
+        (_snapshot(current_drawdown_pct=20.0), "MAX_DRAWDOWN_PCT", False),
+        (_snapshot(minutes_since_last_loss=5.0), "COOLDOWN_AFTER_LOSS", False),
     ],
 )
 def test_risk_parity_vectors_share_decision_identity(
@@ -125,6 +131,16 @@ def test_risk_decision_identity_fields_are_trace_compatible() -> None:
     }
     assert fields["risk_decision_hash"] == decision.risk_decision_hash
     assert fields["risk_reason_code"] == DAILY_LOSS_LIMIT_REASON_CODE
+
+
+def test_strategy_level_risk_policy_schema_contains_required_fields() -> None:
+    payload = _policy().as_dict()
+
+    assert payload["max_daily_loss_krw"] == pytest.approx(30_000.0)
+    assert payload["max_daily_order_count"] == 2
+    assert payload["max_trade_count_per_day"] == 4
+    assert payload["max_drawdown_pct"] == pytest.approx(20.0)
+    assert payload["cooldown_after_loss_min"] == 15
 
 
 def test_runtime_risk_evaluation_records_typed_decision_identity(tmp_path) -> None:

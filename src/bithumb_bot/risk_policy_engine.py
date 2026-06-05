@@ -154,6 +154,54 @@ class RiskPolicyEngine:
                     evidence={**dict(snapshot.evidence), "today_orders": today_orders},
                 )
 
+        trade_limit = int(self.policy.max_trade_count_per_day)
+        if trade_limit > 0 and snapshot.daily_trade_count is not None:
+            today_trades = int(snapshot.daily_trade_count)
+            if today_trades >= trade_limit:
+                return build_risk_decision(
+                    evaluation_point=evaluation_point,  # type: ignore[arg-type]
+                    status="BLOCK",
+                    reason_code="MAX_TRADE_COUNT_PER_DAY",
+                    reason=f"daily trade count limit exceeded ({today_trades}/{trade_limit})",
+                    allowed_actions=("HOLD",),
+                    recommended_action="halt",
+                    snapshot=snapshot,
+                    policy=self.policy,
+                    evidence={**dict(snapshot.evidence), "today_trades": today_trades},
+                )
+
+        drawdown_limit = float(self.policy.max_drawdown_pct)
+        if drawdown_limit > 0.0 and snapshot.current_drawdown_pct is not None:
+            current_drawdown = float(snapshot.current_drawdown_pct)
+            if current_drawdown >= drawdown_limit:
+                return build_risk_decision(
+                    evaluation_point=evaluation_point,  # type: ignore[arg-type]
+                    status="BLOCK",
+                    reason_code="MAX_DRAWDOWN_PCT",
+                    reason=f"drawdown limit exceeded ({current_drawdown}/{drawdown_limit})",
+                    allowed_actions=("HOLD",),
+                    recommended_action="halt",
+                    snapshot=snapshot,
+                    policy=self.policy,
+                    evidence={**dict(snapshot.evidence), "current_drawdown_pct": current_drawdown},
+                )
+
+        cooldown_min = int(self.policy.cooldown_after_loss_min)
+        if cooldown_min > 0 and snapshot.minutes_since_last_loss is not None:
+            elapsed = float(snapshot.minutes_since_last_loss)
+            if elapsed < float(cooldown_min):
+                return build_risk_decision(
+                    evaluation_point=evaluation_point,  # type: ignore[arg-type]
+                    status="BLOCK",
+                    reason_code="COOLDOWN_AFTER_LOSS",
+                    reason=f"cooldown after loss active ({elapsed}/{cooldown_min} min)",
+                    allowed_actions=("HOLD",),
+                    recommended_action="hold",
+                    snapshot=snapshot,
+                    policy=self.policy,
+                    evidence={**dict(snapshot.evidence), "minutes_since_last_loss": elapsed},
+                )
+
         if (
             evaluation_point == "pre_submit"
             and self.policy.unresolved_order_policy == "block"

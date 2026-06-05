@@ -93,7 +93,8 @@ For the initial deterministic allocator policy:
 - Equal-priority `BUY` plus `SELL`, including `BUY` plus `SELL` plus `HOLD`, fails closed.
 - Higher-priority strategies win over lower-priority conflicting strategies; lower numeric priority is higher authority.
 - BUY target exposure is the weighted average of selected BUY strategy desired exposures. If any selected BUY contribution carries `max_target_exposure_krw`, the result is capped by the sum of selected BUY exposure caps.
-- `max_target_exposure_krw` is the allocator exposure cap. Historical `risk_budget_krw` is deprecated, preserved only as non-authoritative metadata, and no longer falls back into `max_target_exposure_krw`. It is not a maximum-loss budget and is marked with `risk_budget_semantics=deprecated_non_authoritative_not_exposure_cap` plus `risk_decision_hash=deprecated:risk_budget_krw_not_enforced_as_loss_budget` until separate loss-risk enforcement exists.
+- `max_target_exposure_krw` is the allocator exposure cap. Historical `risk_budget_krw` is deprecated, preserved only as non-authoritative metadata, and no longer falls back into `max_target_exposure_krw`.
+- Strategy-level loss/order/drawdown/cooldown policy is separate from exposure caps. Runtime strategy specs and preferences may carry typed `risk_policy` and `risk_snapshot` evidence with `max_daily_loss_krw`, `max_daily_order_count`, `max_trade_count_per_day`, `max_drawdown_pct`, and `cooldown_after_loss_min`. If a selected BUY contribution violates policy, the allocator fails closed before authoritative `PortfolioTarget` adoption and records the blocking `strategy_risk_decision_hash`.
 
 ## Runtime Manifest
 

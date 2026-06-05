@@ -113,7 +113,11 @@ class DecisionEnvelope:
         context.update(self._policy_hashes_as_dict())
         _attach_decision_projection_observability(context, _thaw_mapping(self.replay_fingerprint))
         if decision.execution_intent is not None:
-            context["execution_intent"] = decision.execution_intent.as_dict()
+            context["strategy_trace"] = {
+                **dict(context.get("strategy_trace") or {}),
+                "execution_intent": decision.execution_intent.as_dict(),
+                "execution_intent_authority": "non_authoritative_strategy_hint",
+            }
         return context
 
     def observability_fields(self) -> dict[str, object]:

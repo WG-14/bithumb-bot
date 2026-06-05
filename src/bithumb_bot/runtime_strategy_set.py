@@ -112,6 +112,8 @@ class RuntimeStrategySpec:
     desired_exposure_krw: float | None = None
     max_target_exposure_krw: float | None = None
     risk_budget_krw: float | None = None
+    risk_policy: Mapping[str, object] | None = None
+    risk_snapshot: Mapping[str, object] | None = None
     parameters: Mapping[str, object] | None = None
     runtime_adapter_config: Mapping[str, object] | None = None
     approved_profile_path: str | None = None
@@ -151,6 +153,20 @@ class RuntimeStrategySpec:
         object.__setattr__(self, "desired_exposure_krw", desired_exposure)
         object.__setattr__(self, "max_target_exposure_krw", max_target_exposure)
         object.__setattr__(self, "risk_budget_krw", risk_budget)
+        object.__setattr__(
+            self,
+            "risk_policy",
+            MappingProxyType({str(key): value for key, value in dict(self.risk_policy or {}).items()})
+            if self.risk_policy is not None
+            else None,
+        )
+        object.__setattr__(
+            self,
+            "risk_snapshot",
+            MappingProxyType({str(key): value for key, value in dict(self.risk_snapshot or {}).items()})
+            if self.risk_snapshot is not None
+            else None,
+        )
         object.__setattr__(
             self,
             "parameters",
@@ -197,6 +213,12 @@ class RuntimeStrategySpec:
             "desired_exposure_krw": self.desired_exposure_krw,
             "max_target_exposure_krw": self.max_target_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
+            "strategy_risk_policy": (
+                None if self.risk_policy is None else dict(self.risk_policy)
+            ),
+            "strategy_risk_snapshot": (
+                None if self.risk_snapshot is None else dict(self.risk_snapshot)
+            ),
             "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
             "risk_decision": risk_decision,
             "risk_decision_hash": risk_decision["risk_decision_hash"],
@@ -718,6 +740,16 @@ class RuntimeStrategySetResolver:
                 payload.get("exposure_cap_krw", default.max_target_exposure_krw),
             ),
             risk_budget_krw=payload.get("risk_budget_krw", default.risk_budget_krw),
+            risk_policy=(
+                payload.get("risk_policy")
+                if isinstance(payload.get("risk_policy"), Mapping)
+                else default.risk_policy
+            ),
+            risk_snapshot=(
+                payload.get("risk_snapshot")
+                if isinstance(payload.get("risk_snapshot"), Mapping)
+                else default.risk_snapshot
+            ),
             parameters=payload.get("parameters") if isinstance(payload.get("parameters"), Mapping) else None,
             runtime_adapter_config=(
                 payload.get("runtime_adapter_config")

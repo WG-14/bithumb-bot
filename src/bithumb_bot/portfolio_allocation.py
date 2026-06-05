@@ -10,7 +10,76 @@ from .risk_decision import (
     RISK_BUDGET_SEMANTICS,
     build_risk_decision_artifact,
 )
+from .risk_contract import RiskPolicy, RiskSnapshot
+from .risk_policy_engine import RiskPolicyEngine
 from .strategy_preference import StrategyPreference, StrategyPreferenceSet
+
+
+def _strategy_risk_policy_from_mapping(payload: Mapping[str, object]) -> RiskPolicy:
+    return RiskPolicy(
+        schema_version=int(payload.get("schema_version", 1) or 1),
+        max_daily_loss_krw=float(payload.get("max_daily_loss_krw", 0.0) or 0.0),
+        max_position_loss_pct=float(payload.get("max_position_loss_pct", 0.0) or 0.0),
+        max_daily_order_count=int(payload.get("max_daily_order_count", 0) or 0),
+        max_trade_count_per_day=int(payload.get("max_trade_count_per_day", 0) or 0),
+        max_drawdown_pct=float(payload.get("max_drawdown_pct", 0.0) or 0.0),
+        cooldown_after_loss_min=int(payload.get("cooldown_after_loss_min", 0) or 0),
+        kill_switch=bool(payload.get("kill_switch", False)),
+        max_open_positions=int(payload.get("max_open_positions", 1) or 1),
+        unresolved_order_policy=str(payload.get("unresolved_order_policy", "block") or "block"),
+        policy_status=str(payload.get("policy_status", "enabled") or "enabled"),
+        missing_policy=str(payload.get("missing_policy", "fail_closed_for_promotion") or "fail_closed_for_promotion"),
+        source=str(payload.get("source", "runtime_strategy_spec") or "runtime_strategy_spec"),
+    )
+
+
+def _strategy_risk_snapshot_from_mapping(
+    payload: Mapping[str, object] | None,
+    *,
+    strategy_instance_id: str,
+) -> RiskSnapshot:
+    fields = dict(payload or {})
+    return RiskSnapshot(
+        evaluation_ts_ms=int(fields.get("evaluation_ts_ms", 0) or 0),
+        mark_price=float(fields.get("mark_price", 0.0) or 0.0),
+        current_equity=fields.get("current_equity"),  # type: ignore[arg-type]
+        baseline_equity=fields.get("baseline_equity"),  # type: ignore[arg-type]
+        loss_today=fields.get("loss_today"),  # type: ignore[arg-type]
+        current_cash_krw=fields.get("current_cash_krw"),  # type: ignore[arg-type]
+        current_asset_qty=fields.get("current_asset_qty"),  # type: ignore[arg-type]
+        position_entry_price=fields.get("position_entry_price"),  # type: ignore[arg-type]
+        broker_local_mismatch=bool(fields.get("broker_local_mismatch", False)),
+        recovery_risk_mismatch_reason=(
+            None
+            if fields.get("recovery_risk_mismatch_reason") is None
+            else str(fields.get("recovery_risk_mismatch_reason"))
+        ),
+        duplicate_entry=bool(fields.get("duplicate_entry", False)),
+        daily_order_count=(
+            None if fields.get("daily_order_count") is None else int(fields.get("daily_order_count") or 0)
+        ),
+        daily_trade_count=(
+            None if fields.get("daily_trade_count") is None else int(fields.get("daily_trade_count") or 0)
+        ),
+        current_drawdown_pct=(
+            None
+            if fields.get("current_drawdown_pct") is None
+            else float(fields.get("current_drawdown_pct") or 0.0)
+        ),
+        minutes_since_last_loss=(
+            None
+            if fields.get("minutes_since_last_loss") is None
+            else float(fields.get("minutes_since_last_loss") or 0.0)
+        ),
+        unresolved_order_blocked=bool(fields.get("unresolved_order_blocked", False)),
+        unresolved_order_reason_code=str(fields.get("unresolved_order_reason_code", "OK") or "OK"),
+        unresolved_order_reason=str(fields.get("unresolved_order_reason", "ok") or "ok"),
+        state_source=str(fields.get("state_source", "strategy_risk_snapshot") or "strategy_risk_snapshot"),
+        evidence={
+            **dict(fields.get("evidence") or {}),
+            "strategy_instance_id": strategy_instance_id,
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -26,6 +95,8 @@ class StrategyContribution:
     risk_budget_krw: float | None
     max_target_exposure_krw: float | None
     reason: str
+    strategy_risk_policy: Mapping[str, object] | None = None
+    strategy_risk_snapshot: Mapping[str, object] | None = None
     pre_cap_weighted_target_exposure_krw: float | None = None
     exposure_cap_applied: bool = False
     exposure_cap_source: str = "none"
@@ -55,6 +126,12 @@ class StrategyContribution:
             "exposure_cap_applied": bool(self.exposure_cap_applied),
             "exposure_cap_source": self.exposure_cap_source,
             "risk_budget_semantics": self.risk_budget_semantics,
+            "strategy_risk_policy": (
+                None if self.strategy_risk_policy is None else dict(self.strategy_risk_policy)
+            ),
+            "strategy_risk_snapshot": (
+                None if self.strategy_risk_snapshot is None else dict(self.strategy_risk_snapshot)
+            ),
             "risk_decision": risk_decision,
             "risk_decision_hash": risk_decision["risk_decision_hash"],
             "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
@@ -276,6 +353,8 @@ class PortfolioAllocator:
             desired_exposure_krw=preference.desired_exposure_krw,
             risk_budget_krw=preference.risk_budget_krw,
             max_target_exposure_krw=preference.max_target_exposure_krw,
+            strategy_risk_policy=preference.risk_policy,
+            strategy_risk_snapshot=preference.risk_snapshot,
             reason=preference.reason,
         )
 
@@ -319,6 +398,17 @@ class PortfolioAllocator:
         conflict_resolution["selected_signal"] = selected_signal
         if selected_signal == "BUY":
             buy_contributions = tuple(item for item in top if item.signal_direction == "BUY")
+            risk_block = self._selected_strategy_risk_block(buy_contributions)
+            if risk_block is not None:
+                conflict_resolution.update(risk_block)
+                return self._blocked_target(
+                    pair,
+                    input_hash,
+                    config_hash,
+                    contribution_hash,
+                    str(risk_block["strategy_risk_block_reason_code"]),
+                    conflict_resolution=conflict_resolution,
+                )
             target_exposure, cap_audit = self._buy_target_exposure(buy_contributions)
             conflict_resolution.update(cap_audit)
             reason = "buy_weighted_target_from_allocator"
@@ -420,6 +510,30 @@ class PortfolioAllocator:
             "risk_decision_hash": risk_decision["risk_decision_hash"],
             "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
         }
+
+    def _selected_strategy_risk_block(
+        self,
+        contributions: tuple[StrategyContribution, ...],
+    ) -> dict[str, object] | None:
+        for item in contributions:
+            if not isinstance(item.strategy_risk_policy, Mapping):
+                continue
+            policy = _strategy_risk_policy_from_mapping(item.strategy_risk_policy)
+            snapshot = _strategy_risk_snapshot_from_mapping(
+                item.strategy_risk_snapshot,
+                strategy_instance_id=item.strategy_instance_id,
+            )
+            decision = RiskPolicyEngine(policy).evaluate_pre_decision(snapshot)
+            if decision.status != "ALLOW":
+                return {
+                    "strategy_risk_policy_blocked": True,
+                    "strategy_risk_blocked_instance_id": item.strategy_instance_id,
+                    "strategy_risk_block_reason_code": decision.reason_code,
+                    "strategy_risk_decision": decision.as_dict(),
+                    "strategy_risk_decision_hash": decision.risk_decision_hash,
+                    "risk_decision_hash": decision.risk_decision_hash,
+                }
+        return None
 
     def _blocked_decision(
         self,

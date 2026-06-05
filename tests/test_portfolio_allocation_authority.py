@@ -661,6 +661,38 @@ def test_risk_budget_does_not_act_as_exposure_cap() -> None:
     assert contribution["risk_budget_legacy_marker"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
 
 
+def test_strategy_level_risk_policy_violation_blocks_authoritative_portfolio_target() -> None:
+    preference = strategy_decision_to_preference(
+        _decision(final_signal="BUY", strategy_name="strategy_a"),
+        pair="KRW-BTC",
+        desired_exposure_krw=100_000.0,
+        max_target_exposure_krw=100_000.0,
+        risk_policy={
+            "max_daily_loss_krw": 1_000.0,
+            "max_daily_order_count": 5,
+            "max_trade_count_per_day": 5,
+            "max_drawdown_pct": 10.0,
+            "cooldown_after_loss_min": 15,
+            "source": "unit_strategy_policy",
+        },
+        risk_snapshot={
+            "evaluation_ts_ms": 123,
+            "mark_price": 100_000_000.0,
+            "loss_today": 2_000.0,
+            "state_source": "unit_strategy_snapshot",
+        },
+    )
+
+    decision = _allocate((preference,))
+    target = decision.target_for_pair("KRW-BTC")
+
+    assert target is not None
+    assert target.authoritative is False
+    assert target.fail_closed_reason == "DAILY_LOSS_LIMIT"
+    assert target.conflict_resolution["strategy_risk_policy_blocked"] is True
+    assert str(target.conflict_resolution["strategy_risk_decision_hash"]).startswith("sha256:")
+
+
 def test_allocator_records_risk_budget_semantics() -> None:
     decision = _allocate(
         (
@@ -2119,6 +2151,31 @@ def test_manifest_contains_execution_and_risk_config_hashes(tmp_path) -> None:
         assert manifest["risk_budget_legacy_marker"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
     finally:
         conn.close()
+
+
+def test_live_real_order_manifest_records_target_delta_authority_and_legacy_disabled() -> None:
+    cfg = replace(
+        settings,
+        MODE="live",
+        LIVE_DRY_RUN=False,
+        LIVE_REAL_ORDER_ARMED=True,
+        EXECUTION_ENGINE="target_delta",
+        PAIR="KRW-BTC",
+        INTERVAL="1m",
+    )
+    strategy_set = RuntimeStrategySet(
+        source="unit",
+        strategies=(RuntimeStrategySpec("safe_hold", strategy_instance_id="hold"),),
+    )
+
+    manifest = normalized_runtime_strategy_set_manifest(strategy_set=strategy_set, settings_obj=cfg)
+
+    assert manifest["submit_authority_mode"] == "live_real_order_target_delta_only"
+    assert manifest["live_real_order_requires_target_delta"] is True
+    assert manifest["legacy_lot_native_compat_enabled"] is False
+    assert manifest["allowed_submit_plan_sources"] == ["target_delta", "residual_inventory"]
+    assert "configured_strategy_order_size" not in manifest["allowed_submit_plan_authorities"]
+    assert str(manifest["submit_authority_policy_hash"]).startswith("sha256:")
 
 
 def test_runtime_manifest_replays_decision_request_hashes_exactly(tmp_path) -> None:

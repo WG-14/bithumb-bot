@@ -122,15 +122,21 @@ target-delta allocator path even when there is only one strategy instance.
 
 ## Risk And Exposure Semantics
 
-`risk_budget_krw` is not an exposure cap and is not a live loss-budget engine.
-The exposure-cap concept is `max_target_exposure_krw`. Runtime strategy
-manifests, strategy preferences, allocation decisions, portfolio targets, and
-submit plans emit a `risk_decision` artifact and `risk_decision_hash` recording:
+`risk_budget_krw` is not an exposure cap. The exposure-cap concept is
+`max_target_exposure_krw`. Runtime strategy manifests, strategy preferences,
+allocation decisions, portfolio targets, and submit plans emit a
+`risk_decision` artifact and `risk_decision_hash` recording:
 
 - `risk_budget_interpreted_as_exposure_cap=false`
-- `loss_budget_supported=false`
-- `loss_budget_authority=unsupported_fail_closed`
 - `exposure_cap_source=max_target_exposure_krw` when an exposure cap applies
+
+Strategy-level loss/order/drawdown/cooldown policy is represented separately
+from exposure caps by the typed risk policy fields `max_daily_loss_krw`,
+`max_daily_order_count`, `max_trade_count_per_day`, `max_drawdown_pct`, and
+`cooldown_after_loss_min`. A selected strategy risk-policy violation blocks
+authoritative `PortfolioTarget` adoption before a submittable target-delta plan
+can be created, and the blocking risk decision hash is carried in allocation
+and execution context.
 
 The deprecated marker
 `deprecated:risk_budget_krw_not_enforced_as_loss_budget` may still appear as

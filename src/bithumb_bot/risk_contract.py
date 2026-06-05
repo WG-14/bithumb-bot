@@ -15,6 +15,9 @@ class RiskPolicy:
     max_daily_loss_krw: float = 0.0
     max_position_loss_pct: float = 0.0
     max_daily_order_count: int = 0
+    max_trade_count_per_day: int = 0
+    max_drawdown_pct: float = 0.0
+    cooldown_after_loss_min: int = 0
     kill_switch: bool = False
     max_open_positions: int = 1
     unresolved_order_policy: str = "block"
@@ -28,6 +31,9 @@ class RiskPolicy:
             "max_daily_loss_krw": float(self.max_daily_loss_krw),
             "max_position_loss_pct": float(self.max_position_loss_pct),
             "max_daily_order_count": int(self.max_daily_order_count),
+            "max_trade_count_per_day": int(self.max_trade_count_per_day),
+            "max_drawdown_pct": float(self.max_drawdown_pct),
+            "cooldown_after_loss_min": int(self.cooldown_after_loss_min),
             "kill_switch": bool(self.kill_switch),
             "max_open_positions": int(self.max_open_positions),
             "unresolved_order_policy": str(self.unresolved_order_policy),
@@ -41,6 +47,9 @@ class RiskPolicy:
             "max_daily_loss_krw": float(self.max_daily_loss_krw),
             "max_position_loss_pct": float(self.max_position_loss_pct),
             "max_daily_order_count": int(self.max_daily_order_count),
+            "max_trade_count_per_day": int(self.max_trade_count_per_day),
+            "max_drawdown_pct": float(self.max_drawdown_pct),
+            "cooldown_after_loss_min": int(self.cooldown_after_loss_min),
             "max_open_positions": int(self.max_open_positions),
             "kill_switch": bool(self.kill_switch),
             "unresolved_order_policy": str(self.unresolved_order_policy),
@@ -65,6 +74,9 @@ class RiskSnapshot:
     recovery_risk_mismatch_reason: str | None = None
     duplicate_entry: bool = False
     daily_order_count: int | None = None
+    daily_trade_count: int | None = None
+    current_drawdown_pct: float | None = None
+    minutes_since_last_loss: float | None = None
     unresolved_order_blocked: bool = False
     unresolved_order_reason_code: str = "OK"
     unresolved_order_reason: str = "ok"
@@ -85,6 +97,9 @@ class RiskSnapshot:
             "recovery_risk_mismatch_reason": self.recovery_risk_mismatch_reason,
             "duplicate_entry": bool(self.duplicate_entry),
             "daily_order_count": self.daily_order_count,
+            "daily_trade_count": self.daily_trade_count,
+            "current_drawdown_pct": self.current_drawdown_pct,
+            "minutes_since_last_loss": self.minutes_since_last_loss,
             "unresolved_order_blocked": bool(self.unresolved_order_blocked),
             "unresolved_order_reason_code": str(self.unresolved_order_reason_code),
             "unresolved_order_reason": str(self.unresolved_order_reason),

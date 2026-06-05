@@ -275,6 +275,7 @@ def _allocator_target_exposure_krw(settings_obj: object = settings) -> float:
 def _allocation_context_fields(decision, *, runtime_pair: str) -> dict[str, object]:
     target = decision.target_for_pair(str(runtime_pair))
     target_payload = None if target is None else target.as_dict()
+    decision_payload = decision.as_dict()
     target_conflict = {}
     if target_payload is not None:
         raw_conflict = target_payload.get("conflict_resolution")
@@ -304,7 +305,14 @@ def _allocation_context_fields(decision, *, runtime_pair: str) -> dict[str, obje
         "allocation_selected_signal": str(target_conflict.get("selected_signal") or ""),
         "allocation_contributions": [item.as_dict() for item in decision.contributions],
         "portfolio_target": target_payload,
-        "portfolio_allocation_decision": decision.as_dict(),
+        "portfolio_allocation_decision": decision_payload,
+        "allocation_risk_decision_hash": str(decision_payload.get("risk_decision_hash") or ""),
+        "strategy_risk_decision_hash": str(target_conflict.get("strategy_risk_decision_hash") or ""),
+        "risk_decision_hash": str(
+            target_conflict.get("strategy_risk_decision_hash")
+            or decision_payload.get("risk_decision_hash")
+            or ""
+        ),
     }
 
 
@@ -895,7 +903,11 @@ class ExecutionPlanner:
                 context[key] = value
         execution_intent = getattr(decision, "execution_intent", None)
         if execution_intent is not None and hasattr(execution_intent, "as_dict"):
-            context["execution_intent"] = execution_intent.as_dict()
+            context["strategy_trace"] = {
+                **dict(context.get("strategy_trace") or {}),
+                "execution_intent": execution_intent.as_dict(),
+                "execution_intent_authority": "non_authoritative_strategy_hint",
+            }
         return context
 
     def _plan_typed_input(
@@ -1035,6 +1047,8 @@ class ExecutionPlanner:
                             desired_weight=spec.weight,
                             risk_budget_krw=spec.risk_budget_krw,
                             max_target_exposure_krw=spec.max_target_exposure_krw,
+                            risk_policy=spec.risk_policy,
+                            risk_snapshot=spec.risk_snapshot,
                             metadata=result_metadata,
                         )
                     )

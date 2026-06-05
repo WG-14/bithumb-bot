@@ -304,8 +304,10 @@ class TypedExecutionPlanningInput:
             payload["total_effective_exposure_notional_krw"] = 0.0
         execution_intent = decision.execution_intent
         if execution_intent is not None and hasattr(execution_intent, "as_dict"):
-            payload["execution_intent"] = execution_intent.as_dict()
-            payload["execution_intent_authority"] = "non_authoritative_strategy_hint"
+            strategy_trace = dict(payload.get("strategy_trace") or {})
+            strategy_trace["execution_intent"] = execution_intent.as_dict()
+            strategy_trace["execution_intent_authority"] = "non_authoritative_strategy_hint"
+            payload["strategy_trace"] = strategy_trace
         if self.target.portfolio_target is not None:
             target_payload = self.target.portfolio_target.as_dict()
             payload.update(
@@ -1383,18 +1385,6 @@ def _build_execution_decision_summary_from_authority_payload(
     buy_delta_krw = None
     if raw == "BUY":
         target_exposure_krw = max(0.0, float(getattr(settings, "MAX_ORDER_KRW", 0.0) or 0.0))
-        execution_intent = _dict_value(payload.get("execution_intent"))
-        if str(execution_intent.get("budget_model") or "") == "cash_fraction_capped_by_max_order_krw":
-            cash_available = payload.get("cash_available")
-            if cash_available is not None:
-                target_exposure_krw = max(
-                    0.0,
-                    float(cash_available or 0.0)
-                    * float(execution_intent.get("budget_fraction_of_cash") or 0.0),
-                )
-                max_budget = float(execution_intent.get("max_budget_krw") or 0.0)
-                if max_budget > 0.0:
-                    target_exposure_krw = min(target_exposure_krw, max_budget)
         current_effective_exposure_krw = (
             None
             if payload.get("total_effective_exposure_notional_krw") is None
@@ -1600,6 +1590,18 @@ def _build_execution_decision_summary_from_authority_payload(
                     or "none"
                 ),
                 "submit_authority_mode": submit_authority_policy.submit_authority_mode,
+                "live_real_order_requires_target_delta": (
+                    submit_authority_policy.live_real_order_requires_target_delta
+                ),
+                "legacy_lot_native_compat_enabled": (
+                    submit_authority_policy.legacy_lot_native_compat_enabled
+                ),
+                "allowed_submit_plan_sources": list(
+                    submit_authority_policy.allowed_submit_plan_sources
+                ),
+                "allowed_submit_plan_authorities": list(
+                    submit_authority_policy.allowed_submit_plan_authorities
+                ),
                 "submit_authority_policy_hash": submit_authority_policy_hash,
                 "risk_decision": risk_decision,
                 "risk_decision_hash": risk_decision_hash,
@@ -1847,6 +1849,18 @@ def _build_execution_decision_summary_from_authority_payload(
                 "would_submit_side": "SELL",
                 "would_submit_qty": float(residual_candidate.qty),
                 "submit_authority_mode": submit_authority_policy.submit_authority_mode,
+                "live_real_order_requires_target_delta": (
+                    submit_authority_policy.live_real_order_requires_target_delta
+                ),
+                "legacy_lot_native_compat_enabled": (
+                    submit_authority_policy.legacy_lot_native_compat_enabled
+                ),
+                "allowed_submit_plan_sources": list(
+                    submit_authority_policy.allowed_submit_plan_sources
+                ),
+                "allowed_submit_plan_authorities": list(
+                    submit_authority_policy.allowed_submit_plan_authorities
+                ),
                 "submit_authority_policy_hash": submit_authority_policy_hash,
                 "risk_decision": risk_decision,
                 "risk_decision_hash": risk_decision_hash,
