@@ -149,7 +149,11 @@ uv run pytest tests/test_example.py::test_specific_case -q
 uv run pytest -k "specific_failure_name" -q
 ```
 
-Codex must not run selector-less pytest, broad tests targets, or wrapper-owned validation commands.
+Use `-k` only when the expression is narrow and directly derived from the failure packet.
+
+Codex must not run selector-less pytest, broad `tests` or `tests/` targets, or wrapper-owned validation commands.
+
+Focused commands must be traceable to failures, collection errors, import errors, runtime artifact failures, or safety-contract concerns visible in the provided failure packet.
 
 ### Test execution discipline
 
