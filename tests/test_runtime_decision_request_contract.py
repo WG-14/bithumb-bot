@@ -32,6 +32,7 @@ from bithumb_bot.runtime_strategy_set import (
     RuntimeStrategySetResolver,
     RuntimeStrategySpec,
     normalized_runtime_strategy_set_manifest,
+    validate_runtime_strategy_set_market_scope,
     validate_runtime_strategy_set_profile_binding,
 )
 from bithumb_bot.strategy_plugins.canary_non_sma import CanaryNonSmaRuntimeDecisionAdapter
@@ -1543,6 +1544,55 @@ def test_runtime_strategy_set_rejects_multi_pair_until_pair_scoped_runtime_exist
     assert "multi_pair_runtime_unsupported" in str(exc.value)
 
 
+def test_same_pair_same_interval_multi_strategy_runtime_scope_is_accepted() -> None:
+    cfg = replace(settings, PAIR="KRW-BTC", INTERVAL="1m")
+    strategy_set = RuntimeStrategySet(
+        source="unit",
+        market_scope=RuntimeMarketScope(mode="single_pair", pair="KRW-BTC", interval="1m"),
+        strategies=(
+            RuntimeStrategySpec("safe_hold", strategy_instance_id="hold", pair="KRW-BTC", interval="1m"),
+            RuntimeStrategySpec(
+                "canary_non_sma",
+                strategy_instance_id="canary",
+                pair="KRW-BTC",
+                interval="1m",
+            ),
+        ),
+    )
+
+    assert validate_runtime_strategy_set_market_scope(strategy_set, cfg) == ()
+    validate_runtime_strategy_set_selection(
+        replace(
+            cfg,
+            RUNTIME_STRATEGY_SET_JSON=json.dumps(
+                {
+                    "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": "1m"},
+                    "strategies": [
+                        {
+                            "strategy_name": "safe_hold",
+                            "strategy_instance_id": "hold",
+                            "pair": "KRW-BTC",
+                            "interval": "1m",
+                        },
+                        {
+                            "strategy_name": "canary_non_sma",
+                            "strategy_instance_id": "canary",
+                            "pair": "KRW-BTC",
+                            "interval": "1m",
+                        },
+                    ],
+                }
+            ),
+        )
+    )
+    payload = strategy_set.as_dict()
+    assert payload["supported_runtime_scope"] == "multi_strategy_single_pair_single_interval"
+    assert payload["single_pair_runtime_enforced"] is True
+    assert payload["single_interval_runtime_enforced"] is True
+    assert payload["multi_pair_portfolio_supported"] is False
+    assert payload["multiple_execution_targets_supported"] is False
+
+
 def test_explicit_multi_pair_portfolio_scope_fails_closed_until_supported() -> None:
     cfg = replace(
         settings,
@@ -1611,6 +1661,43 @@ def test_strategy_pair_mismatch_reports_multi_pair_runtime_unsupported() -> None
     assert "runtime_strategy_pair_mismatch:multi_pair_runtime_unsupported" in str(exc.value)
 
 
+def test_strategy_interval_mismatch_reports_single_interval_runtime_unsupported() -> None:
+    cfg = replace(
+        settings,
+        PAIR="KRW-BTC",
+        INTERVAL="1m",
+        RUNTIME_STRATEGY_SET_JSON=json.dumps(
+            {
+                "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": "1m"},
+                "strategies": [{"strategy_name": "safe_hold", "pair": "KRW-BTC", "interval": "3m"}],
+            }
+        ),
+    )
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+    assert "runtime_strategy_interval_mismatch:single_interval_runtime_unsupported" in str(exc.value)
+
+
+def test_market_scope_interval_mismatch_reports_single_interval_runtime_unsupported() -> None:
+    cfg = replace(
+        settings,
+        PAIR="KRW-BTC",
+        INTERVAL="1m",
+        RUNTIME_STRATEGY_SET_JSON=json.dumps(
+            {
+                "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": "3m"},
+                "strategies": [{"strategy_name": "safe_hold", "pair": "KRW-BTC", "interval": "3m"}],
+            }
+        ),
+    )
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_runtime_strategy_set_selection(cfg)
+    assert "runtime_strategy_interval_mismatch:single_interval_runtime_unsupported" in str(exc.value)
+    assert "market_scope_interval=3m" in str(exc.value)
+
+
 def test_single_pair_runtime_manifest_declares_market_scope() -> None:
     strategy_set = RuntimeStrategySet(
         source="unit",
@@ -1620,8 +1707,11 @@ def test_single_pair_runtime_manifest_declares_market_scope() -> None:
     manifest = normalized_runtime_strategy_set_manifest(strategy_set=strategy_set)
 
     assert manifest["single_pair_runtime_enforced"] is True
+    assert manifest["single_interval_runtime_enforced"] is True
+    assert manifest["supported_runtime_scope"] == "multi_strategy_single_pair_single_interval"
     assert manifest["market_scope"]["mode"] == "single_pair"
     assert manifest["market_scope"]["pair"] == "KRW-BTC"
+    assert manifest["market_scope"]["single_interval_runtime_enforced"] is True
 
 
 def test_single_strategy_allows_global_profile_selector_when_hash_matches() -> None:
@@ -2389,6 +2479,29 @@ def test_normalized_runtime_strategy_set_manifest_materializes_active_instances(
     )
 
     assert manifest["single_pair_runtime_enforced"] is True
+    assert manifest["single_interval_runtime_enforced"] is True
+    assert manifest["runtime_scope"] == "multi-strategy / single-pair / single-interval runtime"
+    assert manifest["runtime_scope_mode"] == "single_pair"
+    assert manifest["supported_runtime_scope"] == "multi_strategy_single_pair_single_interval"
+    assert manifest["multi_pair_portfolio_supported"] is False
+    assert manifest["multiple_execution_targets_supported"] is False
+    assert manifest["active_strategy_pairs"] == ["KRW-BTC"]
+    assert manifest["active_strategy_intervals"] == ["1m"]
+    unsupported = manifest["unsupported_runtime_scopes"]["multi_pair_portfolio"]
+    assert unsupported["supported"] is False
+    assert unsupported["fail_closed_reason"] == "multi_pair_runtime_unsupported"
+    required = unsupported["required_before_enablement"]
+    for item in (
+        "pair-specific target state",
+        "pair-specific runtime data preflight",
+        "pair-specific strategy decision bundles or pair-scoped bundle partitioning",
+        "pair-specific allocation targets",
+        "pair-specific execution plans",
+        "pair-specific submit/reconcile loops",
+        "cross-pair risk budget semantics",
+        "currency-scoped portfolio/accounting ledger or equivalent multi-asset accounting model",
+    ):
+        assert item in required
     assert manifest["market_scope"]["mode"] == "single_pair"
     assert manifest["execution_config_hash"].startswith("sha256:")
     assert manifest["risk_config_hash"].startswith("sha256:")

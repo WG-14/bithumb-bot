@@ -25,9 +25,12 @@ from .portfolio_allocation import (
 from .strategy_preference import strategy_decision_to_preference
 from .runtime_readiness import compute_runtime_readiness_snapshot
 from .runtime_strategy_set import (
+    MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON,
+    RUNTIME_SCOPE_MODE,
     RuntimeStrategyDecisionResultBundle,
     RuntimeStrategySet,
     derive_strategy_instance_id,
+    runtime_scope_contract,
     runtime_strategy_set_manifest_hash,
 )
 from .strategy_policy_contract import StrategyDecisionV2
@@ -359,10 +362,10 @@ def _allocation_single_pair_invariant_error(decision, *, runtime_pair: str) -> s
 def _allocation_single_pair_invariant_context(decision, *, runtime_pair: str) -> dict[str, object]:
     targets = tuple(getattr(decision, "targets", ()) or ())
     return {
-        "runtime_scope": "multi-strategy / single-pair runtime",
-        "runtime_scope_mode": "single_pair",
+        **runtime_scope_contract(),
+        "runtime_scope_mode": RUNTIME_SCOPE_MODE,
         "multi_pair_portfolio_supported": False,
-        "multi_pair_portfolio_fail_closed_reason": "multi_pair_runtime_unsupported",
+        "multi_pair_portfolio_fail_closed_reason": MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON,
         "allocation_target_count": len(targets),
         "allocation_target_pairs": [str(getattr(target, "pair", "") or "") for target in targets],
         "runtime_pair": str(runtime_pair),

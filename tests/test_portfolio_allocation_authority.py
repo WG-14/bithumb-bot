@@ -1048,7 +1048,14 @@ def test_single_pair_planner_rejects_multi_target_allocation_before_submit() -> 
     assert result.submit_plan is None
     assert result.planning_error == "single_pair_allocation_target_count_mismatch"
     assert result.persistence_context["execution_block_reason"] == "single_pair_allocation_target_count_mismatch"
+    assert result.persistence_context["runtime_scope"] == "multi-strategy / single-pair / single-interval runtime"
+    assert result.persistence_context["runtime_scope_mode"] == "single_pair"
+    assert result.persistence_context["multi_pair_portfolio_supported"] is False
+    assert result.persistence_context["multi_pair_portfolio_fail_closed_reason"] == "multi_pair_runtime_unsupported"
+    assert result.persistence_context["single_pair_allocation_invariant_checked"] is True
+    assert result.persistence_context["runtime_pair"] == "KRW-BTC"
     assert result.persistence_context["allocation_target_count"] == 2
+    assert result.persistence_context["allocation_target_pairs"] == ["KRW-BTC", "KRW-ETH"]
 
 
 def test_single_pair_planner_rejects_target_pair_mismatch_before_submit() -> None:
@@ -1076,6 +1083,11 @@ def test_single_pair_planner_rejects_target_pair_mismatch_before_submit() -> Non
     assert result.submit_plan is None
     assert result.planning_error == "single_pair_allocation_target_pair_mismatch"
     assert result.persistence_context["execution_block_reason"] == "single_pair_allocation_target_pair_mismatch"
+    assert result.persistence_context["multi_pair_portfolio_supported"] is False
+    assert result.persistence_context["multi_pair_portfolio_fail_closed_reason"] == "multi_pair_runtime_unsupported"
+    assert result.persistence_context["single_pair_allocation_invariant_checked"] is True
+    assert result.persistence_context["runtime_pair"] == "KRW-BTC"
+    assert result.persistence_context["allocation_target_count"] == 1
     assert result.persistence_context["allocation_target_pairs"] == ["KRW-ETH"]
 
 

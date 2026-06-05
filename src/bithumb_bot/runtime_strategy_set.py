@@ -85,6 +85,44 @@ def _plugin_accepts_empty_runtime_parameters(plugin: object | None) -> bool:
     )
 
 
+SUPPORTED_RUNTIME_SCOPE = "multi_strategy_single_pair_single_interval"
+RUNTIME_SCOPE_DESCRIPTION = "multi-strategy / single-pair / single-interval runtime"
+RUNTIME_SCOPE_MODE = "single_pair"
+UNSUPPORTED_MULTI_PAIR_SCOPE = "multi_pair_portfolio"
+UNSUPPORTED_MULTI_INTERVAL_SCOPE = "multi_interval_runtime"
+MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON = "multi_pair_runtime_unsupported"
+SINGLE_INTERVAL_RUNTIME_UNSUPPORTED_REASON = "single_interval_runtime_unsupported"
+MULTI_PAIR_REQUIRED_BEFORE_ENABLEMENT = (
+    "pair-specific target state",
+    "pair-specific runtime data preflight",
+    "pair-specific strategy decision bundles or pair-scoped bundle partitioning",
+    "pair-specific allocation targets",
+    "pair-specific execution plans",
+    "pair-specific submit/reconcile loops",
+    "cross-pair risk budget semantics",
+    "currency-scoped portfolio/accounting ledger or equivalent multi-asset accounting model",
+)
+
+
+def runtime_scope_contract() -> dict[str, object]:
+    return {
+        "runtime_scope": RUNTIME_SCOPE_DESCRIPTION,
+        "runtime_scope_mode": RUNTIME_SCOPE_MODE,
+        "supported_runtime_scope": SUPPORTED_RUNTIME_SCOPE,
+        "unsupported_runtime_scope": [
+            UNSUPPORTED_MULTI_PAIR_SCOPE,
+            UNSUPPORTED_MULTI_INTERVAL_SCOPE,
+        ],
+        "single_pair_runtime_enforced": True,
+        "single_interval_runtime_enforced": True,
+        "multi_pair_portfolio_supported": False,
+        "multi_interval_runtime_supported": False,
+        "multiple_execution_targets_supported": False,
+        "multi_pair_portfolio_fail_closed_reason": MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON,
+        "multi_interval_runtime_fail_closed_reason": SINGLE_INTERVAL_RUNTIME_UNSUPPORTED_REASON,
+    }
+
+
 def _settings_for_authority_context(
     authority_context: "ProfileAuthorityContext",
     *,
@@ -260,6 +298,7 @@ class RuntimeMarketScope:
             "mode": self.mode,
             "pair": self.pair,
             "interval": self.interval,
+            **runtime_scope_contract(),
         }
 
 
@@ -496,7 +535,7 @@ class RuntimeStrategySet:
             "schema_version": int(self.schema_version),
             "source": self.source,
             "market_scope": self.market_scope.as_dict() if self.market_scope else None,
-            "single_pair_runtime_enforced": True,
+            **runtime_scope_contract(),
             "multi_strategy_enabled": self.multi_strategy_enabled,
             "strategies": [item.as_dict() for item in self.strategies],
             "active_strategies": [item.as_dict() for item in self.active_strategies],
@@ -1646,26 +1685,26 @@ def validate_runtime_strategy_set_market_scope(
     settings_interval = str(getattr(settings_obj, "INTERVAL", "") or "").strip()
     scope = strategy_set.market_scope or RuntimeMarketScope(pair=settings_pair, interval=settings_interval)
     if scope.mode != "single_pair":
-        issues.append(f"multi_pair_runtime_unsupported:market_scope_mode={scope.mode}")
+        issues.append(f"{MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON}:market_scope_mode={scope.mode}")
     if scope.pair != settings_pair:
         issues.append(
-            "runtime_strategy_pair_mismatch:multi_pair_runtime_unsupported:"
+            f"runtime_strategy_pair_mismatch:{MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON}:"
             f"settings_pair={settings_pair}:market_scope_pair={scope.pair}"
         )
     if scope.interval != settings_interval:
         issues.append(
-            "runtime_strategy_interval_mismatch:single_interval_runtime_unsupported:"
+            f"runtime_strategy_interval_mismatch:{SINGLE_INTERVAL_RUNTIME_UNSUPPORTED_REASON}:"
             f"settings_interval={settings_interval}:market_scope_interval={scope.interval}"
         )
     for spec in strategy_set.active_strategies:
         if str(spec.pair) != settings_pair:
             issues.append(
-                "runtime_strategy_pair_mismatch:multi_pair_runtime_unsupported:"
+                f"runtime_strategy_pair_mismatch:{MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON}:"
                 f"settings_pair={settings_pair}:spec_pair={spec.pair}:strategy={spec.strategy_name}"
             )
         if str(spec.interval) != settings_interval:
             issues.append(
-                "runtime_strategy_interval_mismatch:single_interval_runtime_unsupported:"
+                f"runtime_strategy_interval_mismatch:{SINGLE_INTERVAL_RUNTIME_UNSUPPORTED_REASON}:"
                 f"settings_interval={settings_interval}:spec_interval={spec.interval}:strategy={spec.strategy_name}"
             )
     return tuple(issues)
@@ -1793,23 +1832,23 @@ def normalized_runtime_strategy_set_manifest(
         "runtime_gate_authority": authority_context.as_dict()["runtime_gate_authority"],
         "runtime_pair": str(getattr(settings_obj, "PAIR", "")),
         "runtime_interval": str(getattr(settings_obj, "INTERVAL", "")),
-        "runtime_scope": "multi-strategy / single-pair runtime",
+        **runtime_scope_contract(),
         "unsupported_runtime_scopes": {
             "multi_pair_portfolio": {
                 "supported": False,
-                "fail_closed_reason": "multi_pair_runtime_unsupported",
+                "fail_closed_reason": MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON,
+                "required_before_enablement": list(MULTI_PAIR_REQUIRED_BEFORE_ENABLEMENT),
+            },
+            "multi_interval_runtime": {
+                "supported": False,
+                "fail_closed_reason": SINGLE_INTERVAL_RUNTIME_UNSUPPORTED_REASON,
                 "required_before_enablement": [
-                    "pair-specific target state",
-                    "pair-specific runtime data preflight",
-                    "pair-specific strategy decision bundles or pair-scoped bundle partitioning",
-                    "pair-specific allocation targets",
-                    "pair-specific execution plans",
-                    "pair-specific submit/reconcile loops",
-                    "cross-pair risk budget semantics",
+                    "interval-scoped runtime data preflight",
+                    "interval-scoped strategy decision bundles",
+                    "interval-scoped allocation and execution planning",
                 ],
-            }
+            },
         },
-        "single_pair_runtime_enforced": True,
         **submit_authority_policy.as_dict(),
         "submit_authority_policy_hash": submit_authority_policy.content_hash(),
         "risk_budget_semantics": RISK_BUDGET_SEMANTICS,

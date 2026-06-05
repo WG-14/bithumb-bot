@@ -2,10 +2,11 @@
 
 Strategy output is not execution authority.
 
-The supported production boundary is a multi-strategy / single-pair runtime:
+The supported production boundary is a multi-strategy / single-pair /
+single-interval runtime:
 multiple active strategy instances may decide on the same closed candle for one
-runtime pair, and deterministic priority allocation produces exactly one
-authoritative `PortfolioTarget` for that pair.
+runtime pair and interval, and deterministic priority allocation produces
+exactly one authoritative `PortfolioTarget` for that pair.
 
 The runtime authority chain is:
 
@@ -30,7 +31,7 @@ Runtime strategy set
 
 - `StrategyPreference` records a strategy's typed preference: signal direction, desired exposure or weight hints, confidence, horizon, exposure cap, reason, policy hashes, position snapshot hash, and non-authoritative execution intent hint.
 - `SignalAggregator` validates typed strategy preferences and creates a deterministic preference set.
-- `PortfolioAllocator` converts one or more preferences into one authoritative `PortfolioTarget` for the runtime pair. The allocator remains portfolio-shaped for future extension, but production execution is single-pair only.
+- `PortfolioAllocator` converts one or more preferences into one authoritative `PortfolioTarget` for the runtime pair. The allocator remains portfolio-shaped for future extension, but production execution is single-pair and single-interval only.
 - `PortfolioTarget` carries allocator policy, allocator config hash, strategy contribution hash, allocation input hash, final target hash, conflict metadata, authoritativeness, and fail-closed reason.
 - `ExecutionSubmitPlan` remains the final execution authority.
 
@@ -44,13 +45,14 @@ Configuration contract:
 
 - If `RUNTIME_STRATEGY_SET_JSON` is set to structured object form, it must include `market_scope` and a `strategies` list. The object form is the production contract.
 - `market_scope.mode` must be `single_pair` for production. The reserved future mode `multi_pair_portfolio` is an explicit unsupported concept and fails closed with `multi_pair_runtime_unsupported`.
-- `market_scope.pair` and `market_scope.interval` must match the runtime `PAIR` and `INTERVAL`. Multi-pair production runtime is not supported until pair-specific target state, pair-specific runtime data preflight, pair-scoped strategy decision bundles or bundle partitioning, pair-specific allocation targets, pair-specific execution plans, pair-specific submit/reconcile loops, and cross-pair risk budget semantics are implemented.
+- `market_scope.pair` and `market_scope.interval` must match the runtime `PAIR` and `INTERVAL`. Multi-pair production runtime is not supported until pair-specific target state, pair-specific runtime data preflight, pair-scoped strategy decision bundles or bundle partitioning, pair-specific allocation targets, pair-specific execution plans, pair-specific submit/reconcile loops, cross-pair risk budget semantics, and a currency-scoped portfolio/accounting ledger or equivalent multi-asset accounting model are implemented.
 - Each strategy object supports `strategy_name` or `name`, `enabled`, `pair`, `interval`, `parameters`, `runtime_adapter_config`, `approved_profile_path`, `approved_profile_hash`, `priority`, `weight`, `desired_exposure_krw`, `max_target_exposure_krw`, and legacy alias `risk_budget_krw`.
 - Legacy list-form `RUNTIME_STRATEGY_SET_JSON` remains paper/dev compatibility only. Live-like modes require object form with `market_scope`.
 - If `RUNTIME_STRATEGY_SET_JSON` is unset and `ACTIVE_STRATEGIES` is set, `ACTIVE_STRATEGIES` is parsed only as a compatibility/diagnostic strategy-name list and all other fields use safe defaults. It does not carry per-instance parameters, approved profiles, priority, weight, or risk authority. In `MODE=live`, multiple `ACTIVE_STRATEGIES` fail closed unless a structured runtime strategy-set contract is provided.
 - If neither multi-strategy variable is set, the resolver returns exactly one enabled strategy from `STRATEGY_NAME`.
 - `pair` defaults to `settings.PAIR`, `priority` defaults to `100`, `weight` defaults to `1.0`, and desired exposure defaults to `TARGET_EXPOSURE_KRW` when set or `MAX_ORDER_KRW`.
-- The current run loop is explicitly single-pair. Every active strategy spec must use `settings.PAIR`; pair mismatches fail during startup validation with `multi_pair_runtime_unsupported` before adapter execution in paper, live dry-run, and live real-order paths.
+- The current run loop is explicitly single-pair and single-interval. Every active strategy spec must use `settings.PAIR` and `settings.INTERVAL`; pair mismatches fail during startup validation with `multi_pair_runtime_unsupported`, and interval mismatches fail with `single_interval_runtime_unsupported`, before adapter execution in paper, live dry-run, and live real-order paths.
+- `multi_pair_runtime_unsupported` is intentional fail-closed behavior, not a validator bug. Removing it is unsafe because runtime data preflight, target state, execution plan persistence, submit/reconcile loops, and accounting are not multi-pair-safe yet. Future multi-pair support requires pair-scoped runtime shards plus a portfolio-level orchestrator.
 - Operators can validate and inspect the materialized active set without placing orders with `uv run bithumb-bot runtime-strategy-set-lint` and `uv run bithumb-bot runtime-strategy-set-dump`.
 
 Strict runtime parameter authority is limited to `approved_profile` and `runtime_strategy_spec`. `STRATEGY_PARAMETERS_JSON` and plugin `runtime_parameter_adapter.from_settings()` are compatibility fallbacks only and are surfaced as `paper_legacy_compat`; they are rejected for live/live-like or profile-bound runtime.
