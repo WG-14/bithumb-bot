@@ -18,6 +18,11 @@ from .decision_context import (
     normalize_strategy_decision_context,
 )
 from .canonical_decision import sha256_prefixed
+from .risk_decision import (
+    RISK_BUDGET_LEGACY_MARKER,
+    RISK_BUDGET_SEMANTICS,
+    build_risk_decision_artifact,
+)
 from .target_position import TargetPositionState
 
 
@@ -3753,6 +3758,10 @@ def replay_execution_submit_plan_hash(conn: sqlite3.Connection, execution_plan_i
 
 
 def _strategy_contribution_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    default_risk_decision = build_risk_decision_artifact(
+        risk_budget_krw=row["risk_budget_krw"],
+        decision_context="strategy_contribution",
+    )
     payload = {
         "schema_version": 1,
         "strategy_instance_id": str(row["strategy_instance_id"] or ""),
@@ -3768,8 +3777,10 @@ def _strategy_contribution_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "pre_cap_weighted_target_exposure_krw": None,
         "exposure_cap_applied": False,
         "exposure_cap_source": "none",
-        "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+        "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+        "risk_decision": default_risk_decision,
+        "risk_decision_hash": default_risk_decision["risk_decision_hash"],
+        "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
         "reason": str(row["reason"] or ""),
     }
     raw_json = str(row["contribution_json"] or "").strip()
@@ -3785,12 +3796,20 @@ def _strategy_contribution_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
                 "exposure_cap_applied",
                 "exposure_cap_source",
                 "risk_budget_semantics",
+                "risk_decision",
+                "risk_decision_hash",
+                "risk_budget_legacy_marker",
             ):
                 payload[key] = stored_payload.get(key, payload[key])
     return payload
 
 
 def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    default_risk_decision = build_risk_decision_artifact(
+        max_target_exposure_krw=None,
+        exposure_cap_source="none",
+        decision_context="portfolio_target",
+    )
     payload = {
         "schema_version": 1,
         "pair": str(row["pair"] or ""),
@@ -3810,8 +3829,10 @@ def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "conflict_resolution": _json_loads_object(str(row["conflict_resolution_json"] or "{}")),
         "authoritative": bool(row["authoritative"]),
         "fail_closed_reason": str(row["fail_closed_reason"] or ""),
-        "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+        "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+        "risk_decision": default_risk_decision,
+        "risk_decision_hash": default_risk_decision["risk_decision_hash"],
+        "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
     }
     target_json = _json_loads_object(str(row["target_json"] or "{}"))
     for key in (
@@ -3827,6 +3848,9 @@ def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "exposure_cap_applied",
         "exposure_cap_source",
         "risk_budget_semantics",
+        "risk_decision",
+        "risk_decision_hash",
+        "risk_budget_legacy_marker",
     ):
         payload[key] = target_json.get(key, payload[key])
     payload["final_portfolio_target_hash"] = sha256_prefixed(payload)
@@ -3916,6 +3940,9 @@ def rebuild_allocation_decision_from_bundle(
         "blocked_target_count": sum(1 for target in targets if not bool(target.get("authoritative"))),
         "conflict_count": conflict_count,
     }
+    risk_decision = build_risk_decision_artifact(
+        decision_context="portfolio_allocation_decision"
+    )
     payload = {
         "schema_version": 1,
         "allocation_input_hash": str(allocation["allocation_input_hash"] or ""),
@@ -3927,8 +3954,10 @@ def rebuild_allocation_decision_from_bundle(
         "reason": str(allocation["reason"] or ""),
         "authoritative": bool(allocation["authoritative"]),
         "primary_block_reason": str(allocation["primary_block_reason"] or ""),
-        "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+        "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+        "risk_decision": risk_decision,
+        "risk_decision_hash": risk_decision["risk_decision_hash"],
+        "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
     }
     payload["allocation_decision_hash"] = sha256_prefixed(payload)
     recorded = str(allocation["allocation_decision_hash"] or "")

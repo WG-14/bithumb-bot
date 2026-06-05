@@ -40,6 +40,11 @@ from .runtime_strategy_decision import (
     production_runtime_strategy_missing_error,
 )
 from .submit_authority_policy import submit_authority_policy_from_settings
+from .risk_decision import (
+    RISK_BUDGET_LEGACY_MARKER,
+    RISK_BUDGET_SEMANTICS,
+    build_risk_decision_artifact,
+)
 from .runtime_data_provider import (
     RuntimeDataAvailabilityReport,
     RuntimeDataRequirementResolver,
@@ -172,6 +177,14 @@ class RuntimeStrategySpec:
         )
 
     def as_dict(self) -> dict[str, object]:
+        risk_decision = build_risk_decision_artifact(
+            risk_budget_krw=self.risk_budget_krw,
+            max_target_exposure_krw=self.max_target_exposure_krw,
+            exposure_cap_source="max_target_exposure_krw"
+            if self.max_target_exposure_krw is not None
+            else "none",
+            decision_context="runtime_strategy_spec",
+        )
         return {
             "schema_version": int(self.schema_version),
             "strategy_instance_id": self.strategy_instance_id,
@@ -184,8 +197,10 @@ class RuntimeStrategySpec:
             "desired_exposure_krw": self.desired_exposure_krw,
             "max_target_exposure_krw": self.max_target_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
-            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+            "risk_decision": risk_decision,
+            "risk_decision_hash": risk_decision["risk_decision_hash"],
+            "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
             "parameters": dict(self.parameters or {}),
             "runtime_adapter_config": dict(self.runtime_adapter_config or {}),
             "approved_profile_path": self.approved_profile_path,
@@ -363,6 +378,14 @@ class RuntimeStrategyInstance:
         return str(self.spec.interval)
 
     def as_dict(self) -> dict[str, object]:
+        risk_decision = build_risk_decision_artifact(
+            risk_budget_krw=self.spec.risk_budget_krw,
+            max_target_exposure_krw=self.spec.max_target_exposure_krw,
+            exposure_cap_source="max_target_exposure_krw"
+            if self.spec.max_target_exposure_krw is not None
+            else "none",
+            decision_context="runtime_strategy_instance",
+        )
         return {
             "schema_version": int(self.schema_version),
             "strategy_instance_id": self.strategy_instance_id,
@@ -374,8 +397,10 @@ class RuntimeStrategyInstance:
             "desired_exposure_krw": self.spec.desired_exposure_krw,
             "max_target_exposure_krw": self.spec.max_target_exposure_krw,
             "risk_budget_krw": self.spec.risk_budget_krw,
-            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+            "risk_decision": risk_decision,
+            "risk_decision_hash": risk_decision["risk_decision_hash"],
+            "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
             "parameter_source": self.parameter_source,
             "parameters_raw": dict(self.parameters_raw),
             "parameters_materialized": dict(self.parameters_materialized),
@@ -1707,6 +1732,9 @@ def normalized_runtime_strategy_set_manifest(
         interval=str(getattr(settings_obj, "INTERVAL", "")),
     )
     submit_authority_policy = submit_authority_policy_from_settings(settings_obj)
+    risk_decision = build_risk_decision_artifact(
+        decision_context="runtime_strategy_set_manifest"
+    )
     payload = {
         "schema_version": 1,
         "authority_label": "RuntimeStrategySetManifest",
@@ -1750,9 +1778,12 @@ def normalized_runtime_strategy_set_manifest(
             }
         },
         "single_pair_runtime_enforced": True,
-        "submit_authority_mode": submit_authority_policy.submit_authority_mode,
+        **submit_authority_policy.as_dict(),
         "submit_authority_policy_hash": submit_authority_policy.content_hash(),
-        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+        "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+        "risk_decision": risk_decision,
+        "risk_decision_hash": risk_decision["risk_decision_hash"],
+        "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
         "market_scope": market_scope.as_dict(),
         "multi_strategy_enabled": resolved.multi_strategy_enabled,
         "active_strategy_count": len(active_instances),

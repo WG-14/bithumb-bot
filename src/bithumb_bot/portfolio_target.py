@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 from .canonical_decision import sha256_prefixed
+from .risk_decision import (
+    RISK_BUDGET_LEGACY_MARKER,
+    RISK_BUDGET_SEMANTICS,
+    build_risk_decision_artifact,
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,11 @@ class PortfolioTarget:
         )
 
     def _payload(self) -> dict[str, object]:
+        risk_decision = build_risk_decision_artifact(
+            max_target_exposure_krw=self.conflict_resolution.get("exposure_cap_krw"),
+            exposure_cap_source=str(self.conflict_resolution.get("exposure_cap_source", "none")),
+            decision_context="portfolio_target",
+        )
         return {
             "schema_version": int(self.schema_version),
             "pair": self.pair,
@@ -61,8 +71,10 @@ class PortfolioTarget:
             "conflict_resolution": dict(self.conflict_resolution),
             "authoritative": bool(self.authoritative),
             "fail_closed_reason": self.fail_closed_reason,
-            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+            "risk_decision": risk_decision,
+            "risk_decision_hash": risk_decision["risk_decision_hash"],
+            "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
         }
 
     def content_hash(self) -> str:

@@ -4,6 +4,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Mapping
 
 from .canonical_decision import sha256_prefixed
+from .risk_decision import (
+    RISK_BUDGET_LEGACY_MARKER,
+    RISK_BUDGET_SEMANTICS,
+    build_risk_decision_artifact,
+)
 from .strategy_policy_contract import StrategyDecisionV2
 
 
@@ -83,6 +88,14 @@ class StrategyPreference:
         object.__setattr__(self, "strategy_instance_id", str(self.strategy_instance_id or self.strategy_name))
 
     def as_dict(self) -> dict[str, object]:
+        risk_decision = build_risk_decision_artifact(
+            risk_budget_krw=self.risk_budget_krw,
+            max_target_exposure_krw=self.max_target_exposure_krw,
+            exposure_cap_source="max_target_exposure_krw"
+            if self.max_target_exposure_krw is not None
+            else "none",
+            decision_context="strategy_preference",
+        )
         return {
             "schema_version": int(self.schema_version),
             "strategy_instance_id": self.strategy_instance_id,
@@ -97,8 +110,10 @@ class StrategyPreference:
             "horizon": self.horizon,
             "max_target_exposure_krw": self.max_target_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
-            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+            "risk_decision": risk_decision,
+            "risk_decision_hash": risk_decision["risk_decision_hash"],
+            "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
             "reason": self.reason,
             "policy_hash": self.policy_hash,
             "policy_contract_hash": self.policy_contract_hash,

@@ -16,6 +16,7 @@ from bithumb_bot.execution_service import (
     TypedExecutionRequest,
     validate_execution_submit_plan_payload,
 )
+from bithumb_bot.submit_authority_policy import evaluate_submit_authority_policy
 from bithumb_bot.research.backtest_kernel import ResearchExecutionContext, ResearchVirtualExecutionService
 from bithumb_bot.research.execution_model import FixedBpsExecutionModel
 
@@ -170,6 +171,111 @@ def _typed_plan(payload: dict[str, object]) -> ExecutionSubmitPlan:
         idempotency_key=payload["idempotency_key"],  # type: ignore[arg-type]
         extra_payload={key: value for key, value in payload.items() if key not in required},
     )
+
+
+class _PolicySettings:
+    def __init__(
+        self,
+        *,
+        mode: str = "paper",
+        dry_run: bool = True,
+        armed: bool = False,
+        engine: str = "lot_native",
+        residual_mode: str = "block",
+    ) -> None:
+        self.MODE = mode
+        self.LIVE_DRY_RUN = dry_run
+        self.LIVE_REAL_ORDER_ARMED = armed
+        self.EXECUTION_ENGINE = engine
+        self.RESIDUAL_LIVE_SELL_MODE = residual_mode
+
+
+@pytest.mark.parametrize(
+    ("settings_obj", "plan", "plan_kind", "allowed", "reason"),
+    [
+        (
+            _PolicySettings(mode="paper", dry_run=True, armed=False, engine="lot_native"),
+            _valid_buy_submit_plan(),
+            "buy",
+            True,
+            "allowed_mode_compatibility",
+        ),
+        (
+            _PolicySettings(mode="live", dry_run=True, armed=False, engine="target_delta"),
+            _valid_target_submit_plan(),
+            "target",
+            False,
+            "live_dry_run_non_submitting",
+        ),
+        (
+            _PolicySettings(mode="live", dry_run=False, armed=True, engine="target_delta"),
+            _valid_target_submit_plan(),
+            "target",
+            True,
+            "allowed_target_delta",
+        ),
+        (
+            _PolicySettings(mode="live", dry_run=False, armed=True, engine="target_delta"),
+            _valid_buy_submit_plan(),
+            "buy",
+            False,
+            "live_real_order_buy_plan_rejected_target_delta_required",
+        ),
+        (
+            _PolicySettings(
+                mode="live",
+                dry_run=False,
+                armed=True,
+                engine="target_delta",
+                residual_mode="enabled",
+            ),
+            _valid_residual_submit_plan(),
+            "residual",
+            True,
+            "allowed_residual_inventory_policy",
+        ),
+        (
+            _PolicySettings(
+                mode="live",
+                dry_run=False,
+                armed=True,
+                engine="target_delta",
+                residual_mode="telemetry",
+            ),
+            _valid_residual_submit_plan(),
+            "residual",
+            False,
+            "live_real_order_residual_policy_not_enabled",
+        ),
+    ],
+)
+def test_submit_authority_policy_matrix_is_mode_aware(
+    settings_obj: _PolicySettings,
+    plan: dict[str, object],
+    plan_kind: str,
+    allowed: bool,
+    reason: str,
+) -> None:
+    decision = evaluate_submit_authority_policy(
+        plan,
+        settings_obj=settings_obj,
+        plan_kind=plan_kind,
+    )
+
+    assert decision.allowed is allowed
+    assert decision.reason == reason
+
+
+def test_submit_authority_policy_rejects_live_target_delta_without_provenance() -> None:
+    plan = {**_valid_target_submit_plan(), "portfolio_target_hash": ""}
+    decision = evaluate_submit_authority_policy(
+        plan,
+        settings_obj=_PolicySettings(mode="live", dry_run=False, armed=True, engine="target_delta"),
+        plan_kind="target",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "live_real_order_target_plan_missing_portfolio_target_hash"
 
 
 def _typed_target_execution_summary() -> ExecutionDecisionSummary:

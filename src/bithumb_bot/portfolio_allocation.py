@@ -5,6 +5,11 @@ from typing import Mapping
 
 from .canonical_decision import sha256_prefixed
 from .portfolio_target import PortfolioTarget
+from .risk_decision import (
+    RISK_BUDGET_LEGACY_MARKER,
+    RISK_BUDGET_SEMANTICS,
+    build_risk_decision_artifact,
+)
 from .strategy_preference import StrategyPreference, StrategyPreferenceSet
 
 
@@ -24,10 +29,16 @@ class StrategyContribution:
     pre_cap_weighted_target_exposure_krw: float | None = None
     exposure_cap_applied: bool = False
     exposure_cap_source: str = "none"
-    risk_budget_semantics: str = "deprecated_non_authoritative_not_exposure_cap"
+    risk_budget_semantics: str = RISK_BUDGET_SEMANTICS
     schema_version: int = 1
 
     def as_dict(self) -> dict[str, object]:
+        risk_decision = build_risk_decision_artifact(
+            risk_budget_krw=self.risk_budget_krw,
+            max_target_exposure_krw=self.max_target_exposure_krw,
+            exposure_cap_source=self.exposure_cap_source,
+            decision_context="strategy_contribution",
+        )
         return {
             "schema_version": int(self.schema_version),
             "strategy_instance_id": self.strategy_instance_id,
@@ -44,7 +55,9 @@ class StrategyContribution:
             "exposure_cap_applied": bool(self.exposure_cap_applied),
             "exposure_cap_source": self.exposure_cap_source,
             "risk_budget_semantics": self.risk_budget_semantics,
-            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_decision": risk_decision,
+            "risk_decision_hash": risk_decision["risk_decision_hash"],
+            "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
             "reason": self.reason,
         }
 
@@ -62,7 +75,7 @@ class PortfolioAllocatorConfig:
     conflict_policy: str = "fail_closed_equal_priority"
     strategy_priorities: Mapping[str, int] = field(default_factory=dict)
     strategy_weights: Mapping[str, float] = field(default_factory=dict)
-    risk_budget_semantics: str = "deprecated_non_authoritative_not_exposure_cap"
+    risk_budget_semantics: str = RISK_BUDGET_SEMANTICS
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -149,6 +162,9 @@ class PortfolioAllocationDecision:
     schema_version: int = 1
 
     def as_dict(self) -> dict[str, object]:
+        risk_decision = build_risk_decision_artifact(
+            decision_context="portfolio_allocation_decision"
+        )
         payload = {
             "schema_version": int(self.schema_version),
             "allocation_input_hash": self.allocation_input_hash,
@@ -160,8 +176,10 @@ class PortfolioAllocationDecision:
             "reason": self.reason,
             "authoritative": bool(self.authoritative),
             "primary_block_reason": self.primary_block_reason,
-            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+            "risk_decision": risk_decision,
+            "risk_decision_hash": risk_decision["risk_decision_hash"],
+            "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
         }
         payload["allocation_decision_hash"] = sha256_prefixed(
             {key: value for key, value in payload.items() if key != "allocation_decision_hash"}
@@ -351,13 +369,18 @@ class PortfolioAllocator:
     def _buy_target_exposure(self, contributions: tuple[StrategyContribution, ...]) -> tuple[float, dict[str, object]]:
         if not contributions:
             target = max(0.0, float(self.config.target_exposure_krw))
+            risk_decision = build_risk_decision_artifact(
+                decision_context="portfolio_allocator_default_target"
+            )
             return target, {
                 "pre_cap_weighted_target_exposure_krw": target,
                 "exposure_cap_krw": None,
                 "exposure_cap_applied": False,
                 "exposure_cap_source": "none",
-                "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-                "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+                "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+                "risk_decision": risk_decision,
+                "risk_decision_hash": risk_decision["risk_decision_hash"],
+                "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
             }
         weighted_total = 0.0
         weight_total = 0.0
@@ -382,13 +405,20 @@ class PortfolioAllocator:
             capped = min(target, exposure_cap_total)
             cap_applied = capped < target
             target = capped
+        risk_decision = build_risk_decision_artifact(
+            max_target_exposure_krw=(exposure_cap_total if exposure_cap_present else None),
+            exposure_cap_source="max_target_exposure_krw" if exposure_cap_present else "none",
+            decision_context="portfolio_allocator_buy_target",
+        )
         return max(0.0, float(target)), {
             "pre_cap_weighted_target_exposure_krw": max(0.0, float(pre_cap)),
             "exposure_cap_krw": exposure_cap_total if exposure_cap_present else None,
             "exposure_cap_applied": cap_applied,
             "exposure_cap_source": "max_target_exposure_krw" if exposure_cap_present else "none",
-            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
-            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_budget_semantics": RISK_BUDGET_SEMANTICS,
+            "risk_decision": risk_decision,
+            "risk_decision_hash": risk_decision["risk_decision_hash"],
+            "risk_budget_legacy_marker": RISK_BUDGET_LEGACY_MARKER,
         }
 
     def _blocked_decision(

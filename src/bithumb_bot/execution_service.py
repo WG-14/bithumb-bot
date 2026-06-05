@@ -15,6 +15,7 @@ from .observability import format_log_kv
 from .oms import build_order_intent_key
 from .order_sizing import build_target_delta_execution_sizing
 from .portfolio_target import PortfolioTarget
+from .risk_decision import build_risk_decision_artifact
 from .pre_trade_economics import build_pre_trade_economics_snapshot
 from .strategy_policy_contract import StrategyDecisionV2
 from .submit_authority_policy import (
@@ -1419,7 +1420,12 @@ def _build_execution_decision_summary_from_authority_payload(
     execution_engine = _execution_engine()
     submit_authority_policy = submit_authority_policy_from_settings(settings)
     submit_authority_policy_hash = submit_authority_policy.content_hash()
-    risk_decision_hash = "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
+    risk_decision = build_risk_decision_artifact(
+        max_target_exposure_krw=getattr(portfolio_target, "target_exposure_krw", None),
+        exposure_cap_source="portfolio_target",
+        decision_context="execution_submit_plan",
+    )
+    risk_decision_hash = str(risk_decision["risk_decision_hash"])
 
     if bool(getattr(settings, "TARGET_EXECUTION_SHADOW", False)) or execution_engine == "target_delta":
         execution_order_rules = resolve_execution_order_rules(payload, market=str(settings.PAIR))
@@ -1593,6 +1599,7 @@ def _build_execution_decision_summary_from_authority_payload(
                 ),
                 "submit_authority_mode": submit_authority_policy.submit_authority_mode,
                 "submit_authority_policy_hash": submit_authority_policy_hash,
+                "risk_decision": risk_decision,
                 "risk_decision_hash": risk_decision_hash,
             }
             if performance_gate_fields and str(target_decision.delta_side) == "BUY":
@@ -1839,6 +1846,7 @@ def _build_execution_decision_summary_from_authority_payload(
                 "would_submit_qty": float(residual_candidate.qty),
                 "submit_authority_mode": submit_authority_policy.submit_authority_mode,
                 "submit_authority_policy_hash": submit_authority_policy_hash,
+                "risk_decision": risk_decision,
                 "risk_decision_hash": risk_decision_hash,
             }
             residual_submit_plan = ExecutionSubmitPlan(

@@ -203,6 +203,14 @@ def evaluate_submit_authority_policy(
                 return decision(False, "live_real_order_target_plan_submit_not_expected")
             if proof != "passed":
                 return decision(False, "live_real_order_target_plan_pre_submit_proof_not_passed")
+            if not bool(payload.get("portfolio_target_authoritative")):
+                return decision(False, "live_real_order_target_plan_missing_authoritative_portfolio_target")
+            if not str(payload.get("portfolio_target_hash") or "").strip():
+                return decision(False, "live_real_order_target_plan_missing_portfolio_target_hash")
+            if not str(payload.get("allocation_decision_hash") or "").strip():
+                return decision(False, "live_real_order_target_plan_missing_allocation_decision_hash")
+            if not str(payload.get("strategy_contribution_hash") or "").strip():
+                return decision(False, "live_real_order_target_plan_missing_strategy_contribution_hash")
             return decision(True, "allowed_target_delta")
         if normalized_kind == "residual":
             if source != RESIDUAL_SUBMIT_SOURCE:
@@ -215,6 +223,9 @@ def evaluate_submit_authority_policy(
                 return decision(False, "live_real_order_residual_plan_submit_not_expected")
             if proof != "passed":
                 return decision(False, "live_real_order_residual_plan_pre_submit_proof_not_passed")
+            residual_mode = str(getattr(settings_obj, "RESIDUAL_LIVE_SELL_MODE", "") or "").strip().lower()
+            if residual_mode != "enabled":
+                return decision(False, "live_real_order_residual_policy_not_enabled")
             return decision(True, "allowed_residual_inventory_policy")
         if normalized_kind == "buy":
             return decision(False, "live_real_order_buy_plan_rejected_target_delta_required")

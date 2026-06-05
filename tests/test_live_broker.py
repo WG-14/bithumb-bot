@@ -18,6 +18,8 @@ from bithumb_bot.broker.live_submission_execution import (
 from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import (
+    _lot_native_buy_submit_plan,
+    _target_delta_submit_plan,
     _submit_contract_fields,
     adjust_buy_order_qty_for_dust_safety,
     adjust_sell_order_qty_for_dust_safety,
@@ -317,6 +319,119 @@ def _standard_submit_request(
         submit_observability_fields={},
         sell_observability={},
     )
+
+
+def _final_submit_plan_payload(**overrides: object) -> dict[str, object]:
+    payload = {
+        "side": "BUY",
+        "source": "target_delta",
+        "authority": "canonical_target_delta_sizing",
+        "final_action": "REBALANCE_TO_TARGET",
+        "qty": 0.001,
+        "notional_krw": 100_000.0,
+        "target_exposure_krw": 100_000.0,
+        "current_effective_exposure_krw": 0.0,
+        "delta_krw": 100_000.0,
+        "submit_expected": True,
+        "pre_submit_proof_status": "passed",
+        "block_reason": "none",
+        "idempotency_key": "plan-key",
+        "portfolio_target_authoritative": True,
+        "portfolio_target_hash": "sha256:portfolio-target",
+        "allocation_decision_hash": "sha256:allocation",
+        "strategy_contribution_hash": "sha256:contribution",
+    }
+    payload.update(overrides)
+    return ExecutionSubmitPlan(
+        side=str(payload["side"]),
+        source=str(payload["source"]),
+        authority=str(payload["authority"]),
+        final_action=str(payload["final_action"]),
+        qty=payload["qty"],  # type: ignore[arg-type]
+        notional_krw=payload["notional_krw"],  # type: ignore[arg-type]
+        target_exposure_krw=payload["target_exposure_krw"],  # type: ignore[arg-type]
+        current_effective_exposure_krw=payload["current_effective_exposure_krw"],  # type: ignore[arg-type]
+        delta_krw=payload["delta_krw"],  # type: ignore[arg-type]
+        submit_expected=bool(payload["submit_expected"]),
+        pre_submit_proof_status=str(payload["pre_submit_proof_status"]),
+        block_reason=str(payload["block_reason"]),
+        idempotency_key=payload["idempotency_key"],  # type: ignore[arg-type]
+        extra_payload={
+            key: value
+            for key, value in payload.items()
+            if key
+            not in {
+                "side",
+                "source",
+                "authority",
+                "final_action",
+                "qty",
+                "notional_krw",
+                "target_exposure_krw",
+                "current_effective_exposure_krw",
+                "delta_krw",
+                "submit_expected",
+                "pre_submit_proof_status",
+                "block_reason",
+                "idempotency_key",
+            }
+        },
+    ).as_final_payload()
+
+
+def test_broker_boundary_blocks_strategy_position_buy_plan_in_live_real_order() -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "EXECUTION_ENGINE", "lot_native")
+    plan = _final_submit_plan_payload(
+        source="strategy_position",
+        authority="configured_strategy_order_size",
+        pre_submit_proof_status="not_required",
+        portfolio_target_authoritative=False,
+        portfolio_target_hash="",
+        allocation_decision_hash="",
+        strategy_contribution_hash="",
+    )
+
+    assert _lot_native_buy_submit_plan(plan) is None
+
+
+def test_broker_boundary_accepts_strategy_position_buy_plan_only_for_paper_compat() -> None:
+    object.__setattr__(settings, "MODE", "paper")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "EXECUTION_ENGINE", "lot_native")
+    plan = _final_submit_plan_payload(
+        source="strategy_position",
+        authority="configured_strategy_order_size",
+        pre_submit_proof_status="not_required",
+        portfolio_target_authoritative=False,
+        portfolio_target_hash="",
+        allocation_decision_hash="",
+        strategy_contribution_hash="",
+    )
+
+    parsed = _lot_native_buy_submit_plan(plan)
+
+    assert parsed is not None
+    assert parsed["source"] == "strategy_position"
+    assert parsed["authority"] == "configured_strategy_order_size"
+
+
+def test_broker_boundary_target_delta_requires_portfolio_proof_in_live_real_order() -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    missing_proof = _final_submit_plan_payload(
+        portfolio_target_authoritative=False,
+        portfolio_target_hash="",
+    )
+    valid = _final_submit_plan_payload()
+
+    assert _target_delta_submit_plan(missing_proof) is None
+    assert _target_delta_submit_plan(valid) is not None
 
 
 class _CommitCheckingBroker(_FakeBroker):

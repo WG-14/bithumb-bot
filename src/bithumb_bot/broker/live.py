@@ -33,6 +33,7 @@ from ..observability import format_log_kv, safety_event
 from ..public_api_orderbook import BestQuote
 from ..runtime_readiness import compute_runtime_readiness_snapshot
 from ..strategy_performance import evaluate_strategy_performance_gate
+from ..submit_authority_policy import evaluate_submit_authority_policy
 from .base import BrokerRejectError
 from ..reason_codes import (
     AMBIGUOUS_SUBMIT,
@@ -2356,6 +2357,61 @@ def _execution_engine() -> str:
     return engine if engine in {"lot_native", "target_delta"} else "lot_native"
 
 
+def _broker_submit_authority_allowed(
+    execution_submit_plan: dict[str, object] | None,
+    *,
+    plan_kind: str,
+) -> bool:
+    if not isinstance(execution_submit_plan, dict):
+        return False
+    decision = evaluate_submit_authority_policy(
+        execution_submit_plan,
+        settings_obj=settings,
+        plan_kind=plan_kind,
+    )
+    if decision.allowed:
+        return True
+    RUN_LOG.warning(
+        format_log_kv(
+            "[ORDER_SKIP] broker submit authority blocked",
+            reason=decision.reason,
+            plan_kind=decision.plan_kind,
+            mode=decision.mode,
+            live_dry_run=1 if decision.live_dry_run else 0,
+            live_real_order_armed=1 if decision.live_real_order_armed else 0,
+            execution_engine=decision.execution_engine,
+            source=decision.source or "-",
+            authority=decision.authority or "-",
+            side=decision.side or "-",
+            submit_authority_mode=decision.policy.submit_authority_mode,
+            submit_authority_policy_hash=decision.policy.content_hash(),
+        )
+    )
+    return False
+
+
+def _live_real_legacy_broker_path_blocked(*, signal: str) -> bool:
+    if not _live_real_order_performance_gate_applies():
+        return False
+    RUN_LOG.warning(
+        format_log_kv(
+            "[ORDER_SKIP] broker submit authority blocked",
+            reason="live_real_order_requires_target_delta_submit_plan",
+            plan_kind="legacy_lot_native_fallback",
+            mode=str(getattr(settings, "MODE", "") or "").strip().lower(),
+            live_dry_run=1 if bool(getattr(settings, "LIVE_DRY_RUN", True)) else 0,
+            live_real_order_armed=1
+            if bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False))
+            else 0,
+            execution_engine=_execution_engine(),
+            source="lot_native",
+            authority="legacy_lot_native_fallback",
+            side=str(signal or "").upper(),
+        )
+    )
+    return True
+
+
 def _target_delta_submit_plan(
     execution_submit_plan: dict[str, object] | None,
 ) -> dict[str, object] | None:
@@ -2370,6 +2426,8 @@ def _target_delta_submit_plan(
             require_final_payload=True,
         )
     except ValueError:
+        return None
+    if not _broker_submit_authority_allowed(execution_submit_plan, plan_kind="target"):
         return None
     if str(execution_submit_plan.get("source") or "") != "target_delta":
         return None
@@ -2412,6 +2470,8 @@ def _lot_native_buy_submit_plan(
             require_final_payload=True,
         )
     except ValueError:
+        return None
+    if not _broker_submit_authority_allowed(execution_submit_plan, plan_kind="buy"):
         return None
     if str(execution_submit_plan.get("source") or "") != "strategy_position":
         return None
@@ -2641,6 +2701,8 @@ def _determine_live_execution_intent(
             )
         except ValueError:
             return None
+        if not _broker_submit_authority_allowed(execution_submit_plan, plan_kind="residual"):
+            return None
         residual_qty = float(execution_submit_plan.get("qty") or 0.0)
         if residual_qty <= POSITION_EPSILON:
             return None
@@ -2792,16 +2854,8 @@ def _determine_live_execution_intent(
             )
 
     if signal == "BUY" and normalized_exposure.effective_flat:
-        if (
-            _live_real_order_performance_gate_applies()
-        ):
-            if _record_strategy_performance_gate_block(
-                conn=conn,
-                decision_observability=decision_observability,
-                strategy_name=strategy_name,
-                authority_source="strategy_position",
-            ):
-                return None
+        if _live_real_legacy_broker_path_blocked(signal=signal):
+            return None
         if not math.isfinite(float(market_price)) or float(market_price) <= 0:
             reason = f"invalid market/reference price: {market_price}"
             RUN_LOG.info(
@@ -2955,6 +3009,8 @@ def _determine_live_execution_intent(
         )
 
     if signal == "SELL":
+        if _live_real_legacy_broker_path_blocked(signal=signal):
+            return None
         canonical_sell = position_state.canonical_sell
         diagnostic_sell_qty = position_state.diagnostic_sell_qty
         if canonical_sell is None or diagnostic_sell_qty is None:

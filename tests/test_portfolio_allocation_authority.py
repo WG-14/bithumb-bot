@@ -655,7 +655,10 @@ def test_risk_budget_does_not_act_as_exposure_cap() -> None:
     contribution = decision.as_dict()["contributions"][0]
     assert contribution["max_target_exposure_krw"] is None
     assert contribution["risk_budget_krw"] == pytest.approx(25_000.0)
-    assert contribution["risk_decision_hash"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
+    assert str(contribution["risk_decision_hash"]).startswith("sha256:")
+    assert contribution["risk_decision"]["risk_budget_interpreted_as_exposure_cap"] is False
+    assert contribution["risk_decision"]["loss_budget_supported"] is False
+    assert contribution["risk_budget_legacy_marker"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
 
 
 def test_allocator_records_risk_budget_semantics() -> None:
@@ -2105,8 +2108,15 @@ def test_manifest_contains_execution_and_risk_config_hashes(tmp_path) -> None:
         manifest = json.loads(str(row["manifest_json"]))
         policy = submit_authority_policy_from_settings(settings)
         assert manifest["submit_authority_mode"] == policy.submit_authority_mode
+        assert manifest["live_real_order_requires_target_delta"] == policy.live_real_order_requires_target_delta
+        assert manifest["legacy_lot_native_compat_enabled"] == policy.legacy_lot_native_compat_enabled
+        assert manifest["allowed_submit_plan_sources"] == list(policy.allowed_submit_plan_sources)
+        assert manifest["allowed_submit_plan_authorities"] == list(policy.allowed_submit_plan_authorities)
         assert manifest["submit_authority_policy_hash"] == policy.content_hash()
-        assert manifest["risk_decision_hash"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
+        assert str(manifest["risk_decision_hash"]).startswith("sha256:")
+        assert manifest["risk_decision"]["risk_budget_interpreted_as_exposure_cap"] is False
+        assert manifest["risk_decision"]["loss_budget_supported"] is False
+        assert manifest["risk_budget_legacy_marker"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
     finally:
         conn.close()
 
