@@ -6,6 +6,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 WORK_DIR="${CODEX_PYTEST_WORK_DIR:-${TMPDIR:-/tmp}/bithumb-bot-codex-pytest}"
 ITERATION="${CODEX_PYTEST_ITERATION:-manual}"
 LATEST_LOG_FILE="${WORK_DIR}/latest_full_suite_log"
+PYTHON_BIN="${PYTHON:-python3}"
 
 cd "${PROJECT_ROOT}"
 
@@ -41,6 +42,12 @@ preflight_file="${packet_dir}/preflight_failure.txt"
 collection_file="${packet_dir}/first_collection_import_config_error.txt"
 artifact_file="${packet_dir}/runtime_artifact_failure.txt"
 workspace_file="${packet_dir}/pytest_workspace_summary.txt"
+pytest_failure_sections_file="${packet_dir}/pytest_failure_sections.txt"
+pytest_short_summary_file="${packet_dir}/pytest_short_summary.txt"
+pytest_failure_context_file="${packet_dir}/pytest_failure_context.txt"
+preflight_json_file="${packet_dir}/preflight_failure.json"
+diagnostic_artifact_file="${packet_dir}/diagnostic_runtime_artifact_check.txt"
+failure_signature_material_file="${packet_dir}/failure_signature_material.txt"
 
 grep -E '^(FAILED|ERROR) tests/[^[:space:]]+' "${log_file}" \
   | awk '{print $2}' \
@@ -76,6 +83,152 @@ awk '
 
 grep -E '\[PYTEST-WORKSPACE\]|retained_size_bytes|large_file_bytes|keeping workspace' \
   "${log_file}" > "${workspace_file}" || true
+
+"${PYTHON_BIN}" - "${log_file}" "${packet_dir}" <<'PY'
+import json
+import re
+import shutil
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+packet_dir = Path(sys.argv[2])
+text = log_path.read_text(encoding="utf-8", errors="replace")
+lines = text.splitlines()
+
+
+def bound_text(content, limit, source):
+    if len(content) <= limit:
+        return content
+    head_len = limit // 2
+    tail_len = limit - head_len
+    marker = (
+        "\n\n[TRUNCATED: output exceeded packet limit; "
+        f"preserved head and tail. See {source} for complete evidence.]\n\n"
+    )
+    return content[:head_len].rstrip() + marker + content[-tail_len:].lstrip()
+
+
+def write_bounded(name, content, limit):
+    path = packet_dir / name
+    content = content.strip("\n")
+    if not content:
+        content = f"No matching evidence was extracted from {log_path}."
+    path.write_text(
+        bound_text(content, limit, "full_suite.log") + "\n",
+        encoding="utf-8",
+    )
+
+
+heading_re = re.compile(r"^=+\s+(.+?)\s+=+$")
+
+
+def extract_named_sections(names):
+    sections = []
+    index = 0
+    while index < len(lines):
+        match = heading_re.match(lines[index])
+        if not match or match.group(1).strip().upper() not in names:
+            index += 1
+            continue
+        start = index
+        index += 1
+        while index < len(lines):
+            next_heading = heading_re.match(lines[index])
+            if next_heading:
+                break
+            index += 1
+        sections.append("\n".join(lines[start:index]))
+    return "\n\n".join(sections)
+
+
+write_bounded(
+    "pytest_failure_sections.txt",
+    extract_named_sections({"FAILURES", "ERRORS"}),
+    60000,
+)
+write_bounded(
+    "pytest_short_summary.txt",
+    extract_named_sections({"SHORT TEST SUMMARY INFO"}),
+    24000,
+)
+
+marker_patterns = [
+    r"FAILED tests/",
+    r"ERROR tests/",
+    r"Traceback \(most recent call last\)",
+    r"AssertionError",
+    r"ExceptionGroup",
+    r"ERROR collecting",
+    r"INTERNALERROR",
+    r"ImportError",
+    r"ModuleNotFoundError",
+    r"ConftestImportFailure",
+    r"ConfigError",
+    r"pytest UsageError",
+]
+marker_re = re.compile("|".join(f"(?:{pattern})" for pattern in marker_patterns))
+windows = []
+before = 35
+after = 90
+for line_number, line in enumerate(lines):
+    if marker_re.search(line):
+        windows.append((max(0, line_number - before), min(len(lines), line_number + after + 1)))
+
+merged = []
+for start, end in windows:
+    if merged and start <= merged[-1][1]:
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    else:
+        merged.append((start, end))
+
+context_parts = []
+for start, end in merged:
+    context_parts.append(f"[context lines {start + 1}-{end} from full_suite.log]")
+    context_parts.extend(lines[start:end])
+write_bounded("pytest_failure_context.txt", "\n".join(context_parts), 60000)
+
+report_path = None
+report_re = re.compile(
+    r"\[PYTEST-PREFLIGHT\].*?report=(?:\"([^\"]+preflight_failure\.json)\"|'([^']+preflight_failure\.json)'|([^ \t\r\n]+preflight_failure\.json))"
+)
+for line in lines:
+    match = report_re.search(line)
+    if not match:
+        continue
+    raw_path = next(group for group in match.groups() if group)
+    report_path = Path(raw_path)
+    if not report_path.is_absolute():
+        report_path = (log_path.parent / report_path).resolve()
+    break
+
+target_json = packet_dir / "preflight_failure.json"
+if report_path and report_path.is_file():
+    shutil.copyfile(report_path, target_json)
+else:
+    placeholder = {
+        "status": "missing",
+        "message": "No preflight_failure.json report was found at packet generation time.",
+        "source_log": str(log_path),
+        "parsed_report_path": str(report_path) if report_path else None,
+    }
+    target_json.write_text(json.dumps(placeholder, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+{
+  echo "[DIAGNOSTIC-RUNTIME-ARTIFACT-CHECK] Diagnostic evidence only."
+  echo "[DIAGNOSTIC-RUNTIME-ARTIFACT-CHECK] The WSL wrapper remains the validation authority."
+  echo "[DIAGNOSTIC-RUNTIME-ARTIFACT-CHECK] Command: ./scripts/check_repo_runtime_artifacts.sh"
+  echo
+} > "${diagnostic_artifact_file}"
+set +e
+"${SCRIPT_DIR}/check_repo_runtime_artifacts.sh" >> "${diagnostic_artifact_file}" 2>&1
+diagnostic_artifact_exit_code=$?
+set -e
+{
+  echo
+  echo "[DIAGNOSTIC-RUNTIME-ARTIFACT-CHECK] exit_code=${diagnostic_artifact_exit_code}"
+} >> "${diagnostic_artifact_file}"
 
 git status --porcelain=v1 --untracked-files=all > "${packet_dir}/git_status.txt"
 git diff --stat > "${packet_dir}/git_diff_stat.txt"
@@ -123,15 +276,73 @@ cat > "${packet_dir}/constraints.md" <<'EOF'
 - If a test expectation conflicts with a repository safety contract, stop and report the conflict instead of weakening production behavior.
 EOF
 
-signature_input="${packet_dir}/signature_input.txt"
-cat \
-  "${failed_tests_file}" \
-  "${preflight_file}" \
-  "${collection_file}" \
-  "${artifact_file}" \
-  > "${signature_input}"
-sha256sum "${signature_input}" | awk '{print $1}' > "${packet_dir}/failure_signature.sha256"
-rm -f "${signature_input}"
+"${PYTHON_BIN}" - "${packet_dir}" "${PROJECT_ROOT}" "${WORK_DIR}" <<'PY'
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+packet_dir = Path(sys.argv[1])
+project_root = sys.argv[2]
+work_dir = sys.argv[3]
+
+source_files = [
+    "failed_tests.txt",
+    "pytest_short_summary.txt",
+    "pytest_failure_sections.txt",
+    "first_collection_import_config_error.txt",
+    "preflight_failure.txt",
+    "preflight_failure.json",
+    "runtime_artifact_failure.txt",
+    "diagnostic_runtime_artifact_check.txt",
+]
+
+
+def normalize(content):
+    replacements = [
+        (project_root, "<PROJECT_ROOT>"),
+        (work_dir, "<PYTEST_WORK_DIR>"),
+    ]
+    for needle, replacement in replacements:
+        if needle:
+            content = re.sub(
+                re.escape(needle) + r"(?=$|[\s'\"`<>)\]])",
+                replacement,
+                content,
+            )
+    content = re.sub(r"/tmp/[^\s'\"`<>)\]]+", "<TMP_PATH>", content)
+    content = re.sub(r"\b20\d{6}T\d{6}Z\b", "<UTC_TIMESTAMP>", content)
+    content = re.sub(
+        r"\b20\d{2}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b",
+        "<UTC_TIMESTAMP>",
+        content,
+    )
+    content = re.sub(r"\b0x[0-9a-fA-F]+\b", "<MEMORY_ADDRESS>", content)
+    content = re.sub(
+        r"\b\d+(?:\.\d+)?\s*(?:seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b",
+        "<DURATION>",
+        content,
+        flags=re.IGNORECASE,
+    )
+    content = re.sub(r"\bin \d+(?:\.\d+)?s\b", "in <DURATION>", content)
+    content = re.sub(r"\b\d+(?:\.\d+)?s\b", "<DURATION>", content)
+    return content
+
+
+parts = []
+for name in source_files:
+    path = packet_dir / name
+    if path.exists():
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    else:
+        raw = f"[missing packet file: {name}]\n"
+    parts.append(f"===== {name} =====\n{normalize(raw).rstrip()}\n")
+
+material = "\n".join(parts)
+(packet_dir / "failure_signature_material.txt").write_text(material, encoding="utf-8")
+digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+(packet_dir / "failure_signature.sha256").write_text(digest + "\n", encoding="utf-8")
+PY
 
 codex_input="${packet_dir}/codex_input.md"
 {
@@ -175,6 +386,36 @@ codex_input="${packet_dir}/codex_input.md"
     echo "No FAILED/ERROR test selectors were extracted."
   fi
   echo
+  echo "## Pytest Short Summary"
+  echo '```text'
+  sed -n '1,220p' "${pytest_short_summary_file}"
+  echo '```'
+  echo
+  echo "## Pytest Failure Sections"
+  echo '```text'
+  sed -n '1,360p' "${pytest_failure_sections_file}"
+  echo '```'
+  echo
+  echo "## Failure Context Around Markers"
+  echo '```text'
+  sed -n '1,360p' "${pytest_failure_context_file}"
+  echo '```'
+  echo
+  echo "## Preflight Failure JSON"
+  echo '```json'
+  sed -n '1,220p' "${preflight_json_file}"
+  echo '```'
+  echo
+  echo "## Diagnostic Runtime Artifact Check"
+  echo '```text'
+  sed -n '1,220p' "${diagnostic_artifact_file}"
+  echo '```'
+  echo
+  echo "## Failure Signature Material"
+  echo '```text'
+  sed -n '1,320p' "${failure_signature_material_file}"
+  echo '```'
+  echo
   echo "## Preflight Failure Excerpt"
   echo '```text'
   sed -n '1,120p' "${preflight_file}"
@@ -198,6 +439,11 @@ codex_input="${packet_dir}/codex_input.md"
   echo "## Git Diff Stat"
   echo '```text'
   sed -n '1,160p' "${packet_dir}/git_diff_stat.txt"
+  echo '```'
+  echo
+  echo "## Git Diff Patch Excerpt"
+  echo '```diff'
+  sed -n '1,260p' "${packet_dir}/git_diff.patch"
   echo '```'
   echo
   echo "## Repro Commands"
