@@ -11,6 +11,7 @@ from bithumb_bot.strategy_plugins.sma_with_filter_assembly import (
 from bithumb_bot.strategy_plugins.sma_with_filter_projector import (
     SmaWithFilterSnapshotProjector,
 )
+from bithumb_bot.strategy_plugins.sma_with_filter_contract import SMA_DECISION_EVIDENCE_CONTRACT
 from bithumb_bot.strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
 from bithumb_bot.research.strategy_spec import materialized_strategy_parameters_hash
 
@@ -367,6 +368,7 @@ def research_policy_decision_builder(
                 },
             },
             decision_input_bundle=bundle,
+            decision_evidence_contract=SMA_DECISION_EVIDENCE_CONTRACT,
         )
     )
     result.decision.trace["strategy_evaluation_provenance"] = dict(result.provenance)

@@ -23,6 +23,7 @@ from .strategy_plugins.sma_with_filter_assembly import (
     MaterializationMode,
     SmaWithFilterPolicyAssembly,
 )
+from .strategy_plugins.sma_with_filter_contract import SMA_DECISION_EVIDENCE_CONTRACT
 from .strategy_plugins.sma_with_filter_projector import SmaWithFilterSnapshotProjector
 from .strategy_plugins.sma_with_filter_projector import SmaWithFilterRuntimeProjectionResult
 from .strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
@@ -542,6 +543,7 @@ def build_sma_with_filter_runtime_decision_from_feature_snapshot(
                 },
             },
             decision_input_bundle=decision_input_bundle,
+            decision_evidence_contract=SMA_DECISION_EVIDENCE_CONTRACT,
         )
     )
     final_policy_decision = final_policy_result.decision
@@ -882,6 +884,7 @@ def _build_sma_with_filter_runtime_decision_from_normalized_db_readonly_impl(
                 },
             },
             decision_input_bundle=decision_input_bundle,
+            decision_evidence_contract=SMA_DECISION_EVIDENCE_CONTRACT,
         )
     )
     final_policy_decision = final_policy_result.decision

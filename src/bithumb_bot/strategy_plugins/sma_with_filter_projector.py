@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from bithumb_bot.core.sma_policy import _stable_hash
+from bithumb_bot.core.sma_policy import (
+    _stable_execution_constraints_payload,
+    _stable_hash,
+    _stable_market_feature_policy_input,
+    _stable_market_policy_input,
+    _stable_position_policy_input,
+)
 from bithumb_bot.market_regime.thresholds import MarketRegimeThresholds
 from bithumb_bot.research.dataset_snapshot import DatasetSnapshot
 from bithumb_bot.research.strategy_spec import materialized_strategy_parameters_hash
@@ -25,6 +31,46 @@ class SmaWithFilterProjectedDecisionInput:
     bundle: StrategyDecisionInputBundle
     rule_sources: dict[str, str]
     replay_fingerprint: dict[str, object]
+
+
+def _sma_decision_input_component_payloads(
+    *,
+    market: object,
+    position: PositionSnapshot,
+    config: object,
+    execution_constraints: object,
+    exit_policy_config: object | None,
+) -> dict[str, dict[str, object]]:
+    market_payload = _policy_payload(market)
+    config_payload = _policy_payload(config)
+    exit_payload = _policy_payload(exit_policy_config)
+    execution_payload = (
+        execution_constraints.policy_input_payload()
+        if hasattr(execution_constraints, "policy_input_payload")
+        else _policy_payload(execution_constraints)
+    )
+    stable_market = _stable_market_policy_input(market_payload)
+    return {
+        "market": stable_market,
+        "market_feature": _stable_market_feature_policy_input(stable_market),
+        "position": _stable_position_policy_input(position.policy_input_payload()),
+        "config": config_payload,
+        "execution_constraints": _stable_execution_constraints_payload(execution_payload),
+        "exit_policy_config": exit_payload,
+    }
+
+
+def _policy_payload(value: object) -> dict[str, object]:
+    if value is None:
+        return {}
+    payload_method = getattr(value, "policy_input_payload", None)
+    if callable(payload_method):
+        payload = payload_method()
+        if isinstance(payload, dict):
+            return dict(payload)
+    if isinstance(value, dict):
+        return dict(value)
+    raise TypeError(f"sma_with_filter_component_payload_unsupported:{type(value).__name__}")
 
 
 @dataclass(frozen=True)
@@ -311,6 +357,13 @@ class SmaWithFilterSnapshotProjector:
             snapshot_projector_version=self.version,
             snapshot_projector_hash=self.projector_hash,
             provenance=provenance,
+            component_payloads=_sma_decision_input_component_payloads(
+                market=market,
+                position=position,
+                config=config,
+                execution_constraints=execution,
+                exit_policy_config=exit_policy_config,
+            ),
         )
         replay_fingerprint = self.build_replay_fingerprint(
             strategy_name=strategy.name,
@@ -459,6 +512,13 @@ class SmaWithFilterSnapshotProjector:
                 "runtime_projection_evidence": evidence,
                 **dict(projection.provenance or {}),
             },
+            component_payloads=_sma_decision_input_component_payloads(
+                market=projection.market,
+                position=projection.position,
+                config=projection.config,
+                execution_constraints=projection.execution_constraints,
+                exit_policy_config=projection.exit_policy_config,
+            ),
         )
 
     def build_replay_fingerprint(

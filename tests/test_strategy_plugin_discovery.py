@@ -20,6 +20,7 @@ from bithumb_bot.research.strategy_registry import (
     resolve_research_strategy_plugin,
 )
 from bithumb_bot.research.strategy_spec import StrategySpec
+from bithumb_bot.strategy_evidence_contract import DecisionEvidenceContract
 
 
 DYNAMIC_PLUGIN_NAME = "dynamic_entrypoint_unit"
@@ -159,6 +160,10 @@ def _dynamic_plugin(
                 if not runtime_supported
                 else "dynamic_plugin_capability_missing"
             ),
+        ),
+        decision_evidence_contract=DecisionEvidenceContract(
+            required_promotion_provenance_fields=("policy_input_hash",),
+            required_live_real_order_fields=("policy_input_hash",),
         ),
     )
 

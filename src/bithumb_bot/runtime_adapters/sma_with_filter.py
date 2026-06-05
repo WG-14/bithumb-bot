@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from dataclasses import dataclass
+from typing import Mapping
 
 from bithumb_bot.config import settings
+from bithumb_bot.decision_equivalence import sha256_prefixed
+from bithumb_bot.runtime_data_provider import RuntimeFeatureSnapshot
 from bithumb_bot.runtime_position_state_normalizer import PositionStateNormalizer
 from bithumb_bot.runtime_sma_snapshot import decide_sma_with_filter_runtime_snapshot_from_db
 from bithumb_bot.runtime_sma_snapshot_builder import (
@@ -183,6 +187,39 @@ class SmaWithFilterRuntimeConfig:
 class SmaWithFilterRuntimeDecisionAdapter:
     strategy_name: str = "sma_with_filter"
 
+    def project_feature_snapshot(
+        self,
+        conn,
+        request,
+        feature_snapshot: RuntimeFeatureSnapshot,
+    ) -> RuntimeFeatureSnapshot | None:
+        payload = feature_snapshot.as_dict()
+        feature_payload = payload.get("feature_payload") if isinstance(payload, dict) else {}
+        if not isinstance(feature_payload, Mapping):
+            return None
+        capabilities = feature_payload.get("capabilities")
+        candles = (
+            dict(capabilities.get("candles") or {}).get("rows")
+            if isinstance(capabilities, Mapping) and isinstance(capabilities.get("candles"), Mapping)
+            else None
+        )
+        sma_payload = _sma_runtime_payload_from_generic_snapshot(
+            conn=conn,
+            request=request,
+            candle_rows=candles,
+        )
+        if sma_payload is None:
+            return None
+        projected_feature_payload = dict(feature_payload)
+        projected_feature_payload[self.strategy_name] = sma_payload
+        projected = {
+            **payload,
+            "feature_payload": projected_feature_payload,
+            "strategy_projection_contract": "plugin_owned_runtime_projection.v1",
+        }
+        projected["feature_snapshot_hash"] = sha256_prefixed(projected)
+        return RuntimeFeatureSnapshot(projected)
+
     def decide_feature_snapshot(
         self,
         request,
@@ -320,3 +357,69 @@ def decide_sma_with_filter_for_diagnostics(conn, request) -> RuntimeStrategyDeci
             strategy,
             through_ts_ms=request.through_ts_ms,
         )
+
+
+def _sma_runtime_payload_from_generic_snapshot(
+    *,
+    conn,
+    request: object,
+    candle_rows: object,
+) -> dict[str, object] | None:
+    rows = [dict(item) for item in candle_rows] if isinstance(candle_rows, list) else []
+    if not rows:
+        return None
+
+    from bithumb_bot.runtime_data_provider_sma import load_sma_position_context
+    from bithumb_bot.runtime_sma_context import (
+        fee_authority_context,
+        live_armed_entry_fee_authority_blocks,
+        resolve_strategy_fee_authority,
+    )
+    from bithumb_bot.runtime_sma_snapshot_builder import _policy_position_snapshot
+
+    runtime_instance = getattr(request, "runtime_strategy_spec", None)
+    runtime_adapter_config = (
+        dict(getattr(runtime_instance, "runtime_adapter_config", {}) or {})
+        if runtime_instance is not None
+        else {}
+    )
+    candidate_regime_policy = (
+        dict(runtime_adapter_config.get("candidate_regime_policy"))
+        if isinstance(runtime_adapter_config.get("candidate_regime_policy"), dict)
+        else None
+    )
+    strategy = SmaWithFilterRuntimeConfig.from_runtime_request(request).build_strategy(
+        candidate_regime_policy=candidate_regime_policy,
+    )
+    latest = rows[-1]
+    candle_ts = int(latest["ts"])
+    market_price = float(latest["close"])
+    signal_context = {"strategy": strategy.name}
+    position, exposure, position_state, order_rules_snapshot = load_sma_position_context(
+        conn,
+        pair=strategy.pair,
+        candle_ts=candle_ts,
+        market_price=market_price,
+        signal_context=signal_context,
+        slippage_bps=float(strategy.slippage_bps),
+        entry_edge_buffer_ratio=float(strategy.entry_edge_buffer_ratio),
+    )
+    fee_authority = resolve_strategy_fee_authority(
+        pair=strategy.pair,
+        config_fallback_fee_rate=float(strategy.live_fee_rate_estimate),
+    )
+    position_snapshot = _policy_position_snapshot(position=position, exposure=exposure)
+    payload = {
+        "strategy": strategy.name,
+        "candles": rows,
+        "position_context": position.as_dict(),
+        "position_snapshot": asdict(position_snapshot),
+        "position_state": position_state.as_dict(),
+        "order_rules": order_rules_snapshot,
+        "fee_authority": fee_authority_context(fee_authority),
+        "fee_rate_for_decision": float(fee_authority.taker_roundtrip_fee_rate / 2),
+        "fee_authority_degraded_blocks_entry": live_armed_entry_fee_authority_blocks(fee_authority),
+        "runtime_snapshot_provider_contract": "RuntimeFeatureSnapshot.sma_with_filter.v1",
+    }
+    payload["payload_hash"] = sha256_prefixed(payload)
+    return payload

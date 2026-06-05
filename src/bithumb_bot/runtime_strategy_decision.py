@@ -335,6 +335,14 @@ class DecisionRunner:
         feature_snapshot = provider.snapshot(request, requirements)
         if feature_snapshot is None:
             return None
+        feature_snapshot = _project_runtime_feature_snapshot(
+            adapter=adapter,
+            conn=conn,
+            request=request,
+            feature_snapshot=feature_snapshot,
+        )
+        if feature_snapshot is None:
+            return None
         feature_decider = getattr(adapter, "decide_feature_snapshot", None)
         if not callable(feature_decider):
             raise RuntimeError(f"runtime_decision_feature_snapshot_required:{selected_strategy_name}")
@@ -456,6 +464,24 @@ def _attach_runtime_request_metadata(
 
 def promotion_adapter_supports_feature_snapshot(adapter: object) -> bool:
     return callable(getattr(adapter, "decide_feature_snapshot", None))
+
+
+def _project_runtime_feature_snapshot(
+    *,
+    adapter: object,
+    conn: object,
+    request: RuntimeDecisionRequest,
+    feature_snapshot: RuntimeFeatureSnapshot,
+) -> RuntimeFeatureSnapshot | None:
+    projector = getattr(adapter, "project_feature_snapshot", None)
+    if not callable(projector):
+        return feature_snapshot
+    projected = projector(conn, request, feature_snapshot)
+    if projected is None:
+        return None
+    if not isinstance(projected, RuntimeFeatureSnapshot):
+        raise TypeError(f"runtime_feature_snapshot_projector_invalid:{request.strategy_name}")
+    return projected
 
 
 def _has_db_bound_decide_method(adapter: object) -> bool:

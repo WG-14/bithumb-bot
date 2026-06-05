@@ -24,6 +24,7 @@ from bithumb_bot.strategy_authoring import (
 )
 from bithumb_bot.strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
 from bithumb_bot.strategy_evidence import StrategyDecisionEvidenceBuilder
+from bithumb_bot.strategy_evidence_contract import DecisionEvidenceContract
 from bithumb_bot.strategy_policy_contract import (
     EntryExecutionIntent,
     ExecutionConstraintSnapshot,
@@ -35,6 +36,22 @@ from bithumb_bot.strategy_policy_contract import (
 CANARY_NON_SMA_STRATEGY_NAME = "canary_non_sma"
 CANARY_NON_SMA_POLICY_CONTRACT_VERSION = "canary_non_sma.order_intent_policy.v1"
 CANARY_DEFAULT_REASON = "canary_non_sma_order_contract"
+CANARY_NON_SMA_SNAPSHOT_PROJECTOR_CONTRACT = "canary_non_sma_snapshot_v1"
+CANARY_NON_SMA_DECISION_EVIDENCE_CONTRACT = DecisionEvidenceContract(
+    requires_decision_input_bundle=False,
+    required_promotion_provenance_fields=(
+        "decision_input_bundle_hash",
+        "decision_input_contract_hash",
+        "decision_input_bundle_payload_hash",
+        "market_feature_hash",
+        "final_exit_decision_input_hash",
+        "snapshot_projector_version",
+        "snapshot_projector_hash",
+    ),
+    required_live_real_order_fields=(),
+    snapshot_projector_contract=CANARY_NON_SMA_SNAPSHOT_PROJECTOR_CONTRACT,
+    decision_input_contract_kind="generic_replay_fingerprint",
+)
 
 
 CANARY_NON_SMA_SPEC = StrategySpec(
@@ -318,11 +335,12 @@ def _canary_policy_material(
             "policy_config_hash": sha256_prefixed({"parameters": dict(resolved)}),
             "exit_policy_config_hash": sha256_prefixed({"schema_version": 1, "rules": ()}),
             "final_exit_decision_input_hash": sha256_prefixed(policy_decision),
-            "snapshot_projector_version": "canary_non_sma_snapshot_v1",
+            "snapshot_projector_version": CANARY_NON_SMA_SNAPSHOT_PROJECTOR_CONTRACT,
+            "snapshot_projector_contract": CANARY_NON_SMA_SNAPSHOT_PROJECTOR_CONTRACT,
             "snapshot_projector_hash": sha256_prefixed(
                 {
                     "strategy_name": CANARY_NON_SMA_STRATEGY_NAME,
-                    "projector": "canary_non_sma_snapshot_v1",
+                    "projector": CANARY_NON_SMA_SNAPSHOT_PROJECTOR_CONTRACT,
                 }
             ),
         },
@@ -600,6 +618,7 @@ def _evaluate_canary_result(
                 str(request_fields.get("runtime_decision_request_hash") or "") or None
             ),
             provenance=provenance,
+            decision_evidence_contract=CANARY_NON_SMA_DECISION_EVIDENCE_CONTRACT,
         )
     )
     result.decision.trace["strategy_evaluation_provenance"] = dict(result.provenance)
@@ -1066,6 +1085,7 @@ _CANARY_NON_SMA_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
     live_real_order_allowed=False,
     approved_profile_required=True,
     fail_closed_reason="canary_non_sma_live_real_order_not_allowed",
+    decision_evidence_contract=CANARY_NON_SMA_DECISION_EVIDENCE_CONTRACT,
 )
 
 

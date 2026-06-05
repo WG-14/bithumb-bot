@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import asdict
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
@@ -208,7 +207,10 @@ class RuntimeDataRequirementResolver:
                     instance_id = derive_strategy_instance_id(spec)
                 except Exception:
                     instance_id = strategy_name
-            research_requirements = research_strategy_data_requirements(strategy_name)
+            research_requirements = research_strategy_data_requirements(
+                strategy_name,
+                runtime_strategy_spec=spec,
+            )
             normalized = self._normalize_research_requirements(
                 research_requirements,
                 spec=spec,
@@ -265,11 +267,6 @@ class RuntimeDataRequirementResolver:
                 min_density_pct=capability.min_density_pct,
                 freshness_policy=capability.freshness_policy,
             )
-            if strategy_name == "sma_with_filter" and normalized_name == "candles":
-                normalized_capability = self._sma_candle_requirement(
-                    normalized_capability,
-                    spec=spec,
-                )
             if normalized_capability.required:
                 required[normalized_name] = normalized_capability
                 optional.pop(normalized_name, None)
@@ -279,39 +276,6 @@ class RuntimeDataRequirementResolver:
             required=tuple(required[name] for name in sorted(required)),
             optional=tuple(optional[name] for name in sorted(optional)),
             per_strategy={},
-        )
-
-    def _sma_candle_requirement(
-        self,
-        capability: DataCapabilityRequirement,
-        *,
-        spec: object | None,
-    ) -> DataCapabilityRequirement:
-        params = dict(getattr(spec, "parameters", {}) or {}) if spec is not None else {}
-        def _int_param(name: str, default: int) -> int:
-            try:
-                return int(params.get(name, default))
-            except (TypeError, ValueError):
-                return default
-
-        long_n = _int_param("SMA_LONG", 30)
-        vol_window = _int_param("SMA_FILTER_VOL_WINDOW", 10)
-        overext_lookback = _int_param("SMA_FILTER_OVEREXT_LOOKBACK", 3)
-        lookback_rows = max(long_n + 2, vol_window, overext_lookback + 1)
-        return DataCapabilityRequirement(
-            name=capability.name,
-            required=capability.required,
-            min_coverage_pct=capability.min_coverage_pct if capability.min_coverage_pct is not None else 100.0,
-            evidence_level=capability.evidence_level,
-            source=capability.source,
-            notes=capability.notes,
-            lookback_rows=lookback_rows,
-            closed_candle_required=True,
-            max_age_ms=capability.max_age_ms,
-            min_rows=capability.min_rows,
-            lookback_window_ms=capability.lookback_window_ms,
-            min_density_pct=capability.min_density_pct,
-            freshness_policy=capability.freshness_policy,
         )
 
 
@@ -501,18 +465,6 @@ class SQLiteRuntimeDataProvider:
             capability_snapshots[capability] = snapshot
         if capability_snapshots:
             feature_payload["capabilities"] = capability_snapshots
-        if str(getattr(request, "strategy_name", "") or "").strip().lower() == "sma_with_filter":
-            sma_payload = self._sma_with_filter_runtime_payload(
-                request=request,
-                candle_rows=(
-                    dict(capability_snapshots.get("candles") or {}).get("rows")
-                    if isinstance(capability_snapshots.get("candles"), Mapping)
-                    else None
-                ),
-            )
-            if sma_payload is None:
-                return None
-            feature_payload["sma_with_filter"] = sma_payload
         decision_candle_ts = (
             int(feature_payload["candle_ts"])
             if "candle_ts" in feature_payload
@@ -631,74 +583,6 @@ class SQLiteRuntimeDataProvider:
         }
         material["payload_hash"] = sha256_prefixed(material)
         return material
-
-    def _sma_with_filter_runtime_payload(
-        self,
-        *,
-        request: object,
-        candle_rows: object,
-    ) -> dict[str, object] | None:
-        rows = [dict(item) for item in candle_rows] if isinstance(candle_rows, list) else []
-        if not rows:
-            return None
-        try:
-            from .runtime_adapters.sma_with_filter import SmaWithFilterRuntimeConfig
-            from .runtime_sma_context import (
-                fee_authority_context,
-                live_armed_entry_fee_authority_blocks,
-                resolve_strategy_fee_authority,
-            )
-            from .runtime_data_provider_sma import load_sma_position_context
-            from .runtime_sma_snapshot_builder import _policy_position_snapshot
-        except Exception as exc:  # pragma: no cover - import errors surface as fail-closed runtime errors.
-            raise RuntimeError(f"runtime_data_snapshot_provider_unavailable:sma_with_filter:{type(exc).__name__}") from exc
-
-        runtime_instance = getattr(request, "runtime_strategy_spec", None)
-        runtime_adapter_config = (
-            dict(getattr(runtime_instance, "runtime_adapter_config", {}) or {})
-            if runtime_instance is not None
-            else {}
-        )
-        candidate_regime_policy = (
-            dict(runtime_adapter_config.get("candidate_regime_policy"))
-            if isinstance(runtime_adapter_config.get("candidate_regime_policy"), dict)
-            else None
-        )
-        strategy = SmaWithFilterRuntimeConfig.from_runtime_request(request).build_strategy(
-            candidate_regime_policy=candidate_regime_policy,
-        )
-        latest = rows[-1]
-        candle_ts = int(latest["ts"])
-        market_price = float(latest["close"])
-        signal_context = {"strategy": strategy.name}
-        position, exposure, position_state, order_rules_snapshot = load_sma_position_context(
-            self.conn,
-            pair=strategy.pair,
-            candle_ts=candle_ts,
-            market_price=market_price,
-            signal_context=signal_context,
-            slippage_bps=float(strategy.slippage_bps),
-            entry_edge_buffer_ratio=float(strategy.entry_edge_buffer_ratio),
-        )
-        fee_authority = resolve_strategy_fee_authority(
-            pair=strategy.pair,
-            config_fallback_fee_rate=float(strategy.live_fee_rate_estimate),
-        )
-        position_snapshot = _policy_position_snapshot(position=position, exposure=exposure)
-        payload = {
-            "strategy": strategy.name,
-            "candles": rows,
-            "position_context": position.as_dict(),
-            "position_snapshot": asdict(position_snapshot),
-            "position_state": position_state.as_dict(),
-            "order_rules": order_rules_snapshot,
-            "fee_authority": fee_authority_context(fee_authority),
-            "fee_rate_for_decision": float(fee_authority.taker_roundtrip_fee_rate / 2),
-            "fee_authority_degraded_blocks_entry": live_armed_entry_fee_authority_blocks(fee_authority),
-            "runtime_snapshot_provider_contract": "RuntimeFeatureSnapshot.sma_with_filter.v1",
-        }
-        payload["payload_hash"] = sha256_prefixed(payload)
-        return payload
 
     def _per_strategy_status(
         self,

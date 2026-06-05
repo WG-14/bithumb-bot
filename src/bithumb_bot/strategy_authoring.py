@@ -19,10 +19,13 @@ from bithumb_bot.research.strategy_registry import (
     ResearchStrategyPlugin,
     RuntimeParameterAdapter,
     RuntimeReplayBuilder,
+    RuntimeDataRequirementBuilder,
     SingleReplayBundleBuilder,
     StrategyRuntimeCapabilities,
 )
 from bithumb_bot.research.strategy_spec import StrategySpec
+from bithumb_bot.strategy_evidence_contract import DecisionEvidenceContract
+from bithumb_bot.strategy_evidence_contract import GENERIC_DECISION_EVIDENCE_CONTRACT
 
 
 RESEARCH_ONLY_FAIL_CLOSED_REASON = "promotion_extension_missing"
@@ -41,6 +44,7 @@ class ResearchOnlyStrategyPlugin:
     research_parameter_materializer: ResearchParameterMaterializer | None = None
     decision_contract_version: str | None = None
     diagnostics_namespace: str | None = None
+    runtime_data_requirement_builder: RuntimeDataRequirementBuilder | None = None
 
     def __post_init__(self) -> None:
         name = str(self.strategy_name or "").strip().lower()
@@ -79,6 +83,8 @@ class ResearchOnlyStrategyPlugin:
             ),
             authoring_contract_kind="research_only",
             promotion_extension_payload=None,
+            decision_evidence_contract=GENERIC_DECISION_EVIDENCE_CONTRACT,
+            runtime_data_requirement_builder=self.runtime_data_requirement_builder,
         )
 
 
@@ -98,6 +104,8 @@ class PromotionGradeStrategyExtension:
     live_real_order_allowed: bool = False
     approved_profile_required: bool = True
     fail_closed_reason: str = "promotion_grade_capability_missing"
+    decision_evidence_contract: DecisionEvidenceContract = GENERIC_DECISION_EVIDENCE_CONTRACT
+    runtime_data_requirement_builder: RuntimeDataRequirementBuilder | None = None
 
     def runtime_capabilities(self) -> StrategyRuntimeCapabilities:
         return StrategyRuntimeCapabilities(
@@ -125,6 +133,8 @@ class PromotionGradeStrategyExtension:
             "live_dry_run_allowed": bool(self.live_dry_run_allowed),
             "live_real_order_allowed": bool(self.live_real_order_allowed),
             "fail_closed_reason": self.fail_closed_reason,
+            "decision_evidence_contract": self.decision_evidence_contract.as_dict(),
+            "runtime_data_requirement_builder_supported": self.runtime_data_requirement_builder is not None,
         }
 
 
@@ -198,6 +208,8 @@ class ReplayCompatibleStrategyPlugin:
             runtime_capabilities=self.extension.runtime_capabilities(),
             authoring_contract_kind="replay_compatible",
             promotion_extension_payload=self.extension.contract_payload(),
+            decision_evidence_contract=GENERIC_DECISION_EVIDENCE_CONTRACT,
+            runtime_data_requirement_builder=normalized.runtime_data_requirement_builder,
         )
 
 
@@ -251,6 +263,7 @@ def research_plugin_from_event_builder(
     build_research_events: ResearchEventBuilder,
     diagnostics_namespace: str | None = None,
     research_parameter_materializer: ResearchParameterMaterializer | None = None,
+    runtime_data_requirement_builder: RuntimeDataRequirementBuilder | None = None,
 ) -> ResearchOnlyStrategyPlugin:
     return ResearchOnlyStrategyPlugin(
         strategy_name=strategy_name,
@@ -261,6 +274,7 @@ def research_plugin_from_event_builder(
         research_event_builder=build_research_events,
         diagnostics_namespace=diagnostics_namespace,
         research_parameter_materializer=research_parameter_materializer,
+        runtime_data_requirement_builder=runtime_data_requirement_builder,
     )
 
 
@@ -375,9 +389,14 @@ def promotion_grade_plugin(
         single_replay_bundle_builder=extension.single_replay_bundle_builder,
         policy_assembly_factory=extension.policy_assembly_factory,
         runtime_capabilities=extension.runtime_capabilities(),
-        authoring_contract_kind="promotion_grade",
-        promotion_extension_payload=extension.contract_payload(),
-    )
+            authoring_contract_kind="promotion_grade",
+            promotion_extension_payload=extension.contract_payload(),
+            decision_evidence_contract=extension.decision_evidence_contract,
+            runtime_data_requirement_builder=(
+                extension.runtime_data_requirement_builder
+                or normalized.runtime_data_requirement_builder
+            ),
+        )
 
 
 def _runner_for_research_only_plugin(authoring_plugin: ResearchOnlyStrategyPlugin) -> Callable[..., BacktestRun]:

@@ -21,6 +21,8 @@ from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.experiment_manifest import DateRange
 from bithumb_bot.research.strategy_registry import resolve_research_strategy_plugin
 from bithumb_bot.runtime_data_provider import RuntimeDataRequirementResolver, SQLiteRuntimeDataProvider
+from bithumb_bot.strategy_decision_service import StrategyDecisionService, StrategyEvaluationRequest
+from bithumb_bot.strategy_policy_contract import ExecutionConstraintSnapshot, PositionSnapshot
 
 
 def _seed_runtime_db(path: Path) -> int:
@@ -156,6 +158,67 @@ def test_canary_non_sma_plugin_runtime_envelope_and_planner(tmp_path: Path) -> N
         assert bundle.persistence_context["policy_contract_hash"].startswith("sha256:")
     finally:
         conn.close()
+
+
+def test_canary_non_sma_declares_decision_evidence_contract() -> None:
+    plugin = resolve_research_strategy_plugin("canary_non_sma")
+    payload = plugin.contract_payload()
+    contract = payload["decision_evidence_contract"]
+
+    assert contract["requires_decision_input_bundle"] is False
+    assert contract["decision_input_contract_kind"] == "generic_replay_fingerprint"
+    assert contract["snapshot_projector_contract"] == "canary_non_sma_snapshot_v1"
+    for field in (
+        "decision_input_bundle_hash",
+        "decision_input_contract_hash",
+        "decision_input_bundle_payload_hash",
+        "market_feature_hash",
+        "final_exit_decision_input_hash",
+        "snapshot_projector_hash",
+    ):
+        assert field in contract["required_promotion_provenance_fields"]
+
+
+def test_canary_non_sma_contract_missing_evidence_fails_closed() -> None:
+    from bithumb_bot.strategy_plugins.canary_non_sma import (
+        CANARY_NON_SMA_DECISION_EVIDENCE_CONTRACT,
+        CanaryNonSmaPolicy,
+    )
+
+    with pytest.raises(ValueError, match="strategy_evaluation_required_provenance_missing:canary_non_sma"):
+        StrategyDecisionService().evaluate(
+            StrategyEvaluationRequest(
+                strategy_name="canary_non_sma",
+                strategy_instance_id="unit",
+                mode="runtime_replay",
+                strategy_policy=CanaryNonSmaPolicy(),
+                market_snapshot={
+                    "pair": "KRW-BTC",
+                    "interval": "1m",
+                    "candle_ts": 1_700_000_000_000,
+                    "market_price": 10.0,
+                    "candle_index": 0,
+                },
+                position_snapshot=PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False),
+                strategy_config={"parameters": {}},
+                execution_constraints=ExecutionConstraintSnapshot(fee_rate_for_decision=0.0),
+                exit_policy_config=None,
+                rule_sources={},
+                approved_profile_hash=None,
+                runtime_contract_hash=None,
+                plugin_contract_hash=None,
+                request_hash=None,
+                provenance={
+                    "strategy_parameters_hash": "sha256:unit",
+                    "approved_profile_hash_unavailable_reason": "unit",
+                    "runtime_contract_hash_unavailable_reason": "unit",
+                    "plugin_contract_hash_unavailable_reason": "unit",
+                    "runtime_decision_request_hash_unavailable_reason": "unit",
+                    "snapshot_projector_version": "canary_non_sma_snapshot_v1",
+                },
+                decision_evidence_contract=CANARY_NON_SMA_DECISION_EVIDENCE_CONTRACT,
+            )
+        )
 
 
 def test_canary_non_sma_runtime_adapter_is_request_bound(tmp_path: Path) -> None:

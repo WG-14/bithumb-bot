@@ -16,6 +16,10 @@ from bithumb_bot.research.strategy_spec import SMA_WITH_FILTER_SPEC, materialize
 from bithumb_bot.strategy_authoring import PromotionGradeStrategyExtension
 from bithumb_bot.strategy_authoring import build_live_eligible_strategy_plugin
 from bithumb_bot.strategy_authoring import research_plugin_from_event_builder
+from bithumb_bot.strategy_plugins.sma_with_filter_contract import (
+    SMA_DECISION_EVIDENCE_CONTRACT,
+    sma_runtime_data_requirements,
+)
 from bithumb_bot.strategy_plugins.sma_with_filter_events import build_sma_with_filter_research_events
 
 
@@ -123,6 +127,8 @@ _SMA_WITH_FILTER_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
     live_real_order_allowed=True,
     approved_profile_required=True,
     fail_closed_reason="sma_with_filter_capability_missing",
+    decision_evidence_contract=SMA_DECISION_EVIDENCE_CONTRACT,
+    runtime_data_requirement_builder=sma_runtime_data_requirements,
 )
 
 

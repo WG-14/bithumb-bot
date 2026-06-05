@@ -4,12 +4,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
-from bithumb_bot.core.sma_policy import (
-    _stable_hash,
-    _stable_market_feature_policy_input,
-    _stable_market_policy_input,
-    _stable_position_policy_input,
-)
+from bithumb_bot.decision_equivalence import sha256_prefixed
 from bithumb_bot.strategy_policy_contract import (
     ExecutionConstraintSnapshot,
     PositionSnapshot,
@@ -80,6 +75,7 @@ class StrategyDecisionInputBundle:
     decision_input_contract_hash: str
     decision_input_bundle_payload_hash: str
     decision_input_bundle_hash: str
+    component_payloads: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         strategy_name = str(self.strategy_name or "").strip().lower()
@@ -97,6 +93,16 @@ class StrategyDecisionInputBundle:
             "provenance",
             MappingProxyType({str(key): value for key, value in dict(self.provenance or {}).items()}),
         )
+        object.__setattr__(
+            self,
+            "component_payloads",
+            MappingProxyType(
+                {
+                    str(key): dict(value) if isinstance(value, Mapping) else value
+                    for key, value in dict(self.component_payloads or {}).items()
+                }
+            ),
+        )
 
     @classmethod
     def build(
@@ -112,13 +118,23 @@ class StrategyDecisionInputBundle:
         snapshot_projector_version: str,
         snapshot_projector_hash: str,
         provenance: Mapping[str, object] | None = None,
+        component_payloads: Mapping[str, object] | None = None,
     ) -> "StrategyDecisionInputBundle":
-        market_payload = _stable_market_policy_input(_policy_payload(market))
-        market_feature_payload = _stable_market_feature_policy_input(market_payload)
-        position_payload = _stable_position_policy_input(position.policy_input_payload())
-        config_payload = _policy_payload(config)
-        execution_payload = execution_constraints.policy_input_payload()
-        exit_payload = _policy_payload(exit_policy_config)
+        overrides = dict(component_payloads or {})
+        market_payload = _payload_override(overrides, "market", _policy_payload(market))
+        market_feature_payload = _payload_override(
+            overrides,
+            "market_feature",
+            _generic_feature_payload(market_payload),
+        )
+        position_payload = _payload_override(overrides, "position", dict(position.policy_input_payload()))
+        config_payload = _payload_override(overrides, "config", _policy_payload(config))
+        execution_payload = _payload_override(
+            overrides,
+            "execution_constraints",
+            execution_constraints.policy_input_payload(),
+        )
+        exit_payload = _payload_override(overrides, "exit_policy_config", _policy_payload(exit_policy_config))
         component_hashes = {
             "market_snapshot_hash": _stable_hash(market_payload),
             "market_feature_hash": _stable_hash(market_feature_payload),
@@ -139,6 +155,7 @@ class StrategyDecisionInputBundle:
             "materialized_parameters_hash": str(materialized_parameters_hash),
             "snapshot_projector_version": str(snapshot_projector_version),
             "snapshot_projector_hash": str(snapshot_projector_hash),
+            "decision_input_contract_kind": "generic",
             "component_hashes": component_hashes,
         }
         decision_input_contract_hash = _stable_hash(payload)
@@ -168,20 +185,32 @@ class StrategyDecisionInputBundle:
             decision_input_contract_hash=decision_input_contract_hash,
             decision_input_bundle_payload_hash=decision_input_bundle_payload_hash,
             decision_input_bundle_hash=decision_input_contract_hash,
+            component_payloads=overrides,
         )
 
     def payload(self) -> dict[str, object]:
+        overrides = dict(self.component_payloads or {})
+        market_payload = _payload_override(overrides, "market", _policy_payload(self.market))
+        position_payload = _payload_override(overrides, "position", dict(self.position.policy_input_payload()))
+        config_payload = _payload_override(overrides, "config", _policy_payload(self.config))
+        execution_payload = _payload_override(
+            overrides,
+            "execution_constraints",
+            self.execution_constraints.policy_input_payload(),
+        )
+        exit_payload = _payload_override(overrides, "exit_policy_config", _policy_payload(self.exit_policy_config))
         return {
             "schema_version": 1,
             "strategy_name": self.strategy_name,
-            "market": _stable_market_policy_input(_policy_payload(self.market)),
-            "position": _stable_position_policy_input(self.position.policy_input_payload()),
-            "config": _policy_payload(self.config),
-            "execution_constraints": self.execution_constraints.policy_input_payload(),
-            "exit_policy_config": _policy_payload(self.exit_policy_config),
+            "market": market_payload,
+            "position": position_payload,
+            "config": config_payload,
+            "execution_constraints": execution_payload,
+            "exit_policy_config": exit_payload,
             "materialized_parameters_hash": self.materialized_parameters_hash,
             "snapshot_projector_version": self.snapshot_projector_version,
             "snapshot_projector_hash": self.snapshot_projector_hash,
+            "decision_input_contract_kind": "generic",
             "component_hashes": self.component_hashes(),
             "stable_provenance": _stable_provenance(dict(self.provenance)),
         }
@@ -203,6 +232,7 @@ class StrategyDecisionInputBundle:
             "decision_input_bundle_hash": self.decision_input_bundle_hash,
             "decision_input_bundle_payload_hash": self.decision_input_bundle_payload_hash,
             "snapshot_projector_version": self.snapshot_projector_version,
+            "snapshot_projector_contract": self.snapshot_projector_version,
             "snapshot_projector_hash": self.snapshot_projector_hash,
             "materialized_parameters_hash": self.materialized_parameters_hash,
             **self.component_hashes(),
@@ -220,6 +250,31 @@ def _policy_payload(value: object) -> dict[str, object]:
     if isinstance(value, Mapping):
         return dict(value)
     raise TypeError(f"strategy_decision_input_bundle_policy_payload_unsupported:{type(value).__name__}")
+
+
+def _payload_override(
+    overrides: dict[str, object],
+    key: str,
+    default: dict[str, object],
+) -> dict[str, object]:
+    value = overrides.get(key)
+    if value is None:
+        return dict(default)
+    if not isinstance(value, Mapping):
+        raise TypeError(f"strategy_decision_input_bundle_component_payload_invalid:{key}")
+    return dict(value)
+
+
+def _generic_feature_payload(market_payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "feature_contract_kind": "generic_market_payload",
+        "market": dict(market_payload),
+    }
+
+
+def _stable_hash(payload: object) -> str:
+    return sha256_prefixed(payload)
 
 
 def _stable_provenance(payload: dict[str, object]) -> dict[str, object]:

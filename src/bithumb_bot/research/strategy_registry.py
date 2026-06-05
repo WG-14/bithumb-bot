@@ -15,6 +15,8 @@ from .strategy_spec import (
     StrategySpec,
     materialize_strategy_parameters,
 )
+from ..strategy_evidence_contract import DecisionEvidenceContract
+from ..strategy_evidence_contract import GENERIC_DECISION_EVIDENCE_CONTRACT
 from ..runtime_data_capabilities import normalize_runtime_data_capability
 
 
@@ -64,6 +66,7 @@ ResearchExportNormalizer = Callable[
     ],
     list[dict[str, object]],
 ]
+RuntimeDataRequirementBuilder = Callable[[object | None], "ResearchStrategyDataRequirements"]
 
 
 class ResearchStrategyRegistryError(ValueError):
@@ -335,6 +338,8 @@ class ResearchStrategyPlugin:
     research_runnable: bool = True
     authoring_contract_kind: str = "legacy_research_strategy_plugin"
     promotion_extension_payload: dict[str, Any] | None = None
+    decision_evidence_contract: DecisionEvidenceContract = GENERIC_DECISION_EVIDENCE_CONTRACT
+    runtime_data_requirement_builder: RuntimeDataRequirementBuilder | None = None
 
     def __post_init__(self) -> None:
         if self.runtime_capabilities is None:
@@ -355,6 +360,15 @@ class ResearchStrategyPlugin:
             raise ValueError(f"strategy live dry-run capability missing adapter: {self.name}")
         if self.runtime_capabilities.live_real_order_allowed and self.runtime_decision_adapter_factory is None:
             raise ValueError(f"strategy live real-order capability missing adapter: {self.name}")
+        if not isinstance(self.decision_evidence_contract, DecisionEvidenceContract):
+            raise TypeError(f"strategy decision evidence contract invalid: {self.name}")
+        if self.runtime_capabilities.live_dry_run_allowed:
+            evidence_payload = self.decision_evidence_contract.payload_without_hash()
+            if (
+                not bool(evidence_payload["requires_decision_input_bundle"])
+                and not evidence_payload["required_promotion_provenance_fields"]
+            ):
+                raise ValueError(f"strategy live-eligible decision evidence contract missing: {self.name}")
 
     def contract_payload(self) -> dict[str, Any]:
         data_requirements = ResearchStrategyDataRequirements(
@@ -368,6 +382,18 @@ class ResearchStrategyPlugin:
             "required_data": list(self.required_data),
             "optional_data": list(self.optional_data),
             "data_capability_contract": data_requirements.capability_contract_payload(),
+            "runtime_data_requirement_builder_supported": self.runtime_data_requirement_builder is not None,
+            "runtime_data_requirement_builder_module": (
+                self.runtime_data_requirement_builder.__module__
+                if self.runtime_data_requirement_builder is not None
+                else None
+            ),
+            "runtime_data_requirement_builder_qualname": (
+                self.runtime_data_requirement_builder.__qualname__
+                if self.runtime_data_requirement_builder is not None
+                else None
+            ),
+            "decision_evidence_contract": self.decision_evidence_contract.as_dict(),
             "behavior_affecting_parameter_names": list(self.spec.behavior_affecting_parameter_names),
             "runner_module": self.runner.__module__,
             "runner_qualname": self.runner.__qualname__,
@@ -668,7 +694,11 @@ def strategy_runtime_capability_issues(
 TEST_TOP_OF_BOOK_REQUIRED_STRATEGY = "__test_top_of_book_required__"
 
 
-def research_strategy_data_requirements(strategy_name: str) -> ResearchStrategyDataRequirements:
+def research_strategy_data_requirements(
+    strategy_name: str,
+    *,
+    runtime_strategy_spec: object | None = None,
+) -> ResearchStrategyDataRequirements:
     if strategy_name == TEST_TOP_OF_BOOK_REQUIRED_STRATEGY:
         return ResearchStrategyDataRequirements(
             required_data=("candles", "top_of_book"),
@@ -686,6 +716,8 @@ def research_strategy_data_requirements(strategy_name: str) -> ResearchStrategyD
             ),
         )
     plugin = resolve_research_strategy_plugin(strategy_name)
+    if plugin.runtime_data_requirement_builder is not None:
+        return plugin.runtime_data_requirement_builder(runtime_strategy_spec)
     return ResearchStrategyDataRequirements(
         required_data=plugin.required_data,
         optional_data=plugin.optional_data,

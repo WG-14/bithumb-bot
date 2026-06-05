@@ -34,6 +34,7 @@ from bithumb_bot.strategy_plugins.sma_with_filter_assembly import (
     MaterializationMode,
     SmaWithFilterPolicyAssembly,
 )
+from bithumb_bot.strategy_plugins.sma_with_filter_contract import SMA_DECISION_EVIDENCE_CONTRACT
 from bithumb_bot.strategy_decision_service import (
     StrategyDecisionService,
     StrategyEvaluationRequest,
@@ -391,6 +392,7 @@ def test_sma_promotion_service_requires_canonical_decision_input_bundle() -> Non
                     "plugin_contract_hash_unavailable_reason": "unit",
                     "runtime_decision_request_hash_unavailable_reason": "unit",
                 },
+                decision_evidence_contract=SMA_DECISION_EVIDENCE_CONTRACT,
             )
         )
 
@@ -460,6 +462,7 @@ def test_live_real_order_service_rejects_unavailable_provenance_before_submit_au
                     "plugin_contract_hash_unavailable_reason": "diagnostic_forbidden_in_live_real_order",
                 },
                 decision_input_bundle=bundle,
+                decision_evidence_contract=SMA_DECISION_EVIDENCE_CONTRACT,
             )
         )
 

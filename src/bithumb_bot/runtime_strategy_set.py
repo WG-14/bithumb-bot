@@ -33,6 +33,7 @@ from .runtime_strategy_decision import (
     RuntimeStrategyDecisionResult,
     _attach_runtime_request_metadata,
     _attach_runtime_feature_snapshot_metadata,
+    _project_runtime_feature_snapshot,
     get_runtime_decision_adapter,
     is_runtime_strategy_decision_result,
     promotion_adapter_supports_feature_snapshot,
@@ -1143,6 +1144,14 @@ class RuntimeStrategyDecisionCollector:
                 RuntimeStrategySet(strategies=(spec,), source=strategy_set.source, market_scope=strategy_set.market_scope)
             )
             feature_snapshot = data_provider.snapshot(request, requirements)
+            if feature_snapshot is None:
+                return None
+            feature_snapshot = _project_runtime_feature_snapshot(
+                adapter=adapter,
+                conn=conn,
+                request=request,
+                feature_snapshot=feature_snapshot,
+            )
             if feature_snapshot is None:
                 return None
             result = _decide_with_feature_snapshot(

@@ -150,6 +150,12 @@ def assert_live_eligible_contract(
     assert plugin.policy_assembly_factory is not None
     assert plugin.runtime_capabilities.live_dry_run_allowed is True
     assert plugin.runtime_capabilities.approved_profile_required is True
+    evidence_contract = payload["decision_evidence_contract"]
+    assert evidence_contract["contract_hash"].startswith("sha256:")
+    assert (
+        evidence_contract["requires_decision_input_bundle"]
+        or evidence_contract["required_promotion_provenance_fields"]
+    )
 
     db_path = tmp_path / f"{plugin.name}.sqlite"
     through_ts = _seed_runtime_rows(db_path, pair=pair, interval=interval)
@@ -203,6 +209,8 @@ def assert_live_eligible_contract(
     assert provenance["decision_boundary"] == "StrategyDecisionService.evaluate"
     assert provenance["approved_profile_hash"].startswith("sha256:")
     assert provenance["runtime_contract_hash"].startswith("sha256:")
+    for field in evidence_contract["required_promotion_provenance_fields"]:
+        assert str(provenance.get(field) or "").strip(), field
 
 
 def _seed_replay_db(path: Path, dataset: DatasetSnapshot) -> int:

@@ -69,6 +69,27 @@ def test_runtime_capability_normalization_aligns_research_aliases() -> None:
     assert normalize_runtime_data_capability("open_interest") == "open_interest"
 
 
+def test_common_runtime_files_have_no_concrete_strategy_literals() -> None:
+    common_files = (
+        Path("src/bithumb_bot/strategy_decision_service.py"),
+        Path("src/bithumb_bot/runtime_data_provider.py"),
+        Path("src/bithumb_bot/runtime_strategy_decision.py"),
+        Path("src/bithumb_bot/runtime_strategy_set.py"),
+        Path("src/bithumb_bot/execution_service.py"),
+        Path("src/bithumb_bot/run_loop_execution_planner.py"),
+    )
+    forbidden = ("sma_with_filter", "canary_non_sma")
+
+    violations: list[str] = []
+    for path in common_files:
+        source = path.read_text(encoding="utf-8")
+        for literal in forbidden:
+            if literal in source:
+                violations.append(f"{path}:{literal}")
+
+    assert violations == []
+
+
 def test_runtime_data_provider_preflight_and_snapshot_are_deterministic() -> None:
     conn = _conn()
     try:
@@ -95,6 +116,28 @@ def test_runtime_data_provider_preflight_and_snapshot_are_deterministic() -> Non
     assert snapshot_a.market_snapshot_hash == snapshot_b.market_snapshot_hash
     assert snapshot_a.feature_payload["candle_ts"] == 1_700_000_180_000
     assert snapshot_a.feature_payload["last_close"] == 13.0
+
+
+def test_sma_runtime_data_requirements_are_plugin_declared() -> None:
+    spec = RuntimeStrategySpec(
+        "sma_with_filter",
+        pair="KRW-BTC",
+        interval="1m",
+        parameters={
+            "SMA_SHORT": 3,
+            "SMA_LONG": 8,
+            "SMA_FILTER_VOL_WINDOW": 5,
+            "SMA_FILTER_OVEREXT_LOOKBACK": 2,
+        },
+    )
+    requirements = RuntimeDataRequirementResolver().resolve_for_strategy_set(
+        RuntimeStrategySet(source="unit", strategies=(spec,))
+    )
+
+    candles = next(item for item in requirements.required if item.name == "candles")
+    assert candles.lookback_rows == 10
+    assert candles.closed_candle_required is True
+    assert candles.min_coverage_pct == 100.0
 
 
 def test_missing_required_candles_fail_closed_before_adapter_execution() -> None:

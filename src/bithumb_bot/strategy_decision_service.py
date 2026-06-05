@@ -11,6 +11,8 @@ from .strategy_policy_contract import (
     StrategyDecisionV2,
 )
 from .strategy_decision_input import StrategyDecisionInputBundle
+from .strategy_evidence_contract import DecisionEvidenceContract
+from .strategy_evidence_contract import GENERIC_DECISION_EVIDENCE_CONTRACT
 
 
 class StrategyPolicyLike(Protocol):
@@ -46,6 +48,7 @@ class StrategyEvaluationRequest:
     request_hash: str | None
     provenance: Mapping[str, object]
     decision_input_bundle: StrategyDecisionInputBundle | None = None
+    decision_evidence_contract: DecisionEvidenceContract = GENERIC_DECISION_EVIDENCE_CONTRACT
 
     def __post_init__(self) -> None:
         name = str(self.strategy_name or "").strip().lower()
@@ -56,6 +59,8 @@ class StrategyEvaluationRequest:
             raise ValueError("strategy_evaluation_mode_missing")
         if not hasattr(self.strategy_policy, "decide_snapshot"):
             raise TypeError(f"strategy_evaluation_policy_invalid:{name}:missing_decide_snapshot")
+        if not isinstance(self.decision_evidence_contract, DecisionEvidenceContract):
+            raise TypeError(f"strategy_evaluation_decision_evidence_contract_invalid:{name}")
         object.__setattr__(self, "strategy_name", name)
         object.__setattr__(self, "mode", mode)
         object.__setattr__(
@@ -121,11 +126,11 @@ class StrategyDecisionService:
             raise ValueError(f"strategy_evaluation_policy_strategy_mismatch:{request.strategy_name}:{policy_name}")
         bundle = request.decision_input_bundle
         if (
-            request.strategy_name == "sma_with_filter"
+            request.decision_evidence_contract.requires_decision_input_bundle
             and request.mode in self._PROMOTION_COMPARABLE_MODES
             and bundle is None
         ):
-            raise ValueError("strategy_evaluation_decision_input_bundle_missing:sma_with_filter")
+            raise ValueError(f"strategy_evaluation_decision_input_bundle_missing:{request.strategy_name}")
         if bundle is not None:
             if bundle.strategy_name != request.strategy_name:
                 raise ValueError(
@@ -202,10 +207,23 @@ class StrategyDecisionService:
             value = decision_trace.get(key)
             if str(value or "").strip():
                 provenance[key] = value
+        for key in request.decision_evidence_contract.required_promotion_provenance_fields:
+            if key in provenance:
+                continue
+            value = replay_payload.get(key)
+            if str(value or "").strip():
+                provenance[key] = value
+        for key in request.decision_evidence_contract.required_live_real_order_fields:
+            if key in provenance:
+                continue
+            value = replay_payload.get(key)
+            if str(value or "").strip():
+                provenance[key] = value
         if request.mode in self._PROMOTION_COMPARABLE_MODES and bool(
             provenance.get("compatibility_fallback")
         ):
             raise ValueError(f"strategy_evaluation_compatibility_fallback_rejected:{request.strategy_name}")
+        self._validate_snapshot_projector_contract(request=request, provenance=provenance)
         self._validate_promotion_provenance(request=request, provenance=provenance)
         return StrategyEvaluationResult(
             decision=decision,
@@ -242,18 +260,9 @@ class StrategyDecisionService:
             "strategy_evaluation_mode",
             "decision_boundary",
         ]
-        if request.strategy_name == "sma_with_filter":
-            required_decision_fields.extend(
-                [
-                    "decision_input_bundle_hash",
-                    "decision_input_contract_hash",
-                    "decision_input_bundle_payload_hash",
-                    "market_feature_hash",
-                    "final_exit_decision_input_hash",
-                    "snapshot_projector_version",
-                    "snapshot_projector_hash",
-                ]
-            )
+        required_decision_fields.extend(
+            request.decision_evidence_contract.required_promotion_provenance_fields
+        )
         for field_name in required_decision_fields:
             if not str(provenance.get(field_name) or "").strip():
                 missing.append(field_name)
@@ -265,16 +274,19 @@ class StrategyDecisionService:
                 + ",".join(sorted(set(missing)))
             )
         if request.mode == "live_real_order":
-            self._validate_live_real_order_provenance(provenance)
+            self._validate_live_real_order_provenance(request=request, provenance=provenance)
 
-    def _validate_live_real_order_provenance(self, provenance: Mapping[str, object]) -> None:
+    def _validate_live_real_order_provenance(
+        self,
+        *,
+        request: StrategyEvaluationRequest,
+        provenance: Mapping[str, object],
+    ) -> None:
         missing: list[str] = []
         for field_name in (
             "policy_input_hash",
             "policy_decision_hash",
             "policy_contract_hash",
-            "decision_input_bundle_hash",
-            "snapshot_projector_hash",
             "replay_fingerprint_hash",
             "strategy_parameters_hash",
             "approved_profile_hash",
@@ -282,6 +294,9 @@ class StrategyDecisionService:
             "runtime_contract_hash",
             "runtime_decision_request_hash",
         ):
+            if not str(provenance.get(field_name) or "").strip():
+                missing.append(field_name)
+        for field_name in request.decision_evidence_contract.required_live_real_order_fields:
             if not str(provenance.get(field_name) or "").strip():
                 missing.append(field_name)
         if not (
@@ -306,6 +321,24 @@ class StrategyDecisionService:
                 "strategy_evaluation_live_real_order_provenance_missing:"
                 + ",".join(sorted(set(missing)))
             )
+
+    def _validate_snapshot_projector_contract(
+        self,
+        *,
+        request: StrategyEvaluationRequest,
+        provenance: Mapping[str, object],
+    ) -> None:
+        expected = request.decision_evidence_contract.snapshot_projector_contract
+        if expected is None or request.mode not in self._PROMOTION_COMPARABLE_MODES:
+            return
+        observed_contract = str(provenance.get("snapshot_projector_contract") or "").strip()
+        observed_version = str(provenance.get("snapshot_projector_version") or "").strip()
+        if observed_contract == expected or observed_version == expected:
+            return
+        raise ValueError(
+            "strategy_evaluation_snapshot_projector_contract_mismatch:"
+            f"{request.strategy_name}:{expected}:{observed_contract or observed_version or 'missing'}"
+        )
 
 
 __all__ = [
