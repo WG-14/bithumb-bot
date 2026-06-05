@@ -24,6 +24,7 @@ from .markets import (
 from .market_catalog_snapshot import record_market_catalog_snapshot
 from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError, validate_runtime_root_separation
+from .submit_authority_policy import submit_authority_policy_from_settings
 from .messages import (
     ACCOUNTS_PREFLIGHT_AUTH_FAILED,
     ACCOUNTS_PREFLIGHT_TRANSPORT_FAILED,
@@ -1323,8 +1324,14 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
 
     if cfg.MAX_ORDER_KRW <= 0 or not math.isfinite(float(cfg.MAX_ORDER_KRW)):
         issues.append("MAX_ORDER_KRW must be > 0")
+    submit_authority_policy = submit_authority_policy_from_settings(cfg)
     if str(cfg.EXECUTION_ENGINE) not in {"lot_native", "target_delta"}:
         issues.append("EXECUTION_ENGINE must be one of: lot_native, target_delta")
+    elif (
+        submit_authority_policy.live_real_order_requires_target_delta
+        and str(cfg.EXECUTION_ENGINE) != "target_delta"
+    ):
+        issues.append("live_real_order_requires_execution_engine_target_delta")
     elif selection_kind == "multi_strategy" and str(cfg.EXECUTION_ENGINE) != "target_delta":
         issues.append("live_multi_strategy_requires_execution_engine_target_delta")
     if str(cfg.TARGET_HOLD_POLICY) not in {"maintain_previous_target"}:
@@ -1545,6 +1552,12 @@ def validate_live_real_order_execution_preflight(cfg: Settings) -> None:
             "unarmed live execution cannot start the real-order trading loop. "
             "Only use `run` after real-order arming, performance gate approval, and startup safety checks"
         )
+    submit_authority_policy = submit_authority_policy_from_settings(cfg)
+    if (
+        submit_authority_policy.live_real_order_requires_target_delta
+        and str(cfg.EXECUTION_ENGINE) != "target_delta"
+    ):
+        issues.append("live_real_order_requires_execution_engine_target_delta")
     if issues:
         raise LiveModeValidationError(
             "live real-order execution preflight failed: " + "; ".join(issues)
@@ -1935,12 +1948,14 @@ def live_execution_contract_summary(
         )
         approved_profile_summary = profile_result.audit_fields()
     config_contract = config_contract_metadata(cfg)
+    submit_authority_policy = submit_authority_policy_from_settings(cfg)
     return {
         "mode": cfg.MODE,
         "pair": cfg.PAIR,
         "live_dry_run": bool(cfg.LIVE_DRY_RUN),
         "live_real_order_armed": bool(cfg.LIVE_REAL_ORDER_ARMED),
         "live_submit_contract_profile": str(cfg.LIVE_SUBMIT_CONTRACT_PROFILE),
+        **submit_authority_policy.as_dict(),
         "live_order_rule_fallback_profile": str(cfg.LIVE_ORDER_RULE_FALLBACK_PROFILE),
         "private_rps_limit": float(cfg.BITHUMB_PRIVATE_RPS_LIMIT),
         "order_rps_limit": float(cfg.BITHUMB_ORDER_RPS_LIMIT),

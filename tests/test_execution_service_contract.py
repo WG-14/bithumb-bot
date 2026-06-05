@@ -534,7 +534,62 @@ def test_typed_execution_summary_can_supply_validated_target_submit_plan() -> No
     assert calls[0]["kwargs"]["execution_submit_plan"] == summary.target_submit_plan.as_final_payload()  # type: ignore[index,union-attr]
 
 
-def test_lot_native_typed_buy_submit_plan_reaches_executor() -> None:
+def test_execution_intent_telemetry_does_not_change_live_target_delta_submit_size() -> None:
+    _arm_live_real_orders(engine="target_delta")
+    first_calls: list[dict[str, object]] = []
+    second_calls: list[dict[str, object]] = []
+    summary = _typed_target_execution_summary()
+
+    first = _service(first_calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=100_000_000.0,
+            execution_decision_summary=summary,
+            observability_payload=ExecutionObservabilityPayload(
+                {
+                    "execution_intent": {
+                        "intent": "enter_strategy_position",
+                        "qty": 999.0,
+                        "notional_krw": 999_000_000.0,
+                    }
+                }
+            ),
+        )
+    )
+    second = _service(second_calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=124,
+            market_price=100_000_000.0,
+            execution_decision_summary=summary,
+            observability_payload=ExecutionObservabilityPayload(
+                {
+                    "execution_intent": {
+                        "intent": "enter_strategy_position",
+                        "qty": 0.00000001,
+                        "notional_krw": 1.0,
+                    }
+                }
+            ),
+        )
+    )
+
+    assert first == {"status": "submitted", "signal": "BUY"}
+    assert second == {"status": "submitted", "signal": "BUY"}
+    first_plan = first_calls[0]["kwargs"]["execution_submit_plan"]  # type: ignore[index]
+    second_plan = second_calls[0]["kwargs"]["execution_submit_plan"]  # type: ignore[index]
+    assert first_plan["source"] == "target_delta"
+    assert second_plan["source"] == "target_delta"
+    assert first_plan["qty"] == second_plan["qty"] == pytest.approx(0.001)
+    assert first_plan["notional_krw"] == second_plan["notional_krw"] == pytest.approx(100_000.0)
+    assert first_plan["target_exposure_krw"] == second_plan["target_exposure_krw"] == pytest.approx(100_000.0)
+    assert first_plan["delta_krw"] == second_plan["delta_krw"] == pytest.approx(100_000.0)
+
+
+def test_live_real_order_lot_native_typed_buy_submit_plan_fails_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     _arm_live_real_orders(engine="lot_native")
     calls: list[dict[str, object]] = []
     summary = _typed_buy_execution_summary()
@@ -549,9 +604,62 @@ def test_lot_native_typed_buy_submit_plan_reaches_executor() -> None:
         )
     )
 
-    assert submitted == {"status": "submitted", "signal": "BUY"}
-    assert len(calls) == 1
-    assert calls[0]["kwargs"]["execution_submit_plan"] == summary.buy_submit_plan.as_final_payload()  # type: ignore[index,union-attr]
+    assert submitted is None
+    assert calls == []
+    assert "live_real_order_requires_execution_engine_target_delta" in caplog.text
+
+
+def test_live_real_order_target_delta_blocks_strategy_position_buy_submit_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _arm_live_real_orders(engine="target_delta")
+    calls: list[dict[str, object]] = []
+
+    submitted = _service(calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=100_000_000.0,
+            decision_context={},
+            execution_decision_summary=_typed_buy_execution_summary(),
+        )
+    )
+
+    assert submitted is None
+    assert calls == []
+    assert "live_real_order_buy_submit_plan_requires_target_delta" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        "residual_inventory_delta",
+        "strategy_execution_intent",
+        "research_compatibility_execution_intent",
+    ],
+)
+def test_live_real_order_blocks_non_target_buy_authorities(
+    caplog: pytest.LogCaptureFixture,
+    authority: str,
+) -> None:
+    _arm_live_real_orders(engine="target_delta")
+    calls: list[dict[str, object]] = []
+    plan = {**_valid_buy_submit_plan(), "authority": authority}
+    summary = _typed_buy_execution_summary(plan=plan)
+
+    submitted = _service(calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=100_000_000.0,
+            decision_context={},
+            execution_decision_summary=summary,
+        )
+    )
+
+    assert submitted is None
+    assert calls == []
+    assert "live_real_order_buy_submit_plan_requires_target_delta" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -612,7 +720,7 @@ def test_lot_native_typed_buy_submit_plan_invalid_cases_fail_closed(
 
     assert result is None
     assert calls == []
-    assert expected_reason in caplog.text
+    assert expected_reason in caplog.text or "live_real_order_requires_execution_engine_target_delta" in caplog.text
 
 
 def test_lot_native_typed_buy_submit_plan_mismatch_with_context_fails_closed(
@@ -712,13 +820,13 @@ def test_typed_execution_summary_mismatch_with_context_fails_closed(
 def test_observability_payload_is_non_authoritative_and_checked_for_tampering(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    _arm_live_real_orders(engine="lot_native")
+    _arm_live_real_orders(engine="target_delta")
     calls: list[dict[str, object]] = []
-    summary = _typed_buy_execution_summary()
+    summary = _typed_target_execution_summary()
     tampered = summary.as_dict()
-    buy_plan = dict(tampered["buy_submit_plan"])  # type: ignore[arg-type]
-    buy_plan["source"] = "legacy_context"
-    tampered["buy_submit_plan"] = buy_plan
+    target_plan = dict(tampered["target_submit_plan"])  # type: ignore[arg-type]
+    target_plan["source"] = "legacy_context"
+    tampered["target_submit_plan"] = target_plan
 
     result = _service(calls).execute(
         SignalExecutionRequest(
@@ -750,7 +858,7 @@ def test_valid_residual_plan_reaches_executor_only_when_residual_live_submit_is_
     armed: bool,
     expected_calls: int,
 ) -> None:
-    _arm_live_real_orders(engine="lot_native")
+    _arm_live_real_orders(engine="target_delta")
     object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", mode)
     object.__setattr__(settings, "LIVE_DRY_RUN", dry_run)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", armed)
@@ -819,7 +927,7 @@ def test_live_real_order_blocks_dict_only_execution_decision_even_with_submit_pl
 
 
 def test_live_real_order_executes_with_typed_authority_and_empty_observability_context() -> None:
-    _arm_live_real_orders(engine="lot_native")
+    _arm_live_real_orders(engine="target_delta")
     calls: list[dict[str, object]] = []
 
     submitted = _service(calls).execute(
@@ -827,14 +935,14 @@ def test_live_real_order_executes_with_typed_authority_and_empty_observability_c
             signal="BUY",
             ts=123,
             market_price=100_000_000.0,
-            execution_decision_summary=_typed_buy_execution_summary(),
+            execution_decision_summary=_typed_target_execution_summary(),
             observability_context={},
         )
     )
 
     assert submitted == {"status": "submitted", "signal": "BUY"}
     assert len(calls) == 1
-    assert calls[0]["kwargs"]["execution_submit_plan"]["source"] == "strategy_position"  # type: ignore[index]
+    assert calls[0]["kwargs"]["execution_submit_plan"]["source"] == "target_delta"  # type: ignore[index]
 
 
 def test_live_real_order_request_construction_requires_typed_execution_summary() -> None:
@@ -849,7 +957,7 @@ def test_live_real_order_request_construction_requires_typed_execution_summary()
 
 
 def test_live_real_order_dict_context_cannot_be_submit_authority() -> None:
-    _arm_live_real_orders(engine="lot_native")
+    _arm_live_real_orders(engine="target_delta")
     calls: list[dict[str, object]] = []
 
     result = _service(calls).execute(
@@ -867,13 +975,13 @@ def test_live_real_order_dict_context_cannot_be_submit_authority() -> None:
 
 
 def test_explicit_observability_payload_is_non_authoritative_telemetry() -> None:
-    _arm_live_real_orders(engine="lot_native")
+    _arm_live_real_orders(engine="target_delta")
     calls: list[dict[str, object]] = []
     typed_request = TypedExecutionRequest(
         signal="BUY",
         ts=123,
         market_price=100_000_000.0,
-        execution_decision_summary=_typed_buy_execution_summary(),
+        execution_decision_summary=_typed_target_execution_summary(),
         observability_payload=ExecutionObservabilityPayload(
             {"execution_decision": {"buy_submit_plan": _valid_buy_submit_plan()}, "trace": "telemetry"}
         ),
@@ -886,7 +994,7 @@ def test_explicit_observability_payload_is_non_authoritative_telemetry() -> None
     submitted = _service(calls).execute(request)
 
     assert submitted == {"status": "submitted", "signal": "BUY"}
-    assert calls[0]["kwargs"]["execution_submit_plan"] == typed_request.execution_decision_summary.buy_submit_plan.as_final_payload()  # type: ignore[union-attr,index]
+    assert calls[0]["kwargs"]["execution_submit_plan"] == typed_request.execution_decision_summary.target_submit_plan.as_final_payload()  # type: ignore[union-attr,index]
     assert request.observability_payload.as_dict()["trace"] == "telemetry"  # type: ignore[union-attr]
 
 
@@ -1225,24 +1333,25 @@ def _live_admission(summary: ExecutionDecisionSummary, *, engine: str, residual_
 
 
 @pytest.mark.parametrize(
-    ("payload_factory", "engine", "residual_mode"),
+    ("payload_factory", "engine", "residual_mode", "expected_live_admission"),
     [
-        (_valid_buy_submit_plan, "lot_native", "block"),
-        (_valid_target_submit_plan, "target_delta", "block"),
-        (_valid_residual_submit_plan, "lot_native", "enabled"),
+        (_valid_buy_submit_plan, "target_delta", "block", "blocked"),
+        (_valid_target_submit_plan, "target_delta", "block", "accepted"),
+        (_valid_residual_submit_plan, "target_delta", "enabled", "accepted"),
     ],
 )
 def test_submit_plan_admission_equivalence_valid_typed_plans(
     payload_factory: Callable[[], dict[str, object]],
     engine: str,
     residual_mode: str,
+    expected_live_admission: str,
 ) -> None:
     plan = _typed_plan(payload_factory())
     summary = _summary_for_plan(plan)
 
     assert _research_admission(plan) == "accepted"
     assert _paper_admission(summary) == "accepted"
-    assert _live_admission(summary, engine=engine, residual_mode=residual_mode) == "accepted"
+    assert _live_admission(summary, engine=engine, residual_mode=residual_mode) == expected_live_admission
 
 
 @pytest.mark.parametrize(
@@ -1270,7 +1379,7 @@ def test_submit_plan_admission_equivalence_invalid_buy_plans_fail_closed(
 
     assert _research_admission(plan) == "blocked"
     assert _paper_admission(summary) == "blocked"
-    assert _live_admission(summary, engine="lot_native") == "blocked"
+    assert _live_admission(summary, engine="target_delta") == "blocked"
 
 
 def test_submit_plan_admission_equivalence_dict_only_plans_fail_closed() -> None:
@@ -1278,4 +1387,4 @@ def test_submit_plan_admission_equivalence_dict_only_plans_fail_closed() -> None
 
     assert _research_admission(_valid_buy_submit_plan()) == "blocked"
     assert _paper_admission(summary) == "blocked"
-    assert _live_admission(summary, engine="lot_native") == "blocked"
+    assert _live_admission(summary, engine="target_delta") == "blocked"

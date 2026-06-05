@@ -115,6 +115,7 @@ def _set_valid_live_defaults(
     object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 100000.0)
     object.__setattr__(settings, "PAIR", "KRW-BTC")
     object.__setattr__(settings, "STRATEGY_NAME", "sma_with_filter")
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
     object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", False)
     object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_WARNING", False)
     object.__setattr__(settings, "MARKET_PREFLIGHT_WARNING_STATES", "CAUTION")
@@ -715,6 +716,10 @@ def test_live_multi_strategy_profile_authority_is_observable(
     assert summary["runtime_strategy_set_source"] == "RUNTIME_STRATEGY_SET_JSON"
     assert summary["profile_binding_kind"] == "spec_bound_approved_profiles"
     assert summary["startup_gate_authority"] == "RUNTIME_STRATEGY_SET_JSON"
+    assert summary["submit_authority_mode"] == "live_dry_run_non_submitting_compat"
+    assert summary["live_real_order_requires_target_delta"] is False
+    assert summary["legacy_lot_native_compat_enabled"] is True
+    assert "target_delta" in summary["allowed_submit_plan_sources"]
     binding = summary["runtime_profile_binding"]
     assert isinstance(binding, dict)
     assert binding["global_profile_selector_present"] is False
@@ -798,6 +803,39 @@ def test_live_real_order_execution_preflight_accepts_armed_live(monkeypatch: pyt
     object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
 
     config.validate_live_real_order_execution_preflight(settings)
+
+
+def test_live_real_order_contract_summary_reports_target_delta_only_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+
+    summary = config.live_execution_contract_summary(settings)
+
+    assert summary["submit_authority_mode"] == "live_real_order_target_delta_only"
+    assert summary["live_real_order_requires_target_delta"] is True
+    assert summary["legacy_lot_native_compat_enabled"] is False
+    assert summary["allowed_submit_plan_sources"] == ["target_delta", "residual_inventory"]
+    assert "canonical_target_delta_sizing" in summary["allowed_submit_plan_authorities"]
+    assert "configured_strategy_order_size" not in summary["allowed_submit_plan_authorities"]
+
+
+def test_live_real_order_execution_preflight_rejects_single_strategy_lot_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "EXECUTION_ENGINE", "lot_native")
+    profile_path = _write_live_profile(Path(os.environ["DATA_ROOT"]).parent, mode="small_live")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_real_order_execution_preflight(settings)
+
+    assert "live_real_order_requires_execution_engine_target_delta" in str(exc.value)
 
 
 def test_live_real_order_preflight_rejects_incomplete_approved_profile(

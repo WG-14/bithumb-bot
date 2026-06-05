@@ -17,6 +17,10 @@ from .order_sizing import build_target_delta_execution_sizing
 from .portfolio_target import PortfolioTarget
 from .pre_trade_economics import build_pre_trade_economics_snapshot
 from .strategy_policy_contract import StrategyDecisionV2
+from .submit_authority_policy import (
+    live_real_order_legacy_buy_submit_plan_error,
+    submit_authority_policy_from_settings,
+)
 from .target_position import TargetPositionSettings, build_target_position_decision
 
 if False:  # pragma: no cover
@@ -2168,6 +2172,27 @@ class LiveSignalExecutionService:
                     side=request.signal,
                 )
                 return None
+        submit_authority_policy = submit_authority_policy_from_settings(settings)
+        if submit_authority_policy.live_real_order_requires_target_delta and _execution_engine() != "target_delta":
+            _log_live_submit_plan_block(
+                reason="live_real_order_requires_execution_engine_target_delta",
+                field_name="execution_engine",
+                side=request.signal,
+            )
+            return None
+        if buy_plan:
+            legacy_buy_error = live_real_order_legacy_buy_submit_plan_error(
+                buy_plan,
+                settings_obj=settings,
+            )
+            if legacy_buy_error is not None:
+                _log_live_submit_plan_block(
+                    reason=legacy_buy_error,
+                    field_name="buy_submit_plan",
+                    source=buy_plan.get("source"),
+                    side=buy_plan.get("side"),
+                )
+                return None
         primary_plan = target_plan or residual_plan or buy_plan
         invariant_error = execution_submit_plan_invariant_error(
             primary_plan,
@@ -2223,6 +2248,151 @@ class LiveSignalExecutionService:
             )
         if _execution_engine() == "target_delta" and str(settings.MODE).lower() == "live":
             if not target_plan:
+                if (
+                    request.signal == "SELL"
+                    and residual_plan
+                    and str(residual_plan.get("source")) == "residual_inventory"
+                ):
+                    pass
+                else:
+                    _block_live_submit_plan(
+                        reason="target_delta_missing_target_submit_plan",
+                        field_name="target_submit_plan",
+                        source=execution_decision.get("source"),
+                        side=request.signal,
+                    )
+                    return None
+            if target_plan:
+                if not bool(target_plan.get("portfolio_target_authoritative")):
+                    _block_live_submit_plan(
+                        reason="target_delta_missing_authoritative_portfolio_target",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if not str(target_plan.get("portfolio_target_hash") or "").strip():
+                    _block_live_submit_plan(
+                        reason="target_delta_missing_portfolio_target_hash",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if not str(target_plan.get("allocation_decision_hash") or "").strip():
+                    _block_live_submit_plan(
+                        reason="target_delta_missing_allocation_decision_hash",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if not str(target_plan.get("strategy_contribution_hash") or "").strip():
+                    _block_live_submit_plan(
+                        reason="target_delta_missing_strategy_contribution_hash",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if str(target_plan.get("source")) != "target_delta":
+                    _block_live_submit_plan(
+                        reason="target_delta_invalid_target_submit_plan_source",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if str(target_plan.get("authority")) not in {
+                    "canonical_target_delta_sizing",
+                    "target_position_delta",
+                }:
+                    _block_live_submit_plan(
+                        reason="target_delta_invalid_target_submit_plan_authority",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if str(target_plan.get("block_reason") or "none") != "none":
+                    _block_live_submit_plan(
+                        reason="target_delta_blocked_submit_plan",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if str(target_plan.get("pre_submit_proof_status") or "") != "passed":
+                    _block_live_submit_plan(
+                        reason="target_delta_pre_submit_proof_not_passed",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if not bool(target_plan.get("submit_expected")):
+                    _block_live_submit_plan(
+                        reason="target_delta_submit_not_expected",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                plan_side = str(target_plan.get("side") or "").upper()
+                if plan_side not in {"BUY", "SELL"}:
+                    _block_live_submit_plan(
+                        reason="target_delta_non_submittable_side",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                try:
+                    plan_qty = float(target_plan.get("qty") or 0.0)
+                except (TypeError, ValueError):
+                    _block_live_submit_plan(
+                        reason="target_delta_invalid_qty",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                if plan_qty <= 0.0:
+                    _block_live_submit_plan(
+                        reason="target_delta_non_positive_qty",
+                        field_name="target_submit_plan",
+                        source=target_plan.get("source"),
+                        side=target_plan.get("side"),
+                    )
+                    return None
+                try:
+                    if not _live_submit_plan_schema_valid(
+                        target_plan,
+                        field_name="target_submit_plan",
+                    ):
+                        return None
+                    return self.executor(
+                        self.broker,
+                        plan_side,
+                        request.ts,
+                        request.market_price,
+                        strategy_name=request.strategy_name,
+                        decision_id=request.decision_id,
+                        decision_reason=request.decision_reason,
+                        exit_rule_name=request.exit_rule_name,
+                        execution_submit_plan=target_plan,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument" not in str(exc):
+                        raise
+                    return {
+                        "status": "blocked",
+                        "reason": "executor_missing_execution_submit_plan_support",
+                        "side": plan_side,
+                        "source": "target_delta",
+                        "authority": "target_position_delta",
+                    }
+            if not residual_plan:
                 _block_live_submit_plan(
                     reason="target_delta_missing_target_submit_plan",
                     field_name="target_submit_plan",
@@ -2230,135 +2400,6 @@ class LiveSignalExecutionService:
                     side=request.signal,
                 )
                 return None
-            if not bool(target_plan.get("portfolio_target_authoritative")):
-                _block_live_submit_plan(
-                    reason="target_delta_missing_authoritative_portfolio_target",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if not str(target_plan.get("portfolio_target_hash") or "").strip():
-                _block_live_submit_plan(
-                    reason="target_delta_missing_portfolio_target_hash",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if not str(target_plan.get("allocation_decision_hash") or "").strip():
-                _block_live_submit_plan(
-                    reason="target_delta_missing_allocation_decision_hash",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if not str(target_plan.get("strategy_contribution_hash") or "").strip():
-                _block_live_submit_plan(
-                    reason="target_delta_missing_strategy_contribution_hash",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if str(target_plan.get("source")) != "target_delta":
-                _block_live_submit_plan(
-                    reason="target_delta_invalid_target_submit_plan_source",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if str(target_plan.get("authority")) not in {
-                "canonical_target_delta_sizing",
-                "target_position_delta",
-            }:
-                _block_live_submit_plan(
-                    reason="target_delta_invalid_target_submit_plan_authority",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if str(target_plan.get("block_reason") or "none") != "none":
-                _block_live_submit_plan(
-                    reason="target_delta_blocked_submit_plan",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if str(target_plan.get("pre_submit_proof_status") or "") != "passed":
-                _block_live_submit_plan(
-                    reason="target_delta_pre_submit_proof_not_passed",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if not bool(target_plan.get("submit_expected")):
-                _block_live_submit_plan(
-                    reason="target_delta_submit_not_expected",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            plan_side = str(target_plan.get("side") or "").upper()
-            if plan_side not in {"BUY", "SELL"}:
-                _block_live_submit_plan(
-                    reason="target_delta_non_submittable_side",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            try:
-                plan_qty = float(target_plan.get("qty") or 0.0)
-            except (TypeError, ValueError):
-                _block_live_submit_plan(
-                    reason="target_delta_invalid_qty",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            if plan_qty <= 0.0:
-                _block_live_submit_plan(
-                    reason="target_delta_non_positive_qty",
-                    field_name="target_submit_plan",
-                    source=target_plan.get("source"),
-                    side=target_plan.get("side"),
-                )
-                return None
-            try:
-                if not _live_submit_plan_schema_valid(
-                    target_plan,
-                    field_name="target_submit_plan",
-                ):
-                    return None
-                return self.executor(
-                    self.broker,
-                    plan_side,
-                    request.ts,
-                    request.market_price,
-                    strategy_name=request.strategy_name,
-                    decision_id=request.decision_id,
-                    decision_reason=request.decision_reason,
-                    exit_rule_name=request.exit_rule_name,
-                    execution_submit_plan=target_plan,
-                )
-            except TypeError as exc:
-                if "unexpected keyword argument" not in str(exc):
-                    raise
-                return {
-                    "status": "blocked",
-                    "reason": "executor_missing_execution_submit_plan_support",
-                    "side": plan_side,
-                    "source": "target_delta",
-                    "authority": "target_position_delta",
-                }
         if request.signal == "BUY" and buy_plan:
             if str(buy_plan.get("source")) != "strategy_position":
                 _block_live_submit_plan(
