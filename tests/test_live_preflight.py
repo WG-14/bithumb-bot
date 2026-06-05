@@ -448,6 +448,65 @@ def _select_small_live_profile(tmp_path: Path) -> None:
     object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(profile_path))
 
 
+def _profile_hash(profile_path: Path) -> str:
+    profile = json.loads(profile_path.read_text(encoding="utf-8-sig"))
+    return str(profile["profile_content_hash"])
+
+
+def _set_live_multi_strategy_json(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profile_mode: str,
+    second_sma_short: int | None = None,
+    include_path: bool = True,
+    include_hash: bool = True,
+    hash_override: str | None = None,
+) -> tuple[Path, Path]:
+    base_dir = Path(os.environ["DATA_ROOT"]).parent
+    left_profile = _write_live_profile(base_dir, mode=profile_mode)
+    right_profile = _write_live_profile(
+        base_dir,
+        mode=profile_mode,
+        sma_short=second_sma_short,
+    )
+    left_hash = _profile_hash(left_profile)
+    right_hash = hash_override or _profile_hash(right_profile)
+
+    def _strategy(instance_id: str, path: Path, profile_hash: str) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "strategy_name": "sma_with_filter",
+            "strategy_instance_id": instance_id,
+            "pair": "KRW-BTC",
+            "interval": str(settings.INTERVAL),
+            "desired_exposure_krw": 50_000.0,
+        }
+        if include_path:
+            payload["approved_profile_path"] = str(path)
+        if include_hash:
+            payload["approved_profile_hash"] = profile_hash
+        return payload
+
+    runtime_strategy_set_json = json.dumps(
+        {
+            "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": settings.INTERVAL},
+            "strategies": [
+                _strategy("left", left_profile, left_hash),
+                _strategy("right", right_profile, right_hash),
+            ],
+        }
+    )
+    monkeypatch.delenv("ACTIVE_STRATEGIES", raising=False)
+    monkeypatch.delenv("RUNTIME_STRATEGY_SET_JSON", raising=False)
+    monkeypatch.delenv("APPROVED_STRATEGY_PROFILE_PATH", raising=False)
+    monkeypatch.delenv("STRATEGY_APPROVED_PROFILE_PATH", raising=False)
+    object.__setattr__(settings, "RUNTIME_STRATEGY_SET_JSON", runtime_strategy_set_json)
+    object.__setattr__(settings, "ACTIVE_STRATEGIES", "")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+    object.__setattr__(settings, "STRATEGY_APPROVED_PROFILE_PATH", "")
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    return left_profile, right_profile
+
+
 
 def test_live_preflight_skips_paper_mode() -> None:
     object.__setattr__(settings, "MODE", "paper")
@@ -542,6 +601,124 @@ def test_global_profile_selector_rejected_for_live_multi_strategy(
         config.validate_runtime_strategy_set_selection(cfg)
 
     assert "global_profile_selector_rejected_for_live_multi_strategy" in str(exc.value)
+
+
+def test_live_dry_run_multi_strategy_spec_bound_profiles_without_global_selector_passes_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    _set_live_multi_strategy_json(
+        monkeypatch,
+        profile_mode="live_dry_run",
+        second_sma_short=_sma_int("SMA_SHORT") + 1,
+    )
+    object.__setattr__(settings, "STRATEGY_NAME", "unsupported_legacy_global_name")
+
+    config.validate_live_dry_run_loop_startup_contract(settings)
+
+
+def test_live_real_order_multi_strategy_spec_bound_profiles_without_global_selector_passes_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    _set_live_multi_strategy_json(monkeypatch, profile_mode="small_live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "STRATEGY_NAME", "unsupported_legacy_global_name")
+
+    config.validate_live_run_startup_contract(settings)
+
+
+def test_live_multi_strategy_global_profile_selector_fails_full_startup_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    global_profile, _ = _set_live_multi_strategy_json(monkeypatch, profile_mode="live_dry_run")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", str(global_profile))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "global_profile_selector_rejected_for_live_multi_strategy" in str(exc.value)
+
+
+def test_live_multi_strategy_missing_spec_profile_path_fails_full_startup_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    _set_live_multi_strategy_json(
+        monkeypatch,
+        profile_mode="live_dry_run",
+        include_path=False,
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "live_multi_strategy_requires_spec_bound_approved_profiles:path" in str(exc.value)
+
+
+def test_live_multi_strategy_missing_spec_profile_hash_fails_full_startup_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    _set_live_multi_strategy_json(
+        monkeypatch,
+        profile_mode="live_dry_run",
+        include_hash=False,
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "live_multi_strategy_requires_spec_bound_approved_profiles:hash" in str(exc.value)
+
+
+def test_live_multi_strategy_spec_profile_hash_mismatch_fails_full_startup_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    _set_live_multi_strategy_json(
+        monkeypatch,
+        profile_mode="live_dry_run",
+        hash_override="sha256:not-the-profile",
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "approved_profile_hash_mismatch_for_runtime_strategy:sma_with_filter" in str(exc.value)
+
+
+def test_live_multi_strategy_requires_target_delta_execution_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    _set_live_multi_strategy_json(monkeypatch, profile_mode="live_dry_run")
+    object.__setattr__(settings, "EXECUTION_ENGINE", "lot_native")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_dry_run_loop_startup_contract(settings)
+
+    assert "live_multi_strategy_requires_execution_engine_target_delta" in str(exc.value)
+
+
+def test_live_multi_strategy_profile_authority_is_observable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    _set_live_multi_strategy_json(monkeypatch, profile_mode="live_dry_run")
+
+    summary = config.live_execution_contract_summary(settings)
+
+    assert summary["runtime_selection_kind"] == "multi_strategy"
+    assert summary["runtime_strategy_set_source"] == "RUNTIME_STRATEGY_SET_JSON"
+    assert summary["profile_binding_kind"] == "spec_bound_approved_profiles"
+    assert summary["startup_gate_authority"] == "RUNTIME_STRATEGY_SET_JSON"
+    binding = summary["runtime_profile_binding"]
+    assert isinstance(binding, dict)
+    assert binding["global_profile_selector_present"] is False
+    assert len(binding["strategy_instance_approved_profile_hashes"]) == 2
 
 
 def test_live_preflight_rejects_invalid_runtime_strategy_set_json(

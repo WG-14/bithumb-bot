@@ -1891,6 +1891,79 @@ def test_live_like_single_strategy_name_preflight_accepts_valid_approved_profile
     validate_runtime_strategy_set_selection(_live_single_strategy_cfg(profile_path="/tmp/profile.json"))
 
 
+def test_live_multi_strategy_request_builder_disables_global_profile_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    _clear_runtime_strategy_source_env: None,
+) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    loaded: list[str] = []
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "load_approved_profile",
+        lambda path: loaded.append(str(path)) or {
+            "profile_mode": "live_dry_run",
+            "profile_content_hash": "sha256:global",
+            "strategy_parameters": _complete_sma_parameters(),
+        },
+    )
+    cfg = _live_single_strategy_cfg(profile_path="/tmp/global-profile.json")
+    spec = RuntimeStrategySpec(
+        "sma_with_filter",
+        pair="KRW-BTC",
+        interval="1m",
+        approved_profile_hash="sha256:declared",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="spec_bound_approved_profile_path_missing_for_runtime_strategy:sma_with_filter",
+    ):
+        RuntimeDecisionRequestBuilder(
+            settings_obj=cfg,
+            require_spec_bound_approved_profile=True,
+        ).materialize_instance(spec)
+
+    assert loaded == []
+
+
+def test_live_multi_strategy_request_builder_requires_spec_hash_even_with_global_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    _clear_runtime_strategy_source_env: None,
+) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    loaded: list[str] = []
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "load_approved_profile",
+        lambda path: loaded.append(str(path)) or {
+            "profile_mode": "live_dry_run",
+            "profile_content_hash": "sha256:profile",
+            "strategy_parameters": _complete_sma_parameters(),
+        },
+    )
+    cfg = _live_single_strategy_cfg(profile_path="/tmp/global-profile.json")
+
+    with pytest.raises(
+        RuntimeError,
+        match="spec_bound_approved_profile_hash_missing_for_runtime_strategy:sma_with_filter",
+    ):
+        RuntimeDecisionRequestBuilder(
+            settings_obj=cfg,
+            require_spec_bound_approved_profile=True,
+        ).materialize_instance(
+            RuntimeStrategySpec(
+                "sma_with_filter",
+                pair="KRW-BTC",
+                interval="1m",
+                approved_profile_path="/tmp/spec-profile.json",
+            )
+        )
+
+    assert loaded == []
+
+
 @pytest.mark.parametrize(
     "runtime_strategy_set_json",
     (

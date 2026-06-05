@@ -741,6 +741,7 @@ class ParameterAuthorityResolver:
 @dataclass(frozen=True)
 class RuntimeDecisionRequestBuilder:
     settings_obj: object = settings
+    require_spec_bound_approved_profile: bool = False
 
     def materialize_instance(
         self,
@@ -748,13 +749,26 @@ class RuntimeDecisionRequestBuilder:
     ) -> RuntimeStrategyInstance:
         plugin = resolve_research_strategy_plugin(spec.strategy_name)
         cfg = replace(self.settings_obj, STRATEGY_NAME=spec.strategy_name)
-        approved_profile_path = (
-            spec.approved_profile_path
-            or str(getattr(self.settings_obj, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
-            or str(getattr(self.settings_obj, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
-            or approved_profile_path_from_env()
-            or None
-        )
+        spec_profile_path = str(spec.approved_profile_path or "").strip()
+        spec_profile_hash = str(spec.approved_profile_hash or "").strip()
+        if self.require_spec_bound_approved_profile:
+            if not spec_profile_path:
+                raise RuntimeError(
+                    f"spec_bound_approved_profile_path_missing_for_runtime_strategy:{spec.strategy_name}"
+                )
+            if not spec_profile_hash:
+                raise RuntimeError(
+                    f"spec_bound_approved_profile_hash_missing_for_runtime_strategy:{spec.strategy_name}"
+                )
+            approved_profile_path = spec_profile_path
+        else:
+            approved_profile_path = (
+                spec_profile_path
+                or str(getattr(self.settings_obj, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+                or str(getattr(self.settings_obj, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+                or approved_profile_path_from_env()
+                or None
+            )
         profile = None
         if approved_profile_path:
             profile = load_approved_profile(approved_profile_path)
@@ -1393,7 +1407,13 @@ def normalized_runtime_strategy_set_manifest(
     market_issues = validate_runtime_strategy_set_market_scope(resolved, settings_obj)
     if market_issues:
         raise RuntimeError("; ".join(market_issues))
-    builder = RuntimeDecisionRequestBuilder(settings_obj=settings_obj)
+    builder = RuntimeDecisionRequestBuilder(
+        settings_obj=settings_obj,
+        require_spec_bound_approved_profile=(
+            str(getattr(settings_obj, "MODE", "") or "").strip().lower() == "live"
+            and resolved.multi_strategy_enabled
+        ),
+    )
     active_instances = tuple(builder.materialize_instance(spec) for spec in resolved.active_strategies)
     live_like_runtime = (
         str(getattr(settings_obj, "MODE", "") or "").strip().lower() == "live"
@@ -1434,6 +1454,24 @@ def normalized_runtime_strategy_set_manifest(
         "authority_label": "RuntimeStrategySetManifest",
         "authority_scope": "operator_reproducibility_manifest",
         "source": resolved.source,
+        "runtime_selection_kind": (
+            "multi_strategy" if resolved.multi_strategy_enabled else "single_strategy"
+        ),
+        "profile_binding_kind": (
+            "spec_bound_approved_profiles"
+            if resolved.multi_strategy_enabled
+            else "global_approved_profile_selector"
+        ),
+        "global_profile_selector_present": bool(
+            str(getattr(settings_obj, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+            or str(getattr(settings_obj, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+            or str(approved_profile_path_from_env() or "").strip()
+        ),
+        "startup_gate_authority": (
+            "RUNTIME_STRATEGY_SET_JSON"
+            if resolved.multi_strategy_enabled
+            else "STRATEGY_NAME"
+        ),
         "runtime_pair": str(getattr(settings_obj, "PAIR", "")),
         "runtime_interval": str(getattr(settings_obj, "INTERVAL", "")),
         "runtime_scope": "multi-strategy / single-pair runtime",

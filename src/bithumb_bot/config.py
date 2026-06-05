@@ -10,6 +10,7 @@ import subprocess
 from dataclasses import dataclass, fields
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from .markets import (
     MarketCatalogError,
@@ -360,6 +361,155 @@ def resolve_strategy_name_from_env() -> str:
     return strategy_name_from_legacy_compat_env()
 
 
+@dataclass(frozen=True)
+class SingleStrategyProfileBinding:
+    strategy_name: str
+    profile_path: str
+    profile_hash: str | None
+
+
+@dataclass(frozen=True)
+class StrategySetProfileBinding:
+    strategy_instance_id: str
+    strategy_name: str
+    profile_path: str
+    profile_hash: str
+
+
+@dataclass(frozen=True)
+class RuntimeProfileBindingReport:
+    selection_kind: Literal["single_strategy", "multi_strategy"]
+    ok: bool
+    bindings: tuple[SingleStrategyProfileBinding | StrategySetProfileBinding, ...]
+    issues: tuple[str, ...]
+    runtime_strategy_set_source: str
+    global_profile_selector_present: bool
+
+
+def _global_approved_profile_selector(cfg: object) -> str:
+    return (
+        str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+        or str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+        or str(approved_profile_path_from_env() or "").strip()
+    )
+
+
+def _resolve_runtime_strategy_set_for_live_startup(cfg: Settings):
+    from .runtime_strategy_set import RuntimeStrategySetResolver
+
+    return RuntimeStrategySetResolver(settings_obj=cfg).resolve()
+
+
+def _runtime_selection_kind(strategy_set: object) -> Literal["single_strategy", "multi_strategy"]:
+    return "multi_strategy" if bool(getattr(strategy_set, "multi_strategy_enabled", False)) else "single_strategy"
+
+
+def validate_runtime_profile_bindings_for_live_startup(
+    cfg: Settings,
+    *,
+    expected_profile_modes: set[str] | None = None,
+) -> RuntimeProfileBindingReport:
+    from .runtime_strategy_set import (
+        RuntimeDecisionRequestBuilder,
+        derive_strategy_instance_id,
+        validate_runtime_strategy_set_profile_binding,
+    )
+
+    strategy_set = _resolve_runtime_strategy_set_for_live_startup(cfg)
+    selection_kind = _runtime_selection_kind(strategy_set)
+    global_profile = _global_approved_profile_selector(cfg)
+    issues: list[str] = []
+    bindings: list[SingleStrategyProfileBinding | StrategySetProfileBinding] = []
+
+    if selection_kind == "single_strategy":
+        runtime_contract = runtime_contract_from_settings(cfg)
+        profile_path = str(runtime_contract.get("profile_selector") or "").strip()
+        profile_required = bool(cfg.LIVE_DRY_RUN or cfg.LIVE_REAL_ORDER_ARMED)
+        if expected_profile_modes is None:
+            expected_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
+        else:
+            expected_modes, mode_reason = expected_profile_modes, None
+        profile_result = verify_profile_against_runtime(
+            profile_path=profile_path,
+            runtime=runtime_contract,
+            require_profile=profile_required,
+            expected_profile_modes=expected_modes,
+            expected_profile_mode_reason=mode_reason,
+            verify_source_promotion=True,
+        )
+        bindings.append(
+            SingleStrategyProfileBinding(
+                strategy_name=str(runtime_contract.get("strategy_name") or cfg.STRATEGY_NAME),
+                profile_path=profile_path,
+                profile_hash=profile_result.profile_hash,
+            )
+        )
+        if not profile_result.ok:
+            issues.append(
+                "approved profile verification failed: "
+                f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
+            )
+        return RuntimeProfileBindingReport(
+            selection_kind=selection_kind,
+            ok=not issues,
+            bindings=tuple(bindings),
+            issues=tuple(issues),
+            runtime_strategy_set_source=str(getattr(strategy_set, "source", "")),
+            global_profile_selector_present=bool(global_profile),
+        )
+
+    issues.extend(validate_runtime_strategy_set_profile_binding(strategy_set, cfg))
+    builder = RuntimeDecisionRequestBuilder(
+        settings_obj=cfg,
+        require_spec_bound_approved_profile=True,
+    )
+    for spec in strategy_set.active_strategies:
+        instance_id = derive_strategy_instance_id(spec)
+        try:
+            instance = builder.materialize_instance(spec)
+        except Exception as exc:
+            issues.append(
+                f"{instance_id}:runtime_strategy_profile_binding_failed:{type(exc).__name__}:{exc}"
+            )
+            continue
+        profile_path = str(instance.approved_profile_path or "").strip()
+        profile_hash = str(instance.approved_profile_hash or "").strip()
+        bindings.append(
+            StrategySetProfileBinding(
+                strategy_instance_id=instance.strategy_instance_id,
+                strategy_name=instance.strategy_name,
+                profile_path=profile_path,
+                profile_hash=profile_hash,
+            )
+        )
+        profile_result = verify_profile_against_runtime(
+            profile_path=profile_path,
+            runtime=dict(instance.runtime_contract),
+            require_profile=True,
+            expected_profile_modes=expected_profile_modes,
+            verify_source_promotion=True,
+        )
+        if not profile_result.ok:
+            issues.append(
+                f"{instance.strategy_instance_id}:approved profile verification failed: "
+                f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
+            )
+        elif profile_result.profile_hash != profile_hash:
+            issues.append(
+                f"{instance.strategy_instance_id}:approved_profile_hash_mismatch_for_runtime_strategy:"
+                f"{instance.strategy_name}"
+            )
+
+    return RuntimeProfileBindingReport(
+        selection_kind=selection_kind,
+        ok=not issues,
+        bindings=tuple(bindings),
+        issues=tuple(issues),
+        runtime_strategy_set_source=str(getattr(strategy_set, "source", "")),
+        global_profile_selector_present=bool(global_profile),
+    )
+
+
 def validate_live_strategy_selection(cfg: Settings) -> None:
     if str(cfg.MODE or "").strip().lower() != "live":
         return
@@ -414,10 +564,19 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
         issues.append(
             "ACTIVE_STRATEGIES:live_multi_strategy_requires_runtime_strategy_set_json"
         )
+    if (
+        live_like
+        and strategy_set.multi_strategy_enabled
+        and str(getattr(cfg, "EXECUTION_ENGINE", "") or "").strip().lower() != "target_delta"
+    ):
+        issues.append("live_multi_strategy_requires_execution_engine_target_delta")
     issues.extend(validate_runtime_strategy_set_market_scope(strategy_set, cfg))
     issues.extend(validate_runtime_strategy_set_profile_binding(strategy_set, cfg))
     active_instance_ids: set[str] = set()
-    request_builder = runtime_strategy_set_module.RuntimeDecisionRequestBuilder(settings_obj=cfg)
+    request_builder = runtime_strategy_set_module.RuntimeDecisionRequestBuilder(
+        settings_obj=cfg,
+        require_spec_bound_approved_profile=live_like and strategy_set.multi_strategy_enabled,
+    )
     for spec in strategy_set.active_strategies:
         instance_id = derive_strategy_instance_id(spec)
         if instance_id in active_instance_ids:
@@ -1077,8 +1236,17 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         return
 
     issues: list[str] = []
+    selection_kind: Literal["single_strategy", "multi_strategy"] = "single_strategy"
     try:
-        validate_live_strategy_selection(cfg)
+        strategy_set = _resolve_runtime_strategy_set_for_live_startup(cfg)
+        selection_kind = _runtime_selection_kind(strategy_set)
+    except Exception as exc:
+        issues.append(
+            f"runtime_strategy_set_selection_failed: resolve_failed:{type(exc).__name__}:{exc}"
+        )
+    try:
+        if selection_kind == "single_strategy":
+            validate_live_strategy_selection(cfg)
     except LiveModeValidationError as exc:
         issues.append(str(exc))
     try:
@@ -1086,7 +1254,8 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
     except LiveModeValidationError as exc:
         issues.append(str(exc))
     if (
-        not bool(cfg.LIVE_DRY_RUN)
+        selection_kind == "single_strategy"
+        and not bool(cfg.LIVE_DRY_RUN)
         and bool(cfg.LIVE_REAL_ORDER_ARMED)
         and not str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
     ):
@@ -1150,6 +1319,8 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.append("MAX_ORDER_KRW must be > 0")
     if str(cfg.EXECUTION_ENGINE) not in {"lot_native", "target_delta"}:
         issues.append("EXECUTION_ENGINE must be one of: lot_native, target_delta")
+    elif selection_kind == "multi_strategy" and str(cfg.EXECUTION_ENGINE) != "target_delta":
+        issues.append("live_multi_strategy_requires_execution_engine_target_delta")
     if str(cfg.TARGET_HOLD_POLICY) not in {"maintain_previous_target"}:
         issues.append("TARGET_HOLD_POLICY must be maintain_previous_target")
     if str(cfg.RESIDUAL_LIVE_SELL_MODE) not in {"telemetry", "dry_run", "enabled"}:
@@ -1337,27 +1508,12 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             issues.append(str(exc))
 
     if not issues:
-        profile_required = bool(cfg.LIVE_DRY_RUN or cfg.LIVE_REAL_ORDER_ARMED)
-        runtime_contract = runtime_contract_from_settings(cfg)
-        configured_profile_path = str(runtime_contract.get("profile_selector") or "").strip()
-        if profile_required or configured_profile_path:
-            expected_profile_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
-            if profile_required and not cfg.LIVE_DRY_RUN:
-                expected_profile_modes = {"small_live"}
-                mode_reason = None
-            profile_result = verify_profile_against_runtime(
-                profile_path=configured_profile_path,
-                runtime=runtime_contract,
-                require_profile=profile_required,
-                expected_profile_modes=expected_profile_modes,
-                expected_profile_mode_reason=mode_reason,
-                verify_source_promotion=True,
-            )
-            if not profile_result.ok:
-                issues.append(
-                    "approved profile verification failed: "
-                    f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
-                )
+        try:
+            profile_report = validate_runtime_profile_bindings_for_live_startup(cfg)
+        except Exception as exc:
+            issues.append(f"runtime_profile_binding_validation_failed:{type(exc).__name__}:{exc}")
+        else:
+            issues.extend(profile_report.issues)
 
     if issues:
         raise LiveModeValidationError(
@@ -1387,18 +1543,13 @@ def validate_live_real_order_execution_preflight(cfg: Settings) -> None:
         raise LiveModeValidationError(
             "live real-order execution preflight failed: " + "; ".join(issues)
         )
-    runtime_contract = runtime_contract_from_settings(cfg)
-    profile_result = verify_profile_against_runtime(
-        profile_path=str(runtime_contract.get("profile_selector") or "").strip(),
-        runtime=runtime_contract,
-        require_profile=True,
+    profile_report = validate_runtime_profile_bindings_for_live_startup(
+        cfg,
         expected_profile_modes={"small_live"},
-        verify_source_promotion=True,
     )
-    if not profile_result.ok:
+    if not profile_report.ok:
         raise LiveModeValidationError(
-            "live real-order execution preflight failed: approved profile verification failed: "
-            f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
+            "live real-order execution preflight failed: " + "; ".join(profile_report.issues)
         )
 
 
@@ -1416,18 +1567,13 @@ def validate_live_dry_run_loop_startup_contract(cfg: Settings) -> None:
             "live dry-run loop startup contract failed: " + "; ".join(issues)
         )
     validate_live_mode_preflight(cfg)
-    runtime_contract = runtime_contract_from_settings(cfg)
-    profile_result = verify_profile_against_runtime(
-        profile_path=str(runtime_contract.get("profile_selector") or "").strip(),
-        runtime=runtime_contract,
-        require_profile=True,
+    profile_report = validate_runtime_profile_bindings_for_live_startup(
+        cfg,
         expected_profile_modes={"live_dry_run"},
-        verify_source_promotion=True,
     )
-    if not profile_result.ok:
+    if not profile_report.ok:
         raise LiveModeValidationError(
-            "live dry-run loop startup contract failed: approved profile verification failed: "
-            f"reason={profile_result.reason} path={profile_result.profile_path or '-'}"
+            "live dry-run loop startup contract failed: " + "; ".join(profile_report.issues)
         )
 
 
@@ -1588,6 +1734,11 @@ def live_env_contract_lint_findings(cfg: Settings) -> tuple[dict[str, object], .
     if str(cfg.MODE or "").strip().lower() != "live":
         return ()
     findings: list[dict[str, object]] = []
+    try:
+        strategy_set = _resolve_runtime_strategy_set_for_live_startup(cfg)
+        selection_kind = _runtime_selection_kind(strategy_set)
+    except Exception:
+        selection_kind = "single_strategy"
     profile_path = str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
     if profile_path.startswith("<") and profile_path.endswith(">"):
         findings.append(
@@ -1662,7 +1813,7 @@ def live_env_contract_lint_findings(cfg: Settings) -> tuple[dict[str, object], .
             )
     except (TypeError, ValueError):
         pass
-    if not profile_path:
+    if selection_kind == "single_strategy" and not profile_path:
         findings.append(
             _config_lint_finding(
                 "approved_profile_not_configured",
@@ -1710,16 +1861,73 @@ def live_execution_contract_summary(
     }
     explicit_env = dict(env_summary or {})
     explicit_env_file = _env_file_contract_metadata(explicit_env)
-    runtime_contract = runtime_contract_from_settings(cfg)
-    expected_profile_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
-    profile_result = verify_profile_against_runtime(
-        profile_path=str(runtime_contract.get("profile_selector") or "").strip(),
-        runtime=runtime_contract,
-        require_profile=False,
-        expected_profile_modes=expected_profile_modes,
-        expected_profile_mode_reason=mode_reason,
-        verify_source_promotion=True,
-    )
+    profile_binding_report = None
+    profile_binding_summary: dict[str, object]
+    try:
+        profile_binding_report = validate_runtime_profile_bindings_for_live_startup(cfg)
+        profile_bindings = [
+            {
+                key: value
+                for key, value in binding.__dict__.items()
+            }
+            for binding in profile_binding_report.bindings
+        ]
+        profile_binding_summary = {
+            "runtime_selection_kind": profile_binding_report.selection_kind,
+            "runtime_strategy_set_source": profile_binding_report.runtime_strategy_set_source,
+            "profile_binding_kind": (
+                "spec_bound_approved_profiles"
+                if profile_binding_report.selection_kind == "multi_strategy"
+                else "global_approved_profile_selector"
+            ),
+            "startup_gate_authority": (
+                "RUNTIME_STRATEGY_SET_JSON"
+                if profile_binding_report.selection_kind == "multi_strategy"
+                else "STRATEGY_NAME"
+            ),
+            "global_profile_selector_present": profile_binding_report.global_profile_selector_present,
+            "ok": profile_binding_report.ok,
+            "issues": list(profile_binding_report.issues),
+            "bindings": profile_bindings,
+            "strategy_instance_approved_profile_hashes": [
+                item.get("profile_hash") for item in profile_bindings if item.get("profile_hash")
+            ],
+        }
+    except Exception as exc:
+        profile_binding_summary = {
+            "runtime_selection_kind": "unknown",
+            "runtime_strategy_set_source": "",
+            "profile_binding_kind": "unresolved",
+            "startup_gate_authority": "unresolved",
+            "global_profile_selector_present": bool(_global_approved_profile_selector(cfg)),
+            "ok": False,
+            "issues": [f"{type(exc).__name__}:{exc}"],
+            "bindings": [],
+            "strategy_instance_approved_profile_hashes": [],
+        }
+    if profile_binding_report is not None and profile_binding_report.selection_kind == "multi_strategy":
+        first_binding = profile_binding_report.bindings[0] if profile_binding_report.bindings else None
+        approved_profile_summary = {
+            "approved_profile_verification_ok": profile_binding_report.ok,
+            "approved_profile_block_reason": ";".join(profile_binding_report.issues) if profile_binding_report.issues else "",
+            "approved_profile_contract_scope": "runtime_strategy_set_spec_bound_profiles",
+            "approved_profile_path": getattr(first_binding, "profile_path", None),
+            "approved_profile_hash": getattr(first_binding, "profile_hash", None),
+            "legacy_candidate_profile_path_used": False,
+            "legacy_compatibility_used": False,
+        }
+    else:
+        runtime_contract = runtime_contract_from_settings(cfg)
+        expected_profile_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
+        profile_result = verify_profile_against_runtime(
+            profile_path=str(runtime_contract.get("profile_selector") or "").strip(),
+            runtime=runtime_contract,
+            require_profile=False,
+            expected_profile_modes=expected_profile_modes,
+            expected_profile_mode_reason=mode_reason,
+            verify_source_promotion=True,
+        )
+        approved_profile_summary = profile_result.audit_fields()
     config_contract = config_contract_metadata(cfg)
     return {
         "mode": cfg.MODE,
@@ -1738,7 +1946,13 @@ def live_execution_contract_summary(
         "api_secret_length": len(str(cfg.BITHUMB_API_SECRET or "")),
         "api_secret_hash_prefix": _safe_secret_hash_prefix(cfg.BITHUMB_API_SECRET),
         "code_provenance": runtime_code_provenance(),
-        "approved_profile": profile_result.audit_fields(),
+        "approved_profile": approved_profile_summary,
+        "runtime_profile_binding": profile_binding_summary,
+        "runtime_selection_kind": profile_binding_summary.get("runtime_selection_kind"),
+        "runtime_strategy_set_source": profile_binding_summary.get("runtime_strategy_set_source"),
+        "profile_binding_kind": profile_binding_summary.get("profile_binding_kind"),
+        "global_profile_selector_present": profile_binding_summary.get("global_profile_selector_present"),
+        "startup_gate_authority": profile_binding_summary.get("startup_gate_authority"),
         "explicit_env": explicit_env,
         "explicit_env_file": explicit_env_file,
         "live_env_contract_lints": list(live_env_contract_lints(cfg)),
@@ -1771,6 +1985,11 @@ def log_live_execution_contract(
     explicit_env_file = summary.get("explicit_env_file") if isinstance(summary.get("explicit_env_file"), dict) else {}
     code_provenance = summary.get("code_provenance") if isinstance(summary.get("code_provenance"), dict) else {}
     approved_profile = summary.get("approved_profile") if isinstance(summary.get("approved_profile"), dict) else {}
+    runtime_profile_binding = (
+        summary.get("runtime_profile_binding")
+        if isinstance(summary.get("runtime_profile_binding"), dict)
+        else {}
+    )
     config_contract = summary.get("config_contract") if isinstance(summary.get("config_contract"), dict) else {}
     lint_findings = summary.get("live_env_contract_lint_findings") or []
     lint_reason_codes = [
@@ -1787,6 +2006,18 @@ def log_live_execution_contract(
             pair=summary.get("pair"),
             live_dry_run=1 if bool(summary.get("live_dry_run")) else 0,
             live_real_order_armed=1 if bool(summary.get("live_real_order_armed")) else 0,
+            runtime_selection_kind=summary.get("runtime_selection_kind"),
+            runtime_strategy_set_source=summary.get("runtime_strategy_set_source"),
+            profile_binding_kind=summary.get("profile_binding_kind"),
+            global_profile_selector_present=(
+                1 if bool(summary.get("global_profile_selector_present")) else 0
+            ),
+            startup_gate_authority=summary.get("startup_gate_authority"),
+            strategy_instance_approved_profile_hashes=",".join(
+                str(item)
+                for item in runtime_profile_binding.get("strategy_instance_approved_profile_hashes", [])
+            )
+            or "none",
             live_submit_contract_profile=summary.get("live_submit_contract_profile"),
             live_order_rule_fallback_profile=summary.get("live_order_rule_fallback_profile"),
             api_base=summary.get("api_base"),
