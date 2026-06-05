@@ -717,6 +717,7 @@ def test_live_multi_strategy_profile_authority_is_observable(
     assert summary["profile_binding_kind"] == "spec_bound_approved_profiles"
     assert summary["startup_gate_authority"] == "RUNTIME_STRATEGY_SET_JSON"
     assert summary["submit_authority_mode"] == "live_dry_run_non_submitting_compat"
+    assert str(summary["submit_authority_policy_hash"]).startswith("sha256:")
     assert summary["live_real_order_requires_target_delta"] is False
     assert summary["legacy_lot_native_compat_enabled"] is True
     assert "target_delta" in summary["allowed_submit_plan_sources"]
@@ -815,6 +816,7 @@ def test_live_real_order_contract_summary_reports_target_delta_only_policy(
     summary = config.live_execution_contract_summary(settings)
 
     assert summary["submit_authority_mode"] == "live_real_order_target_delta_only"
+    assert str(summary["submit_authority_policy_hash"]).startswith("sha256:")
     assert summary["live_real_order_requires_target_delta"] is True
     assert summary["legacy_lot_native_compat_enabled"] is False
     assert summary["allowed_submit_plan_sources"] == ["target_delta", "residual_inventory"]

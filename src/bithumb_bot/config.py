@@ -1956,6 +1956,7 @@ def live_execution_contract_summary(
         "live_real_order_armed": bool(cfg.LIVE_REAL_ORDER_ARMED),
         "live_submit_contract_profile": str(cfg.LIVE_SUBMIT_CONTRACT_PROFILE),
         **submit_authority_policy.as_dict(),
+        "submit_authority_policy_hash": submit_authority_policy.content_hash(),
         "live_order_rule_fallback_profile": str(cfg.LIVE_ORDER_RULE_FALLBACK_PROFILE),
         "private_rps_limit": float(cfg.BITHUMB_PRIVATE_RPS_LIMIT),
         "order_rps_limit": float(cfg.BITHUMB_ORDER_RPS_LIMIT),

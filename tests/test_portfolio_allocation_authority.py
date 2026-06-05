@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -59,6 +60,7 @@ from bithumb_bot.runtime_strategy_set import (
     RuntimeStrategySpec,
     normalized_runtime_strategy_set_manifest,
 )
+from bithumb_bot.submit_authority_policy import submit_authority_policy_from_settings
 from bithumb_bot.strategy_policy_contract import EntryExecutionIntent, PositionSnapshot, StrategyDecisionV2
 
 
@@ -625,18 +627,19 @@ def test_risk_budget_is_not_silent_exposure_cap_without_declared_semantics() -> 
     target = decision.target_for_pair("KRW-BTC")
 
     assert target is not None
-    assert target.target_exposure_krw == pytest.approx(60_000.0)
+    assert target.target_exposure_krw == pytest.approx(100_000.0)
     payload = decision.as_dict()
-    assert payload["risk_budget_semantics"] == "max_target_exposure_cap"
-    assert payload["targets"][0]["risk_budget_semantics"] == "max_target_exposure_cap"
-    assert payload["contributions"][0]["max_target_exposure_krw"] == pytest.approx(60_000.0)
-    assert payload["contributions"][0]["risk_budget_semantics"] == "max_target_exposure_cap"
+    assert payload["risk_budget_semantics"] == "deprecated_non_authoritative_not_exposure_cap"
+    assert payload["targets"][0]["risk_budget_semantics"] == "deprecated_non_authoritative_not_exposure_cap"
+    assert payload["contributions"][0]["max_target_exposure_krw"] is None
+    assert payload["contributions"][0]["risk_budget_krw"] == pytest.approx(60_000.0)
+    assert payload["contributions"][0]["risk_budget_semantics"] == "deprecated_non_authoritative_not_exposure_cap"
     assert payload["targets"][0]["pre_cap_weighted_target_exposure_krw"] == pytest.approx(100_000.0)
-    assert payload["targets"][0]["exposure_cap_krw"] == pytest.approx(60_000.0)
-    assert payload["targets"][0]["exposure_cap_applied"] is True
+    assert payload["targets"][0]["exposure_cap_krw"] is None
+    assert payload["targets"][0]["exposure_cap_applied"] is False
 
 
-def test_exposure_cap_alias_preserves_legacy_risk_budget_krw() -> None:
+def test_risk_budget_does_not_act_as_exposure_cap() -> None:
     preference = strategy_decision_to_preference(
         _decision(final_signal="BUY", strategy_name="strategy_a"),
         pair="KRW-BTC",
@@ -644,11 +647,15 @@ def test_exposure_cap_alias_preserves_legacy_risk_budget_krw() -> None:
         risk_budget_krw=25_000.0,
     )
 
-    assert preference.max_target_exposure_krw == pytest.approx(25_000.0)
+    assert preference.max_target_exposure_krw is None
     decision = _allocate((preference,))
+    target = decision.target_for_pair("KRW-BTC")
+    assert target is not None
+    assert target.target_exposure_krw == pytest.approx(100_000.0)
     contribution = decision.as_dict()["contributions"][0]
-    assert contribution["max_target_exposure_krw"] == pytest.approx(25_000.0)
+    assert contribution["max_target_exposure_krw"] is None
     assert contribution["risk_budget_krw"] == pytest.approx(25_000.0)
+    assert contribution["risk_decision_hash"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
 
 
 def test_allocator_records_risk_budget_semantics() -> None:
@@ -664,9 +671,9 @@ def test_allocator_records_risk_budget_semantics() -> None:
     )
     payload = decision.as_dict()
 
-    assert payload["risk_budget_semantics"] == "max_target_exposure_cap"
+    assert payload["risk_budget_semantics"] == "deprecated_non_authoritative_not_exposure_cap"
     assert payload["targets"][0]["exposure_cap_source"] == "max_target_exposure_krw"
-    assert payload["targets"][0]["risk_budget_semantics"] == "max_target_exposure_cap"
+    assert payload["targets"][0]["risk_budget_semantics"] == "deprecated_non_authoritative_not_exposure_cap"
 
 
 def test_exposure_cap_limits_buy_target_with_declared_semantics() -> None:
@@ -682,7 +689,7 @@ def test_exposure_cap_limits_buy_target_with_declared_semantics() -> None:
     assert target is not None
     assert target.target_exposure_krw == pytest.approx(30_000.0)
     assert target.as_dict()["exposure_cap_applied"] is True
-    assert target.as_dict()["risk_budget_semantics"] == "max_target_exposure_cap"
+    assert target.as_dict()["risk_budget_semantics"] == "deprecated_non_authoritative_not_exposure_cap"
 
 
 def test_target_delta_typed_planning_uses_allocator_portfolio_target(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2089,12 +2096,17 @@ def test_manifest_contains_execution_and_risk_config_hashes(tmp_path) -> None:
         )
         refs = record_runtime_strategy_set_manifest(conn, strategy_set=strategy_set, created_ts=123)
         row = conn.execute(
-            "SELECT execution_config_hash, risk_config_hash FROM runtime_strategy_set_manifest WHERE id=?",
+            "SELECT execution_config_hash, risk_config_hash, manifest_json FROM runtime_strategy_set_manifest WHERE id=?",
             (refs["runtime_strategy_set_manifest_id"],),
         ).fetchone()
 
         assert str(row["execution_config_hash"]).startswith("sha256:")
         assert str(row["risk_config_hash"]).startswith("sha256:")
+        manifest = json.loads(str(row["manifest_json"]))
+        policy = submit_authority_policy_from_settings(settings)
+        assert manifest["submit_authority_mode"] == policy.submit_authority_mode
+        assert manifest["submit_authority_policy_hash"] == policy.content_hash()
+        assert manifest["risk_decision_hash"] == "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
     finally:
         conn.close()
 

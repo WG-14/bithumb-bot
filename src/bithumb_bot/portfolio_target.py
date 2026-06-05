@@ -61,7 +61,8 @@ class PortfolioTarget:
             "conflict_resolution": dict(self.conflict_resolution),
             "authoritative": bool(self.authoritative),
             "fail_closed_reason": self.fail_closed_reason,
-            "risk_budget_semantics": "max_target_exposure_cap",
+            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
         }
 
     def content_hash(self) -> str:

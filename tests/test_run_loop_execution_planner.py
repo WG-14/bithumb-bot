@@ -134,7 +134,10 @@ def test_diagnostic_legacy_equivalence_cannot_create_promotion_artifact() -> Non
     assert result.planning_error is None
     assert result.execution_decision_summary is not None
     assert result.execution_decision["target_submit_plan"]["source"] == "target_delta"  # type: ignore[index]
+    assert result.execution_decision["target_submit_plan"]["submit_plan_hash"] == plan.content_hash()  # type: ignore[index]
     assert result.context["execution_decision"] == result.execution_decision
+    assert result.context["execution_submit_plan_hash"] == plan.content_hash()
+    assert result.context["submit_plan_hash"] == plan.content_hash()
     assert result.context["policy_input_hash"] == "sha256:policy-input"
     assert result.context["policy_decision_hash"] == "sha256:policy-decision"
     assert result.context["target_origin"] == "runtime_state"

@@ -20,11 +20,21 @@ of that dict must not change execution authority.
 Execution authority flows through:
 
 ```text
-ExecutionAuthorityEnvelope
+PortfolioAllocator
+-> PortfolioTarget
+-> target delta
+-> exchange order rules
+-> ExecutionAuthorityEnvelope
 -> TypedExecutionPlanningInput
 -> ExecutionDecisionSummary
 -> ExecutionSubmitPlan
 ```
+
+For `MODE=live`, `LIVE_DRY_RUN=false`, and `LIVE_REAL_ORDER_ARMED=true`, live
+real-order startup and submit require `EXECUTION_ENGINE=target_delta`. General
+`lot_native` promotion submit is not live-real-order eligible. Strategy
+`execution_intent` remains a non-authoritative hint for traceability only and
+must not size live submitted quantity, notional, target exposure, or delta.
 
 The live service consumes only typed `ExecutionDecisionSummary` and typed
 `ExecutionSubmitPlan` for live real-order submission. The final broker-facing
@@ -32,6 +42,7 @@ dict must be produced by `ExecutionSubmitPlan.as_final_payload()`, which adds:
 
 - `schema_version`
 - `authority_label`
+- `submit_plan_hash`
 - `content_hash`
 - `source`
 - `authority`
@@ -42,6 +53,26 @@ dict must be produced by `ExecutionSubmitPlan.as_final_payload()`, which adds:
 
 The broker rejects submit-plan dicts that do not validate as this final typed
 serialization.
+
+## Submit Authority Matrix
+
+Submit authority is mode-aware. The policy considers `MODE`, `LIVE_DRY_RUN`,
+`LIVE_REAL_ORDER_ARMED`, `EXECUTION_ENGINE`, plan kind, source, authority, side,
+`submit_expected`, and `pre_submit_proof_status`.
+
+- Live real-order target-delta: allows only `target_submit_plan` with
+  `source=target_delta` and `authority=canonical_target_delta_sizing` or
+  another explicit target-delta authority accepted by policy.
+- Live real-order residual close: allowed only as the explicit
+  `residual_inventory_policy` exception for SELL, with proof passed and all
+  residual safety gates satisfied.
+- Live real-order rejects `buy_submit_plan(source=strategy_position)`,
+  `configured_strategy_order_size`, `strategy_execution_intent`, and
+  `research_compatibility_execution_intent`.
+- Live dry-run may build and observe target-delta plans, but
+  `LiveSignalExecutionService` does not invoke the live executor.
+- Paper and research compatibility are separate policy modes and do not imply
+  live real-order eligibility.
 
 ## Non-Authoritative Dicts
 
@@ -84,3 +115,28 @@ engine.run_loop
 ```
 
 Missing or invalid typed authority fails closed with `[ORDER_SKIP]` logging.
+
+## Audit Fields
+
+Runtime planning and persistence artifacts carry enough hashes to reconstruct:
+
+```text
+strategy decisions
+-> StrategyPreference
+-> PortfolioAllocator decision
+-> PortfolioTarget
+-> previous/current exposure
+-> target delta
+-> exchange order rules
+-> risk decision marker
+-> final ExecutionSubmitPlan
+-> submitted qty/notional
+```
+
+Relevant fields include `portfolio_target_hash`, `allocation_decision_hash`,
+`strategy_contribution_hash`, `submit_plan_hash`,
+`execution_submit_plan_hash`, `submit_authority_mode`,
+`submit_authority_policy_hash`, and `risk_decision_hash`. The runtime
+strategy-set manifest also records `submit_authority_mode` and
+`submit_authority_policy_hash` so a run-start artifact binds the submit policy
+used by later execution plans.

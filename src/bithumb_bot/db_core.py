@@ -3566,7 +3566,14 @@ def record_execution_plan(
     bundle_hash = str(execution_plan_bundle.content_hash())
     submit_plan = getattr(execution_plan_bundle, "submit_plan", None)
     submit_payload = submit_plan.as_dict() if submit_plan is not None and hasattr(submit_plan, "as_dict") else None
-    submit_hash = None if submit_payload is None else sha256_prefixed(submit_payload)
+    submit_hash = None
+    if submit_payload is not None:
+        submit_hash = (
+            str(submit_plan.content_hash())
+            if hasattr(submit_plan, "content_hash")
+            else sha256_prefixed(submit_payload)
+        )
+        submit_payload = {**submit_payload, "submit_plan_hash": submit_hash}
     status = getattr(execution_plan_bundle, "status", None)
     status_text = ""
     if status is not None and hasattr(status, "status"):
@@ -3738,7 +3745,7 @@ def replay_execution_submit_plan_hash(conn: sqlite3.Connection, execution_plan_i
     if row["execution_submit_plan_json"] is None:
         return None
     payload = json.loads(str(row["execution_submit_plan_json"]))
-    replayed = sha256_prefixed(payload)
+    replayed = str(payload.get("submit_plan_hash") or "") or sha256_prefixed(payload)
     recorded = row["execution_submit_plan_hash"]
     if recorded is not None and str(recorded) != replayed:
         raise RuntimeError("execution_submit_plan_hash_mismatch")
@@ -3757,11 +3764,12 @@ def _strategy_contribution_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "preference_hash": str(row["preference_hash"] or ""),
         "desired_exposure_krw": row["desired_exposure_krw"],
         "risk_budget_krw": row["risk_budget_krw"],
-        "max_target_exposure_krw": row["risk_budget_krw"],
+        "max_target_exposure_krw": None,
         "pre_cap_weighted_target_exposure_krw": None,
         "exposure_cap_applied": False,
         "exposure_cap_source": "none",
-        "risk_budget_semantics": "max_target_exposure_cap",
+        "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
         "reason": str(row["reason"] or ""),
     }
     raw_json = str(row["contribution_json"] or "").strip()
@@ -3802,7 +3810,8 @@ def _portfolio_target_payload_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "conflict_resolution": _json_loads_object(str(row["conflict_resolution_json"] or "{}")),
         "authoritative": bool(row["authoritative"]),
         "fail_closed_reason": str(row["fail_closed_reason"] or ""),
-        "risk_budget_semantics": "max_target_exposure_cap",
+        "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
     }
     target_json = _json_loads_object(str(row["target_json"] or "{}"))
     for key in (
@@ -3918,7 +3927,8 @@ def rebuild_allocation_decision_from_bundle(
         "reason": str(allocation["reason"] or ""),
         "authoritative": bool(allocation["authoritative"]),
         "primary_block_reason": str(allocation["primary_block_reason"] or ""),
-        "risk_budget_semantics": "max_target_exposure_cap",
+        "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
     }
     payload["allocation_decision_hash"] = sha256_prefixed(payload)
     recorded = str(allocation["allocation_decision_hash"] or "")
@@ -3960,7 +3970,7 @@ def rebuild_execution_submit_plan_from_execution_plan(
             "block_reason": row["block_reason"],
         }
     )
-    replayed = sha256_prefixed(payload)
+    replayed = str(payload.get("submit_plan_hash") or "") or sha256_prefixed(payload)
     recorded = row["execution_submit_plan_hash"]
     if recorded is not None and str(recorded) != replayed:
         raise RuntimeError("execution_submit_plan_rebuild_hash_mismatch")
@@ -3972,7 +3982,9 @@ def replay_execution_submit_plan_from_execution_plan(
     execution_plan_id: int,
 ) -> str | None:
     payload = rebuild_execution_submit_plan_from_execution_plan(conn, execution_plan_id)
-    return None if payload is None else sha256_prefixed(payload)
+    if payload is None:
+        return None
+    return str(payload.get("submit_plan_hash") or "") or sha256_prefixed(payload)
 
 
 def load_target_position_state(conn: sqlite3.Connection, *, pair: str) -> TargetPositionState | None:

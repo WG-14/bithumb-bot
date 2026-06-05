@@ -93,11 +93,11 @@ For the initial deterministic allocator policy:
 - Equal-priority `BUY` plus `SELL`, including `BUY` plus `SELL` plus `HOLD`, fails closed.
 - Higher-priority strategies win over lower-priority conflicting strategies; lower numeric priority is higher authority.
 - BUY target exposure is the weighted average of selected BUY strategy desired exposures. If any selected BUY contribution carries `max_target_exposure_krw`, the result is capped by the sum of selected BUY exposure caps.
-- `risk_budget_krw` remains a backward-compatible alias for `max_target_exposure_krw`; it is not a true maximum-loss budget. Allocation payloads declare `risk_budget_semantics=max_target_exposure_cap` and record pre-cap target exposure, cap amount, whether the cap applied, and cap source.
+- `max_target_exposure_krw` is the allocator exposure cap. Historical `risk_budget_krw` is deprecated, preserved only as non-authoritative metadata, and no longer falls back into `max_target_exposure_krw`. It is not a maximum-loss budget and is marked with `risk_budget_semantics=deprecated_non_authoritative_not_exposure_cap` plus `risk_decision_hash=deprecated:risk_budget_krw_not_enforced_as_loss_budget` until separate loss-risk enforcement exists.
 
 ## Runtime Manifest
 
-At persistence time the materialized runtime strategy-set manifest is stored in SQLite as recovery-critical `trades` data. The manifest includes active strategy instances, raw and materialized parameters, normalized parameter source, strategy parameter hash, approved profile path/hash, runtime and plugin contract hashes, strategy version, execution and risk config hashes, market scope, single-pair enforcement, and the manifest hash.
+At persistence time the materialized runtime strategy-set manifest is stored in SQLite as recovery-critical `trades` data. The manifest includes active strategy instances, raw and materialized parameters, normalized parameter source, strategy parameter hash, approved profile path/hash, runtime and plugin contract hashes, strategy version, execution and risk config hashes, `submit_authority_mode`, `submit_authority_policy_hash`, the risk-decision placeholder when applicable, market scope, single-pair enforcement, and the manifest hash.
 
 Run-start manifests are candle-independent blueprints. Runtime data preflight is
 decision-cycle evidence and is linked from decision bundles through

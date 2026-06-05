@@ -479,7 +479,7 @@ def test_explicit_plan_present_but_not_consumed_does_not_call_executor(
 
     assert result is None
     assert calls == []
-    assert "explicit_submit_plan_not_consumed" in caplog.text
+    assert "live_real_order_requires_execution_engine_target_delta" in caplog.text
 
 
 def test_valid_target_plan_reaches_executor_only_for_target_delta_engine() -> None:
@@ -532,6 +532,7 @@ def test_typed_execution_summary_can_supply_validated_target_submit_plan() -> No
     assert submitted == {"status": "submitted", "signal": "BUY"}
     assert len(calls) == 1
     assert calls[0]["kwargs"]["execution_submit_plan"] == summary.target_submit_plan.as_final_payload()  # type: ignore[index,union-attr]
+    assert calls[0]["kwargs"]["execution_submit_plan"]["submit_plan_hash"] == summary.target_submit_plan.content_hash()  # type: ignore[index,union-attr]
 
 
 def test_execution_intent_telemetry_does_not_change_live_target_delta_submit_size() -> None:
@@ -550,6 +551,9 @@ def test_execution_intent_telemetry_does_not_change_live_target_delta_submit_siz
                 {
                     "execution_intent": {
                         "intent": "enter_strategy_position",
+                        "budget_model": "cash_fraction_capped_by_max_order_krw",
+                        "budget_fraction_of_cash": 0.99,
+                        "max_budget_krw": 999_000_000.0,
                         "qty": 999.0,
                         "notional_krw": 999_000_000.0,
                     }
@@ -567,6 +571,9 @@ def test_execution_intent_telemetry_does_not_change_live_target_delta_submit_siz
                 {
                     "execution_intent": {
                         "intent": "enter_strategy_position",
+                        "budget_model": "cash_fraction_capped_by_max_order_krw",
+                        "budget_fraction_of_cash": 0.01,
+                        "max_budget_krw": 1.0,
                         "qty": 0.00000001,
                         "notional_krw": 1.0,
                     }
@@ -585,6 +592,30 @@ def test_execution_intent_telemetry_does_not_change_live_target_delta_submit_siz
     assert first_plan["notional_krw"] == second_plan["notional_krw"] == pytest.approx(100_000.0)
     assert first_plan["target_exposure_krw"] == second_plan["target_exposure_krw"] == pytest.approx(100_000.0)
     assert first_plan["delta_krw"] == second_plan["delta_krw"] == pytest.approx(100_000.0)
+
+
+def test_live_dry_run_target_delta_validates_but_does_not_call_executor(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    calls: list[dict[str, object]] = []
+
+    submitted = _service(calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=100_000_000.0,
+            decision_context={},
+            execution_decision_summary=_typed_target_execution_summary(),
+        )
+    )
+
+    assert submitted is None
+    assert calls == []
+    assert "live_dry_run_non_submitting" in caplog.text
 
 
 def test_live_real_order_lot_native_typed_buy_submit_plan_fails_closed(
@@ -627,7 +658,7 @@ def test_live_real_order_target_delta_blocks_strategy_position_buy_submit_plan(
 
     assert submitted is None
     assert calls == []
-    assert "live_real_order_buy_submit_plan_requires_target_delta" in caplog.text
+    assert "live_real_order_buy_plan_rejected_target_delta_required" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -659,7 +690,7 @@ def test_live_real_order_blocks_non_target_buy_authorities(
 
     assert submitted is None
     assert calls == []
-    assert "live_real_order_buy_submit_plan_requires_target_delta" in caplog.text
+    assert "live_real_order_buy_plan_rejected_target_delta_required" in caplog.text
 
 
 @pytest.mark.parametrize(

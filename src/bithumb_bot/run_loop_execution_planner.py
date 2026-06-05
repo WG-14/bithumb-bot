@@ -90,7 +90,10 @@ class ExecutionPlanBundle:
     status: "ExecutionPlanStatus | None" = None
 
     def as_dict(self) -> dict[str, object]:
-        submit_plan = None if self.submit_plan is None else self.submit_plan.as_dict()
+        submit_plan = None if self.submit_plan is None else {
+            **self.submit_plan.as_dict(),
+            "submit_plan_hash": self.submit_plan.content_hash(),
+        }
         summary = None if self.summary is None else self.summary.as_dict()
         status = None if self.status is None else self.status.as_dict()
         return {
@@ -100,6 +103,9 @@ class ExecutionPlanBundle:
             "submit_plan_authority": "ExecutionSubmitPlan" if self.submit_plan is not None else "none",
             "summary": summary,
             "primary_submit_plan": submit_plan,
+            "execution_submit_plan_hash": None
+            if self.submit_plan is None
+            else self.submit_plan.content_hash(),
             "status": status,
             "planning_error": self.planning_error,
             "persistence_context_hash": sha256_prefixed(self.persistence_context),
@@ -672,6 +678,17 @@ def prepare_strategy_decision_persistence_context(
     context["execution_block_reason"] = execution_decision["block_reason"]
     context["residual_live_sell_mode"] = execution_decision.get("residual_live_sell_mode")
     context["residual_buy_sizing_mode"] = execution_decision.get("residual_buy_sizing_mode")
+    for plan_key in ("target_submit_plan", "residual_submit_plan", "buy_submit_plan"):
+        plan_payload = execution_decision.get(plan_key)
+        if isinstance(plan_payload, dict) and str(plan_payload.get("submit_plan_hash") or "").strip():
+            context["execution_submit_plan_hash"] = str(plan_payload["submit_plan_hash"])
+            context["submit_plan_hash"] = str(plan_payload["submit_plan_hash"])
+            context["submit_authority_mode"] = str(plan_payload.get("submit_authority_mode") or "")
+            context["submit_authority_policy_hash"] = str(
+                plan_payload.get("submit_authority_policy_hash") or ""
+            )
+            context["risk_decision_hash"] = str(plan_payload.get("risk_decision_hash") or "")
+            break
     target_shadow = execution_decision.get("target_shadow_decision")
     if isinstance(target_shadow, dict):
         for target_key, target_value in target_shadow.items():
@@ -1016,7 +1033,8 @@ class ExecutionPlanner:
                             strategy_instance_id=strategy_instance_id,
                             desired_exposure_krw=spec.desired_exposure_krw,
                             desired_weight=spec.weight,
-                            risk_budget_krw=spec.max_target_exposure_krw,
+                            risk_budget_krw=spec.risk_budget_krw,
+                            max_target_exposure_krw=spec.max_target_exposure_krw,
                             metadata=result_metadata,
                         )
                     )

@@ -18,7 +18,7 @@ from .portfolio_target import PortfolioTarget
 from .pre_trade_economics import build_pre_trade_economics_snapshot
 from .strategy_policy_contract import StrategyDecisionV2
 from .submit_authority_policy import (
-    live_real_order_legacy_buy_submit_plan_error,
+    evaluate_submit_authority_policy,
     submit_authority_policy_from_settings,
 )
 from .target_position import TargetPositionSettings, build_target_position_decision
@@ -401,10 +401,14 @@ class ExecutionSubmitPlan:
         payload.update(dict(self.extra_payload))
         return payload
 
+    def content_hash(self) -> str:
+        return execution_submit_plan_payload_hash(self.as_dict())
+
     def as_final_payload(self, *, extra: dict[str, object] | None = None) -> dict[str, object]:
         payload = self.as_dict()
         if extra:
             payload.update(extra)
+        payload.setdefault("submit_plan_hash", self.content_hash())
         payload["schema_version"] = EXECUTION_SUBMIT_PLAN_SCHEMA_VERSION
         payload["authority_label"] = EXECUTION_SUBMIT_PLAN_AUTHORITY_LABEL
         payload["content_hash"] = execution_submit_plan_payload_hash(payload)
@@ -461,7 +465,11 @@ EXECUTION_SUBMIT_PLAN_FINAL_REQUIRED_FIELDS = frozenset(
 
 
 def execution_submit_plan_payload_hash(plan: Mapping[str, object]) -> str:
-    hash_input = {str(key): value for key, value in dict(plan).items() if key != "content_hash"}
+    hash_input = {
+        str(key): value
+        for key, value in dict(plan).items()
+        if key not in {"content_hash", "submit_plan_hash"}
+    }
     return sha256_prefixed(hash_input)
 
 
@@ -685,7 +693,9 @@ def _submit_plan_payload(
 ) -> dict[str, object] | None:
     if plan is None:
         return None
-    return plan.as_dict()
+    payload = plan.as_dict()
+    payload["submit_plan_hash"] = plan.content_hash()
+    return payload
 
 
 def _typed_submit_plan(
@@ -713,6 +723,28 @@ def primary_execution_submit_plan(
         or summary.typed_residual_submit_plan()
         or summary.typed_buy_submit_plan()
     )
+
+
+def _validate_submit_authority_before_executor(
+    plan: Mapping[str, object],
+    *,
+    plan_kind: str,
+    field_name: str,
+) -> bool:
+    decision = evaluate_submit_authority_policy(
+        plan,
+        settings_obj=settings,
+        plan_kind=plan_kind,
+    )
+    if decision.allowed:
+        return True
+    _block_live_submit_plan(
+        reason=decision.reason,
+        field_name=field_name,
+        source=decision.source,
+        side=decision.side,
+    )
+    return False
 
 
 def execution_submit_plan_invariant_error(
@@ -1385,6 +1417,9 @@ def _build_execution_decision_summary_from_authority_payload(
     target_submit_plan: ExecutionSubmitPlan | None = None
     pre_trade_economics: dict[str, object] | None = None
     execution_engine = _execution_engine()
+    submit_authority_policy = submit_authority_policy_from_settings(settings)
+    submit_authority_policy_hash = submit_authority_policy.content_hash()
+    risk_decision_hash = "deprecated:risk_budget_krw_not_enforced_as_loss_budget"
 
     if bool(getattr(settings, "TARGET_EXECUTION_SHADOW", False)) or execution_engine == "target_delta":
         execution_order_rules = resolve_execution_order_rules(payload, market=str(settings.PAIR))
@@ -1556,6 +1591,9 @@ def _build_execution_decision_summary_from_authority_payload(
                     or payload.get("allocation_primary_block_reason")
                     or "none"
                 ),
+                "submit_authority_mode": submit_authority_policy.submit_authority_mode,
+                "submit_authority_policy_hash": submit_authority_policy_hash,
+                "risk_decision_hash": risk_decision_hash,
             }
             if performance_gate_fields and str(target_decision.delta_side) == "BUY":
                 target_plan_extra.update(performance_gate_fields)
@@ -1790,6 +1828,7 @@ def _build_execution_decision_summary_from_authority_payload(
             residual_plan_extra = {
                 "intent_type": "residual_close",
                 "strategy_context": "residual_inventory_policy",
+                "residual_inventory_policy_exception": True,
                 "would_submit_pipeline": "standard",
                 "would_intent_key": residual_intent_key,
                 "would_client_order_id_shape": "live_<ts>_sell_<submit_attempt_id>",
@@ -1798,6 +1837,9 @@ def _build_execution_decision_summary_from_authority_payload(
                 "would_authority": "residual_inventory_policy",
                 "would_submit_side": "SELL",
                 "would_submit_qty": float(residual_candidate.qty),
+                "submit_authority_mode": submit_authority_policy.submit_authority_mode,
+                "submit_authority_policy_hash": submit_authority_policy_hash,
+                "risk_decision_hash": risk_decision_hash,
             }
             residual_submit_plan = ExecutionSubmitPlan(
                 side="SELL",
@@ -2180,19 +2222,6 @@ class LiveSignalExecutionService:
                 side=request.signal,
             )
             return None
-        if buy_plan:
-            legacy_buy_error = live_real_order_legacy_buy_submit_plan_error(
-                buy_plan,
-                settings_obj=settings,
-            )
-            if legacy_buy_error is not None:
-                _log_live_submit_plan_block(
-                    reason=legacy_buy_error,
-                    field_name="buy_submit_plan",
-                    source=buy_plan.get("source"),
-                    side=buy_plan.get("side"),
-                )
-                return None
         primary_plan = target_plan or residual_plan or buy_plan
         invariant_error = execution_submit_plan_invariant_error(
             primary_plan,
@@ -2235,6 +2264,12 @@ class LiveSignalExecutionService:
             return None
         if _execution_engine() == "target_delta" and str(settings.MODE).lower() != "live" and target_plan:
             plan_side = str(target_plan.get("side") or request.signal).upper()
+            if not _validate_submit_authority_before_executor(
+                target_plan,
+                plan_kind="target",
+                field_name="target_submit_plan",
+            ):
+                return None
             return self.executor(
                 self.broker,
                 plan_side,
@@ -2254,6 +2289,13 @@ class LiveSignalExecutionService:
                     and str(residual_plan.get("source")) == "residual_inventory"
                 ):
                     pass
+                elif buy_plan:
+                    if not _validate_submit_authority_before_executor(
+                        buy_plan,
+                        plan_kind="buy",
+                        field_name="buy_submit_plan",
+                    ):
+                        return None
                 else:
                     _block_live_submit_plan(
                         reason="target_delta_missing_target_submit_plan",
@@ -2371,6 +2413,12 @@ class LiveSignalExecutionService:
                         field_name="target_submit_plan",
                     ):
                         return None
+                    if not _validate_submit_authority_before_executor(
+                        target_plan,
+                        plan_kind="target",
+                        field_name="target_submit_plan",
+                    ):
+                        return None
                     return self.executor(
                         self.broker,
                         plan_side,
@@ -2477,6 +2525,12 @@ class LiveSignalExecutionService:
                     field_name="buy_submit_plan",
                 ):
                     return None
+                if not _validate_submit_authority_before_executor(
+                    buy_plan,
+                    plan_kind="buy",
+                    field_name="buy_submit_plan",
+                ):
+                    return None
                 return self.executor(
                     self.broker,
                     "BUY",
@@ -2541,6 +2595,12 @@ class LiveSignalExecutionService:
                     field_name="residual_submit_plan",
                 ):
                     return None
+                if not _validate_submit_authority_before_executor(
+                    residual_plan,
+                    plan_kind="residual",
+                    field_name="residual_submit_plan",
+                ):
+                    return None
                 return self.executor(
                     self.broker,
                     request.signal,
@@ -2586,6 +2646,14 @@ class LiveSignalExecutionService:
         if harmless_dust_preview is not None:
             if self.record_harmless_dust_suppression_if_applicable(request):
                 return None
+        if str(settings.MODE).lower() == "live" and bool(settings.LIVE_DRY_RUN):
+            _log_live_submit_plan_block(
+                reason="live_dry_run_non_submitting",
+                field_name="execution_service",
+                source="legacy_lot_native_fallback",
+                side=request.signal,
+            )
+            return None
         # Legacy lot-native compatibility path. Live real-order execution is
         # blocked above unless a validated explicit submit plan was consumed.
         try:

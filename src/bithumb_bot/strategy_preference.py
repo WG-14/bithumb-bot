@@ -71,8 +71,6 @@ class StrategyPreference:
         object.__setattr__(self, "confidence", _optional_float(self.confidence))
         max_target_exposure = _optional_float(self.max_target_exposure_krw)
         object.__setattr__(self, "risk_budget_krw", _optional_float(self.risk_budget_krw))
-        if max_target_exposure is None:
-            max_target_exposure = self.risk_budget_krw
         object.__setattr__(self, "max_target_exposure_krw", max_target_exposure)
         object.__setattr__(
             self,
@@ -99,7 +97,8 @@ class StrategyPreference:
             "horizon": self.horizon,
             "max_target_exposure_krw": self.max_target_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
-            "risk_budget_semantics": "risk_budget_krw_is_deprecated_alias_for_max_target_exposure_krw",
+            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
             "reason": self.reason,
             "policy_hash": self.policy_hash,
             "policy_contract_hash": self.policy_contract_hash,

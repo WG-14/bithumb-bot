@@ -144,8 +144,8 @@ unsupported until readiness, target state, allocation, execution submit, and
 persistence are pair-scoped.
 
 Use `max_target_exposure_krw` for allocator exposure caps. Historical
-`risk_budget_krw` inputs are compatibility aliases for that exposure cap and are
-not maximum-loss budgets.
+`risk_budget_krw` inputs are deprecated non-authoritative metadata and are not
+maximum-loss budgets. They do not cap target exposure in live promotion.
 
 At run start, the runtime persists a materialized strategy-set manifest in the
 trade DB. It records active instance ids, raw and materialized parameters,

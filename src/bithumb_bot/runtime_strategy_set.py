@@ -39,6 +39,7 @@ from .runtime_strategy_decision import (
     promotion_adapter_supports_feature_snapshot,
     production_runtime_strategy_missing_error,
 )
+from .submit_authority_policy import submit_authority_policy_from_settings
 from .runtime_data_provider import (
     RuntimeDataAvailabilityReport,
     RuntimeDataRequirementResolver,
@@ -134,8 +135,6 @@ class RuntimeStrategySpec:
             raise ValueError("runtime_strategy_risk_budget_must_be_non_negative")
         if max_target_exposure is not None and max_target_exposure < 0.0:
             raise ValueError("runtime_strategy_max_target_exposure_must_be_non_negative")
-        if max_target_exposure is None:
-            max_target_exposure = risk_budget
         desired_exposure = _optional_float(self.desired_exposure_krw)
         if desired_exposure is not None and desired_exposure < 0.0:
             raise ValueError("runtime_strategy_desired_exposure_must_be_non_negative")
@@ -185,7 +184,8 @@ class RuntimeStrategySpec:
             "desired_exposure_krw": self.desired_exposure_krw,
             "max_target_exposure_krw": self.max_target_exposure_krw,
             "risk_budget_krw": self.risk_budget_krw,
-            "risk_budget_semantics": "deprecated_alias_for_max_target_exposure_cap",
+            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
             "parameters": dict(self.parameters or {}),
             "runtime_adapter_config": dict(self.runtime_adapter_config or {}),
             "approved_profile_path": self.approved_profile_path,
@@ -374,7 +374,8 @@ class RuntimeStrategyInstance:
             "desired_exposure_krw": self.spec.desired_exposure_krw,
             "max_target_exposure_krw": self.spec.max_target_exposure_krw,
             "risk_budget_krw": self.spec.risk_budget_krw,
-            "risk_budget_semantics": "deprecated_alias_for_max_target_exposure_cap",
+            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
             "parameter_source": self.parameter_source,
             "parameters_raw": dict(self.parameters_raw),
             "parameters_materialized": dict(self.parameters_materialized),
@@ -1518,9 +1519,7 @@ def _stable_settings_hash(settings_obj: object, field_names: tuple[str, ...]) ->
 
 
 def execution_config_hash(settings_obj: object = settings) -> str:
-    return _stable_settings_hash(
-        settings_obj,
-        (
+    field_names = (
             "EXECUTION_ENGINE",
             "EXECUTION_FILL_REFERENCE_POLICY",
             "EXECUTION_DECISION_GUARD_MS",
@@ -1548,7 +1547,14 @@ def execution_config_hash(settings_obj: object = settings) -> str:
             "EXECUTION_SLIPPAGE_SOURCE",
             "EXECUTION_CALIBRATION_REQUIRED",
             "EXECUTION_CALIBRATION_ARTIFACT_HASH",
-        ),
+    )
+    return sha256_prefixed(
+        {
+            "settings": {name: getattr(settings_obj, name, None) for name in field_names},
+            "submit_authority_policy_hash": submit_authority_policy_from_settings(
+                settings_obj
+            ).content_hash(),
+        }
     )
 
 
@@ -1700,6 +1706,7 @@ def normalized_runtime_strategy_set_manifest(
         pair=str(getattr(settings_obj, "PAIR", "")),
         interval=str(getattr(settings_obj, "INTERVAL", "")),
     )
+    submit_authority_policy = submit_authority_policy_from_settings(settings_obj)
     payload = {
         "schema_version": 1,
         "authority_label": "RuntimeStrategySetManifest",
@@ -1743,6 +1750,9 @@ def normalized_runtime_strategy_set_manifest(
             }
         },
         "single_pair_runtime_enforced": True,
+        "submit_authority_mode": submit_authority_policy.submit_authority_mode,
+        "submit_authority_policy_hash": submit_authority_policy.content_hash(),
+        "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
         "market_scope": market_scope.as_dict(),
         "multi_strategy_enabled": resolved.multi_strategy_enabled,
         "active_strategy_count": len(active_instances),

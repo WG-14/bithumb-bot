@@ -24,7 +24,7 @@ class StrategyContribution:
     pre_cap_weighted_target_exposure_krw: float | None = None
     exposure_cap_applied: bool = False
     exposure_cap_source: str = "none"
-    risk_budget_semantics: str = "max_target_exposure_cap"
+    risk_budget_semantics: str = "deprecated_non_authoritative_not_exposure_cap"
     schema_version: int = 1
 
     def as_dict(self) -> dict[str, object]:
@@ -44,6 +44,7 @@ class StrategyContribution:
             "exposure_cap_applied": bool(self.exposure_cap_applied),
             "exposure_cap_source": self.exposure_cap_source,
             "risk_budget_semantics": self.risk_budget_semantics,
+            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
             "reason": self.reason,
         }
 
@@ -61,7 +62,7 @@ class PortfolioAllocatorConfig:
     conflict_policy: str = "fail_closed_equal_priority"
     strategy_priorities: Mapping[str, int] = field(default_factory=dict)
     strategy_weights: Mapping[str, float] = field(default_factory=dict)
-    risk_budget_semantics: str = "risk_budget_krw_is_deprecated_alias_for_max_target_exposure_krw"
+    risk_budget_semantics: str = "deprecated_non_authoritative_not_exposure_cap"
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -159,7 +160,8 @@ class PortfolioAllocationDecision:
             "reason": self.reason,
             "authoritative": bool(self.authoritative),
             "primary_block_reason": self.primary_block_reason,
-            "risk_budget_semantics": "max_target_exposure_cap",
+            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
         }
         payload["allocation_decision_hash"] = sha256_prefixed(
             {key: value for key, value in payload.items() if key != "allocation_decision_hash"}
@@ -354,7 +356,8 @@ class PortfolioAllocator:
                 "exposure_cap_krw": None,
                 "exposure_cap_applied": False,
                 "exposure_cap_source": "none",
-                "risk_budget_semantics": "max_target_exposure_cap",
+                "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+                "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
             }
         weighted_total = 0.0
         weight_total = 0.0
@@ -384,7 +387,8 @@ class PortfolioAllocator:
             "exposure_cap_krw": exposure_cap_total if exposure_cap_present else None,
             "exposure_cap_applied": cap_applied,
             "exposure_cap_source": "max_target_exposure_krw" if exposure_cap_present else "none",
-            "risk_budget_semantics": "max_target_exposure_cap",
+            "risk_budget_semantics": "deprecated_non_authoritative_not_exposure_cap",
+            "risk_decision_hash": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
         }
 
     def _blocked_decision(
