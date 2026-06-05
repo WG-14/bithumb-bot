@@ -37,6 +37,7 @@ from .runtime_strategy_set import (
     runtime_scope_contract,
     runtime_strategy_set_manifest_hash,
 )
+from .strategy_risk_profile import strategy_risk_profile_from_profile_payload
 from .strategy_policy_contract import StrategyDecisionV2
 from .strategy_performance import evaluate_strategy_performance_gate
 from .target_position import (
@@ -717,6 +718,7 @@ def prepare_strategy_decision_persistence_context(
                 "pre_submit_risk_status",
                 "pre_submit_risk_reason_code",
                 "pre_submit_risk_plan_hash",
+                "pre_submit_risk_state_source",
             ):
                 if risk_key in plan_payload:
                     context[risk_key] = plan_payload[risk_key]
@@ -1068,7 +1070,7 @@ class ExecutionPlanner:
                         str(getattr(self.settings_obj, "MODE", "") or "").strip().lower() == "live"
                     )
                     risk_profile = None
-                    if live_like_for_risk or spec.risk_policy is not None:
+                    if live_like_for_risk or spec.risk_policy is not None or spec.approved_profile_path:
                         try:
                             authority_context = ProfileAuthorityContext.for_strategy_set(
                                 runtime_result_bundle.strategy_set,
@@ -1082,6 +1084,20 @@ class ExecutionPlanner:
                             if live_like_for_risk:
                                 raise
                             risk_profile = None
+                    if risk_profile is None and not live_like_for_risk:
+                        risk_profile = strategy_risk_profile_from_profile_payload(
+                            strategy_instance_id=strategy_instance_id,
+                            strategy_name=spec.strategy_name,
+                            pair=str(spec.pair),
+                            interval=str(spec.interval),
+                            profile_payload=None,
+                            approved_runtime_profile_path=None,
+                            approved_runtime_profile_hash=None,
+                            inline_risk_policy=spec.risk_policy,
+                            declared_risk_policy_hash=spec.risk_policy_hash,
+                            live_like=False,
+                            live_real_order=False,
+                        )
                     if risk_profile is not None:
                         enforced = risk_profile.enforcement_mode == "enforced"
                         if risk_profile.policy.policy_status == "disabled_explicit":
@@ -1091,7 +1107,16 @@ class ExecutionPlanner:
                                 evaluation_ts_ms=int(result.candle_ts),
                                 mark_price=float(result.market_price),
                                 state_source="risk_policy_disabled_explicit",
-                                evidence={"strategy_instance_id": strategy_instance_id},
+                                evidence={
+                                    "strategy_instance_id": strategy_instance_id,
+                                    "strategy_name": spec.strategy_name,
+                                    "pair": str(spec.pair),
+                                    "interval": str(spec.interval),
+                                    "policy_status": "disabled_explicit",
+                                    "missing_policy": risk_profile.policy.missing_policy,
+                                    "risk_enforcement_mode": risk_profile.enforcement_mode,
+                                    "risk_profile_source": risk_profile.risk_profile_source,
+                                },
                             )
                             missing_state = ()
                         elif not any(

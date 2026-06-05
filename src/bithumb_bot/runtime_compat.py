@@ -70,7 +70,9 @@ def run_loop() -> None:
             "priority": 0,
             "weight": 1.0,
             "desired_exposure_krw": context.get("target_exposure_krw"),
-            "risk_budget_krw": context.get("target_exposure_krw"),
+            "risk_budget_krw": None,
+            "risk_budget_legacy_marker": "deprecated:risk_budget_krw_not_enforced_as_loss_budget",
+            "risk_budget_semantics": "deprecated_non_authoritative_compatibility_metadata",
             "preference_hash": sha256_prefixed(
                 {
                     "strategy_name": str(decision.strategy_name),

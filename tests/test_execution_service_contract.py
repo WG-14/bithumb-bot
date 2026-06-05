@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
+import sqlite3
 
 import pytest
 
@@ -19,6 +21,7 @@ from bithumb_bot.execution_service import (
 )
 from bithumb_bot.submit_authority_policy import evaluate_submit_authority_policy
 from bithumb_bot.submit_authority_policy import operational_pre_submit_risk_approval_error
+from bithumb_bot.db_core import update_execution_plan_final_submit_payload
 from bithumb_bot.research.backtest_kernel import ResearchExecutionContext, ResearchVirtualExecutionService
 from bithumb_bot.research.execution_model import FixedBpsExecutionModel
 
@@ -353,6 +356,62 @@ def test_operational_pre_submit_risk_approval_requires_allow_and_matching_plan_h
         {**payload, "pre_submit_risk_state_source": ""},
         expected_submit_plan_hash="sha256:plan",
     ) == "live_real_order_pre_submit_risk_state_source_missing"
+
+
+def test_final_submit_payload_update_persists_broker_bound_pre_submit_proof() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            CREATE TABLE execution_plan (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_submit_plan_hash TEXT,
+                execution_submit_plan_json TEXT,
+                submit_plan_side TEXT,
+                submit_plan_qty REAL,
+                submit_plan_notional_krw REAL,
+                submit_plan_idempotency_key TEXT,
+                submit_plan_source TEXT,
+                submit_plan_authority TEXT,
+                submit_expected INTEGER NOT NULL DEFAULT 0,
+                final_action TEXT NOT NULL DEFAULT '',
+                block_reason TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO execution_plan(execution_submit_plan_hash, execution_submit_plan_json) VALUES (?, ?)",
+            ("sha256:plan", "{}"),
+        )
+        payload = {
+            **_valid_target_submit_plan(),
+            "submit_plan_hash": "sha256:plan",
+            "pre_submit_risk_status": "ALLOW",
+            "pre_submit_risk_decision_hash": "sha256:" + "1" * 64,
+            "pre_submit_risk_policy_hash": "sha256:" + "2" * 64,
+            "pre_submit_risk_input_hash": "sha256:" + "3" * 64,
+            "pre_submit_risk_evidence_hash": "sha256:" + "4" * 64,
+            "pre_submit_risk_plan_hash": "sha256:plan",
+            "pre_submit_risk_reason_code": "OK",
+            "pre_submit_risk_state_source": "runtime_db_broker",
+        }
+
+        result = update_execution_plan_final_submit_payload(
+            conn,
+            final_submit_payload=payload,
+            persistence_status="final_broker_bound_payload",
+        )
+
+        assert result["updated"] is True
+        row = conn.execute("SELECT execution_submit_plan_json FROM execution_plan").fetchone()
+        stored = json.loads(row["execution_submit_plan_json"])
+        assert stored["pre_submit_risk_status"] == "ALLOW"
+        assert stored["pre_submit_risk_plan_hash"] == "sha256:plan"
+        assert stored["final_submit_payload_persistence_status"] == "final_broker_bound_payload"
+        assert stored["final_submit_payload_hash"].startswith("sha256:")
+    finally:
+        conn.close()
 
 
 def _typed_target_execution_summary() -> ExecutionDecisionSummary:

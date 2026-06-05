@@ -230,6 +230,28 @@ class RuntimeCycleArtifact:
     execution_plan_id: int | None = None
     execution_plan_bundle_hash: str | None = None
     execution_submit_plan_hash: str | None = None
+    strategy_risk_decision_hash: str | None = None
+    strategy_risk_policy_hash: str | None = None
+    strategy_risk_input_hash: str | None = None
+    strategy_risk_evidence_hash: str | None = None
+    strategy_risk_state_source: str | None = None
+    strategy_risk_status: str | None = None
+    strategy_risk_reason_code: str | None = None
+    portfolio_risk_decision_hash: str | None = None
+    portfolio_risk_policy_hash: str | None = None
+    portfolio_risk_input_hash: str | None = None
+    portfolio_risk_evidence_hash: str | None = None
+    portfolio_risk_state_source: str | None = None
+    portfolio_risk_status: str | None = None
+    portfolio_risk_reason_code: str | None = None
+    pre_submit_risk_decision_hash: str | None = None
+    pre_submit_risk_policy_hash: str | None = None
+    pre_submit_risk_input_hash: str | None = None
+    pre_submit_risk_evidence_hash: str | None = None
+    pre_submit_risk_plan_hash: str | None = None
+    pre_submit_risk_state_source: str | None = None
+    pre_submit_risk_status: str | None = None
+    pre_submit_risk_reason_code: str | None = None
     execution_result_hash: str | None = None
     safety_decision_hash: str | None = None
     recovery_decision_hash: str | None = None
@@ -256,6 +278,28 @@ class RuntimeCycleArtifact:
             "execution_plan_id": self.execution_plan_id,
             "execution_plan_bundle_hash": self.execution_plan_bundle_hash,
             "execution_submit_plan_hash": self.execution_submit_plan_hash,
+            "strategy_risk_decision_hash": self.strategy_risk_decision_hash,
+            "strategy_risk_policy_hash": self.strategy_risk_policy_hash,
+            "strategy_risk_input_hash": self.strategy_risk_input_hash,
+            "strategy_risk_evidence_hash": self.strategy_risk_evidence_hash,
+            "strategy_risk_state_source": self.strategy_risk_state_source,
+            "strategy_risk_status": self.strategy_risk_status,
+            "strategy_risk_reason_code": self.strategy_risk_reason_code,
+            "portfolio_risk_decision_hash": self.portfolio_risk_decision_hash,
+            "portfolio_risk_policy_hash": self.portfolio_risk_policy_hash,
+            "portfolio_risk_input_hash": self.portfolio_risk_input_hash,
+            "portfolio_risk_evidence_hash": self.portfolio_risk_evidence_hash,
+            "portfolio_risk_state_source": self.portfolio_risk_state_source,
+            "portfolio_risk_status": self.portfolio_risk_status,
+            "portfolio_risk_reason_code": self.portfolio_risk_reason_code,
+            "pre_submit_risk_decision_hash": self.pre_submit_risk_decision_hash,
+            "pre_submit_risk_policy_hash": self.pre_submit_risk_policy_hash,
+            "pre_submit_risk_input_hash": self.pre_submit_risk_input_hash,
+            "pre_submit_risk_evidence_hash": self.pre_submit_risk_evidence_hash,
+            "pre_submit_risk_plan_hash": self.pre_submit_risk_plan_hash,
+            "pre_submit_risk_state_source": self.pre_submit_risk_state_source,
+            "pre_submit_risk_status": self.pre_submit_risk_status,
+            "pre_submit_risk_reason_code": self.pre_submit_risk_reason_code,
             "execution_result_hash": self.execution_result_hash,
             "safety_decision_hash": self.safety_decision_hash,
             "recovery_decision_hash": self.recovery_decision_hash,
@@ -280,6 +324,28 @@ class RuntimeCycleArtifact:
                 "strategy_contribution_hash": self.strategy_contribution_hash,
                 "execution_plan_bundle_hash": self.execution_plan_bundle_hash,
                 "execution_submit_plan_hash": self.execution_submit_plan_hash,
+                "strategy_risk_decision_hash": self.strategy_risk_decision_hash,
+                "strategy_risk_policy_hash": self.strategy_risk_policy_hash,
+                "strategy_risk_input_hash": self.strategy_risk_input_hash,
+                "strategy_risk_evidence_hash": self.strategy_risk_evidence_hash,
+                "strategy_risk_state_source": self.strategy_risk_state_source,
+                "strategy_risk_status": self.strategy_risk_status,
+                "strategy_risk_reason_code": self.strategy_risk_reason_code,
+                "portfolio_risk_decision_hash": self.portfolio_risk_decision_hash,
+                "portfolio_risk_policy_hash": self.portfolio_risk_policy_hash,
+                "portfolio_risk_input_hash": self.portfolio_risk_input_hash,
+                "portfolio_risk_evidence_hash": self.portfolio_risk_evidence_hash,
+                "portfolio_risk_state_source": self.portfolio_risk_state_source,
+                "portfolio_risk_status": self.portfolio_risk_status,
+                "portfolio_risk_reason_code": self.portfolio_risk_reason_code,
+                "pre_submit_risk_decision_hash": self.pre_submit_risk_decision_hash,
+                "pre_submit_risk_policy_hash": self.pre_submit_risk_policy_hash,
+                "pre_submit_risk_input_hash": self.pre_submit_risk_input_hash,
+                "pre_submit_risk_evidence_hash": self.pre_submit_risk_evidence_hash,
+                "pre_submit_risk_plan_hash": self.pre_submit_risk_plan_hash,
+                "pre_submit_risk_state_source": self.pre_submit_risk_state_source,
+                "pre_submit_risk_status": self.pre_submit_risk_status,
+                "pre_submit_risk_reason_code": self.pre_submit_risk_reason_code,
                 "execution_result_hash": self.execution_result_hash,
                 "safety_decision_hash": self.safety_decision_hash,
                 "recovery_decision_hash": self.recovery_decision_hash,

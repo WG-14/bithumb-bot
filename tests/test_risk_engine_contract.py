@@ -542,6 +542,31 @@ def test_risk_budget_krw_not_used_in_arithmetic_authority_paths() -> None:
     assert violations == []
 
 
+def test_non_live_missing_runtime_risk_policy_materializes_disabled_profile() -> None:
+    profile = strategy_risk_profile_from_profile_payload(
+        strategy_instance_id="research:unit",
+        strategy_name="sma_with_filter",
+        pair="KRW-BTC",
+        interval="1m",
+        profile_payload=None,
+        approved_runtime_profile_path=None,
+        approved_runtime_profile_hash=None,
+        live_like=False,
+        live_real_order=False,
+    )
+
+    assert profile is not None
+    payload = profile.as_dict()
+    assert payload["risk_profile_source"] == "research_missing_policy_explicit"
+    assert payload["enforcement_mode"] == "telemetry"
+    assert payload["missing_policy_behavior"] == "disabled_explicit"
+    risk_policy = payload["risk_policy"]
+    assert isinstance(risk_policy, dict)
+    assert risk_policy["policy_status"] == "disabled_explicit"
+    assert risk_policy["missing_policy"] == "disabled_explicit"
+    assert risk_policy["source"] == "research_missing_policy_explicit"
+
+
 def _production_manifest() -> dict[str, object]:
     return {
         "experiment_id": "risk_policy_test",

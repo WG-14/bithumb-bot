@@ -3677,6 +3677,68 @@ def record_execution_plan(
     }
 
 
+def update_execution_plan_final_submit_payload(
+    conn: sqlite3.Connection,
+    *,
+    final_submit_payload: Mapping[str, Any],
+    persistence_status: str = "final_broker_bound_payload",
+) -> dict[str, Any]:
+    payload = dict(final_submit_payload)
+    submit_hash = str(payload.get("submit_plan_hash") or "").strip()
+    if not submit_hash:
+        raise RuntimeError("final_submit_payload_submit_plan_hash_missing")
+    payload.setdefault("final_submit_payload_persistence_status", str(persistence_status))
+    payload_hash = sha256_prefixed(payload)
+    payload["final_submit_payload_hash"] = payload_hash
+    cur = conn.execute(
+        """
+        UPDATE execution_plan
+        SET
+            execution_submit_plan_json=?,
+            execution_submit_plan_hash=?,
+            submit_plan_side=?,
+            submit_plan_qty=?,
+            submit_plan_notional_krw=?,
+            submit_plan_idempotency_key=?,
+            submit_plan_source=?,
+            submit_plan_authority=?,
+            submit_expected=?,
+            final_action=?,
+            block_reason=?
+        WHERE execution_submit_plan_hash=?
+        """,
+        (
+            _json_dumps_stable(payload),
+            submit_hash,
+            str(payload.get("side") or ""),
+            None if payload.get("qty") is None else float(payload.get("qty") or 0.0),
+            None
+            if payload.get("notional_krw") is None
+            else float(payload.get("notional_krw") or 0.0),
+            payload.get("idempotency_key"),
+            str(payload.get("source") or ""),
+            str(payload.get("authority") or ""),
+            1 if bool(payload.get("submit_expected")) else 0,
+            str(payload.get("final_action") or ""),
+            str(payload.get("block_reason") or ""),
+            submit_hash,
+        ),
+    )
+    if cur.rowcount <= 0:
+        return {
+            "updated": False,
+            "reason": "execution_plan_not_found_for_submit_plan_hash",
+            "execution_submit_plan_hash": submit_hash,
+            "final_submit_payload_hash": payload_hash,
+        }
+    return {
+        "updated": True,
+        "execution_submit_plan_hash": submit_hash,
+        "final_submit_payload_hash": payload_hash,
+        "updated_row_count": int(cur.rowcount),
+    }
+
+
 def replay_allocation_decision_hash(conn: sqlite3.Connection, allocation_id: int) -> str:
     row = conn.execute(
         "SELECT allocation_decision_json FROM portfolio_allocation_decision WHERE id=?",

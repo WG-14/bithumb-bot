@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ..config import settings
 from ..db_core import (
@@ -61,6 +61,59 @@ def _context_int(context: dict[str, object] | None, key: str) -> int | None:
     if not isinstance(context, dict) or context.get(key) is None:
         return None
     return int(context[key])
+
+
+_STRATEGY_RISK_KEYS = (
+    "strategy_risk_decision_hash",
+    "strategy_risk_policy_hash",
+    "strategy_risk_input_hash",
+    "strategy_risk_evidence_hash",
+    "strategy_risk_state_source",
+    "strategy_risk_status",
+    "strategy_risk_reason_code",
+)
+_PORTFOLIO_RISK_KEYS = (
+    "portfolio_risk_decision_hash",
+    "portfolio_risk_policy_hash",
+    "portfolio_risk_input_hash",
+    "portfolio_risk_evidence_hash",
+    "portfolio_risk_state_source",
+    "portfolio_risk_status",
+    "portfolio_risk_reason_code",
+)
+_PRE_SUBMIT_RISK_KEYS = (
+    "pre_submit_risk_decision_hash",
+    "pre_submit_risk_policy_hash",
+    "pre_submit_risk_input_hash",
+    "pre_submit_risk_evidence_hash",
+    "pre_submit_risk_plan_hash",
+    "pre_submit_risk_state_source",
+    "pre_submit_risk_status",
+    "pre_submit_risk_reason_code",
+)
+
+
+def _risk_layer_fields_from_context(context: Mapping[str, object] | None) -> dict[str, str | None]:
+    fields: dict[str, str | None] = {
+        key: None for key in (*_STRATEGY_RISK_KEYS, *_PORTFOLIO_RISK_KEYS, *_PRE_SUBMIT_RISK_KEYS)
+    }
+    if not isinstance(context, Mapping):
+        return fields
+    for key in (*_PORTFOLIO_RISK_KEYS, *_PRE_SUBMIT_RISK_KEYS, *_STRATEGY_RISK_KEYS):
+        value = context.get(key)
+        if value is not None and str(value).strip():
+            fields[key] = str(value)
+    if all(fields[key] is None for key in _STRATEGY_RISK_KEYS):
+        for item in context.get("runtime_strategy_result_contexts") or []:
+            if not isinstance(item, Mapping):
+                continue
+            if not str(item.get("strategy_risk_decision_hash") or "").strip():
+                continue
+            for key in _STRATEGY_RISK_KEYS:
+                value = item.get(key)
+                fields[key] = None if value is None or not str(value).strip() else str(value)
+            break
+    return fields
 
 
 def persist_target_position_state_for_run_loop(
@@ -138,6 +191,28 @@ class DecisionCycleResult:
     strategy_contribution_hash: str | None = None
     execution_plan_id: int | None = None
     execution_submit_plan_hash: str | None = None
+    strategy_risk_decision_hash: str | None = None
+    strategy_risk_policy_hash: str | None = None
+    strategy_risk_input_hash: str | None = None
+    strategy_risk_evidence_hash: str | None = None
+    strategy_risk_state_source: str | None = None
+    strategy_risk_status: str | None = None
+    strategy_risk_reason_code: str | None = None
+    portfolio_risk_decision_hash: str | None = None
+    portfolio_risk_policy_hash: str | None = None
+    portfolio_risk_input_hash: str | None = None
+    portfolio_risk_evidence_hash: str | None = None
+    portfolio_risk_state_source: str | None = None
+    portfolio_risk_status: str | None = None
+    portfolio_risk_reason_code: str | None = None
+    pre_submit_risk_decision_hash: str | None = None
+    pre_submit_risk_policy_hash: str | None = None
+    pre_submit_risk_input_hash: str | None = None
+    pre_submit_risk_evidence_hash: str | None = None
+    pre_submit_risk_plan_hash: str | None = None
+    pre_submit_risk_state_source: str | None = None
+    pre_submit_risk_status: str | None = None
+    pre_submit_risk_reason_code: str | None = None
     typed_runtime_decision: RuntimeStrategyDecisionResult | None = None
     representative_runtime_decision_for_observability: RuntimeStrategyDecisionResult | None = None
     typed_runtime_decision_bundle: RuntimeStrategyDecisionResultBundle | None = None
@@ -164,6 +239,28 @@ class DecisionCycleResult:
             "execution_plan_id": self.execution_plan_id,
             "execution_plan_bundle_hash": self.execution_plan_bundle_hash,
             "execution_submit_plan_hash": self.execution_submit_plan_hash,
+            "strategy_risk_decision_hash": self.strategy_risk_decision_hash,
+            "strategy_risk_policy_hash": self.strategy_risk_policy_hash,
+            "strategy_risk_input_hash": self.strategy_risk_input_hash,
+            "strategy_risk_evidence_hash": self.strategy_risk_evidence_hash,
+            "strategy_risk_state_source": self.strategy_risk_state_source,
+            "strategy_risk_status": self.strategy_risk_status,
+            "strategy_risk_reason_code": self.strategy_risk_reason_code,
+            "portfolio_risk_decision_hash": self.portfolio_risk_decision_hash,
+            "portfolio_risk_policy_hash": self.portfolio_risk_policy_hash,
+            "portfolio_risk_input_hash": self.portfolio_risk_input_hash,
+            "portfolio_risk_evidence_hash": self.portfolio_risk_evidence_hash,
+            "portfolio_risk_state_source": self.portfolio_risk_state_source,
+            "portfolio_risk_status": self.portfolio_risk_status,
+            "portfolio_risk_reason_code": self.portfolio_risk_reason_code,
+            "pre_submit_risk_decision_hash": self.pre_submit_risk_decision_hash,
+            "pre_submit_risk_policy_hash": self.pre_submit_risk_policy_hash,
+            "pre_submit_risk_input_hash": self.pre_submit_risk_input_hash,
+            "pre_submit_risk_evidence_hash": self.pre_submit_risk_evidence_hash,
+            "pre_submit_risk_plan_hash": self.pre_submit_risk_plan_hash,
+            "pre_submit_risk_state_source": self.pre_submit_risk_state_source,
+            "pre_submit_risk_status": self.pre_submit_risk_status,
+            "pre_submit_risk_reason_code": self.pre_submit_risk_reason_code,
             "persistence_status": self.persistence_status,
             "mark_processed_candidate": bool(self.mark_processed_candidate),
             "market_price": self.market_price,
@@ -374,6 +471,7 @@ class DecisionCoordinator:
         finally:
             conn.close()
 
+        risk_layer_fields = _risk_layer_fields_from_context(context)
         return DecisionCycleResult(
             candle_ts=typed_bundle.candle_ts,
             strategy_name=strategy_name,
@@ -394,6 +492,28 @@ class DecisionCoordinator:
             strategy_contribution_hash=_context_str(context, "strategy_contribution_hash"),
             execution_plan_id=_context_int(context, "execution_plan_id"),
             execution_submit_plan_hash=_context_str(context, "execution_submit_plan_hash"),
+            strategy_risk_decision_hash=risk_layer_fields["strategy_risk_decision_hash"],
+            strategy_risk_policy_hash=risk_layer_fields["strategy_risk_policy_hash"],
+            strategy_risk_input_hash=risk_layer_fields["strategy_risk_input_hash"],
+            strategy_risk_evidence_hash=risk_layer_fields["strategy_risk_evidence_hash"],
+            strategy_risk_state_source=risk_layer_fields["strategy_risk_state_source"],
+            strategy_risk_status=risk_layer_fields["strategy_risk_status"],
+            strategy_risk_reason_code=risk_layer_fields["strategy_risk_reason_code"],
+            portfolio_risk_decision_hash=risk_layer_fields["portfolio_risk_decision_hash"],
+            portfolio_risk_policy_hash=risk_layer_fields["portfolio_risk_policy_hash"],
+            portfolio_risk_input_hash=risk_layer_fields["portfolio_risk_input_hash"],
+            portfolio_risk_evidence_hash=risk_layer_fields["portfolio_risk_evidence_hash"],
+            portfolio_risk_state_source=risk_layer_fields["portfolio_risk_state_source"],
+            portfolio_risk_status=risk_layer_fields["portfolio_risk_status"],
+            portfolio_risk_reason_code=risk_layer_fields["portfolio_risk_reason_code"],
+            pre_submit_risk_decision_hash=risk_layer_fields["pre_submit_risk_decision_hash"],
+            pre_submit_risk_policy_hash=risk_layer_fields["pre_submit_risk_policy_hash"],
+            pre_submit_risk_input_hash=risk_layer_fields["pre_submit_risk_input_hash"],
+            pre_submit_risk_evidence_hash=risk_layer_fields["pre_submit_risk_evidence_hash"],
+            pre_submit_risk_plan_hash=risk_layer_fields["pre_submit_risk_plan_hash"],
+            pre_submit_risk_state_source=risk_layer_fields["pre_submit_risk_state_source"],
+            pre_submit_risk_status=risk_layer_fields["pre_submit_risk_status"],
+            pre_submit_risk_reason_code=risk_layer_fields["pre_submit_risk_reason_code"],
             persistence_status=persistence_status,
             mark_processed_candidate=decision_id is not None and planning_bundle is not None,
             typed_runtime_decision=single_runtime_decision,

@@ -193,6 +193,7 @@ uv run bithumb-bot risk-layer-replay --db <runtime.sqlite> --execution-plan-id <
 
 The verifier is read-only: it opens SQLite with `mode=ro`, does not call broker
 APIs, does not submit orders, and does not mutate DB state. Applicable strategy,
-portfolio, and pre-submit layers report stored and recomputed decision hashes,
-policy hash, input hash, evidence hash, state source, status, reason code, and
-mismatch reason. Non-applicable layers are reported explicitly.
+portfolio, and pre-submit layers report stored payload integrity, source
+reconstruction, and final layer status separately, along with decision/policy/
+input/evidence hashes, state source, status, reason code, and mismatch reason.
+Non-applicable or missing-source layers are reported explicitly.

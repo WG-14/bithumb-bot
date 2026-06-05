@@ -443,6 +443,8 @@ class StrategyRiskStateProvider:
             "pair": str(pair),
             "interval": str(interval),
             "as_of_ts_ms": int(as_of_ts_ms),
+            "mark_price": float(mark_price),
+            "mark_price_source": str(mark_price_source),
             "scope": "strategy_instance",
             "strategy_instance_scope": {
                 "source_table": "strategy_decisions",

@@ -170,6 +170,11 @@ missing-state evidence. A selected strategy risk-policy violation blocks
 authoritative `PortfolioTarget` adoption before a submittable target-delta plan
 can be created, and the blocking strategy risk decision hash is carried in
 allocation and execution context.
+Research/non-live missing risk policy is not silent: runtime materialization
+creates an explicit disabled telemetry `StrategyRiskProfile` with
+`policy_status=disabled_explicit`, `missing_policy=disabled_explicit`,
+`risk_enforcement_mode=telemetry`, and
+`risk_profile_source=research_missing_policy_explicit`.
 
 After the authoritative `PortfolioTarget` is created, a separate
 `PortfolioRiskDecision` records `portfolio_risk_decision_hash`,
@@ -194,7 +199,14 @@ Immediately before live broker submission,
 `pre_submit_risk_plan_hash` must equal the stable
 `ExecutionSubmitPlan.submit_plan_hash` evaluated by the risk engine. The final
 broker submission path validates this proof after runtime DB/broker state is
-available and before placing the order.
+available and before placing the order. After the proof is attached, the final
+broker-bound submit payload is written back to
+`execution_plan.execution_submit_plan_json` for the matching stable
+`execution_submit_plan_hash`. If a post-proof approval check blocks submission,
+the same column records the proof fields plus
+`final_submit_payload_persistence_status=post_proof_submit_skipped` and a skip
+reason, so replay can distinguish "broker submission not reached" from missing
+evidence.
 
 Operators can replay persisted risk-layer hashes without broker access:
 
@@ -205,7 +217,11 @@ uv run bithumb-bot risk-layer-replay --db <runtime.sqlite> --execution-plan-id <
 
 The verifier opens SQLite read-only, never submits orders, never calls live
 broker APIs, and reports explicit pass/fail/not-applicable status for strategy,
-portfolio, and pre-submit risk layers.
+portfolio, and pre-submit risk layers. Each layer separates
+`stored_payload_integrity_status` from `source_reconstruction_status` and
+`final_layer_status`; a stored decision dict hashing to itself is payload
+integrity evidence, not by itself proof that the runtime source state can be
+reconstructed.
 
 Hash order is deterministic:
 
@@ -221,6 +237,9 @@ Hash order is deterministic:
    `submit_plan_hash` in `SubmitPlan.evidence`.
 4. The live lower boundary requires `pre_submit_risk_plan_hash` to match the
    stable `submit_plan_hash` before any real order is placed.
+5. The final broker-bound payload, including all `pre_submit_risk_*` proof
+   fields, is persisted in `execution_plan.execution_submit_plan_json` and can
+   be inspected by `risk-layer-replay --execution-plan-id <id>`.
 
 The deprecated marker
 `deprecated:risk_budget_krw_not_enforced_as_loss_budget` may still appear as
@@ -277,3 +296,15 @@ Relevant fields include `portfolio_target_hash`, `allocation_decision_hash`,
 same submit policy mode, allowed sources/authorities, legacy compatibility
 flag, and policy hash so a run-start artifact binds the submit policy used by
 later execution plans.
+
+To trace a live decision, start with `strategy_decisions.id` or
+`execution_plan.id`, then inspect:
+
+- strategy source: `strategy_preferences[*].strategy_risk_profile`,
+  `strategy_risk_decision`, and the `strategy_risk_*` hashes
+- portfolio source: `portfolio_target.target_json.portfolio_risk_decision` and
+  the `portfolio_risk_*` hashes
+- pre-submit source: `execution_plan.execution_submit_plan_json` and the
+  `pre_submit_risk_*` hashes, especially `pre_submit_risk_plan_hash`
+- blocking layer: the first layer whose status is not `ALLOW`, or whose replay
+  `final_layer_status` is `fail`

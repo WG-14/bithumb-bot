@@ -576,6 +576,35 @@ def _attach_live_real_pre_submit_risk_proof(
         expected_submit_plan_hash=expected_hash,
     )
     if approval_error is not None:
+        payload.update(
+            {
+                **proof_fields,
+                "final_submit_payload_persistence_status": "post_proof_submit_skipped",
+                "final_submit_payload_skip_reason": approval_error,
+            }
+        )
+        try:
+            from .db_core import update_execution_plan_final_submit_payload
+
+            conn = ensure_db()
+            try:
+                persist_result = update_execution_plan_final_submit_payload(
+                    conn,
+                    final_submit_payload=payload,
+                    persistence_status="post_proof_submit_skipped",
+                )
+                if not bool(persist_result.get("updated")):
+                    raise RuntimeError(str(persist_result.get("reason") or "execution_plan_final_submit_payload_not_bound"))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            _log_live_submit_plan_block(
+                reason=f"final_submit_payload_persist_failed:{exc}",
+                field_name=field_name,
+                source=payload.get("source"),
+                side=side,
+            )
         _log_live_submit_plan_block(
             reason=approval_error,
             field_name=field_name,
@@ -584,6 +613,29 @@ def _attach_live_real_pre_submit_risk_proof(
         )
         return None
     payload.update(proof_fields)
+    try:
+        from .db_core import update_execution_plan_final_submit_payload
+
+        conn = ensure_db()
+        try:
+            persist_result = update_execution_plan_final_submit_payload(
+                conn,
+                final_submit_payload=payload,
+                persistence_status="final_broker_bound_payload",
+            )
+            if not bool(persist_result.get("updated")):
+                raise RuntimeError(str(persist_result.get("reason") or "execution_plan_final_submit_payload_not_bound"))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        _log_live_submit_plan_block(
+            reason=f"final_submit_payload_persist_failed:{exc}",
+            field_name=field_name,
+            source=payload.get("source"),
+            side=side,
+        )
+        return None
     return payload
 
 

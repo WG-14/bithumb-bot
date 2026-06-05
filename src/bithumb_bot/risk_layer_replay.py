@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .canonical_decision import canonical_payload_hash, sha256_prefixed
+from .portfolio_target import build_portfolio_risk_decision
+from .risk_policy_engine import RiskPolicyEngine
+from .strategy_risk_profile import risk_policy_from_mapping
+from .strategy_risk_state import StrategyRiskStateProvider
 
 
 def _json_object(raw: object) -> dict[str, Any]:
@@ -118,10 +122,24 @@ def _layer_result(
     risk_status: str = "",
     reason_code: str = "",
     mismatch_reason: str = "",
+    stored_payload_integrity_status: str | None = None,
+    source_reconstruction_status: str = "not_applicable",
+    final_layer_status: str | None = None,
+    missing_source_material: list[str] | None = None,
 ) -> dict[str, object]:
+    stored_status = stored_payload_integrity_status or replay_status
+    final_status = final_layer_status or (
+        "pass"
+        if stored_status == "pass" and source_reconstruction_status in {"pass", "not_applicable"}
+        else ("not_applicable" if replay_status == "not_applicable" else "fail")
+    )
     return {
         "layer": layer,
         "replay_status": replay_status,
+        "stored_payload_integrity_status": stored_status,
+        "source_reconstruction_status": source_reconstruction_status,
+        "final_layer_status": final_status,
+        "missing_source_material": list(missing_source_material or []),
         "reason": reason,
         "expected_decision_hash": expected_hash,
         "actual_decision_hash": actual_hash,
@@ -192,6 +210,14 @@ def _verify_portfolio_layer(context: Mapping[str, object], target_payload: Mappi
     input_hash = str(decision.get("portfolio_risk_input_hash") or decision.get("risk_input_hash") or "")
     stored_evidence_hash = str(decision.get("portfolio_risk_evidence_hash") or "")
     actual, actual_evidence_hash = _portfolio_risk_actual(decision)
+    rebuild_payload = dict(target_payload)
+    decision_evidence = dict(decision.get("evidence") or {})
+    base_target_hash = str(decision_evidence.get("portfolio_target_hash") or "").strip()
+    if base_target_hash:
+        rebuild_payload["final_portfolio_target_hash"] = base_target_hash
+    rebuilt = build_portfolio_risk_decision(rebuild_payload).as_dict() if rebuild_payload else {}
+    rebuilt_hash = str(rebuilt.get("portfolio_risk_decision_hash") or "")
+    source_reconstruction_status = "pass" if rebuilt_hash == expected else "fail"
     mismatch = ""
     status = "pass"
     if not _valid_hash(expected):
@@ -206,12 +232,14 @@ def _verify_portfolio_layer(context: Mapping[str, object], target_payload: Mappi
     elif stored_evidence_hash != actual_evidence_hash:
         status = "fail"
         mismatch = "evidence_hash_mismatch"
+    elif source_reconstruction_status != "pass":
+        mismatch = "portfolio_source_reconstruction_hash_mismatch"
     return _layer_result(
         layer="portfolio",
-        replay_status=status,
-        reason="matched" if status == "pass" else "mismatch",
+        replay_status="pass" if status == "pass" and source_reconstruction_status == "pass" else "fail",
+        reason="matched" if status == "pass" and source_reconstruction_status == "pass" else "mismatch",
         expected_hash=expected,
-        actual_hash=actual,
+        actual_hash=rebuilt_hash or actual,
         policy_hash=policy_hash,
         input_hash=input_hash,
         evidence_hash=actual_evidence_hash,
@@ -219,6 +247,8 @@ def _verify_portfolio_layer(context: Mapping[str, object], target_payload: Mappi
         risk_status=str(decision.get("status") or ""),
         reason_code=str(decision.get("reason_code") or ""),
         mismatch_reason=mismatch,
+        stored_payload_integrity_status=status,
+        source_reconstruction_status=source_reconstruction_status,
     )
 
 
@@ -250,6 +280,74 @@ def _extract_strategy_decision(context: Mapping[str, object]) -> dict[str, objec
                 "evidence": {},
             }
     return None
+
+
+def _extract_strategy_profile(context: Mapping[str, object]) -> dict[str, object] | None:
+    for key in ("strategy_preferences", "allocation_contributions"):
+        items = context.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, Mapping) and isinstance(item.get("strategy_risk_profile"), Mapping):
+                    return dict(item["strategy_risk_profile"])  # type: ignore[index]
+    return None
+
+
+def _reconstruct_strategy_layer(
+    conn: sqlite3.Connection,
+    *,
+    context: Mapping[str, object],
+    decision: Mapping[str, object],
+) -> tuple[str, str, list[str]]:
+    profile = _extract_strategy_profile(context)
+    evidence = dict(decision.get("evidence") or {})
+    missing: list[str] = []
+    if not isinstance(profile, Mapping):
+        missing.append("strategy_risk_profile")
+    profile_policy = profile.get("risk_policy") if isinstance(profile, Mapping) else None
+    if not isinstance(profile_policy, Mapping):
+        missing.append("strategy_risk_profile.risk_policy")
+    strategy_instance_id = str(evidence.get("strategy_instance_id") or "").strip()
+    strategy_name = str(evidence.get("strategy_name") or "").strip()
+    pair = str(evidence.get("pair") or "").strip()
+    interval = str(evidence.get("interval") or "").strip()
+    as_of_ts_ms = evidence.get("as_of_ts_ms")
+    mark_price = evidence.get("mark_price")
+    if not strategy_instance_id:
+        missing.append("strategy_instance_id")
+    if not strategy_name:
+        missing.append("strategy_name")
+    if not pair:
+        missing.append("pair")
+    if not interval:
+        missing.append("interval")
+    if as_of_ts_ms is None:
+        missing.append("as_of_ts_ms")
+    if mark_price is None:
+        missing.append("mark_price")
+    state_source = str(decision.get("state_source") or "")
+    if state_source not in {"runtime_db_strategy_instance_ledger"}:
+        missing.append(f"reconstructable_state_source:{state_source or 'missing'}")
+    if missing:
+        return "not_applicable", "", missing
+    policy = risk_policy_from_mapping(profile_policy)  # type: ignore[arg-type]
+    snapshot = StrategyRiskStateProvider(conn).snapshot(
+        strategy_instance_id=strategy_instance_id,
+        strategy_name=strategy_name,
+        pair=pair,
+        interval=interval,
+        as_of_ts_ms=int(as_of_ts_ms),
+        mark_price=float(mark_price),
+        policy=policy,
+        enforced=str(profile.get("risk_enforcement_mode") or "") == "enforced",
+    )
+    rebuilt = RiskPolicyEngine(policy).evaluate_pre_decision(snapshot).as_dict()
+    return (
+        "pass"
+        if str(rebuilt.get("risk_decision_hash") or "") == str(decision.get("risk_decision_hash") or "")
+        else "fail",
+        str(rebuilt.get("risk_decision_hash") or ""),
+        [],
+    )
 
 
 def _load_cycle(
@@ -330,6 +428,8 @@ def _verify_pre_submit_layer(submit_payload: Mapping[str, object]) -> dict[str, 
             reason="pre_submit_risk_decision_not_recorded",
         )
     result = _verify_generic_layer("pre_submit", decision)
+    source_status = "not_applicable"
+    missing_source: list[str] = []
     expected_plan_hash = str(submit_payload.get("submit_plan_hash") or "")
     actual_plan_hash = _stable_submit_plan_hash(submit_payload)
     if result["replay_status"] == "pass" and expected_plan_hash != actual_plan_hash:
@@ -342,6 +442,30 @@ def _verify_pre_submit_layer(submit_payload: Mapping[str, object]) -> dict[str, 
             result["replay_status"] = "fail"
             result["reason"] = "mismatch"
             result["mismatch_reason"] = "pre_submit_risk_plan_hash_mismatch"
+        else:
+            decision_plan = dict(decision.get("evidence", {})).get("submit_plan")
+            plan_evidence = (
+                decision_plan.get("evidence") if isinstance(decision_plan, Mapping) else None
+            )
+            decision_bound_hash = (
+                str(plan_evidence.get("execution_submit_plan_hash") or "").strip()
+                if isinstance(plan_evidence, Mapping)
+                else ""
+            )
+            if decision_bound_hash == expected_plan_hash:
+                source_status = "pass"
+            else:
+                source_status = "fail"
+                missing_source.append("pre_submit_decision_submit_plan_hash_binding")
+                result["replay_status"] = "fail"
+                result["reason"] = "mismatch"
+                result["mismatch_reason"] = "pre_submit_source_plan_binding_mismatch"
+    result["stored_payload_integrity_status"] = (
+        "pass" if result["mismatch_reason"] in {"", "pre_submit_source_plan_binding_mismatch"} else "fail"
+    )
+    result["source_reconstruction_status"] = source_status
+    result["final_layer_status"] = result["replay_status"]
+    result["missing_source_material"] = missing_source
     return result
 
 
@@ -356,7 +480,27 @@ def verify_risk_layer_replay(
         decision_id=decision_id,
         execution_plan_id=execution_plan_id,
     )
-    strategy = _verify_generic_layer("strategy", _extract_strategy_decision(context))
+    strategy_decision = _extract_strategy_decision(context)
+    strategy = _verify_generic_layer("strategy", strategy_decision)
+    if isinstance(strategy_decision, Mapping) and strategy["replay_status"] != "not_applicable":
+        source_status, source_hash, missing_source = _reconstruct_strategy_layer(
+            conn,
+            context=context,
+            decision=strategy_decision,
+        )
+        strategy["source_reconstruction_status"] = source_status
+        strategy["missing_source_material"] = missing_source
+        if source_hash:
+            strategy["actual_source_decision_hash"] = source_hash
+        if strategy["stored_payload_integrity_status"] == "pass" and source_status == "fail":
+            strategy["replay_status"] = "fail"
+            strategy["final_layer_status"] = "fail"
+            strategy["reason"] = "mismatch"
+            strategy["mismatch_reason"] = "strategy_source_reconstruction_hash_mismatch"
+        elif strategy["stored_payload_integrity_status"] == "pass" and source_status == "pass":
+            strategy["final_layer_status"] = "pass"
+        elif strategy["stored_payload_integrity_status"] == "pass" and source_status == "not_applicable":
+            strategy["final_layer_status"] = "not_applicable"
     portfolio = _verify_portfolio_layer(context, target_payload)
     pre_submit = _verify_pre_submit_layer(submit_payload)
     layers = {

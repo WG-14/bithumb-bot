@@ -782,6 +782,28 @@ def test_runtime_cycle_artifact_hashes_required_paths() -> None:
         readiness_hash="sha256:ready",
         strategy_decision_hash="sha256:strategy",
         execution_plan_bundle_hash="sha256:plan",
+        strategy_risk_decision_hash="sha256:strategy-risk",
+        strategy_risk_policy_hash="sha256:strategy-policy",
+        strategy_risk_input_hash="sha256:strategy-input",
+        strategy_risk_evidence_hash="sha256:strategy-evidence",
+        strategy_risk_state_source="runtime_db_strategy_instance_ledger",
+        strategy_risk_status="ALLOW",
+        strategy_risk_reason_code="OK",
+        portfolio_risk_decision_hash="sha256:portfolio-risk",
+        portfolio_risk_policy_hash="sha256:portfolio-policy",
+        portfolio_risk_input_hash="sha256:portfolio-input",
+        portfolio_risk_evidence_hash="sha256:portfolio-evidence",
+        portfolio_risk_state_source="portfolio_allocator_target",
+        portfolio_risk_status="ALLOW",
+        portfolio_risk_reason_code="OK",
+        pre_submit_risk_decision_hash="sha256:pre-submit-risk",
+        pre_submit_risk_policy_hash="sha256:pre-submit-policy",
+        pre_submit_risk_input_hash="sha256:pre-submit-input",
+        pre_submit_risk_evidence_hash="sha256:pre-submit-evidence",
+        pre_submit_risk_plan_hash="sha256:plan",
+        pre_submit_risk_state_source="runtime_db_broker",
+        pre_submit_risk_status="ALLOW",
+        pre_submit_risk_reason_code="OK",
         execution_result_hash="sha256:execution",
         safety_decision_hash="sha256:safety",
         recovery_decision_hash="sha256:recovery",
@@ -791,6 +813,10 @@ def test_runtime_cycle_artifact_hashes_required_paths() -> None:
     payload = artifact.as_dict()
     assert payload["artifact_type"] == "runtime_cycle_artifact"
     assert payload["execution_result_hash"] == "sha256:execution"
+    assert payload["strategy_risk_decision_hash"] == "sha256:strategy-risk"
+    assert payload["portfolio_risk_decision_hash"] == "sha256:portfolio-risk"
+    assert payload["pre_submit_risk_decision_hash"] == "sha256:pre-submit-risk"
+    assert payload["pre_submit_risk_plan_hash"] == "sha256:plan"
     assert payload["decision_hash"].startswith("sha256:")
 
 

@@ -510,6 +510,35 @@ class Runner:
                 post_trade_cash=f"{float(trade.get('post_trade_cash', trade.get('cash', 0.0)) or 0.0):.0f}",
                 post_trade_asset=f"{float(trade.get('post_trade_asset', trade.get('asset', 0.0)) or 0.0):.8f}",
             )
+        pre_submit_fields = {
+            "pre_submit_risk_decision_hash": decision_result.pre_submit_risk_decision_hash,
+            "pre_submit_risk_policy_hash": decision_result.pre_submit_risk_policy_hash,
+            "pre_submit_risk_input_hash": decision_result.pre_submit_risk_input_hash,
+            "pre_submit_risk_evidence_hash": decision_result.pre_submit_risk_evidence_hash,
+            "pre_submit_risk_plan_hash": decision_result.pre_submit_risk_plan_hash,
+            "pre_submit_risk_state_source": decision_result.pre_submit_risk_state_source,
+            "pre_submit_risk_status": decision_result.pre_submit_risk_status,
+            "pre_submit_risk_reason_code": decision_result.pre_submit_risk_reason_code,
+        }
+        if decision_result.execution_plan_id is not None:
+            conn = c.db_factory()
+            try:
+                row = conn.execute(
+                    "SELECT execution_submit_plan_json FROM execution_plan WHERE id=?",
+                    (int(decision_result.execution_plan_id),),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is not None:
+                try:
+                    submit_payload = json.loads(str(row["execution_submit_plan_json"] or "{}"))
+                except json.JSONDecodeError:
+                    submit_payload = {}
+                if isinstance(submit_payload, dict):
+                    for key in tuple(pre_submit_fields):
+                        value = submit_payload.get(key)
+                        if value is not None and str(value).strip():
+                            pre_submit_fields[key] = str(value)
         artifact = self._record_artifact(
             "checkpoint:processed",
             candle_ts=decision_result.candle_ts,
@@ -525,6 +554,21 @@ class Runner:
             execution_plan_id=decision_result.execution_plan_id,
             execution_plan_bundle_hash=decision_result.execution_plan_bundle_hash,
             execution_submit_plan_hash=decision_result.execution_submit_plan_hash,
+            strategy_risk_decision_hash=decision_result.strategy_risk_decision_hash,
+            strategy_risk_policy_hash=decision_result.strategy_risk_policy_hash,
+            strategy_risk_input_hash=decision_result.strategy_risk_input_hash,
+            strategy_risk_evidence_hash=decision_result.strategy_risk_evidence_hash,
+            strategy_risk_state_source=decision_result.strategy_risk_state_source,
+            strategy_risk_status=decision_result.strategy_risk_status,
+            strategy_risk_reason_code=decision_result.strategy_risk_reason_code,
+            portfolio_risk_decision_hash=decision_result.portfolio_risk_decision_hash,
+            portfolio_risk_policy_hash=decision_result.portfolio_risk_policy_hash,
+            portfolio_risk_input_hash=decision_result.portfolio_risk_input_hash,
+            portfolio_risk_evidence_hash=decision_result.portfolio_risk_evidence_hash,
+            portfolio_risk_state_source=decision_result.portfolio_risk_state_source,
+            portfolio_risk_status=decision_result.portfolio_risk_status,
+            portfolio_risk_reason_code=decision_result.portfolio_risk_reason_code,
+            **pre_submit_fields,
             execution_result_hash=execution_result.as_dict()["decision_hash"],
         )
         if execution_result.halt_transition:
@@ -585,6 +629,28 @@ def _record_runtime_cycle_artifact(
     execution_plan_id: int | None = None,
     execution_plan_bundle_hash: str | None = None,
     execution_submit_plan_hash: str | None = None,
+    strategy_risk_decision_hash: str | None = None,
+    strategy_risk_policy_hash: str | None = None,
+    strategy_risk_input_hash: str | None = None,
+    strategy_risk_evidence_hash: str | None = None,
+    strategy_risk_state_source: str | None = None,
+    strategy_risk_status: str | None = None,
+    strategy_risk_reason_code: str | None = None,
+    portfolio_risk_decision_hash: str | None = None,
+    portfolio_risk_policy_hash: str | None = None,
+    portfolio_risk_input_hash: str | None = None,
+    portfolio_risk_evidence_hash: str | None = None,
+    portfolio_risk_state_source: str | None = None,
+    portfolio_risk_status: str | None = None,
+    portfolio_risk_reason_code: str | None = None,
+    pre_submit_risk_decision_hash: str | None = None,
+    pre_submit_risk_policy_hash: str | None = None,
+    pre_submit_risk_input_hash: str | None = None,
+    pre_submit_risk_evidence_hash: str | None = None,
+    pre_submit_risk_plan_hash: str | None = None,
+    pre_submit_risk_state_source: str | None = None,
+    pre_submit_risk_status: str | None = None,
+    pre_submit_risk_reason_code: str | None = None,
     execution_result_hash: str | None = None,
     safety_decision_hash: str | None = None,
     recovery_decision_hash: str | None = None,
@@ -612,6 +678,28 @@ def _record_runtime_cycle_artifact(
         execution_plan_id=execution_plan_id,
         execution_plan_bundle_hash=execution_plan_bundle_hash,
         execution_submit_plan_hash=execution_submit_plan_hash,
+        strategy_risk_decision_hash=strategy_risk_decision_hash,
+        strategy_risk_policy_hash=strategy_risk_policy_hash,
+        strategy_risk_input_hash=strategy_risk_input_hash,
+        strategy_risk_evidence_hash=strategy_risk_evidence_hash,
+        strategy_risk_state_source=strategy_risk_state_source,
+        strategy_risk_status=strategy_risk_status,
+        strategy_risk_reason_code=strategy_risk_reason_code,
+        portfolio_risk_decision_hash=portfolio_risk_decision_hash,
+        portfolio_risk_policy_hash=portfolio_risk_policy_hash,
+        portfolio_risk_input_hash=portfolio_risk_input_hash,
+        portfolio_risk_evidence_hash=portfolio_risk_evidence_hash,
+        portfolio_risk_state_source=portfolio_risk_state_source,
+        portfolio_risk_status=portfolio_risk_status,
+        portfolio_risk_reason_code=portfolio_risk_reason_code,
+        pre_submit_risk_decision_hash=pre_submit_risk_decision_hash,
+        pre_submit_risk_policy_hash=pre_submit_risk_policy_hash,
+        pre_submit_risk_input_hash=pre_submit_risk_input_hash,
+        pre_submit_risk_evidence_hash=pre_submit_risk_evidence_hash,
+        pre_submit_risk_plan_hash=pre_submit_risk_plan_hash,
+        pre_submit_risk_state_source=pre_submit_risk_state_source,
+        pre_submit_risk_status=pre_submit_risk_status,
+        pre_submit_risk_reason_code=pre_submit_risk_reason_code,
         execution_result_hash=execution_result_hash,
         safety_decision_hash=safety_decision_hash,
         recovery_decision_hash=recovery_decision_hash,

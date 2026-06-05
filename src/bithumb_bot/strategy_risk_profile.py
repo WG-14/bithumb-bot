@@ -11,6 +11,7 @@ RiskProfileSource = Literal[
     "approved_runtime_profile",
     "approved_risk_profile",
     "runtime_strategy_spec_fixture",
+    "research_missing_policy_explicit",
 ]
 RiskEnforcementMode = Literal["telemetry", "enforced"]
 MissingRiskPolicyBehavior = Literal["fail_closed_for_live", "disabled_explicit"]
@@ -99,7 +100,28 @@ def strategy_risk_profile_from_profile_payload(
         if inline_risk_policy is None:
             if live_like:
                 raise RuntimeError(f"strategy_risk_profile_missing_for_live_strategy:{strategy_name}")
-            return None
+            policy = RiskPolicy(
+                schema_version=1,
+                policy_status="disabled_explicit",
+                missing_policy="disabled_explicit",
+                source="research_missing_policy_explicit",
+            )
+            return StrategyRiskProfile(
+                schema_version=1,
+                strategy_instance_id=str(strategy_instance_id),
+                strategy_name=str(strategy_name),
+                pair=str(pair),
+                interval=str(interval),
+                policy=policy,
+                risk_policy_hash=policy.policy_hash(),
+                risk_profile_source="research_missing_policy_explicit",
+                approved_risk_profile_path=None,
+                approved_runtime_profile_path=approved_runtime_profile_path,
+                approved_risk_profile_hash=None,
+                approved_runtime_profile_hash=approved_runtime_profile_hash,
+                enforcement_mode="telemetry",
+                missing_policy_behavior="disabled_explicit",
+            )
         raw_policy = inline_risk_policy
 
     policy = risk_policy_from_mapping(raw_policy)
@@ -111,7 +133,12 @@ def strategy_risk_profile_from_profile_payload(
     source = str(risk_profile_source or profile.get("risk_profile_source") or "").strip()
     if not source:
         source = "approved_runtime_profile" if profile_payload is not None else "runtime_strategy_spec_fixture"
-    if source not in {"approved_runtime_profile", "approved_risk_profile", "runtime_strategy_spec_fixture"}:
+    if source not in {
+        "approved_runtime_profile",
+        "approved_risk_profile",
+        "runtime_strategy_spec_fixture",
+        "research_missing_policy_explicit",
+    }:
         raise RuntimeError(f"strategy_risk_profile_source_unsupported:{strategy_name}:{source}")
     if live_like and source == "runtime_strategy_spec_fixture":
         raise RuntimeError(f"runtime_strategy_spec_risk_profile_rejected_for_live:{strategy_name}")

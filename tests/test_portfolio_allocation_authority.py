@@ -2428,11 +2428,36 @@ def test_decision_cycle_result_as_dict_exposes_top_level_multi_strategy_artifact
         strategy_contribution_hash="sha256:contribution",
         execution_plan_id=4,
         execution_submit_plan_hash="sha256:submit",
+        strategy_risk_decision_hash="sha256:strategy-risk",
+        strategy_risk_policy_hash="sha256:strategy-policy",
+        strategy_risk_input_hash="sha256:strategy-input",
+        strategy_risk_evidence_hash="sha256:strategy-evidence",
+        strategy_risk_state_source="runtime_db_strategy_instance_ledger",
+        strategy_risk_status="ALLOW",
+        strategy_risk_reason_code="OK",
+        portfolio_risk_decision_hash="sha256:portfolio-risk",
+        portfolio_risk_policy_hash="sha256:portfolio-policy",
+        portfolio_risk_input_hash="sha256:portfolio-input",
+        portfolio_risk_evidence_hash="sha256:portfolio-evidence",
+        portfolio_risk_state_source="portfolio_allocator_target",
+        portfolio_risk_status="ALLOW",
+        portfolio_risk_reason_code="OK",
+        pre_submit_risk_decision_hash="sha256:pre-submit-risk",
+        pre_submit_risk_policy_hash="sha256:pre-submit-policy",
+        pre_submit_risk_input_hash="sha256:pre-submit-input",
+        pre_submit_risk_evidence_hash="sha256:pre-submit-evidence",
+        pre_submit_risk_plan_hash="sha256:submit",
+        pre_submit_risk_state_source="runtime_db_broker",
+        pre_submit_risk_status="ALLOW",
+        pre_submit_risk_reason_code="OK",
     )
 
     payload = result.as_dict()
     assert payload["runtime_strategy_decision_bundle_id"] == 1
     assert payload["runtime_strategy_decision_bundle_hash"] == "sha256:bundle"
+    assert payload["strategy_risk_decision_hash"] == "sha256:strategy-risk"
+    assert payload["portfolio_risk_decision_hash"] == "sha256:portfolio-risk"
+    assert payload["pre_submit_risk_decision_hash"] == "sha256:pre-submit-risk"
     assert payload["portfolio_allocation_decision_id"] == 2
     assert payload["portfolio_allocation_decision_hash"] == "sha256:allocation"
     assert payload["portfolio_target_id"] == 3

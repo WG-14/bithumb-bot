@@ -130,6 +130,9 @@ def test_risk_layer_replay_reports_pass_for_matching_cycle(tmp_path) -> None:
     assert report["pre_submit_risk_replay_status"] == "pass"
     for layer in ("strategy", "portfolio", "pre_submit"):
         payload = report["layers"][layer]
+        assert payload["stored_payload_integrity_status"] in {"pass", "not_applicable"}
+        assert payload["source_reconstruction_status"] in {"pass", "not_applicable"}
+        assert payload["final_layer_status"] in {"pass", "not_applicable"}
         assert payload["expected_decision_hash"].startswith("sha256:")
         assert payload["actual_decision_hash"].startswith("sha256:")
         assert payload["policy_hash"].startswith("sha256:")
@@ -138,6 +141,10 @@ def test_risk_layer_replay_reports_pass_for_matching_cycle(tmp_path) -> None:
         assert payload["state_source"]
         assert payload["risk_status"] == "ALLOW"
         assert payload["reason_code"] == "OK"
+    assert report["layers"]["portfolio"]["source_reconstruction_status"] == "pass"
+    assert report["layers"]["pre_submit"]["source_reconstruction_status"] == "pass"
+    assert report["layers"]["strategy"]["source_reconstruction_status"] == "not_applicable"
+    assert report["layers"]["strategy"]["missing_source_material"]
 
 
 def test_risk_layer_replay_fails_on_tampered_strategy_hash(tmp_path) -> None:
@@ -153,6 +160,7 @@ def test_risk_layer_replay_fails_on_tampered_strategy_hash(tmp_path) -> None:
 
     assert report["overall_status"] == "fail"
     assert report["strategy_risk_replay_status"] == "fail"
+    assert report["layers"]["strategy"]["stored_payload_integrity_status"] == "fail"
     assert report["layers"]["strategy"]["mismatch_reason"] == "decision_hash_mismatch"
 
 
