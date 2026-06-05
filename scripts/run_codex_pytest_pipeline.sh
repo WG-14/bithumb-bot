@@ -56,6 +56,14 @@ git_status_porcelain() {
   git status --porcelain=v1 --untracked-files=all
 }
 
+git_worktree_fingerprint() {
+  {
+    git status --porcelain=v1 --untracked-files=all
+    git diff --binary --no-ext-diff
+    git diff --cached --binary --no-ext-diff
+  } | sha256sum | awk '{print $1}'
+}
+
 cleanup_codex_pytest_guard() {
   if [[ -n "${guard_dir}" && -d "${guard_dir}" ]]; then
     rm -rf "${guard_dir}"
@@ -299,14 +307,14 @@ while (( iteration <= CODEX_PYTEST_MAX_ITERATIONS )); do
   fi
   last_signature="${signature}"
 
-  status_before="$(git_status_porcelain)"
+  fingerprint_before="$(git_worktree_fingerprint)"
   run_codex_pytest_repair_with_guard "${codex_input_file}"
   run_stage "post-Codex repo runtime artifact guard" "${ARTIFACT_CHECK_SCRIPT}"
   detect_forbidden_repair_patterns
-  status_after="$(git_status_porcelain)"
+  fingerprint_after="$(git_worktree_fingerprint)"
 
-  if [[ "${status_after}" == "${status_before}" ]]; then
-    fail "Codex returned without changing repository state"
+  if [[ "${fingerprint_after}" == "${fingerprint_before}" ]]; then
+    fail "Codex returned without changing repository diff"
   fi
 
   iteration=$((iteration + 1))
