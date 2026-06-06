@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -143,6 +146,67 @@ def _changed_files_from_args(args: argparse.Namespace, repo_root: Path) -> tuple
     return ()
 
 
+def _github_event_payload() -> dict[str, object]:
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        return {}
+    path = Path(event_path)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _run_git_changed_files(repo_root: Path, *args: str) -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            ("git", *args),
+            cwd=repo_root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ()
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _changed_files_from_github_event(repo_root: Path, payload: dict[str, object]) -> tuple[str, ...]:
+    pull_request = payload.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return ()
+    base = pull_request.get("base")
+    head = pull_request.get("head")
+    base_sha = str(base.get("sha") or "").strip() if isinstance(base, dict) else ""
+    head_sha = str(head.get("sha") or "").strip() if isinstance(head, dict) else ""
+    base_ref = str(base.get("ref") or "").strip() if isinstance(base, dict) else ""
+    candidates: list[tuple[str, ...]] = []
+    if base_sha and head_sha:
+        candidates.append(("diff", "--name-only", f"{base_sha}...{head_sha}"))
+        candidates.append(("diff", "--name-only", f"{base_sha}..{head_sha}"))
+    if base_ref:
+        candidates.append(("diff", "--name-only", f"origin/{base_ref}...HEAD"))
+    candidates.append(("diff", "--name-only", "HEAD^..HEAD"))
+    for candidate in candidates:
+        files = _run_git_changed_files(repo_root, *candidate)
+        if files:
+            return files
+    return ()
+
+
+def _changed_files_from_env(repo_root: Path, payload: dict[str, object]) -> tuple[str, ...]:
+    raw = os.environ.get("STRATEGY_PR_CHANGED_FILES", "")
+    if raw.strip():
+        return tuple(line.strip() for line in raw.splitlines() if line.strip())
+    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        return _changed_files_from_github_event(repo_root, payload)
+    return ()
+
+
 def _evidence_text_from_args(args: argparse.Namespace, repo_root: Path) -> str:
     if args.evidence_text:
         return str(args.evidence_text)
@@ -151,12 +215,37 @@ def _evidence_text_from_args(args: argparse.Namespace, repo_root: Path) -> str:
     return (repo_root / ".github" / "pull_request_template.md").read_text(encoding="utf-8")
 
 
+def _evidence_text_from_env(payload: dict[str, object]) -> str:
+    raw = os.environ.get("STRATEGY_PR_EVIDENCE_TEXT")
+    if raw is not None:
+        return raw
+    pull_request = payload.get("pull_request")
+    if isinstance(pull_request, dict):
+        title = str(pull_request.get("title") or "")
+        body = str(pull_request.get("body") or "")
+        return "\n".join((title, body))
+    return ""
+
+
+def _explicit_diff_inputs(args: argparse.Namespace) -> bool:
+    return bool(args.changed_file or args.changed_files or args.evidence_file or args.evidence_text)
+
+
+def _explicit_evidence_input(args: argparse.Namespace) -> bool:
+    return bool(args.evidence_file or args.evidence_text)
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--changed-file", action="append")
     parser.add_argument("--changed-files")
     parser.add_argument("--evidence-file")
     parser.add_argument("--evidence-text")
+    parser.add_argument(
+        "--require-diff-aware",
+        action="store_true",
+        help="fail if changed-file/evidence inputs or PR metadata are unavailable",
+    )
     return parser.parse_args(argv)
 
 
@@ -174,20 +263,39 @@ def main() -> int:
             continue
         for token in missing_tokens(path, tokens):
             violations.append(f"{path.relative_to(repo_root)} missing required strategy workload guard text: {token}")
+    event_payload = _github_event_payload()
     changed_files = _changed_files_from_args(args, repo_root)
-    evidence_text = _evidence_text_from_args(args, repo_root)
-    violations.extend(
-        validate_strategy_pr_evidence(
-            changed_files=changed_files,
-            evidence_text=evidence_text,
+    evidence_text = _evidence_text_from_args(args, repo_root) if _explicit_evidence_input(args) else ""
+    diff_source = "explicit_args" if _explicit_diff_inputs(args) else "static_only"
+    if not changed_files and not _explicit_diff_inputs(args):
+        changed_files = _changed_files_from_env(repo_root, event_payload)
+        env_evidence = _evidence_text_from_env(event_payload)
+        if changed_files:
+            evidence_text = env_evidence
+            diff_source = "ci_pr_metadata"
+    diff_evaluated = bool(changed_files)
+    if args.require_diff_aware and not diff_evaluated:
+        violations.append("diff-aware strategy PR guard required but changed-file evidence was unavailable")
+    if diff_evaluated:
+        violations.extend(
+            validate_strategy_pr_evidence(
+                changed_files=changed_files,
+                evidence_text=evidence_text,
+            )
         )
-    )
     if violations:
         print("strategy PR workload guard violations:", file=sys.stderr)
         for violation in violations:
             print(f"- {violation}", file=sys.stderr)
         return 1
-    print("strategy PR workload guard: ok")
+    print("strategy PR workload guard: static docs/templates ok")
+    if diff_evaluated:
+        print(f"strategy PR workload guard: diff-aware evidence ok ({diff_source}, changed_files={len(changed_files)})")
+    else:
+        print(
+            "strategy PR workload guard: diff-aware evidence skipped "
+            "(no changed-file PR metadata or explicit changed-file/evidence arguments)"
+        )
     return 0
 
 

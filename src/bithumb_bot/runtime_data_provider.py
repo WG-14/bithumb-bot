@@ -530,6 +530,7 @@ class SQLiteRuntimeDataProvider:
             "last_close": feature_payload.get("last_close"),
         }
         coverage = dict(report.payload.get("coverage_by_capability") or {})
+        requirements_hash = requirements.content_hash()
         scope_key = getattr(request, "runtime_scope_key", None)
         scope_payload = (
             scope_key.with_hash_payload()
@@ -557,7 +558,8 @@ class SQLiteRuntimeDataProvider:
             "provider_name": self.provider_name,
             "provider_version": self.provider_version,
             "provider_contract_hash": self.provider_contract_hash,
-            "runtime_data_contract_hash": requirements.content_hash(),
+            "runtime_data_requirements_hash": requirements_hash,
+            "runtime_data_contract_hash": requirements_hash,
             "runtime_data_availability_report_hash": report.report_hash,
             "runtime_scope_key": scope_payload or None,
             "scope_key_hash": scope_payload.get("scope_key_hash"),

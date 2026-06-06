@@ -587,6 +587,7 @@ def _attach_runtime_feature_snapshot_metadata(
 ) -> None:
     payload = feature_snapshot.as_dict()
     fields = {
+        "runtime_data_requirements_hash": payload.get("runtime_data_requirements_hash"),
         "runtime_data_contract_hash": payload.get("runtime_data_contract_hash"),
         "provider_contract_hash": payload.get("provider_contract_hash"),
         "runtime_data_availability_report_hash": payload.get("runtime_data_availability_report_hash"),

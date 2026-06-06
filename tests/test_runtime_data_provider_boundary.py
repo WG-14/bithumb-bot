@@ -102,6 +102,7 @@ def test_runtime_data_provider_preflight_and_snapshot_are_deterministic() -> Non
             through_ts_ms=1_700_000_180_000,
         )
         requirements = resolver.resolve_for_strategy_set(strategy_set)
+        requirements_hash = requirements.content_hash()
 
         snapshot_a = provider.snapshot(request, requirements)
         snapshot_b = provider.snapshot(request, requirements)
@@ -114,6 +115,9 @@ def test_runtime_data_provider_preflight_and_snapshot_are_deterministic() -> Non
     assert snapshot_b is not None
     assert snapshot_a.feature_snapshot_hash == snapshot_b.feature_snapshot_hash
     assert snapshot_a.market_snapshot_hash == snapshot_b.market_snapshot_hash
+    snapshot_payload = snapshot_a.as_dict()
+    assert snapshot_payload["runtime_data_requirements_hash"] == requirements_hash
+    assert snapshot_payload["runtime_data_contract_hash"] == requirements_hash
     assert snapshot_a.feature_payload["candle_ts"] == 1_700_000_180_000
     assert snapshot_a.feature_payload["last_close"] == 13.0
 
@@ -457,6 +461,10 @@ def test_canary_runtime_decision_uses_provider_snapshot_provenance() -> None:
     assert result.base_context["plugin_contract_hash"].startswith("sha256:")
     assert result.base_context["through_ts_ms"] == 1_700_000_180_000
     assert result.base_context["runtime_data_contract_hash"].startswith("sha256:")
+    assert result.base_context["runtime_data_requirements_hash"].startswith("sha256:")
+    assert result.base_context["runtime_data_requirements_hash"] == (
+        result.base_context["runtime_data_contract_hash"]
+    )
     provenance = result.base_context["strategy_evaluation_provenance"]
     assert isinstance(provenance, dict)
     assert provenance["feature_snapshot_hash"] == result.base_context["feature_snapshot_hash"]
@@ -467,12 +475,25 @@ def test_canary_runtime_decision_uses_provider_snapshot_provenance() -> None:
     assert result.replay_fingerprint["runtime_data_contract_hash"] == (
         result.base_context["runtime_data_contract_hash"]
     )
+    assert result.replay_fingerprint["runtime_data_requirements_hash"] == (
+        result.base_context["runtime_data_requirements_hash"]
+    )
+    assert result.boundary["runtime_data_requirements_hash"] == (
+        result.base_context["runtime_data_requirements_hash"]
+    )
+    assert result.boundary["feature_snapshot_hash"] == result.base_context["feature_snapshot_hash"]
+    assert result.boundary["runtime_decision_request_hash"] == (
+        result.base_context["runtime_decision_request_hash"]
+    )
     assert bundle.data_availability_report is not None
     assert bundle.data_availability_report.report_hash.startswith("sha256:")
     replay_metadata = bundle.as_dict()["results"][0]
     assert replay_metadata["feature_snapshot_hash"] == result.base_context["feature_snapshot_hash"]
     assert replay_metadata["runtime_data_availability_report_hash"] == (
         bundle.data_availability_report.report_hash
+    )
+    assert replay_metadata["runtime_data_requirements_hash"] == (
+        result.base_context["runtime_data_requirements_hash"]
     )
     assert replay_metadata["provider_contract_hash"] == result.base_context["provider_contract_hash"]
     assert replay_metadata["source_schema_hash"] == result.base_context["source_schema_hash"]

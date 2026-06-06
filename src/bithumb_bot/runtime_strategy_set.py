@@ -1611,6 +1611,8 @@ def _runtime_result_replay_metadata(result: RuntimeStrategyDecisionResult) -> di
         "through_ts_ms": base.get("through_ts_ms"),
         "runtime_data_contract_hash": base.get("runtime_data_contract_hash")
         or replay_payload.get("runtime_data_contract_hash"),
+        "runtime_data_requirements_hash": base.get("runtime_data_requirements_hash")
+        or replay_payload.get("runtime_data_requirements_hash"),
         "provider_contract_hash": base.get("provider_contract_hash")
         or replay_payload.get("provider_contract_hash"),
         "runtime_data_availability_report_hash": base.get("runtime_data_availability_report_hash")

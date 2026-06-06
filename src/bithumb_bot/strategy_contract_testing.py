@@ -199,6 +199,14 @@ def assert_live_eligible_contract(
         )
         assert feature_snapshot is not None
         result = adapter.decide_feature_snapshot(request, feature_snapshot)
+        assert result is not None
+        from bithumb_bot.runtime_strategy_decision import (
+            _attach_runtime_feature_snapshot_metadata,
+            _attach_runtime_request_metadata,
+        )
+
+        _attach_runtime_feature_snapshot_metadata(result, feature_snapshot)
+        _attach_runtime_request_metadata(result, request)
     finally:
         conn.close()
 
@@ -206,6 +214,9 @@ def assert_live_eligible_contract(
     assert result.decision.policy_contract_hash.startswith("sha256:")
     assert result.decision.policy_input_hash.startswith("sha256:")
     assert result.decision.policy_decision_hash.startswith("sha256:")
+    assert result.base_context["runtime_decision_request_hash"].startswith("sha256:")
+    assert result.base_context["feature_snapshot_hash"].startswith("sha256:")
+    assert result.base_context["runtime_data_requirements_hash"].startswith("sha256:")
     assert result.replay_fingerprint["replay_fingerprint_hash"].startswith("sha256:")
     provenance = result.decision.trace.get("strategy_evaluation_provenance")
     assert isinstance(provenance, dict)

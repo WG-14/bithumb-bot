@@ -27,6 +27,22 @@ Public contract helpers are available from `bithumb_bot.strategy_contract_testin
 - `assert_replay_compatible_contract(plugin, dataset, params, tmp_path)` for Level 2
 - `assert_live_eligible_contract(plugin, tmp_path, params, pair, interval)` for Level 3
 
+The default fast PR guard checks this document and the pull request template on
+all runs. On GitHub pull_request runs it also evaluates the actual changed files
+against the pull request title/body evidence. Local focused verification can
+exercise the same diff-aware path explicitly:
+
+```bash
+uv run python scripts/check_strategy_pr_workload_guard.py \
+  --require-diff-aware \
+  --changed-file src/bithumb_bot/strategy_plugins/example.py \
+  --evidence-file /path/to/pr-evidence.md
+```
+
+When no PR metadata or explicit changed-file/evidence arguments are available,
+the guard reports that only the diff-aware portion was skipped; that output is
+not full diff-aware validation.
+
 | Level | Required hooks | Forbidden vocabulary | Stable fail-closed reasons | Expected files | Test helper |
 | --- | --- | --- | --- | --- | --- |
 | Level 1 research-only | `StrategySpec`, `research_event_builder` or `decide_snapshot` | runtime adapter, approved profile, live dry-run, live real-order, promotion extension | `promotion_extension_missing`, `promotion_runtime_unsupported_for_strategy`, `runtime_replay_unsupported_for_strategy`, `live_dry_run_not_allowed_for_strategy` | one plugin file, built-in manifest entry or external entry point, and one focused test file | `assert_research_only_contract` |
