@@ -17,6 +17,7 @@ For strategy-related changes, complete every item below. For non-strategy change
 - [ ] New strategy authoring stays plugin-centered.
 - [ ] In-repo built-in strategy plugins updated `src/bithumb_bot/strategy_plugins/builtin_manifest.py`, or external strategy packages declared a `bithumb_bot.strategy_plugins` entry point.
 - [ ] Strategy appears in `list_research_strategy_plugins()` and resolves through `resolve_research_strategy_plugin()`.
+- [ ] Strategy plugin inventory verification: `uv run bithumb-bot strategy-plugin-inventory --json` shows the expected strategy source, contract hash, live eligibility, and fail-closed reason.
 - [ ] Live-eligible strategies have runtime decision adapter discovery coverage where applicable.
-- [ ] Common research/runtime engines remain strategy-neutral.
+- [ ] Common execution, risk, data, research, and runtime core paths remain strategy-neutral.
 - [ ] No full default-fast research matrices were added.

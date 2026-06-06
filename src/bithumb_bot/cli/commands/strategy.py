@@ -7,6 +7,14 @@ from bithumb_bot.cli.registry import CommandSpec
 from ._helpers import make_spec, parser_error
 
 
+def _strategy_plugin_inventory(args: argparse.Namespace, context) -> int:
+    del args
+    from bithumb_bot.strategy_plugin_inventory import strategy_plugin_inventory_json
+
+    context.printer(strategy_plugin_inventory_json())
+    return 0
+
+
 def _strategy_sweep(args: argparse.Namespace, _context) -> None:
     from bithumb_bot.config import settings
     from bithumb_bot.reporting import parse_kst_date_range_to_ts_ms
@@ -60,6 +68,18 @@ def _strategy_sweep(args: argparse.Namespace, _context) -> None:
 def command_specs() -> list[CommandSpec]:
     return [
         make_spec(
+            "strategy-plugin-inventory",
+            domain="strategy",
+            handler=_strategy_plugin_inventory,
+            help="print read-only strategy plugin discovery inventory as deterministic JSON",
+            description=(
+                "Read-only strategy plugin inventory. Does not open the trading DB, "
+                "contact brokers, submit orders, or write runtime artifacts."
+            ),
+            build=_build_strategy_plugin_inventory,
+            json_output_supported=True,
+        ),
+        make_spec(
             "strategy-sweep",
             domain="strategy",
             handler=_strategy_sweep,
@@ -72,6 +92,10 @@ def command_specs() -> list[CommandSpec]:
             json_output_supported=True,
         )
     ]
+
+
+def _build_strategy_plugin_inventory(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true", help="emit deterministic JSON (default)")
 
 
 def _build_strategy_sweep(parser: argparse.ArgumentParser) -> None:

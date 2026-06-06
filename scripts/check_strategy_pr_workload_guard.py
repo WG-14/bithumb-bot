@@ -19,6 +19,12 @@ REQUIRED_PR_TEMPLATE_TOKENS = (
     "memory_sensitive",
     "lower-level contract coverage",
     "no default-fast workload delta",
+    "builtin_manifest.py",
+    "bithumb_bot.strategy_plugins",
+    "strategy-plugin-inventory --json",
+    "list_research_strategy_plugins()",
+    "resolve_research_strategy_plugin()",
+    "common execution, risk, data, research, and runtime core paths remain strategy-neutral",
 )
 
 REQUIRED_AUTHORING_DOC_TOKENS = (
@@ -29,6 +35,12 @@ REQUIRED_AUTHORING_DOC_TOKENS = (
     "research/nightly workload delta",
     "full default-fast research matrices",
     "lower-level contract",
+    "builtin_manifest.py",
+    "entry-point group",
+    "STRATEGY_PLUGINS",
+    "strategy-plugin-inventory --json",
+    "list_research_strategy_plugins()",
+    "resolve_research_strategy_plugin()",
 )
 
 

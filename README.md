@@ -99,6 +99,7 @@ uv run bithumb-bot execution-quality-report --limit 200 --compare-manifest examp
 uv run bithumb-bot decision-telemetry --limit 200
 uv run bithumb-bot decision-attribution --limit 500
 uv run bithumb-bot strategy-report
+uv run bithumb-bot strategy-plugin-inventory --json
 uv run bithumb-bot research-backtest --manifest examples/research/sma_filter_manifest.example.json
 uv run bithumb-bot research-walk-forward --manifest examples/research/sma_filter_manifest.example.json
 uv run bithumb-bot research-verify-audit --experiment-id <id>

@@ -15,6 +15,10 @@ class BuiltinStrategyPluginExport:
     def object_path(self) -> str:
         return f"{self.module}:{self.object_name}"
 
+    def load(self) -> Any:
+        module = import_module(self.module)
+        return getattr(module, self.object_name)
+
 
 BUILTIN_STRATEGY_PLUGIN_EXPORTS: tuple[BuiltinStrategyPluginExport, ...] = (
     BuiltinStrategyPluginExport(
@@ -54,5 +58,4 @@ def iter_builtin_strategy_plugin_exports() -> tuple[BuiltinStrategyPluginExport,
 
 def iter_builtin_strategy_plugins_from_manifest() -> Iterable[Any]:
     for plugin_export in BUILTIN_STRATEGY_PLUGIN_EXPORTS:
-        module = import_module(plugin_export.module)
-        yield getattr(module, plugin_export.object_name)
+        yield plugin_export.load()

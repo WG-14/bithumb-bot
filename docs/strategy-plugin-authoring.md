@@ -46,6 +46,14 @@ This is intentionally not package-wide auto-scanning; helper modules,
 experimental modules, and test-only modules must not become runtime-discoverable
 by accident.
 
+Built-in manifest entries may point to one public plugin object, a callable that
+returns plugin objects, or an iterable export such as `STRATEGY_PLUGINS`. The
+loader applies the same coercion semantics as external entry-point discovery:
+public Level 1/2/3 authoring objects are normalized into
+`ResearchStrategyPlugin`, and every resulting plugin is registered
+individually. The manifest entry is still required, even for `STRATEGY_PLUGINS`,
+so in-repo discovery remains explicit and reviewable.
+
 External packages must not edit the built-in manifest. They register through the
 `bithumb_bot.strategy_plugins` entry-point group in their package metadata.
 
@@ -55,6 +63,22 @@ allowlisted in the focused discovery guard test with a clear reason. A new
 built-in strategy is not complete until it appears in
 `list_research_strategy_plugins()` and can be resolved with
 `resolve_research_strategy_plugin()`.
+
+Operators and reviewers can inspect the read-only discovery surface without a
+trading DB, broker credentials, order submission, or runtime artifact writes:
+
+```bash
+uv run bithumb-bot strategy-plugin-inventory --json
+```
+
+The strategy plugin inventory emits deterministic JSON sorted by strategy name.
+Each entry includes source attribution, built-in manifest object path when
+available, authoring level, capability level, contract hashes, live eligibility,
+fail-closed reason, decision-evidence contract hash, and data requirements. Use
+it to verify that a strategy is discoverable through
+`list_research_strategy_plugins()` / `resolve_research_strategy_plugin()` while
+preserving strategy-neutral common execution, risk, data, and runtime core
+paths.
 
 ## Level 1: Fast Research Path
 

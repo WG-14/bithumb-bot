@@ -25,7 +25,8 @@ StrategyPluginRegistration = (
 
 
 def iter_builtin_strategy_plugins() -> Iterable[StrategyPluginRegistration]:
-    yield from iter_builtin_strategy_plugins_from_manifest()
+    for loaded in iter_builtin_strategy_plugins_from_manifest():
+        yield from _coerce_loaded_plugins(loaded)
 
 
 def iter_entry_point_strategy_plugins() -> Iterable[ResearchStrategyPlugin]:
@@ -48,7 +49,7 @@ def iter_entry_point_strategy_plugins() -> Iterable[ResearchStrategyPlugin]:
             str(getattr(item, "value", "")),
         ),
     ):
-        yield from _coerce_loaded_plugins(entry_point.load())
+        yield from coerce_loaded_strategy_plugins(entry_point.load())
 
 
 def iter_discovered_strategy_plugins() -> Iterable[ResearchStrategyPlugin]:
@@ -57,6 +58,10 @@ def iter_discovered_strategy_plugins() -> Iterable[ResearchStrategyPlugin]:
 
 
 def _coerce_loaded_plugins(loaded: Any) -> Iterable[ResearchStrategyPlugin]:
+    yield from coerce_loaded_strategy_plugins(loaded)
+
+
+def coerce_loaded_strategy_plugins(loaded: Any) -> Iterable[ResearchStrategyPlugin]:
     if isinstance(loaded, ResearchStrategyPlugin):
         yield loaded
         return

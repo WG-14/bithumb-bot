@@ -4,6 +4,8 @@ import ast
 from importlib import import_module
 import json
 import sqlite3
+import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from bithumb_bot.research.strategy_registry import (
 )
 from bithumb_bot.research.strategy_spec import StrategySpec
 from bithumb_bot.strategy_evidence_contract import DecisionEvidenceContract
+from bithumb_bot.strategy_plugin_inventory import build_strategy_plugin_inventory
 from bithumb_bot.strategy_plugins.builtin_manifest import (
     BuiltinStrategyPluginExport,
     iter_builtin_strategy_plugin_exports,
@@ -298,6 +301,102 @@ def test_builtin_manifest_exports_are_discoverable_and_hash_stable() -> None:
         assert resolved.contract_hash() == sha256_prefixed(resolved.contract_payload())
 
 
+def test_strategy_plugin_inventory_is_read_only_deterministic_and_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bithumb_bot.db_core as db_core
+    import bithumb_bot.strategy_plugins as strategy_plugins
+
+    def _db_forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("strategy plugin inventory must not open the trading DB")
+
+    monkeypatch.setattr(sqlite3, "connect", _db_forbidden)
+    monkeypatch.setattr(db_core, "ensure_db", _db_forbidden)
+    reload_research_strategy_plugins_for_tests(providers=(strategy_plugins.iter_builtin_strategy_plugins,))
+
+    inventory = build_strategy_plugin_inventory()
+    second_inventory = build_strategy_plugin_inventory()
+    listed = {plugin.name: plugin for plugin in list_research_strategy_plugins()}
+    manifest_names = {
+        _normalize_plugin(_load_builtin_export(plugin_export)).name
+        for plugin_export in iter_builtin_strategy_plugin_exports()
+    }
+
+    assert inventory == second_inventory
+    assert inventory["schema_version"] == 1
+    assert inventory["strategy_count"] == len(inventory["strategies"])
+    assert [entry["name"] for entry in inventory["strategies"]] == sorted(
+        entry["name"] for entry in inventory["strategies"]
+    )
+    assert manifest_names <= {entry["name"] for entry in inventory["strategies"]}
+
+    required_keys = {
+        "name",
+        "version",
+        "source",
+        "manifest_object_path",
+        "authoring_contract_kind",
+        "authoring_level",
+        "capability_level",
+        "contract_hash",
+        "strategy_spec_hash",
+        "runtime_capabilities",
+        "live_eligibility",
+        "fail_closed_reason",
+        "decision_evidence_contract",
+        "required_data",
+        "optional_data",
+    }
+    for entry in inventory["strategies"]:
+        plugin = listed[entry["name"]]
+        assert required_keys <= set(entry)
+        assert entry["source"] == "built_in_manifest"
+        assert entry["manifest_object_path"] in _builtin_export_object_paths()
+        assert entry["contract_hash"] == plugin.contract_hash()
+        assert entry["strategy_spec_hash"] == plugin.spec.spec_hash()
+        assert entry["decision_evidence_contract"]["contract_hash"] == (
+            plugin.decision_evidence_contract.contract_hash()
+        )
+        if not entry["live_eligibility"]["dry_run_allowed"] or not entry["live_eligibility"]["real_order_allowed"]:
+            assert entry["fail_closed_reason"]
+            assert entry["fail_closed_reason"] == plugin.runtime_capabilities.fail_closed_reason
+
+    by_name = {entry["name"]: entry for entry in inventory["strategies"]}
+    assert by_name["threshold_research_only"]["authoring_level"] == "level_1_research_only"
+    assert by_name["threshold_research_only"]["capability_level"] == "research_only"
+    assert by_name["replay_threshold"]["authoring_level"] == "level_2_replay_compatible"
+    assert by_name["replay_threshold"]["capability_level"] == "replay_compatible"
+    assert by_name["canary_non_sma"]["authoring_level"] == "level_3_live_eligible"
+    assert by_name["canary_non_sma"]["capability_level"] == "live_eligible"
+
+
+def test_strategy_plugin_inventory_cli_is_read_only_json_surface() -> None:
+    from types import SimpleNamespace
+
+    from bithumb_bot.cli.context import AppContext
+    from bithumb_bot.cli.main import main
+    from bithumb_bot.cli.registry import command_registry
+
+    output: list[str] = []
+    spec = command_registry()["strategy-plugin-inventory"]
+
+    assert spec.read_only is True
+    assert spec.mutating is False
+    assert spec.writes_db is False
+    assert spec.uses_broker is False
+    assert spec.produces_artifact is False
+    assert spec.json_output_supported is True
+
+    rc = main(
+        ["strategy-plugin-inventory", "--json"],
+        context=AppContext(settings=SimpleNamespace(MODE="paper"), printer=output.append),
+    )
+    payload = json.loads(output[0])
+
+    assert rc == 0
+    assert payload == build_strategy_plugin_inventory()
+
+
 def test_public_builtin_plugin_exports_must_be_registered_in_manifest() -> None:
     public_exports = _iter_public_plugin_export_paths()
     manifest_exports = _builtin_export_object_paths()
@@ -311,6 +410,56 @@ def test_public_builtin_plugin_exports_must_be_registered_in_manifest() -> None:
     assert undocumented_allowlist == []
     assert public_exports - manifest_exports - allowlisted_exports == set()
     assert manifest_exports <= public_exports
+
+
+def test_builtin_manifest_iterable_strategy_plugins_are_expanded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bithumb_bot.strategy_plugins as strategy_plugins
+    import bithumb_bot.strategy_plugins.builtin_manifest as builtin_manifest
+
+    module = types.ModuleType("tests.dynamic_builtin_strategy_plugins")
+    first = _dynamic_plugin(name="dynamic_builtin_iterable_a")
+    second = _dynamic_plugin(name="dynamic_builtin_iterable_b", runtime_supported=False)
+    module.STRATEGY_PLUGINS = (first, second)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(
+        builtin_manifest,
+        "BUILTIN_STRATEGY_PLUGIN_EXPORTS",
+        (BuiltinStrategyPluginExport(module.__name__, "STRATEGY_PLUGINS"),),
+    )
+
+    reload_research_strategy_plugins_for_tests(providers=(strategy_plugins.iter_builtin_strategy_plugins,))
+
+    listed = {plugin.name for plugin in list_research_strategy_plugins()}
+    assert listed == {"dynamic_builtin_iterable_a", "dynamic_builtin_iterable_b"}
+    assert resolve_research_strategy_plugin("dynamic_builtin_iterable_a") is first
+    assert resolve_research_strategy_plugin("dynamic_builtin_iterable_b") is second
+
+
+def test_builtin_manifest_callable_authoring_export_is_expanded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bithumb_bot.strategy_plugins as strategy_plugins
+    import bithumb_bot.strategy_plugins.builtin_manifest as builtin_manifest
+
+    module = types.ModuleType("tests.dynamic_builtin_strategy_plugin_callable")
+    plugin = _dynamic_plugin(name="dynamic_builtin_callable")
+
+    def _strategy_plugins() -> tuple[ResearchStrategyPlugin, ...]:
+        return (plugin,)
+
+    module.STRATEGY_PLUGINS = _strategy_plugins
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(
+        builtin_manifest,
+        "BUILTIN_STRATEGY_PLUGIN_EXPORTS",
+        (BuiltinStrategyPluginExport(module.__name__, "STRATEGY_PLUGINS"),),
+    )
+
+    reload_research_strategy_plugins_for_tests(providers=(strategy_plugins.iter_builtin_strategy_plugins,))
+
+    assert resolve_research_strategy_plugin("dynamic_builtin_callable") is plugin
 
 
 def test_builtin_manifest_runtime_capability_contracts_are_fail_closed() -> None:
