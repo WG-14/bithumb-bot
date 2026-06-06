@@ -1316,12 +1316,19 @@ def test_single_pair_planner_rejects_multi_target_allocation_before_submit() -> 
     assert result.persistence_context["execution_block_reason"] == "single_pair_allocation_target_count_mismatch"
     assert result.persistence_context["runtime_scope"] == "multi-strategy / single-pair / single-interval runtime"
     assert result.persistence_context["runtime_scope_mode"] == "single_pair"
+    assert result.persistence_context["blocked_layer"] == "runtime_scope_validation"
+    assert result.persistence_context["required_migration"] == "RuntimeScopeV2"
+    assert result.persistence_context["target_position_state_scope"] == "pair_only"
+    assert result.persistence_context["execution_plan_scope"] == "single_target"
+    assert result.persistence_context["portfolio_ledger_scope"] == "single_asset"
     assert result.persistence_context["multi_pair_portfolio_supported"] is False
     assert result.persistence_context["multi_pair_portfolio_fail_closed_reason"] == "multi_pair_runtime_unsupported"
     assert result.persistence_context["single_pair_allocation_invariant_checked"] is True
     assert result.persistence_context["runtime_pair"] == "KRW-BTC"
     assert result.persistence_context["allocation_target_count"] == 2
     assert result.persistence_context["allocation_target_pairs"] == ["KRW-BTC", "KRW-ETH"]
+    assert result.persistence_context["submit_expected"] is False
+    assert result.persistence_context["execution_decision"] == {}
 
 
 def test_single_pair_planner_rejects_target_pair_mismatch_before_submit() -> None:
@@ -1351,10 +1358,15 @@ def test_single_pair_planner_rejects_target_pair_mismatch_before_submit() -> Non
     assert result.persistence_context["execution_block_reason"] == "single_pair_allocation_target_pair_mismatch"
     assert result.persistence_context["multi_pair_portfolio_supported"] is False
     assert result.persistence_context["multi_pair_portfolio_fail_closed_reason"] == "multi_pair_runtime_unsupported"
+    assert result.persistence_context["blocked_layer"] == "runtime_scope_validation"
+    assert result.persistence_context["required_migration"] == "RuntimeScopeV2"
+    assert result.persistence_context["execution_plan_scope"] == "single_target"
     assert result.persistence_context["single_pair_allocation_invariant_checked"] is True
     assert result.persistence_context["runtime_pair"] == "KRW-BTC"
     assert result.persistence_context["allocation_target_count"] == 1
     assert result.persistence_context["allocation_target_pairs"] == ["KRW-ETH"]
+    assert result.persistence_context["submit_expected"] is False
+    assert result.persistence_context["execution_decision"] == {}
 
 
 def test_planner_runtime_pair_uses_injected_scope_when_global_pair_changes(tmp_path) -> None:
@@ -1411,6 +1423,8 @@ def test_planner_runtime_pair_uses_injected_scope_when_global_pair_changes(tmp_p
 
     assert result.planning_error is None
     assert result.persistence_context["runtime_pair"] == "KRW-BTC"
+    assert result.persistence_context["target_position_state_scope"] == "pair_only"
+    assert result.persistence_context["execution_plan_scope"] == "single_target"
     assert result.persistence_context["allocation_target_pairs"] == ["KRW-BTC"]
     assert result.persistence_context["portfolio_target"]["pair"] == "KRW-BTC"
     assert result.persistence_context["portfolio_target"]["target_exposure_krw"] == pytest.approx(12_345.0)
@@ -1584,6 +1598,62 @@ def test_persist_target_position_state_uses_runtime_pair_not_global_pair(tmp_pat
     assert btc is not None
     assert btc.target_exposure_krw == pytest.approx(70_000.0)
     assert eth is None
+
+
+def test_target_position_state_schema_is_pair_level_actual_target_state(tmp_path) -> None:
+    from bithumb_bot.db_core import load_target_position_state, upsert_target_position_state
+
+    conn = ensure_db(str(tmp_path / "target-state-pair-scope.sqlite"))
+    try:
+        pk_columns = [
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(target_position_state)").fetchall()
+            if int(row["pk"] or 0)
+        ]
+        upsert_target_position_state(
+            conn,
+            pair="KRW-BTC",
+            target_exposure_krw=10_000.0,
+            target_qty=0.0001,
+            last_signal="BUY",
+            last_decision_id=1,
+            last_reference_price=100_000_000.0,
+            updated_ts=100,
+            target_origin="allocator",
+        )
+        upsert_target_position_state(
+            conn,
+            pair="KRW-BTC",
+            target_exposure_krw=20_000.0,
+            target_qty=0.0002,
+            last_signal="HOLD",
+            last_decision_id=2,
+            last_reference_price=100_000_000.0,
+            updated_ts=200,
+            target_origin="allocator",
+        )
+        upsert_target_position_state(
+            conn,
+            pair="KRW-ETH",
+            target_exposure_krw=30_000.0,
+            target_qty=0.01,
+            last_signal="BUY",
+            last_decision_id=3,
+            last_reference_price=3_000_000.0,
+            updated_ts=300,
+            target_origin="allocator",
+        )
+        btc = load_target_position_state(conn, pair="KRW-BTC")
+        eth = load_target_position_state(conn, pair="KRW-ETH")
+    finally:
+        conn.close()
+
+    assert pk_columns == ["pair"]
+    assert btc is not None
+    assert eth is not None
+    assert btc.target_exposure_krw == pytest.approx(20_000.0)
+    assert btc.last_decision_id == 2
+    assert eth.target_exposure_krw == pytest.approx(30_000.0)
 
 
 def test_live_performance_gate_uses_allocator_selected_contributions_not_global_strategy(

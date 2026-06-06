@@ -145,6 +145,7 @@ UNSUPPORTED_MULTI_INTERVAL_SCOPE = "multi_interval_runtime"
 MULTI_PAIR_RUNTIME_UNSUPPORTED_REASON = "multi_pair_runtime_unsupported"
 SINGLE_INTERVAL_RUNTIME_UNSUPPORTED_REASON = "single_interval_runtime_unsupported"
 MULTI_PAIR_REQUIRED_BEFORE_ENABLEMENT = (
+    "pair-scoped runtime shards",
     "pair-specific target state",
     "pair-specific runtime data preflight",
     "pair-specific strategy decision bundles or pair-scoped bundle partitioning",
@@ -161,6 +162,11 @@ def runtime_scope_contract() -> dict[str, object]:
         "runtime_scope": RUNTIME_SCOPE_DESCRIPTION,
         "runtime_scope_mode": RUNTIME_SCOPE_MODE,
         "supported_runtime_scope": SUPPORTED_RUNTIME_SCOPE,
+        "blocked_layer": "runtime_scope_validation",
+        "required_migration": "RuntimeScopeV2",
+        "target_position_state_scope": "pair_only",
+        "execution_plan_scope": "single_target",
+        "portfolio_ledger_scope": "single_asset",
         "unsupported_runtime_scope": [
             UNSUPPORTED_MULTI_PAIR_SCOPE,
             UNSUPPORTED_MULTI_INTERVAL_SCOPE,

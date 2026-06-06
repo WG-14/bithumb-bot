@@ -26,13 +26,14 @@ Runtime strategy set
   -> execution service
 ```
 
-`StrategyDecisionV2.execution_intent` is a non-authoritative strategy hint. It may be serialized for reproducibility and diagnostics, but it does not decide final portfolio exposure, final order size, conflict resolution, or live submit eligibility.
+`StrategyDecisionV2.execution_intent` is a non-authoritative strategy hint. It may be serialized for reproducibility and diagnostics, but it does not decide final portfolio exposure, final order size, conflict resolution, or live submit eligibility. Current multi-strategy support means multiple strategies determine one target for one runtime pair and one runtime interval; it does not mean multi-pair portfolio runtime support.
 
 ## Contracts
 
 - `StrategyPreference` records a strategy's typed preference: signal direction, desired exposure or weight hints, confidence, horizon, exposure cap, reason, policy hashes, position snapshot hash, and non-authoritative execution intent hint.
 - `SignalAggregator` validates typed strategy preferences and creates a deterministic preference set.
 - `PortfolioAllocator` converts one or more preferences into one authoritative `PortfolioTarget` for the runtime pair. The allocator remains portfolio-shaped for future extension, but production execution is single-pair and single-interval only.
+- If the allocator produces multiple targets, the current run-loop planner rejects the allocation before submit with `single_pair_allocation_target_count_mismatch`. If the one target is for a different pair than the runtime pair, it rejects before submit with `single_pair_allocation_target_pair_mismatch`.
 - `PortfolioTarget` carries allocator policy, allocator config hash, strategy contribution hash, allocation input hash, final target hash, conflict metadata, authoritativeness, and fail-closed reason.
 - `PortfolioRiskDecision` is created after an authoritative `PortfolioTarget`
   and before submittable execution planning. It is distinct from exposure-cap
@@ -141,6 +142,22 @@ runtime_strategy_set_manifest
 ```
 
 Allocation and execution plan rows carry the same manifest id/hash. Compatibility projections in `strategy_decisions` remain non-authoritative; replay should use the manifest-to-plan chain.
+
+## Target State And Accounting Scope
+
+`target_position_state(pair)` is current pair-level actual target state. It is
+not strategy-instance-level virtual target state, and it is not interval-level
+virtual strategy lifecycle state. Future strategy-instance or interval
+lifecycle support must introduce a separate virtual target-state model instead
+of treating the current pair row as per-strategy authority.
+
+The current live accounting ledger remains single-asset authority for the
+configured runtime pair. A single aggregate portfolio row such as
+`portfolio(id=1, asset_qty)` is not enough to authorize multi-pair live
+execution. Multi-pair support requires pair-scoped runtime shards, pair-aware
+allocation input, execution batching, pair-specific submit/reconcile loops,
+cross-pair risk budget semantics, and a multi-asset accounting ledger or
+equivalent currency-scoped accounting model.
 
 ## Multi Strategy Conflicts
 

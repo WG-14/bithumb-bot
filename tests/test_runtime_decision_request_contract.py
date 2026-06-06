@@ -1793,6 +1793,11 @@ def test_same_pair_same_interval_multi_strategy_runtime_scope_is_accepted() -> N
     )
     payload = strategy_set.as_dict()
     assert payload["supported_runtime_scope"] == "multi_strategy_single_pair_single_interval"
+    assert payload["blocked_layer"] == "runtime_scope_validation"
+    assert payload["required_migration"] == "RuntimeScopeV2"
+    assert payload["target_position_state_scope"] == "pair_only"
+    assert payload["execution_plan_scope"] == "single_target"
+    assert payload["portfolio_ledger_scope"] == "single_asset"
     assert payload["single_pair_runtime_enforced"] is True
     assert payload["single_interval_runtime_enforced"] is True
     assert payload["multi_pair_portfolio_supported"] is False
@@ -2732,6 +2737,11 @@ def test_normalized_runtime_strategy_set_manifest_materializes_active_instances(
     assert manifest["runtime_scope"] == "multi-strategy / single-pair / single-interval runtime"
     assert manifest["runtime_scope_mode"] == "single_pair"
     assert manifest["supported_runtime_scope"] == "multi_strategy_single_pair_single_interval"
+    assert manifest["blocked_layer"] == "runtime_scope_validation"
+    assert manifest["required_migration"] == "RuntimeScopeV2"
+    assert manifest["target_position_state_scope"] == "pair_only"
+    assert manifest["execution_plan_scope"] == "single_target"
+    assert manifest["portfolio_ledger_scope"] == "single_asset"
     assert manifest["multi_pair_portfolio_supported"] is False
     assert manifest["multiple_execution_targets_supported"] is False
     assert manifest["active_strategy_pairs"] == ["KRW-BTC"]
@@ -2742,6 +2752,7 @@ def test_normalized_runtime_strategy_set_manifest_materializes_active_instances(
     required = unsupported["required_before_enablement"]
     for item in (
         "pair-specific target state",
+        "pair-scoped runtime shards",
         "pair-specific runtime data preflight",
         "pair-specific strategy decision bundles or pair-scoped bundle partitioning",
         "pair-specific allocation targets",
