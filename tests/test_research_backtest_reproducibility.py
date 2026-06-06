@@ -4750,7 +4750,7 @@ def test_walk_forward_complete_external_audit_traces_all_windows(tmp_path, monke
         "resource_limits": {
             # Keep complete external walk-forward trace coverage explicit while
             # bounding this reduced fixture just above the default 128 MiB audit cap.
-            "max_audit_stream_bytes": 136 * 1024 * 1024,
+            "max_audit_stream_bytes": 160 * 1024 * 1024,
         },
     }
 

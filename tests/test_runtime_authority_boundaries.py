@@ -130,12 +130,14 @@ def test_db_bound_projector_signature_is_rejected_before_projection() -> None:
     assert calls == []
 
 
-def test_builtin_sma_db_bound_projector_fails_closed_at_projection_boundary() -> None:
+def test_builtin_sma_adapter_no_longer_exposes_db_bound_projector() -> None:
     from bithumb_bot.runtime_adapters.sma_with_filter import SmaWithFilterRuntimeDecisionAdapter
 
-    with pytest.raises(RuntimeError, match="promotion_runtime_adapter_db_bound_projector_forbidden:sma_with_filter"):
-        _project_runtime_feature_snapshot(
-            adapter=SmaWithFilterRuntimeDecisionAdapter(),
-            request=SimpleNamespace(strategy_name="sma_with_filter"),
-            feature_snapshot=RuntimeFeatureSnapshot({"feature_payload": {}, "feature_snapshot_hash": "sha256:x"}),
-        )
+    snapshot = RuntimeFeatureSnapshot({"feature_payload": {}, "feature_snapshot_hash": "sha256:x"})
+    projected = _project_runtime_feature_snapshot(
+        adapter=SmaWithFilterRuntimeDecisionAdapter(),
+        request=SimpleNamespace(strategy_name="sma_with_filter"),
+        feature_snapshot=snapshot,
+    )
+
+    assert projected is snapshot

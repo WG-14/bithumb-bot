@@ -11,6 +11,7 @@ from bithumb_bot.db_core import ensure_db
 from bithumb_bot.compat.engine_legacy import run_loop
 from bithumb_bot.runtime_compat import _close_guard_ms, _is_closed_candle, _select_latest_closed_candle
 from bithumb_bot.execution_service import ExecutionDecisionSummary, ExecutionSubmitPlan
+from bithumb_bot.execution_plan_batch import ExecutionPlanBatch, PairExecutionPlan
 from bithumb_bot.run_loop_execution_planner import ExecutionPlanBundle
 from bithumb_bot.strategy_policy_contract import EntryExecutionIntent, PositionSnapshot, StrategyDecisionV2
 from bithumb_bot.compat.sma_legacy_adapter import compute_signal
@@ -236,9 +237,9 @@ def _buy_execution_plan() -> ExecutionPlanBundle:
         residual_live_sell_mode="telemetry",
         residual_buy_sizing_mode="telemetry",
         residual_submit_plan=None,
-        buy_submit_plan=plan,
+        buy_submit_plan=None,
         target_shadow_decision=None,
-        target_submit_plan=None,
+        target_submit_plan=plan,
     )
     return ExecutionPlanBundle(
         summary=summary,
@@ -259,6 +260,7 @@ def _buy_execution_plan() -> ExecutionPlanBundle:
         },
         readiness_payload={},
         target_policy_metadata={},
+        execution_plan_batch=_unit_execution_plan_batch(plan=plan, submit_expected=True),
     )
 
 
@@ -301,6 +303,40 @@ def _hold_execution_plan(result: _RuntimeDecisionResult) -> ExecutionPlanBundle:
         },
         readiness_payload={},
         target_policy_metadata={},
+        execution_plan_batch=_unit_execution_plan_batch(plan=None, submit_expected=False),
+    )
+
+
+def _unit_execution_plan_batch(
+    *,
+    plan: ExecutionSubmitPlan | None,
+    submit_expected: bool,
+) -> ExecutionPlanBatch:
+    submit_hash = "sha256:no-submit" if plan is None else plan.content_hash()
+    pair_plan = PairExecutionPlan(
+        pair=settings.PAIR,
+        portfolio_target_hash="sha256:unit-portfolio-target",
+        execution_submit_plan_hash=submit_hash,
+        idempotency_key="unit-candle-plan",
+        submit_authority_policy_hash="sha256:unit-submit-authority-policy",
+        pre_submit_risk_decision_hash="",
+        scope_key_hash="sha256:unit-scope",
+        scope_key_hashes=("sha256:unit-scope",),
+        execution_plan_hash="sha256:unit-execution-plan",
+        order_rule_snapshot_hash="sha256:unit-order-rules" if submit_expected else "",
+        order_rule_snapshot={"source": "unit"},
+        lock_evidence_hash="sha256:unit-lock-evidence" if submit_expected else "",
+        lock_status="active" if submit_expected else "not_required",
+        submit_expected=bool(submit_expected),
+        pre_submit_risk_required=False,
+        pre_submit_risk_not_required_reason="unit_not_required",
+    )
+    return ExecutionPlanBatch(
+        runtime_strategy_set_manifest_hash="sha256:unit-runtime-strategy-set",
+        allocation_decision_hash="sha256:unit-allocation",
+        pair_plans=(pair_plan,),
+        batch_risk_decision_evidence={"source": "unit"},
+        budget_lock_hash="sha256:unit-budget-lock",
     )
 
 

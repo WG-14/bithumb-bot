@@ -1018,6 +1018,7 @@ def _validate_submit_authority_before_executor(
         plan,
         settings_obj=settings,
         plan_kind=plan_kind,
+        require_final_payload=True,
     )
     if decision.allowed:
         return True

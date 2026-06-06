@@ -20,6 +20,7 @@ from bithumb_bot.research.strategy_registry import (
     RuntimeParameterAdapter,
     RuntimeReplayBuilder,
     RuntimeDataRequirementBuilder,
+    RuntimeFeatureSnapshotBuilder,
     SingleReplayBundleBuilder,
     StrategyRuntimeCapabilities,
 )
@@ -94,6 +95,7 @@ class PromotionGradeStrategyExtension:
     runtime_parameter_adapter: RuntimeParameterAdapter | None
     runtime_decision_adapter_factory: Callable[[], Any] | None
     policy_assembly_factory: Callable[[], Any] | None
+    runtime_feature_snapshot_builder: RuntimeFeatureSnapshotBuilder | None = None
     research_export_normalizer: ResearchExportNormalizer | None = None
     decision_payload_adapter: DecisionPayloadAdapter | None = None
     exit_signal_context_builder: ExitSignalContextBuilder | None = None
@@ -126,6 +128,7 @@ class PromotionGradeStrategyExtension:
             "runtime_replay_supported": self.runtime_replay_builder is not None,
             "runtime_parameter_adapter_supported": self.runtime_parameter_adapter is not None,
             "runtime_decision_adapter_supported": self.runtime_decision_adapter_factory is not None,
+            "runtime_feature_snapshot_builder_supported": self.runtime_feature_snapshot_builder is not None,
             "policy_assembly_supported": self.policy_assembly_factory is not None,
             "research_export_normalizer_supported": self.research_export_normalizer is not None,
             "single_replay_bundle_supported": self.single_replay_bundle_builder is not None,
@@ -386,6 +389,7 @@ def promotion_grade_plugin(
         research_policy_decision_builder=extension.research_policy_decision_builder,
         research_export_normalizer=extension.research_export_normalizer,
         runtime_decision_adapter_factory=extension.runtime_decision_adapter_factory,
+        runtime_feature_snapshot_builder=extension.runtime_feature_snapshot_builder,
         single_replay_bundle_builder=extension.single_replay_bundle_builder,
         policy_assembly_factory=extension.policy_assembly_factory,
         runtime_capabilities=extension.runtime_capabilities(),

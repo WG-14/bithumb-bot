@@ -2351,26 +2351,33 @@ def test_position_normalizer_is_the_only_runtime_decision_mutation_boundary() ->
 
 def test_engine_orchestration_normalizes_before_snapshot_decision(monkeypatch) -> None:
     events: list[str] = []
-    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    conn = _build_candle_db([10.0 + 0.01 * idx for idx in range(40)])
     old_pair = engine.settings.PAIR
     old_interval = engine.settings.INTERVAL
+    base_ts = 1_700_000_000_000
 
-    def _normalize(conn, strategy, *, through_ts_ms=None, normalizer=None):
+    from bithumb_bot import runtime_data_provider_sma
+    from bithumb_bot.runtime_adapters.sma_with_filter import SmaWithFilterRuntimeDecisionAdapter
+
+    original_load_position_context = runtime_data_provider_sma.load_sma_position_context
+
+    def _normalize(*args, **kwargs):
         events.append("normalize")
-        return 0
+        return original_load_position_context(*args, **kwargs)
 
-    def _decide(conn, strategy, *, through_ts_ms=None):
+    def _decide(self, request, feature_snapshot):
+        del self, request, feature_snapshot
         events.append("decision")
         return None
 
     monkeypatch.setattr(
-        runtime_sma_adapter,
-        "normalize_position_state_before_strategy_decision",
+        runtime_data_provider_sma,
+        "load_sma_position_context",
         _normalize,
     )
     monkeypatch.setattr(
-        runtime_sma_adapter,
-        "decide_sma_with_filter_runtime_snapshot_from_db",
+        SmaWithFilterRuntimeDecisionAdapter,
+        "decide_feature_snapshot",
         _decide,
     )
 
@@ -2379,7 +2386,7 @@ def test_engine_orchestration_normalizes_before_snapshot_decision(monkeypatch) -
         object.__setattr__(engine.settings, "INTERVAL", "1m")
         decision = engine.compute_strategy_decision_snapshot(
             conn,
-            through_ts_ms=1_700_000_240_000,
+            through_ts_ms=base_ts + 39 * 60_000,
             strategy_name="sma_with_filter",
         )
     finally:

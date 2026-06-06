@@ -2368,6 +2368,7 @@ def _broker_submit_authority_allowed(
         execution_submit_plan,
         settings_obj=settings,
         plan_kind=plan_kind,
+        require_final_payload=True,
     )
     if decision.allowed:
         return True

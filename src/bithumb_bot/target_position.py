@@ -138,6 +138,8 @@ class StartupTargetPositionPolicyDecision:
             "target_closeout_requested": self.target_origin == TARGET_ORIGIN_OPERATOR_CLOSEOUT,
             "target_strategy_signal_source": self.created_from_signal,
             "target_would_submit_on_startup": bool(self.would_submit_on_startup),
+            "actual_target_authority": ACTUAL_PAIR_TARGET_AUTHORITY,
+            "actual_target_authority_scope": ACTUAL_PAIR_TARGET_AUTHORITY_SCOPE,
             "target_startup_policy_block_reason": self.block_reason,
         }
 

@@ -160,6 +160,7 @@ def evaluate_submit_authority_policy(
     *,
     settings_obj: object,
     plan_kind: str,
+    require_final_payload: bool = False,
 ) -> SubmitAuthorityPolicyDecision:
     policy = submit_authority_policy_from_settings(settings_obj)
     payload = plan.as_dict() if hasattr(plan, "as_dict") else dict(plan or {})
@@ -173,6 +174,7 @@ def evaluate_submit_authority_policy(
     submit_expected = bool(payload.get("submit_expected"))
     proof = str(payload.get("pre_submit_proof_status") or "").strip()
     normalized_kind = str(plan_kind or "").strip().lower()
+    final_payload_required = bool(require_final_payload or hasattr(plan, "as_final_payload"))
 
     def final_payload_error() -> str | None:
         try:
@@ -221,9 +223,10 @@ def evaluate_submit_authority_policy(
         return decision(False, "live_dry_run_non_submitting")
     if policy.live_real_order_requires_target_delta:
         if normalized_kind == "residual":
-            final_error = final_payload_error()
-            if final_error is not None:
-                return decision(False, final_error)
+            if final_payload_required:
+                final_error = final_payload_error()
+                if final_error is not None:
+                    return decision(False, final_error)
             if source != RESIDUAL_SUBMIT_SOURCE:
                 return decision(False, "live_real_order_residual_plan_invalid_source")
             if authority not in RESIDUAL_SUBMIT_AUTHORITIES:
@@ -241,9 +244,10 @@ def evaluate_submit_authority_policy(
         if execution_engine != "target_delta":
             return decision(False, "live_real_order_requires_execution_engine_target_delta")
         if normalized_kind == "target":
-            final_error = final_payload_error()
-            if final_error is not None:
-                return decision(False, final_error)
+            if final_payload_required:
+                final_error = final_payload_error()
+                if final_error is not None:
+                    return decision(False, final_error)
             if source != TARGET_DELTA_SUBMIT_SOURCE:
                 return decision(False, "live_real_order_target_plan_invalid_source")
             if authority not in TARGET_DELTA_SUBMIT_AUTHORITIES:

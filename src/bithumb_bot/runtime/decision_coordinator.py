@@ -448,6 +448,21 @@ class DecisionCoordinator:
                 execution_plan_bundle=planning_bundle,
             )
             context.update(execution_refs)
+            context["runtime_strategy_decision_bundle_hash"] = bundle_refs[
+                "runtime_strategy_decision_bundle_hash"
+            ]
+            context["portfolio_allocation_decision_hash"] = allocation_refs[
+                "allocation_decision_hash"
+            ]
+            context["execution_submit_plan_hash"] = execution_refs[
+                "execution_submit_plan_hash"
+            ]
+            context["execution_plan_batch_hash"] = batch_refs[
+                "execution_plan_batch_hash"
+            ]
+            context["execution_plan_batch_id"] = batch_refs[
+                "execution_plan_batch_id"
+            ]
             if typed_bundle.strategy_set.multi_strategy_enabled:
                 context["strategy_decision_projection_type"] = (
                     "multi_strategy_compatibility_projection"
@@ -455,21 +470,6 @@ class DecisionCoordinator:
                 context["strategy_decisions_authority"] = (
                     "compatibility_projection_not_execution_authority"
                 )
-                context["runtime_strategy_decision_bundle_hash"] = bundle_refs[
-                    "runtime_strategy_decision_bundle_hash"
-                ]
-                context["portfolio_allocation_decision_hash"] = allocation_refs[
-                    "allocation_decision_hash"
-                ]
-                context["execution_submit_plan_hash"] = execution_refs[
-                    "execution_submit_plan_hash"
-                ]
-                context["execution_plan_batch_hash"] = batch_refs[
-                    "execution_plan_batch_hash"
-                ]
-                context["execution_plan_batch_id"] = batch_refs[
-                    "execution_plan_batch_id"
-                ]
             if typed_bundle.strategy_set.multi_strategy_enabled:
                 signal = str(context.get("authoritative_execution_signal") or "HOLD").upper()
                 if signal not in {"BUY", "SELL", "HOLD"}:

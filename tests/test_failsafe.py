@@ -452,6 +452,7 @@ class _LoopConn:
         self.portfolio_target_rows: dict[str, dict[str, object]] = {}
         self.execution_plan_batch_rows: dict[str, dict[str, object]] = {}
         self.execution_plan_rows: dict[tuple[int, str], dict[str, object]] = {}
+        self.strategy_virtual_target_state_rows: dict[tuple[str, str, str, str], str] = {}
         self.budget_lock_rows: dict[str, dict[str, object]] = {}
         self.order_lock_rows: dict[str, dict[str, object]] = {}
         self.in_transaction = False
@@ -480,6 +481,17 @@ class _LoopConn:
                     "adopted_broker_qty": state.adopted_broker_qty,
                     "adopted_broker_exposure_krw": state.adopted_broker_exposure_krw,
                     "created_from_signal": state.created_from_signal,
+                    "actual_target_authority": state.actual_target_authority,
+                    "actual_target_authority_scope": state.actual_target_authority_scope,
+                    "actual_target_source": state.actual_target_source,
+                    "runtime_strategy_set_manifest_hash": state.runtime_strategy_set_manifest_hash,
+                    "runtime_strategy_decision_bundle_hash": state.runtime_strategy_decision_bundle_hash,
+                    "portfolio_allocation_decision_hash": state.portfolio_allocation_decision_hash,
+                    "portfolio_target_hash": state.portfolio_target_hash,
+                    "execution_plan_batch_hash": state.execution_plan_batch_hash,
+                    "execution_submit_plan_hash": state.execution_submit_plan_hash,
+                    "actual_target_provenance_hash": state.actual_target_provenance_hash,
+                    "actual_target_provenance_json": state.actual_target_provenance_json,
                 }
             )
 
@@ -502,7 +514,34 @@ class _LoopConn:
                     None if len(params) <= 10 or params[10] is None else float(params[10])
                 ),
                 created_from_signal=str(params[11] if len(params) > 11 else ""),
+                actual_target_authority=str(
+                    params[12] if len(params) > 12 else "allocator_derived_pair_actual_target"
+                ),
+                actual_target_authority_scope=str(
+                    params[13] if len(params) > 13 else "pair"
+                ),
+                actual_target_source=str(params[14] if len(params) > 14 else ""),
+                runtime_strategy_set_manifest_hash=str(params[15] if len(params) > 15 else ""),
+                runtime_strategy_decision_bundle_hash=str(params[16] if len(params) > 16 else ""),
+                portfolio_allocation_decision_hash=str(params[17] if len(params) > 17 else ""),
+                portfolio_target_hash=str(params[18] if len(params) > 18 else ""),
+                execution_plan_batch_hash=str(params[19] if len(params) > 19 else ""),
+                execution_submit_plan_hash=str(params[20] if len(params) > 20 else ""),
+                actual_target_provenance_hash=str(params[21] if len(params) > 21 else ""),
+                actual_target_provenance_json=str(params[22] if len(params) > 22 else "{}"),
             )
+            return _Rows(None, rowcount=1)
+
+        if "SELECT state_json FROM strategy_virtual_target_state" in q:
+            assert params is not None
+            key = (str(params[0]), str(params[1]), str(params[2]), str(params[3]))
+            state_json = self.strategy_virtual_target_state_rows.get(key)
+            return _Rows(None if state_json is None else {"state_json": state_json})
+
+        if "INSERT INTO strategy_virtual_target_state" in q:
+            assert params is not None
+            key = (str(params[0]), str(params[2]), str(params[3]), str(params[4]))
+            self.strategy_virtual_target_state_rows[key] = str(params[12])
             return _Rows(None, rowcount=1)
 
         if "INSERT OR IGNORE INTO runtime_strategy_set_manifest" in q:

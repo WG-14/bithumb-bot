@@ -121,6 +121,7 @@ _SMA_WITH_FILTER_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
     research_policy_decision_builder=runtime_contract.research_policy_decision_builder,
     research_export_normalizer=runtime_contract.research_export_normalizer,
     runtime_decision_adapter_factory=runtime_contract.runtime_decision_adapter_factory,
+    runtime_feature_snapshot_builder=runtime_contract.runtime_feature_snapshot_builder,
     single_replay_bundle_builder=runtime_contract.single_replay_bundle_builder,
     policy_assembly_factory=runtime_contract.policy_assembly_factory,
     live_dry_run_allowed=True,

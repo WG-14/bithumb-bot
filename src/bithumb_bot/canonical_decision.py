@@ -95,8 +95,6 @@ COMMON_CANONICAL_DECISION_FIELDS_V2 = (
     "runtime_strategy_set_manifest_hash",
     "approved_profile_hash",
     "execution_plan_bundle_hash",
-    "execution_plan_batch_hash",
-    "pair_execution_plan_hash",
     "execution_summary_hash",
     "execution_submit_plan_hash",
     "final_action",
@@ -203,8 +201,6 @@ PROMOTION_REQUIRED_CANONICAL_FIELDS = (
     "runtime_strategy_set_manifest_hash",
     "approved_profile_hash",
     "execution_plan_bundle_hash",
-    "execution_plan_batch_hash",
-    "pair_execution_plan_hash",
     "execution_summary_hash",
     "execution_submit_plan_hash",
     "final_action",
@@ -1256,6 +1252,7 @@ def build_runtime_replay_execution_plan_bundle(
     planner = ExecutionPlanner(
         readiness_snapshot_builder=lambda _conn: _ReplayReadiness(dict(readiness_payload or {})),
         target_state_resolver=_runtime_replay_target_state_resolver,
+        read_only_planning=True,
     )
     return planner.plan_envelope(conn, envelope, updated_ts=int(result.candle_ts))
 

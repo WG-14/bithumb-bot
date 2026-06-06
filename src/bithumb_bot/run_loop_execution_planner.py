@@ -832,6 +832,7 @@ class ExecutionPlanner:
     target_state_resolver: Callable[..., dict[str, object]] = resolve_target_position_state_for_run_loop
     persistence_context_builder: Callable[..., dict[str, object]] = prepare_strategy_decision_persistence_context
     strict_promotion_mode: bool = True
+    read_only_planning: bool = False
 
     @property
     def result_cls(self) -> type[ExecutionPlanningResult]:
@@ -878,6 +879,7 @@ class ExecutionPlanner:
             context=context,
             submit_plan=submit_plan,
             updated_ts=int(updated_ts),
+            read_only=bool(self.read_only_planning),
         )
         context.update(
             {
@@ -1827,6 +1829,7 @@ def _build_execution_plan_batch_for_runtime_pair(
     context: Mapping[str, object],
     submit_plan: ExecutionSubmitPlan | None,
     updated_ts: int,
+    read_only: bool = False,
 ) -> ExecutionPlanBatch:
     runtime_pair = str(context.get("runtime_pair") or getattr(settings, "PAIR", "") or "").strip()
     if not runtime_pair and submit_plan is not None:
@@ -1866,7 +1869,7 @@ def _build_execution_plan_batch_for_runtime_pair(
     )
     side = str(submit_plan.side if submit_plan is not None else context.get("authoritative_execution_signal") or "HOLD").upper()
     lock_evidence: dict[str, object]
-    db_locking_available = _batch_lock_tables_available(conn)
+    db_locking_available = False if read_only else _batch_lock_tables_available(conn)
     if submit_plan is not None and bool(submit_plan.submit_expected) and side == "BUY" and db_locking_available:
         lock_evidence = create_or_get_budget_lock(
             conn,
@@ -1902,7 +1905,13 @@ def _build_execution_plan_batch_for_runtime_pair(
             {
                 "schema_version": 1,
                 "lock_required": bool(submit_plan is not None and bool(submit_plan.submit_expected) and side in {"BUY", "SELL"}),
-                "lock_persistence": "db_unavailable_diagnostic" if not db_locking_available else "not_required",
+                "lock_persistence": (
+                    "read_only_diagnostic"
+                    if read_only
+                    else "db_unavailable_diagnostic"
+                    if not db_locking_available
+                    else "not_required"
+                ),
                 "runtime_pair": runtime_pair,
                 "execution_submit_plan_hash": submit_hash,
                 "submit_expected": False if submit_plan is None else bool(submit_plan.submit_expected),

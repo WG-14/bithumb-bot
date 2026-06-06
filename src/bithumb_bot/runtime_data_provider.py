@@ -593,7 +593,36 @@ class SQLiteRuntimeDataProvider:
         }
         payload["market_snapshot_hash"] = sha256_prefixed(market_material)
         payload["feature_snapshot_hash"] = sha256_prefixed(payload)
-        return RuntimeFeatureSnapshot(payload)
+        snapshot = RuntimeFeatureSnapshot(payload)
+        return self._project_strategy_feature_snapshot(request, snapshot)
+
+    def _project_strategy_feature_snapshot(
+        self,
+        request: object,
+        feature_snapshot: RuntimeFeatureSnapshot,
+    ) -> RuntimeFeatureSnapshot | None:
+        strategy_name = str(getattr(request, "strategy_name", "") or "").strip().lower()
+        if not strategy_name:
+            return feature_snapshot
+        try:
+            from .research.strategy_registry import resolve_research_strategy_plugin
+
+            plugin = resolve_research_strategy_plugin(strategy_name)
+        except Exception:
+            return feature_snapshot
+        builder = getattr(plugin, "runtime_feature_snapshot_builder", None)
+        if not callable(builder):
+            return feature_snapshot
+        projected = builder(
+            conn=self.conn,
+            request=request,
+            feature_snapshot=feature_snapshot,
+        )
+        if projected is None:
+            return None
+        if not isinstance(projected, RuntimeFeatureSnapshot):
+            raise TypeError(f"runtime_feature_snapshot_builder_invalid:{strategy_name}")
+        return projected
 
     def _scope_coverage_payload(
         self,

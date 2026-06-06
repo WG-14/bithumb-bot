@@ -392,6 +392,18 @@ def runtime_decision_adapter_factory() -> Any:
     return SmaWithFilterRuntimeDecisionAdapter()
 
 
+def runtime_feature_snapshot_builder(*, conn, request, feature_snapshot) -> Any:
+    from bithumb_bot.runtime_adapters.sma_with_filter import (
+        build_sma_with_filter_runtime_feature_snapshot,
+    )
+
+    return build_sma_with_filter_runtime_feature_snapshot(
+        conn=conn,
+        request=request,
+        feature_snapshot=feature_snapshot,
+    )
+
+
 def policy_assembly_factory() -> SmaWithFilterPolicyAssembly:
     return SmaWithFilterPolicyAssembly()
 

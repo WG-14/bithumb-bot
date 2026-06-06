@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .decision_equivalence import sha256_prefixed
+from .canonical_decision import sha256_prefixed
 
 
 @dataclass(frozen=True)

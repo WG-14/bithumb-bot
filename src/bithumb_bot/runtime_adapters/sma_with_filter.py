@@ -187,39 +187,6 @@ class SmaWithFilterRuntimeConfig:
 class SmaWithFilterRuntimeDecisionAdapter:
     strategy_name: str = "sma_with_filter"
 
-    def project_feature_snapshot(
-        self,
-        conn,
-        request,
-        feature_snapshot: RuntimeFeatureSnapshot,
-    ) -> RuntimeFeatureSnapshot | None:
-        payload = feature_snapshot.as_dict()
-        feature_payload = payload.get("feature_payload") if isinstance(payload, dict) else {}
-        if not isinstance(feature_payload, Mapping):
-            return None
-        capabilities = feature_payload.get("capabilities")
-        candles = (
-            dict(capabilities.get("candles") or {}).get("rows")
-            if isinstance(capabilities, Mapping) and isinstance(capabilities.get("candles"), Mapping)
-            else None
-        )
-        sma_payload = _sma_runtime_payload_from_generic_snapshot(
-            conn=conn,
-            request=request,
-            candle_rows=candles,
-        )
-        if sma_payload is None:
-            return None
-        projected_feature_payload = dict(feature_payload)
-        projected_feature_payload[self.strategy_name] = sma_payload
-        projected = {
-            **payload,
-            "feature_payload": projected_feature_payload,
-            "strategy_projection_contract": "plugin_owned_runtime_projection.v1",
-        }
-        projected["feature_snapshot_hash"] = sha256_prefixed(projected)
-        return RuntimeFeatureSnapshot(projected)
-
     def decide_feature_snapshot(
         self,
         request,
@@ -352,6 +319,40 @@ def decide_sma_with_filter_for_diagnostics(conn, request) -> RuntimeStrategyDeci
             strategy,
             through_ts_ms=request.through_ts_ms,
         )
+
+
+def build_sma_with_filter_runtime_feature_snapshot(
+    *,
+    conn,
+    request: object,
+    feature_snapshot: RuntimeFeatureSnapshot,
+) -> RuntimeFeatureSnapshot | None:
+    payload = feature_snapshot.as_dict()
+    feature_payload = payload.get("feature_payload") if isinstance(payload, dict) else {}
+    if not isinstance(feature_payload, Mapping):
+        return None
+    capabilities = feature_payload.get("capabilities")
+    candles = (
+        dict(capabilities.get("candles") or {}).get("rows")
+        if isinstance(capabilities, Mapping) and isinstance(capabilities.get("candles"), Mapping)
+        else None
+    )
+    sma_payload = _sma_runtime_payload_from_generic_snapshot(
+        conn=conn,
+        request=request,
+        candle_rows=candles,
+    )
+    if sma_payload is None:
+        return None
+    projected_feature_payload = dict(feature_payload)
+    projected_feature_payload["sma_with_filter"] = sma_payload
+    projected = {
+        **payload,
+        "feature_payload": projected_feature_payload,
+        "strategy_projection_contract": "plugin_owned_runtime_projection.v1",
+    }
+    projected["feature_snapshot_hash"] = sha256_prefixed(projected)
+    return RuntimeFeatureSnapshot(projected)
 
 
 def _sma_runtime_payload_from_generic_snapshot(

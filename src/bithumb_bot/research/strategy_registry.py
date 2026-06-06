@@ -42,6 +42,7 @@ SingleReplayBundleBuilder = Callable[
     [Any, Any, int, dict[str, object] | None],
     dict[str, Any] | None,
 ]
+RuntimeFeatureSnapshotBuilder = Callable[..., Any]
 RuntimeEnvParameterExtractor = Callable[[dict[str, str]], dict[str, Any]]
 RuntimeSettingsParameterExtractor = Callable[[object], dict[str, Any]]
 DecisionPayloadAdapter = Callable[[dict[str, object], Any], dict[str, object]]
@@ -333,6 +334,7 @@ class ResearchStrategyPlugin:
     research_policy_decision_builder: ResearchPolicyDecisionBuilder | None = None
     research_export_normalizer: ResearchExportNormalizer | None = None
     runtime_decision_adapter_factory: Callable[[], Any] | None = None
+    runtime_feature_snapshot_builder: RuntimeFeatureSnapshotBuilder | None = None
     single_replay_bundle_builder: SingleReplayBundleBuilder | None = None
     policy_assembly_factory: Callable[[], Any] | None = None
     runtime_capabilities: StrategyRuntimeCapabilities | None = None
@@ -400,6 +402,7 @@ class ResearchStrategyPlugin:
             "runtime_data_requirements": data_requirements.capability_contract_payload(),
             "data_capability_contract": data_requirements.capability_contract_payload(),
             "runtime_data_requirement_builder_supported": self.runtime_data_requirement_builder is not None,
+            "runtime_feature_snapshot_builder_supported": self.runtime_feature_snapshot_builder is not None,
             "runtime_data_requirement_builder_module": (
                 self.runtime_data_requirement_builder.__module__
                 if self.runtime_data_requirement_builder is not None
