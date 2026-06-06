@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+from importlib import import_module
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -18,12 +20,18 @@ from bithumb_bot.research.strategy_registry import (
     list_research_strategy_plugins,
     reload_research_strategy_plugins_for_tests,
     resolve_research_strategy_plugin,
+    strategy_runtime_capability_issues,
 )
 from bithumb_bot.research.strategy_spec import StrategySpec
 from bithumb_bot.strategy_evidence_contract import DecisionEvidenceContract
+from bithumb_bot.strategy_plugins.builtin_manifest import (
+    BuiltinStrategyPluginExport,
+    iter_builtin_strategy_plugin_exports,
+)
 
 
 DYNAMIC_PLUGIN_NAME = "dynamic_entrypoint_unit"
+BUILTIN_PLUGIN_EXPORT_ALLOWLIST: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -167,6 +175,51 @@ def _dynamic_plugin(
     )
 
 
+def _normalize_plugin(plugin: object) -> ResearchStrategyPlugin:
+    if isinstance(plugin, ResearchStrategyPlugin):
+        return plugin
+    adapter = getattr(plugin, "to_research_strategy_plugin", None)
+    if callable(adapter):
+        normalized = adapter()
+        if isinstance(normalized, ResearchStrategyPlugin):
+            return normalized
+    raise TypeError(f"test_expected_research_strategy_plugin:{type(plugin).__name__}")
+
+
+def _load_builtin_export(plugin_export: BuiltinStrategyPluginExport) -> object:
+    module = import_module(plugin_export.module)
+    return getattr(module, plugin_export.object_name)
+
+
+def _builtin_export_object_paths() -> set[str]:
+    return {plugin_export.object_path for plugin_export in iter_builtin_strategy_plugin_exports()}
+
+
+def _iter_public_plugin_export_paths() -> set[str]:
+    root = Path("src/bithumb_bot/strategy_plugins")
+    export_paths: set[str] = set()
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
+        module = f"bithumb_bot.strategy_plugins.{path.stem}"
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = (node.target,)
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and _is_public_plugin_export_name(target.id):
+                    export_paths.add(f"{module}:{target.id}")
+    return export_paths
+
+
+def _is_public_plugin_export_name(name: str) -> bool:
+    if name.startswith("_"):
+        return False
+    return name in {"STRATEGY_PLUGIN", "STRATEGY_PLUGINS"} or name.endswith("_PLUGIN")
+
+
 def _dynamic_real_order_plugin_with_incomplete_contract() -> ResearchStrategyPlugin:
     spec = StrategySpec(
         strategy_name="dynamic_real_order_unit",
@@ -224,6 +277,73 @@ def _restore_plugin_and_runtime_registries(monkeypatch: pytest.MonkeyPatch) -> N
 
     reload_research_strategy_plugins_for_tests(providers=(iter_builtin_strategy_plugins,))
     runtime_adapter_bootstrap.reset_runtime_decision_adapter_bootstrap_for_tests()
+
+
+def test_builtin_manifest_exports_are_discoverable_and_hash_stable() -> None:
+    import bithumb_bot.strategy_plugins as strategy_plugins
+
+    reload_research_strategy_plugins_for_tests(providers=(strategy_plugins.iter_builtin_strategy_plugins,))
+
+    listed = {plugin.name: plugin for plugin in list_research_strategy_plugins()}
+    assert listed
+
+    for plugin_export in iter_builtin_strategy_plugin_exports():
+        manifest_plugin = _normalize_plugin(_load_builtin_export(plugin_export))
+        listed_plugin = listed[manifest_plugin.name]
+        resolved = resolve_research_strategy_plugin(manifest_plugin.name)
+
+        assert listed_plugin.name == manifest_plugin.name
+        assert resolved.name == manifest_plugin.name
+        assert resolved.contract_hash() == manifest_plugin.contract_hash()
+        assert resolved.contract_hash() == sha256_prefixed(resolved.contract_payload())
+
+
+def test_public_builtin_plugin_exports_must_be_registered_in_manifest() -> None:
+    public_exports = _iter_public_plugin_export_paths()
+    manifest_exports = _builtin_export_object_paths()
+    allowlisted_exports = set(BUILTIN_PLUGIN_EXPORT_ALLOWLIST)
+
+    undocumented_allowlist = [
+        export_path
+        for export_path, reason in BUILTIN_PLUGIN_EXPORT_ALLOWLIST.items()
+        if not str(reason).strip()
+    ]
+    assert undocumented_allowlist == []
+    assert public_exports - manifest_exports - allowlisted_exports == set()
+    assert manifest_exports <= public_exports
+
+
+def test_builtin_manifest_runtime_capability_contracts_are_fail_closed() -> None:
+    import bithumb_bot.strategy_plugins as strategy_plugins
+
+    reload_research_strategy_plugins_for_tests(providers=(strategy_plugins.iter_builtin_strategy_plugins,))
+    runtime_adapter_bootstrap.reset_runtime_decision_adapter_bootstrap_for_tests()
+
+    for plugin_export in iter_builtin_strategy_plugin_exports():
+        plugin = resolve_research_strategy_plugin(_normalize_plugin(_load_builtin_export(plugin_export)).name)
+        capabilities = plugin.runtime_capabilities
+
+        if capabilities.promotion_runtime_decisions_supported:
+            adapter = runtime_strategy_decision.get_runtime_decision_adapter(plugin.name)
+            assert adapter is not None
+            assert getattr(adapter, "strategy_name") == plugin.name
+        else:
+            assert runtime_strategy_decision.get_runtime_decision_adapter(plugin.name) is None
+
+        if capabilities.research_only or plugin.authoring_contract_kind in {
+            "research_only",
+            "replay_compatible",
+        }:
+            assert capabilities.live_dry_run_allowed is False
+            assert capabilities.live_real_order_allowed is False
+            issues = strategy_runtime_capability_issues(
+                plugin.name,
+                live_dry_run=True,
+                live_real_order_armed=True,
+                approved_profile_path="",
+            )
+            assert any(issue.startswith(f"live_dry_run_not_allowed_for_strategy:{plugin.name}") for issue in issues)
+            assert any(issue.startswith(f"live_real_order_not_allowed_for_strategy:{plugin.name}") for issue in issues)
 
 
 def test_entry_point_strategy_plugin_is_discovered(monkeypatch: pytest.MonkeyPatch) -> None:

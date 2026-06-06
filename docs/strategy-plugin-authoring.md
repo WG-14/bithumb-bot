@@ -28,9 +28,33 @@ Public contract helpers are available from `bithumb_bot.strategy_contract_testin
 
 | Level | Required hooks | Forbidden vocabulary | Stable fail-closed reasons | Expected files | Test helper |
 | --- | --- | --- | --- | --- | --- |
-| Level 1 research-only | `StrategySpec`, `research_event_builder` or `decide_snapshot` | runtime adapter, approved profile, live dry-run, live real-order, promotion extension | `promotion_extension_missing`, `promotion_runtime_unsupported_for_strategy`, `runtime_replay_unsupported_for_strategy`, `live_dry_run_not_allowed_for_strategy` | one plugin file and one focused test file | `assert_research_only_contract` |
-| Level 2 replay-compatible | Level 1 hooks plus parameter schema, deterministic policy material, replay fingerprint material, read-only replay builder | `Settings` fields, `runtime_parameter_adapter.from_settings()`, approved profile requirement, live dry-run, live real-order | `replay_compatible_not_live_eligible`, `promotion_runtime_unsupported_for_strategy`, `runtime_decision_adapter_unsupported_for_strategy`, `live_real_order_not_allowed_for_strategy` | one replay plugin file and one focused replay contract test | `assert_replay_compatible_contract` |
-| Level 3 live-eligible | Level 1 hooks plus runtime decision adapter, policy assembly, approved-profile binding, execution intent contract, replay support, live capability declaration | direct `ResearchStrategyPlugin(...)` assembly in new strategy modules, strategy-specific common-engine branches, production legacy parameter fallback | strategy-specific capability reason, `approved_profile_required_for_strategy`, decision-equivalence/runtime-contract/profile validation reasons | plugin file plus focused promotion/runtime contract tests | `assert_live_eligible_contract` |
+| Level 1 research-only | `StrategySpec`, `research_event_builder` or `decide_snapshot` | runtime adapter, approved profile, live dry-run, live real-order, promotion extension | `promotion_extension_missing`, `promotion_runtime_unsupported_for_strategy`, `runtime_replay_unsupported_for_strategy`, `live_dry_run_not_allowed_for_strategy` | one plugin file, built-in manifest entry or external entry point, and one focused test file | `assert_research_only_contract` |
+| Level 2 replay-compatible | Level 1 hooks plus parameter schema, deterministic policy material, replay fingerprint material, read-only replay builder | `Settings` fields, `runtime_parameter_adapter.from_settings()`, approved profile requirement, live dry-run, live real-order | `replay_compatible_not_live_eligible`, `promotion_runtime_unsupported_for_strategy`, `runtime_decision_adapter_unsupported_for_strategy`, `live_real_order_not_allowed_for_strategy` | one replay plugin file, built-in manifest entry or external entry point, and one focused replay contract test | `assert_replay_compatible_contract` |
+| Level 3 live-eligible | Level 1 hooks plus runtime decision adapter, policy assembly, approved-profile binding, execution intent contract, replay support, live capability declaration | direct `ResearchStrategyPlugin(...)` assembly in new strategy modules, strategy-specific common-engine branches, production legacy parameter fallback | strategy-specific capability reason, `approved_profile_required_for_strategy`, decision-equivalence/runtime-contract/profile validation reasons | plugin file, built-in manifest entry or external entry point, plus focused promotion/runtime contract tests | `assert_live_eligible_contract` |
+
+## Registration Paths
+
+Built-in in-repo plugins and external plugins use different registration
+contracts.
+
+Built-in plugins live under `src/bithumb_bot/strategy_plugins/` and must be
+registered in the explicit built-in manifest at
+`src/bithumb_bot/strategy_plugins/builtin_manifest.py`. The manifest stores
+deterministic `module:object` references and
+`iter_builtin_strategy_plugins()` loads from that manifest with lazy imports.
+This is intentionally not package-wide auto-scanning; helper modules,
+experimental modules, and test-only modules must not become runtime-discoverable
+by accident.
+
+External packages must not edit the built-in manifest. They register through the
+`bithumb_bot.strategy_plugins` entry-point group in their package metadata.
+
+Any public in-repo plugin export such as `*_PLUGIN`, `STRATEGY_PLUGIN`, or
+`STRATEGY_PLUGINS` must either appear in the built-in manifest or be explicitly
+allowlisted in the focused discovery guard test with a clear reason. A new
+built-in strategy is not complete until it appears in
+`list_research_strategy_plugins()` and can be resolved with
+`resolve_research_strategy_plugin()`.
 
 ## Level 1: Fast Research Path
 
@@ -171,7 +195,7 @@ public authoring API for new strategy modules. Public authoring should use:
 
 `research.backtest_runner` is generic and strategy-neutral. It may call explicit plugin hooks such as `research_parameter_materializer` and `research_event_builder`, but it must not branch on strategy names or own strategy-specific defaults. Strategy-specific research materialization, exploratory legacy behavior, empty-event policy, event generation, diagnostics, and payload adaptation belong in plugin-owned modules.
 
-`research.strategy_registry` owns normalized contract dataclasses, validation, registration, discovery, listing, resolving, and test reload behavior only. Built-in plugins are loaded through `bithumb_bot.strategy_plugins.iter_builtin_strategy_plugins()` using lazy imports.
+`research.strategy_registry` owns normalized contract dataclasses, validation, registration, discovery, listing, resolving, and test reload behavior only. Built-in plugins are declared in `strategy_plugins/builtin_manifest.py` and loaded through `bithumb_bot.strategy_plugins.iter_builtin_strategy_plugins()` using lazy imports.
 
 Existing `sma_with_filter`, `safe_hold`, and baseline direct
 `ResearchStrategyPlugin(...)` construction has been narrowed. `sma_with_filter`

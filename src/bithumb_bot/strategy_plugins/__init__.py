@@ -10,6 +10,7 @@ from bithumb_bot.strategy_authoring import (
     ReplayCompatibleStrategyPlugin,
     ResearchOnlyStrategyPlugin,
 )
+from bithumb_bot.strategy_plugins.builtin_manifest import iter_builtin_strategy_plugins_from_manifest
 
 
 STRATEGY_PLUGIN_ENTRY_POINT_GROUP = "bithumb_bot.strategy_plugins"
@@ -24,20 +25,7 @@ StrategyPluginRegistration = (
 
 
 def iter_builtin_strategy_plugins() -> Iterable[StrategyPluginRegistration]:
-    from .baseline_plugins import BUY_AND_HOLD_BASELINE_PLUGIN, NOOP_BASELINE_PLUGIN
-    from .canary_non_sma import CANARY_NON_SMA_PLUGIN
-    from .replay_threshold import REPLAY_THRESHOLD_PLUGIN
-    from .safe_hold_plugin import SAFE_HOLD_PLUGIN
-    from .sma_with_filter_plugin import SMA_WITH_FILTER_PLUGIN
-    from .threshold_research_only import THRESHOLD_RESEARCH_ONLY_PLUGIN
-
-    yield SMA_WITH_FILTER_PLUGIN
-    yield NOOP_BASELINE_PLUGIN
-    yield BUY_AND_HOLD_BASELINE_PLUGIN
-    yield SAFE_HOLD_PLUGIN
-    yield CANARY_NON_SMA_PLUGIN
-    yield REPLAY_THRESHOLD_PLUGIN
-    yield THRESHOLD_RESEARCH_ONLY_PLUGIN
+    yield from iter_builtin_strategy_plugins_from_manifest()
 
 
 def iter_entry_point_strategy_plugins() -> Iterable[ResearchStrategyPlugin]:
