@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from bithumb_bot.paths import PathManager, PathPolicyError
+from bithumb_bot.storage_io import write_json_atomic as write_json_atomic_untracked
 from .artifact_store import ArtifactBudget, ArtifactStore, ResearchArtifactContext
 from .hashing import report_content_hash_payload, sha256_prefixed
 
@@ -169,16 +170,70 @@ def write_research_report(
     report_payload["content_hash"] = final_content_hash
     derived_event = store.write_json_atomic(paths.derived_path, derived_candidates_payload)
     final_report_event = store.write_json_atomic(paths.report_path, report_payload)
+    total_before_report = store.total_bytes - final_report_event.bytes
     artifact_write_summary.update(
         {
             "derived_candidates_bytes": derived_event.bytes,
-            "report_bytes": final_report_event.bytes,
             "artifact_file_count": store.file_count,
-            "artifact_total_bytes": store.total_bytes,
             "write_wall_seconds": time.perf_counter() - started,
         }
     )
+    final_content_hash, artifact_write_summary = persist_final_research_report_observability(
+        paths=paths,
+        report_payload=report_payload,
+        artifact_write_summary=artifact_write_summary,
+        artifact_total_bytes_base=total_before_report,
+    )
     return ResearchReportWriteResult(paths=paths, content_hash=final_content_hash, artifact_write_summary=artifact_write_summary)
+
+
+def persist_final_research_report_observability(
+    *,
+    paths: ResearchReportPaths,
+    report_payload: dict[str, Any],
+    artifact_write_summary: dict[str, Any],
+    artifact_total_bytes_base: int | None = None,
+    stage_timings: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    final_summary = dict(artifact_write_summary)
+    if stage_timings is not None:
+        report_payload.setdefault("execution_observability", {})["stage_timings"] = list(stage_timings)
+    report_payload.setdefault("artifact_observability", {})
+    if artifact_total_bytes_base is None:
+        artifact_total_bytes_base = int(final_summary["artifact_total_bytes"]) - int(final_summary["report_bytes"])
+    final_summary["report_bytes"] = _stable_final_report_byte_count(
+        report_payload,
+        final_summary,
+        artifact_total_bytes_base=int(artifact_total_bytes_base),
+    )
+    final_summary["artifact_total_bytes"] = int(artifact_total_bytes_base) + int(final_summary["report_bytes"])
+    report_payload["artifact_write_summary"] = dict(final_summary)
+    report_payload["artifact_observability"]["report_write"] = dict(final_summary)
+    _sync_report_write_stage(report_payload, final_summary)
+    final_content_hash = sha256_prefixed(report_content_hash_payload(report_payload))
+    report_payload["content_hash"] = final_content_hash
+    final_summary["report_bytes"] = _stable_final_report_byte_count(
+        report_payload,
+        final_summary,
+        artifact_total_bytes_base=int(artifact_total_bytes_base),
+    )
+    final_summary["artifact_total_bytes"] = int(artifact_total_bytes_base) + int(final_summary["report_bytes"])
+    report_payload["artifact_write_summary"] = dict(final_summary)
+    report_payload["artifact_observability"]["report_write"] = dict(final_summary)
+    final_content_hash = sha256_prefixed(report_content_hash_payload(report_payload))
+    report_payload["content_hash"] = final_content_hash
+    write_json_atomic_untracked(paths.report_path, report_payload)
+    actual_report_bytes = paths.report_path.stat().st_size
+    if actual_report_bytes != final_summary["report_bytes"]:
+        final_summary["report_bytes"] = actual_report_bytes
+        final_summary["artifact_total_bytes"] = int(artifact_total_bytes_base) + actual_report_bytes
+        report_payload["artifact_write_summary"] = dict(final_summary)
+        report_payload["artifact_observability"]["report_write"] = dict(final_summary)
+        _sync_report_write_stage(report_payload, final_summary)
+        final_content_hash = sha256_prefixed(report_content_hash_payload(report_payload))
+        report_payload["content_hash"] = final_content_hash
+        write_json_atomic_untracked(paths.report_path, report_payload)
+    return final_content_hash, final_summary
 
 
 def _reference_first_report_payload(
@@ -271,6 +326,42 @@ def _stable_report_byte_count(report_payload: dict[str, Any]) -> int:
         report_payload["artifact_observability"]["report_write"]["report_bytes"] = current
         current = _json_byte_count(report_payload)
     return current
+
+
+def _stable_final_report_byte_count(
+    report_payload: dict[str, Any],
+    artifact_write_summary: dict[str, Any],
+    *,
+    artifact_total_bytes_base: int,
+) -> int:
+    last = -1
+    _sync_report_write_stage(report_payload, artifact_write_summary)
+    current = _json_byte_count(report_payload)
+    while current != last:
+        last = current
+        artifact_write_summary["report_bytes"] = current
+        artifact_write_summary["artifact_total_bytes"] = int(artifact_total_bytes_base) + current
+        report_payload["artifact_write_summary"] = dict(artifact_write_summary)
+        report_payload.setdefault("artifact_observability", {})["report_write"] = dict(artifact_write_summary)
+        _sync_report_write_stage(report_payload, artifact_write_summary)
+        report_payload["content_hash"] = sha256_prefixed(report_content_hash_payload(report_payload))
+        current = _json_byte_count(report_payload)
+    return current
+
+
+def _sync_report_write_stage(report_payload: dict[str, Any], artifact_write_summary: dict[str, Any]) -> None:
+    execution_observability = report_payload.get("execution_observability")
+    if not isinstance(execution_observability, dict):
+        return
+    stage_timings = execution_observability.get("stage_timings")
+    if not isinstance(stage_timings, list):
+        return
+    for stage_timing in stage_timings:
+        if isinstance(stage_timing, dict) and stage_timing.get("stage") == "report_write":
+            stage_timing["artifact_total_bytes"] = artifact_write_summary["artifact_total_bytes"]
+            stage_timing["artifact_file_count"] = artifact_write_summary["artifact_file_count"]
+            stage_timing["derived_candidates_bytes"] = artifact_write_summary["derived_candidates_bytes"]
+            stage_timing["report_bytes"] = artifact_write_summary["report_bytes"]
 
 
 def _ensure_research_output_path_allowed(manager: PathManager, path: Path) -> None:

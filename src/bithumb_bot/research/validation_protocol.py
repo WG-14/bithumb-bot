@@ -84,7 +84,7 @@ from .metrics_gate_policy import metrics_gate_policy_from_acceptance_gate, metri
 from .metrics_contract import METRICS_SCHEMA_VERSION
 from .parameter_space import candidate_id, iter_parameter_candidates
 from .promotion_gate import build_candidate_behavior_profile, build_candidate_profile
-from .report_writer import write_research_report
+from .report_writer import persist_final_research_report_observability, write_research_report
 from .statistical_selection import (
     PROMOTION_GRADE_GENERATION_UNAVAILABLE_WARNING,
     build_statistical_selection_evidence,
@@ -921,11 +921,17 @@ def run_research_backtest(
     )
     full_candidates = report.get("candidates")
     persisted_report = json.loads(paths.report_path.read_text(encoding="utf-8"))
+    persist_final_research_report_observability(
+        paths=paths,
+        report_payload=persisted_report,
+        artifact_write_summary=write_result.artifact_write_summary,
+        stage_timings=stage_timings,
+    )
+    persisted_report = json.loads(paths.report_path.read_text(encoding="utf-8"))
     report.clear()
     report.update(persisted_report)
     if manifest.research_run.report_detail == "summary":
         report["candidates"] = full_candidates
-    report["execution_observability"]["stage_timings"] = stage_timings
     _emit_progress(
         progress_callback,
         stage="complete",
@@ -1136,11 +1142,17 @@ def run_research_walk_forward(
     )
     full_candidates = report.get("candidates")
     persisted_report = json.loads(paths.report_path.read_text(encoding="utf-8"))
+    persist_final_research_report_observability(
+        paths=paths,
+        report_payload=persisted_report,
+        artifact_write_summary=write_result.artifact_write_summary,
+        stage_timings=stage_timings,
+    )
+    persisted_report = json.loads(paths.report_path.read_text(encoding="utf-8"))
     report.clear()
     report.update(persisted_report)
     if manifest.research_run.report_detail == "summary":
         report["candidates"] = full_candidates
-    report["execution_observability"]["stage_timings"] = stage_timings
     _emit_progress(
         progress_callback,
         stage="complete",

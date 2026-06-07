@@ -254,6 +254,55 @@ def test_artifact_write_observability_matches_written_files(tmp_path, monkeypatc
     assert result.paths.report_path.stat().st_size == summary["report_bytes"]
 
 
+def test_persisted_report_write_observability_records_post_write_duration(tmp_path, monkeypatch) -> None:
+    manager = _research_manager(tmp_path, monkeypatch)
+
+    result = write_research_report(
+        manager=manager,
+        experiment_id="summary_write_duration",
+        report_name="backtest",
+        payload=_summary_report_payload(experiment_id="summary_write_duration"),
+    )
+
+    persisted = json.loads(result.paths.report_path.read_text(encoding="utf-8"))
+    summary = persisted["artifact_write_summary"]
+    assert summary["write_wall_seconds"] == result.artifact_write_summary["write_wall_seconds"]
+    assert summary["write_wall_seconds"] > 0
+    assert persisted["artifact_observability"]["report_write"]["write_wall_seconds"] == summary["write_wall_seconds"]
+
+
+def test_persisted_report_write_summary_matches_returned_write_summary(tmp_path, monkeypatch) -> None:
+    manager = _research_manager(tmp_path, monkeypatch)
+
+    result = write_research_report(
+        manager=manager,
+        experiment_id="summary_write_return_match",
+        report_name="backtest",
+        payload=_summary_report_payload(experiment_id="summary_write_return_match"),
+    )
+
+    persisted = json.loads(result.paths.report_path.read_text(encoding="utf-8"))
+    assert persisted["artifact_write_summary"] == result.artifact_write_summary
+    assert persisted["artifact_observability"]["report_write"] == result.artifact_write_summary
+    assert persisted["artifact_write_summary"]["report_bytes"] == result.paths.report_path.stat().st_size
+
+
+def test_persisted_report_content_hash_includes_final_artifact_write_summary(tmp_path, monkeypatch) -> None:
+    manager = _research_manager(tmp_path, monkeypatch)
+
+    result = write_research_report(
+        manager=manager,
+        experiment_id="summary_write_hash_final",
+        report_name="backtest",
+        payload=_summary_report_payload(experiment_id="summary_write_hash_final"),
+    )
+
+    persisted = json.loads(result.paths.report_path.read_text(encoding="utf-8"))
+    assert persisted["artifact_write_summary"] == result.artifact_write_summary
+    assert persisted["content_hash"] == result.content_hash
+    assert sha256_prefixed(report_content_hash_payload(persisted)) == persisted["content_hash"]
+
+
 @pytest.mark.research_e2e
 def test_report_write_stage_timing_is_recorded_after_artifact_write(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
@@ -274,6 +323,35 @@ def test_report_write_stage_timing_is_recorded_after_artifact_write(tmp_path, mo
     ][0]
     assert report_write["artifact_total_bytes"] > 0
     assert report_write["artifact_file_count"] >= 2
+
+
+@pytest.mark.research_e2e
+def test_persisted_report_contains_report_write_stage_timing(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path)
+    payload = _manifest()
+    payload["experiment_id"] = "persisted_report_write_stage"
+    payload["research_run"] = {"report_detail": "summary"}
+    manager = _research_manager(tmp_path, monkeypatch)
+
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    persisted = json.loads(Path(report["artifact_paths"]["report_path"]).read_text(encoding="utf-8"))
+    report_write = [
+        item for item in persisted["execution_observability"]["stage_timings"] if item["stage"] == "report_write"
+    ][0]
+    summary = persisted["artifact_write_summary"]
+    assert persisted["artifact_observability"]["report_write"] == summary
+    assert report_write["artifact_total_bytes"] == summary["artifact_total_bytes"]
+    assert report_write["artifact_file_count"] == summary["artifact_file_count"]
+    assert report_write["derived_candidates_bytes"] == summary["derived_candidates_bytes"]
+    assert report_write["report_bytes"] == summary["report_bytes"]
+    assert persisted["artifact_write_summary"]["report_bytes"] == Path(report["artifact_paths"]["report_path"]).stat().st_size
 
 
 def _contract_evaluator() -> DeterministicResearchEvaluator:
