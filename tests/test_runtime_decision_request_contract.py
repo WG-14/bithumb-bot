@@ -21,6 +21,7 @@ from bithumb_bot.runtime_data_provider import RuntimeDataRequirementResolver, SQ
 from bithumb_bot.runtime_adapters.safe_hold import SafeHoldRuntimeDecisionAdapter
 from bithumb_bot import runtime_strategy_decision
 from bithumb_bot.runtime_strategy_decision import PromotionRuntimeDecisionAdapter, RuntimeDecisionRequest
+from bithumb_bot.runtime.decision_coordinator import DecisionCoordinator
 from bithumb_bot.runtime_strategy_set import (
     ProfileAuthorityContext,
     RuntimeMarketScope,
@@ -268,6 +269,12 @@ def test_common_runtime_adapter_protocol_is_request_shaped() -> None:
                 names = {arg.arg for arg in [*node.args.args, *node.args.kwonlyargs]}
                 assert "short_n" not in names
                 assert "long_n" not in names
+
+
+def test_decision_cycle_context_links_cycle_runtime_data_preflight_hash() -> None:
+    source = inspect.getsource(DecisionCoordinator.decide_cycle)
+    assert "runtime_data_cycle_preflight_hash" in source
+    assert "runtime_data_availability_report_hash" in source
 
 
 def test_production_runtime_modules_have_no_test_only_adapter_registry() -> None:

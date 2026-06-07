@@ -203,6 +203,7 @@ class RuntimeAppContainer:
     runtime_dependency_manifest: RuntimeDependencyManifest | None = None
     runtime_dependency_manifest_id: int | None = None
     runtime_dependency_manifest_hash: str | None = None
+    runtime_cycle_pipeline_factory: Callable[[Any], Any] | None = None
 
     @property
     def runner(self):

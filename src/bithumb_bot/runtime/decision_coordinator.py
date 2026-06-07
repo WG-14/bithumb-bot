@@ -28,6 +28,10 @@ from ..target_position import (
 from ..runtime_decision_service import RuntimeDecisionGateway, RuntimeStrategyDecisionResult
 from ..runtime_service_factories import run_loop_execution_planner
 from ..runtime_strategy_set import RuntimeStrategyDecisionResultBundle
+from .decision_failure_taxonomy import (
+    DecisionCycleFailure,
+    classify_decision_cycle_failure,
+)
 
 
 RUN_LOG = logging.getLogger("bithumb_bot.run")
@@ -259,6 +263,11 @@ class DecisionCycleResult:
     typed_runtime_decision_bundle: RuntimeStrategyDecisionResultBundle | None = None
     market_price: float | None = None
     exit_rule_name: str | None = None
+    failure_phase: str | None = None
+    failure_reason_code: str | None = None
+    failure_detail: str | None = None
+    operator_next_action: str | None = None
+    failure_evidence_hash: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -311,6 +320,11 @@ class DecisionCycleResult:
             "mark_processed_candidate": bool(self.mark_processed_candidate),
             "market_price": self.market_price,
             "exit_rule_name": self.exit_rule_name,
+            "failure_phase": self.failure_phase,
+            "failure_reason_code": self.failure_reason_code,
+            "failure_detail": self.failure_detail,
+            "operator_next_action": self.operator_next_action,
+            "failure_evidence_hash": self.failure_evidence_hash,
         }
         payload["decision_hash"] = sha256_prefixed(payload)
         return payload
@@ -340,13 +354,46 @@ class DecisionCoordinator:
         runtime_strategy_set: object,
         candle_ts: int,
         updated_ts: int,
+        runtime_data_cycle_preflight_hash: str | None = None,
+        runtime_data_availability_report_hash: str | None = None,
     ) -> DecisionCycleResult:
+        current_phase = "gateway"
+        failure: DecisionCycleFailure | None = None
         conn = self.db_factory()
         try:
             typed_bundle = self.decision_gateway_factory().decide_bundle(
                 conn,
                 strategy_set=runtime_strategy_set,
                 through_ts_ms=candle_ts,
+            )
+        except Exception as exc:
+            failure = classify_decision_cycle_failure(exc, phase=current_phase)
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[WARN] strategy decision gateway failed",
+                    error=failure.detail,
+                    failure_phase=failure.phase,
+                    failure_reason_code=failure.reason_code,
+                )
+            )
+            return DecisionCycleResult(
+                candle_ts=candle_ts,
+                strategy_name=None,
+                signal=None,
+                reason=failure.reason_code,
+                decision_id=None,
+                decision_context=None,
+                execution_decision_summary=None,
+                execution_plan_bundle=None,
+                strategy_decision_hash=None,
+                execution_plan_bundle_hash=None,
+                persistence_status=failure.persistence_status,
+                mark_processed_candidate=False,
+                failure_phase=failure.phase,
+                failure_reason_code=failure.reason_code,
+                failure_detail=failure.detail,
+                operator_next_action=failure.operator_next_action,
+                failure_evidence_hash=failure.evidence_hash,
             )
         finally:
             conn.close()
@@ -390,6 +437,7 @@ class DecisionCoordinator:
         exit_rule_name: str | None = None
         persistence_status = "not_attempted"
         try:
+            current_phase = "planner"
             try:
                 planner = self.planner_factory(
                     settings_obj=self.settings_obj,
@@ -407,6 +455,11 @@ class DecisionCoordinator:
                 updated_ts=updated_ts,
             )
             context = dict(planning_bundle.persistence_context)
+            if runtime_data_cycle_preflight_hash:
+                context["runtime_data_cycle_preflight_hash"] = runtime_data_cycle_preflight_hash
+            if runtime_data_availability_report_hash:
+                context["runtime_data_availability_report_hash"] = runtime_data_availability_report_hash
+            current_phase = "bundle persistence"
             bundle_refs = self.record_runtime_strategy_decision_bundle_fn(
                 conn,
                 result_bundle=typed_bundle,
@@ -426,6 +479,7 @@ class DecisionCoordinator:
                     "portfolio_allocation_decision_missing"
                     + (f":{planning_error}" if planning_error else "")
                 )
+            current_phase = "allocation persistence"
             allocation_refs = self.record_portfolio_allocation_decision_fn(
                 conn,
                 bundle_id=int(bundle_refs["runtime_strategy_decision_bundle_id"]),
@@ -441,6 +495,7 @@ class DecisionCoordinator:
                 created_ts=updated_ts,
             )
             context.update(batch_refs)
+            current_phase = "execution plan persistence"
             execution_refs = self.record_execution_plan_fn(
                 conn,
                 allocation_id=int(allocation_refs["portfolio_allocation_decision_id"]),
@@ -487,6 +542,7 @@ class DecisionCoordinator:
             market_price_raw = context.get("last_close")
             confidence_raw = context.get("confidence")
             execution_decision = dict(context["execution_decision"])  # type: ignore[arg-type]
+            current_phase = "strategy decision persistence"
             decision_id = self.record_strategy_decision_fn(
                 conn,
                 decision_ts=updated_ts,
@@ -505,6 +561,7 @@ class DecisionCoordinator:
                 strategy_decisions_authority=context.get("strategy_decisions_authority"),
             )
             try:
+                current_phase = "target state persistence"
                 self.target_position_state_persister(
                     conn,
                     execution_decision=execution_decision,
@@ -526,15 +583,18 @@ class DecisionCoordinator:
             conn.commit()
             persistence_status = "persisted"
         except Exception as exc:
+            failure = classify_decision_cycle_failure(exc, phase=current_phase)
             RUN_LOG.warning(
                 format_log_kv(
                     "[WARN] strategy decision persistence failed",
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=failure.detail,
+                    failure_phase=failure.phase,
+                    failure_reason_code=failure.reason_code,
                     strategy=strategy_name,
                     signal=signal,
                 )
             )
-            persistence_status = "failed"
+            persistence_status = failure.persistence_status
         finally:
             conn.close()
 
@@ -599,6 +659,11 @@ class DecisionCoordinator:
             typed_runtime_decision_bundle=typed_bundle,
             market_price=typed_bundle.market_price,
             exit_rule_name=exit_rule_name,
+            failure_phase=None if failure is None else failure.phase,
+            failure_reason_code=None if failure is None else failure.reason_code,
+            failure_detail=None if failure is None else failure.detail,
+            operator_next_action=None if failure is None else failure.operator_next_action,
+            failure_evidence_hash=None if failure is None else failure.evidence_hash,
         )
 
 

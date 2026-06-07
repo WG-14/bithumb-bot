@@ -259,6 +259,11 @@ class RuntimeCycleArtifact:
     state_transition_hash: str | None = None
     runtime_dependency_manifest_hash: str | None = None
     notification_event_hashes: Sequence[str] = ()
+    failure_phase: str | None = None
+    failure_reason_code: str | None = None
+    failure_detail: str | None = None
+    operator_next_action: str | None = None
+    failure_evidence_hash: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload = {
@@ -310,6 +315,11 @@ class RuntimeCycleArtifact:
             "state_transition_hash": self.state_transition_hash,
             "runtime_dependency_manifest_hash": self.runtime_dependency_manifest_hash,
             "notification_event_hashes": list(self.notification_event_hashes),
+            "failure_phase": self.failure_phase,
+            "failure_reason_code": self.failure_reason_code,
+            "failure_detail": self.failure_detail,
+            "operator_next_action": self.operator_next_action,
+            "failure_evidence_hash": self.failure_evidence_hash,
         }
         payload["input_hash"] = _stable_hash(
             {
@@ -359,6 +369,10 @@ class RuntimeCycleArtifact:
                 "state_transition_hash": self.state_transition_hash,
                 "runtime_dependency_manifest_hash": self.runtime_dependency_manifest_hash,
                 "notification_event_hashes": list(self.notification_event_hashes),
+                "failure_phase": self.failure_phase,
+                "failure_reason_code": self.failure_reason_code,
+                "operator_next_action": self.operator_next_action,
+                "failure_evidence_hash": self.failure_evidence_hash,
             }
         )
         payload["decision_hash"] = _stable_hash(payload)

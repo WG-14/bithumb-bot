@@ -110,6 +110,17 @@ CORE_PATH_PREFIXES = (
     "src/bithumb_bot/strategy_decision",
     "src/bithumb_bot/runtime_data_provider.py",
 )
+STRATEGY_ADDITION_FORBIDDEN_CORE_FILES = (
+    "src/bithumb_bot/runtime/runner.py",
+    "src/bithumb_bot/runtime/decision_coordinator.py",
+    "src/bithumb_bot/runtime/execution_coordinator.py",
+    "src/bithumb_bot/run_loop_execution_planner.py",
+    "src/bithumb_bot/execution_service.py",
+    "src/bithumb_bot/runtime_strategy_set.py",
+    "src/bithumb_bot/research/backtest_kernel.py",
+    "src/bithumb_bot/research/backtest_pipeline.py",
+    "src/bithumb_bot/research/backtest_stage_runner.py",
+)
 STRATEGY_PLUGIN_PREFIX = "src/bithumb_bot/strategy_plugins/"
 BUILTIN_MANIFEST = "src/bithumb_bot/strategy_plugins/builtin_manifest.py"
 
@@ -129,6 +140,11 @@ def validate_strategy_pr_evidence(
     violations: list[str] = []
     strategy_related = any(path.startswith(STRATEGY_PLUGIN_PREFIX) for path in normalized_files)
     core_related = any(path.startswith(prefix) for path in normalized_files for prefix in CORE_PATH_PREFIXES)
+    architecture_migration = (
+        "architecture_review_required" in text
+        or "architecture_review_complete" in text
+        or "runtime architecture migration" in text
+    )
     if not normalized_files:
         return violations
     declared_levels = [level for level in LEVEL_TOKENS if level in text]
@@ -148,6 +164,15 @@ def validate_strategy_pr_evidence(
         and not path.endswith("_test.py")
     ]
     if plugin_files:
+        forbidden_core_files = [
+            path for path in normalized_files if path in STRATEGY_ADDITION_FORBIDDEN_CORE_FILES
+        ]
+        if forbidden_core_files and not architecture_migration:
+            for path in forbidden_core_files:
+                violations.append(
+                    "strategy_core_diff_forbidden:"
+                    f"{path}:runtime_architecture_migration_evidence_required"
+                )
         has_builtin_manifest = BUILTIN_MANIFEST in normalized_files or "builtin_manifest.py" in text
         declares_builtin_path = "registration path: builtin_manifest" in text or has_builtin_manifest
         has_entry_point = "bithumb_bot.strategy_plugins" in text

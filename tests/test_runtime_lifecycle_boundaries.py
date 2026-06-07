@@ -130,15 +130,22 @@ def test_runner_does_not_compose_operator_notifications() -> None:
     assert "globals()[" not in source
 
 
-def test_runner_only_coordinates_controllers() -> None:
+def test_runner_only_delegates_to_runtime_cycle_pipeline() -> None:
     source = inspect.getsource(runner.Runner.run_one_cycle)
     assert "prepare_runtime_start(" in source
-    assert ".decide_cycle(" in source
-    assert ".evaluate_runtime_safety(" in source
-    assert ".execute_cycle(" in source
-    assert ".evaluate_closed_candle(" in source
-    assert ".apply(" in source
+    assert "RuntimeCyclePipeline" in source
+    assert ".run_once(" in source
+    assert ".decide_cycle(" not in source
+    assert ".evaluate_runtime_safety(" not in source
+    assert ".execute_cycle(" not in source
+    assert ".evaluate_closed_candle(" not in source
     for forbidden in {
+        "c.market_sync(",
+        "c.db_factory(",
+        "c.candle_reader(",
+        "c.closed_candle_selector(",
+        "conn.execute(",
+        "\"SELECT ",
         "RuntimeDecisionGateway().decide_bundle(",
         "record_strategy_decision(",
         "run_loop_execution_planner(",
@@ -156,6 +163,31 @@ def test_runner_only_coordinates_controllers() -> None:
         and node.func.id == "OperatorEventComposer"
     ]
     assert direct_composer_calls == []
+
+
+def test_runner_does_not_own_cycle_stage_calls() -> None:
+    source = inspect.getsource(runner.Runner.run_one_cycle)
+    for forbidden in {
+        "c.market_sync(",
+        "c.db_factory(",
+        "c.candle_reader(",
+        "c.closed_candle_selector(",
+        ".evaluate_runtime_safety(",
+        ".decide_cycle(",
+        ".execute_cycle(",
+        "conn.execute(",
+        "\"SELECT ",
+        "execution_submit_plan_json",
+        "pre_submit_fields =",
+    }:
+        assert forbidden not in source
+
+
+def test_runner_does_not_query_execution_plan_for_artifact() -> None:
+    source = inspect.getsource(runner.Runner.run_one_cycle)
+    assert "SELECT execution_submit_plan_json FROM execution_plan" not in source
+    assert "json.loads(str(row[\"execution_submit_plan_json\"]" not in source
+    assert "pre_submit_fields = {" not in source
 
 
 def test_runner_does_not_own_startup_gate_branches() -> None:
@@ -213,14 +245,18 @@ def test_runner_does_not_own_cleanup_revalidation_policy() -> None:
 
 
 def test_runner_applies_safety_decision_after_evaluation() -> None:
-    source = inspect.getsource(runner.Runner.run_one_cycle)
+    from bithumb_bot.runtime.cycle_pipeline import RuntimeCyclePipeline
+
+    source = inspect.getsource(RuntimeCyclePipeline.run_once)
     assert ".evaluate_runtime_safety(" in source
     assert "_apply_runtime_safety_decision(c.safety_controller, safety_result)" in source
     assert "_apply_runtime_safety_decision(c.safety_controller, market_safety_result)" in source
 
 
 def test_execution_coordinator_execute_cycle_is_used_by_runner() -> None:
-    source = inspect.getsource(runner.Runner.run_one_cycle)
+    from bithumb_bot.runtime.cycle_pipeline import RuntimeCyclePipeline
+
+    source = inspect.getsource(RuntimeCyclePipeline.run_once)
     assert ".execute_cycle(" in source
     assert ".resolve_submit_expectation(" not in source
     assert ".target_delta_submit_expected(" not in source
