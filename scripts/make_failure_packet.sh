@@ -268,7 +268,7 @@ git diff --binary > "${packet_dir}/git_diff.patch"
   echo "Wrapper-only full-suite validation command. Codex must not run this command:"
   echo
   echo '```bash'
-  echo 'PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh'
+  echo 'PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh'
   echo '```'
   echo
   echo "Focused examples derived from the failure packet:"
@@ -385,7 +385,7 @@ codex_input="${packet_dir}/codex_input.md"
   echo "The wrapper-owned success command is:"
   echo
   echo '```bash'
-  echo 'PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh'
+  echo 'PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh'
   echo '```'
   echo
   echo "Codex must not run that command, \`./scripts/full_suite.sh\`, \`./scripts/run_full_pytest_tests.sh\`, \`./scripts/check_repo_runtime_artifacts.sh\`, selector-less pytest, broad \`tests\` pytest targets, or raw \`uv run pytest -q\`."

@@ -376,8 +376,8 @@ Optional full-suite xdist validation is available through the full runner, not
 ad-hoc selector-less pytest:
 
 ```bash
-PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh
-PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=loadfile ./scripts/run_full_pytest_tests.sh  # explicit compatibility override
+PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh
+PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=loadfile ./scripts/run_full_pytest_tests.sh  # explicit compatibility override
 ```
 
 ### Parallel Research Safety Matrix

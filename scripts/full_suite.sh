@@ -15,7 +15,7 @@ latest_log_file="${WORK_DIR}/latest_full_suite_log"
 
 cd "${PROJECT_ROOT}" || exit 2
 
-pytest_workers="${PYTEST_XDIST_WORKERS:-4}"
+pytest_workers="${PYTEST_XDIST_WORKERS:-8}"
 pytest_dist="${PYTEST_XDIST_DIST:-worksteal}"
 full_suite_command="PYTEST_XDIST_WORKERS=\"${pytest_workers}\" PYTEST_XDIST_DIST=\"${pytest_dist}\" ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh"
 

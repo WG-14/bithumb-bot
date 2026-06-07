@@ -49,7 +49,7 @@ Do not run `./scripts/full_suite.sh`.
 The WSL wrapper is the only authority allowed to run:
 
 ```bash
-PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
+PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
 ```
 
 Do not modify this request file, `scripts/codex_pytest_repair_prompt.md`,
@@ -137,7 +137,7 @@ After a patch, run targeted focused tests for changed areas only. Do not broaden
 The project’s full validation command is owned by the WSL wrapper:
 
 ```bash
-PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
+PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
 ```
 
 The wrapper normally invokes validation through:
@@ -241,7 +241,7 @@ Focused commands must be traceable to failures, collection errors, import errors
 - The WSL wrapper must run the final validation command:
 
   ```bash
-  PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
+  PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && ./scripts/check_repo_runtime_artifacts.sh
   ```
 
 - If the WSL wrapper later provides a new failure packet, treat it as the new baseline evidence and repeat the focused repair process.

@@ -90,19 +90,139 @@ def test_full_runner_defaults_to_worksteal() -> None:
     assert 'echo "[PYTEST-XDIST] workers=${PYTEST_XDIST_WORKERS} dist=${pytest_dist}"' in text
 
 
-def test_full_suite_wrapper_defaults_to_worksteal() -> None:
-    text = Path("scripts/full_suite.sh").read_text(encoding="utf-8")
+def test_full_runner_logs_xdist_workers_and_dist() -> None:
+    text = Path("scripts/run_full_pytest_tests.sh").read_text(encoding="utf-8")
 
-    assert 'pytest_dist="${PYTEST_XDIST_DIST:-worksteal}"' in text
-    assert 'pytest_dist="${PYTEST_XDIST_DIST:-loadfile}"' not in text
+    assert 'echo "[PYTEST-XDIST] workers=${PYTEST_XDIST_WORKERS} dist=${pytest_dist}"' in text
+    assert 'pytest_args+=(-n "$PYTEST_XDIST_WORKERS" --dist="${pytest_dist}")' in text
 
 
-def test_full_runner_allows_explicit_loadfile_override() -> None:
+def test_full_runner_allows_explicit_xdist_dist_override() -> None:
     text = Path("scripts/run_full_pytest_tests.sh").read_text(encoding="utf-8")
 
     assert 'pytest_dist="${PYTEST_XDIST_DIST:-worksteal}"' in text
     assert '--dist="${pytest_dist}"' in text
     assert '--dist=worksteal' not in text
+
+
+def test_full_runner_skips_xdist_when_worker_count_is_empty_or_zero() -> None:
+    text = Path("scripts/run_full_pytest_tests.sh").read_text(encoding="utf-8")
+
+    guard_index = text.index('if [[ -n "${PYTEST_XDIST_WORKERS:-}" && "${PYTEST_XDIST_WORKERS:-0}" != "0" ]]; then')
+    append_index = text.index('pytest_args+=(-n "$PYTEST_XDIST_WORKERS" --dist="${pytest_dist}")')
+    end_index = text.index("\nfi", append_index)
+
+    assert guard_index < append_index < end_index
+
+
+def test_full_suite_wrapper_defaults_to_8_workers_and_worksteal() -> None:
+    text = Path("scripts/full_suite.sh").read_text(encoding="utf-8")
+
+    assert 'pytest_workers="${PYTEST_XDIST_WORKERS:-8}"' in text
+    assert 'pytest_workers="${PYTEST_XDIST_WORKERS:-4}"' not in text
+    assert 'pytest_dist="${PYTEST_XDIST_DIST:-worksteal}"' in text
+    assert 'pytest_dist="${PYTEST_XDIST_DIST:-loadfile}"' not in text
+
+
+def test_full_suite_wrapper_preserves_latest_log_pointer_for_failure_packets() -> None:
+    text = Path("scripts/full_suite.sh").read_text(encoding="utf-8")
+
+    assert 'latest_log_file="${WORK_DIR}/latest_full_suite_log"' in text
+    assert 'printf \'%s\\n\' "${log_file}" > "${latest_log_file}"' in text
+
+
+def test_full_suite_wrapper_preserves_pipe_status_for_tee() -> None:
+    text = Path("scripts/full_suite.sh").read_text(encoding="utf-8")
+
+    assert 'pytest_exit="${PIPESTATUS[0]}"' in text
+    assert 'artifact_exit="${PIPESTATUS[0]}"' in text
+
+
+def test_full_suite_wrapper_runs_artifact_check_only_after_pytest_success() -> None:
+    text = Path("scripts/full_suite.sh").read_text(encoding="utf-8")
+
+    success_guard_index = text.index('if [[ "${pytest_exit}" -eq 0 ]]; then')
+    artifact_index = text.index("./scripts/check_repo_runtime_artifacts.sh", success_guard_index)
+    else_index = text.index("\nelse", artifact_index)
+
+    assert success_guard_index < artifact_index < else_index
+
+
+def test_full_suite_wrapper_does_not_embed_local_review_log_path() -> None:
+    text = Path("scripts/full_suite.sh").read_text(encoding="utf-8")
+
+    assert ".local-review-logs" not in text
+    assert ".local-review-logs/full_runner_worksteal.log" not in text
+
+
+def test_codex_pipeline_delegates_full_suite_to_full_suite_wrapper() -> None:
+    text = Path("scripts/run_codex_pytest_pipeline.sh").read_text(encoding="utf-8")
+
+    assert 'FULL_SUITE_SCRIPT="${FULL_SUITE_SCRIPT:-${SCRIPT_DIR}/full_suite.sh}"' in text
+    assert 'if "${FULL_SUITE_SCRIPT}"; then' in text
+
+
+def test_codex_pipeline_does_not_inline_manual_full_runner_command() -> None:
+    text = Path("scripts/run_codex_pytest_pipeline.sh").read_text(encoding="utf-8")
+
+    assert ".local-review-logs/full_runner_worksteal.log" not in text
+    assert "./scripts/run_full_pytest_tests.sh 2>&1 | tee" not in text
+    assert (
+        "PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh && "
+        "./scripts/check_repo_runtime_artifacts.sh"
+    ) not in text
+
+
+def test_codex_pipeline_preserves_failure_packet_flow() -> None:
+    text = Path("scripts/run_codex_pytest_pipeline.sh").read_text(encoding="utf-8")
+
+    assert 'PACKET_SCRIPT="${PACKET_SCRIPT:-${SCRIPT_DIR}/make_failure_packet.sh}"' in text
+    assert 'codex_input_file="$("${PACKET_SCRIPT}")"' in text
+
+
+def test_codex_repair_prompt_uses_8_worker_worksteal_wrapper_command() -> None:
+    text = Path("scripts/codex_pytest_repair_prompt.md").read_text(encoding="utf-8")
+
+    assert "PYTEST_XDIST_WORKERS=8 PYTEST_XDIST_DIST=worksteal" in text
+    assert "PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal" not in text
+
+
+def test_codex_repair_prompt_preserves_wrapper_owned_validation_ban() -> None:
+    text = Path("scripts/codex_pytest_repair_prompt.md").read_text(encoding="utf-8")
+
+    assert "Do not run `./scripts/run_full_pytest_tests.sh`." in text
+    assert "Do not run `./scripts/check_repo_runtime_artifacts.sh`." in text
+    assert "Do not run `./scripts/full_suite.sh`." in text
+    assert "Codex must not run this command." in text
+
+
+def test_codex_repair_prompt_points_wrapper_to_full_suite() -> None:
+    text = Path("scripts/codex_pytest_repair_prompt.md").read_text(encoding="utf-8")
+
+    wrapper_index = text.index("The wrapper normally invokes validation through:")
+    full_suite_index = text.index("./scripts/full_suite.sh", wrapper_index)
+    codex_ban_index = text.index("Codex must not run `./scripts/full_suite.sh` directly.", full_suite_index)
+
+    assert wrapper_index < full_suite_index < codex_ban_index
+
+
+def test_no_authoritative_full_suite_command_uses_old_4_worker_or_loadfile_default() -> None:
+    paths = [
+        Path("scripts/codex_pytest_repair_prompt.md"),
+        Path("scripts/full_suite.sh"),
+        Path("scripts/make_failure_packet.sh"),
+        Path("scripts/run_full_pytest_tests.sh"),
+        Path("scripts/run_codex_pytest_pipeline.sh"),
+        Path("docs/research-validation.md"),
+    ]
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "PYTEST_XDIST_WORKERS=4 PYTEST_XDIST_DIST=worksteal ./scripts/run_full_pytest_tests.sh" not in text
+        assert "PYTEST_XDIST_WORKERS:-4" not in text
+        assert "PYTEST_XDIST_DIST:-loadfile" not in text
+        if path != Path("docs/research-validation.md"):
+            assert "PYTEST_XDIST_DIST=loadfile" not in text
 
 
 def test_parallel_research_safety_runner_uses_parallel_marker_expression() -> None:
