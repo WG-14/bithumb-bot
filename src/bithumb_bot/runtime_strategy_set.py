@@ -1677,6 +1677,7 @@ class RuntimeStrategyDecisionResultBundle:
     strategy_set: RuntimeStrategySet
     results: tuple[RuntimeStrategyDecisionResult, ...]
     data_availability_report: RuntimeDataAvailabilityReport | None = None
+    runtime_data_cycle_preflight_hash: str | None = None
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -1765,6 +1766,7 @@ class RuntimeStrategyDecisionResultBundle:
             "runtime_data_availability_report_hash": (
                 None if self.data_availability_report is None else self.data_availability_report.report_hash
             ),
+            "runtime_data_cycle_preflight_hash": self.runtime_data_cycle_preflight_hash,
             "result_count": len(self.results),
             "results": [
                 _runtime_result_replay_metadata(result)
@@ -1832,6 +1834,8 @@ def _runtime_result_replay_metadata(result: RuntimeStrategyDecisionResult) -> di
         or replay_payload.get("provider_contract_hash"),
         "runtime_data_availability_report_hash": base.get("runtime_data_availability_report_hash")
         or replay_payload.get("runtime_data_availability_report_hash"),
+        "runtime_data_cycle_preflight_hash": base.get("runtime_data_cycle_preflight_hash")
+        or replay_payload.get("runtime_data_cycle_preflight_hash"),
         "source_schema_hash": base.get("source_schema_hash")
         or replay_payload.get("source_schema_hash"),
         "feature_snapshot_hash": base.get("feature_snapshot_hash")
@@ -1928,6 +1932,7 @@ class RuntimeStrategyDecisionCollector:
         strategy_set: RuntimeStrategySet,
         *,
         through_ts_ms: int | None,
+        runtime_data_cycle_preflight_hash: str | None = None,
     ) -> RuntimeStrategyDecisionResultBundle | None:
         authority_context = ProfileAuthorityContext.for_strategy_set(
             strategy_set,
@@ -2007,12 +2012,18 @@ class RuntimeStrategyDecisionCollector:
                 raise TypeError(f"typed_runtime_decision_required:{spec.strategy_name}")
             _attach_runtime_feature_snapshot_metadata(result, feature_snapshot)
             _attach_runtime_request_metadata(result, request)
+            if runtime_data_cycle_preflight_hash:
+                result.base_context["runtime_data_cycle_preflight_hash"] = runtime_data_cycle_preflight_hash
+                result.replay_fingerprint["runtime_data_cycle_preflight_hash"] = (
+                    runtime_data_cycle_preflight_hash
+                )
             validate_runtime_decision_result_provenance(result, request)
             results.append(result)
         return RuntimeStrategyDecisionResultBundle(
             strategy_set=strategy_set,
             results=tuple(results),
             data_availability_report=data_availability_report,
+            runtime_data_cycle_preflight_hash=runtime_data_cycle_preflight_hash,
         )
 
     def _validate_strategy_capability(
@@ -2138,6 +2149,7 @@ class RuntimeDecisionGateway:
         *,
         strategy_set: RuntimeStrategySet | None = None,
         through_ts_ms: int | None,
+        runtime_data_cycle_preflight_hash: str | None = None,
     ) -> RuntimeStrategyDecisionResultBundle | None:
         resolved = strategy_set or self.resolver.resolve()
         collector = self.collector
@@ -2154,6 +2166,7 @@ class RuntimeDecisionGateway:
             conn,
             resolved,
             through_ts_ms=through_ts_ms,
+            runtime_data_cycle_preflight_hash=runtime_data_cycle_preflight_hash,
         )
 
 
@@ -2166,11 +2179,13 @@ def collect_runtime_strategy_decisions(
     *,
     through_ts_ms: int | None,
     strategy_set: RuntimeStrategySet | None = None,
+    runtime_data_cycle_preflight_hash: str | None = None,
 ) -> RuntimeStrategyDecisionResultBundle | None:
     return RuntimeDecisionGateway().decide_bundle(
         conn,
         strategy_set=strategy_set,
         through_ts_ms=through_ts_ms,
+        runtime_data_cycle_preflight_hash=runtime_data_cycle_preflight_hash,
     )
 
 

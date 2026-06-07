@@ -1075,7 +1075,7 @@ def _install_runtime_gateway(monkeypatch_or_factory, result_factory=None):
     if result_factory is None:
         result_factory = monkeypatch_or_factory
     class _Gateway:
-        def decide_bundle(self, conn, *, strategy_set=None, through_ts_ms=None):
+        def decide_bundle(self, conn, *, strategy_set=None, through_ts_ms=None, **_kwargs):
             from bithumb_bot.runtime_strategy_set import derive_strategy_instance_id
 
             result = result_factory(conn, through_ts_ms=through_ts_ms)

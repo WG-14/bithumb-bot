@@ -365,6 +365,7 @@ class DecisionCoordinator:
                 conn,
                 strategy_set=runtime_strategy_set,
                 through_ts_ms=candle_ts,
+                runtime_data_cycle_preflight_hash=runtime_data_cycle_preflight_hash,
             )
         except Exception as exc:
             failure = classify_decision_cycle_failure(exc, phase=current_phase)

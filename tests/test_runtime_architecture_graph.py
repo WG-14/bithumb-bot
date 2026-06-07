@@ -25,6 +25,27 @@ def _import_modules(path: Path) -> set[str]:
     return modules
 
 
+def _normalized_import_module(path: Path, node: ast.ImportFrom) -> str:
+    if node.level == 0:
+        return str(node.module or "")
+    package = "bithumb_bot.runtime" if path.parts[-2:] and path.parts[-2] == "runtime" else "bithumb_bot"
+    parts = package.split(".")
+    if node.level > 1:
+        parts = parts[: -(node.level - 1)]
+    if node.module:
+        parts.extend(str(node.module).split("."))
+    return ".".join(part for part in parts if part)
+
+
+def _imported_names(path: Path) -> dict[str, set[str]]:
+    imports: dict[str, set[str]] = {}
+    for node in ast.walk(_tree(path)):
+        if isinstance(node, ast.ImportFrom):
+            module = _normalized_import_module(path, node)
+            imports.setdefault(module, set()).update(alias.name for alias in node.names)
+    return imports
+
+
 def test_runner_imports_only_runtime_shell_dependencies() -> None:
     modules = _import_modules(Path("src/bithumb_bot/runtime/runner.py"))
     forbidden = {
@@ -51,12 +72,17 @@ def test_runtime_shell_does_not_import_strategy_plugins() -> None:
 
 
 def test_submit_boundary_is_only_execution_service_or_execution_coordinator() -> None:
-    forbidden_names = {"live_execute_signal", "build_signal_execution_request"}
+    forbidden_names = {
+        "live_execute_signal",
+        "paper_execute",
+        "build_signal_execution_service",
+        "record_harmless_dust_exit_suppression",
+        "build_signal_execution_request",
+    }
     allowlisted = {
         Path("src/bithumb_bot/runtime/execution_coordinator.py"),
         Path("src/bithumb_bot/execution_service.py"),
         Path("src/bithumb_bot/runtime/app_container.py"),
-        Path("src/bithumb_bot/runtime/runner.py"),
     }
     for path in (
         Path("src/bithumb_bot/runtime/runner.py"),
@@ -70,6 +96,23 @@ def test_submit_boundary_is_only_execution_service_or_execution_coordinator() ->
         source = path.read_text(encoding="utf-8-sig")
         for name in forbidden_names:
             assert name not in source, path
+
+
+def test_runtime_shell_does_not_import_execution_service_submit_symbols() -> None:
+    forbidden = {
+        "live_execute_signal",
+        "paper_execute",
+        "build_signal_execution_service",
+        "record_harmless_dust_exit_suppression",
+        "build_signal_execution_request",
+    }
+    for path in (
+        Path("src/bithumb_bot/runtime/runner.py"),
+        Path("src/bithumb_bot/runtime/cycle_pipeline.py"),
+    ):
+        imports = _imported_names(path)
+        assert "bithumb_bot.execution_service" not in imports, path
+        assert forbidden.isdisjoint(imports.get("bithumb_bot.runtime.execution_coordinator", set())), path
 
 
 def test_runtime_shell_contains_no_raw_sql_strings() -> None:

@@ -163,6 +163,23 @@ def validate_strategy_pr_evidence(
         and path != BUILTIN_MANIFEST
         and not path.endswith("_test.py")
     ]
+    has_builtin_manifest = BUILTIN_MANIFEST in normalized_files or "builtin_manifest.py" in text
+    has_entry_point = "bithumb_bot.strategy_plugins" in text
+    declares_builtin_path = "registration path: builtin_manifest" in text or has_builtin_manifest
+    declares_external_path = "registration path: external_entry_point" in text or has_entry_point
+    if strategy_related:
+        if BUILTIN_MANIFEST in normalized_files:
+            builtin_reason = _extract_field_value(text, "built-in reason")
+            if builtin_reason not in BUILTIN_REASON_TOKENS:
+                violations.append(
+                    "built-in strategy changes require valid Built-in Reason:"
+                    f"{BUILTIN_MANIFEST}"
+                )
+        if declares_external_path and BUILTIN_MANIFEST in normalized_files:
+            violations.append(
+                "external entry-point strategy changes must not edit built-in manifest:"
+                f"{BUILTIN_MANIFEST}"
+            )
     if plugin_files:
         forbidden_core_files = [
             path for path in normalized_files if path in STRATEGY_ADDITION_FORBIDDEN_CORE_FILES
@@ -173,22 +190,12 @@ def validate_strategy_pr_evidence(
                     "strategy_core_diff_forbidden:"
                     f"{path}:runtime_architecture_migration_evidence_required"
                 )
-        has_builtin_manifest = BUILTIN_MANIFEST in normalized_files or "builtin_manifest.py" in text
-        declares_builtin_path = "registration path: builtin_manifest" in text or has_builtin_manifest
-        has_entry_point = "bithumb_bot.strategy_plugins" in text
-        declares_external_path = "registration path: external_entry_point" in text or has_entry_point
         if not (has_builtin_manifest or has_entry_point):
             violations.append("strategy plugin changes require built-in manifest or external entry-point evidence")
         if not (declares_builtin_path or declares_external_path):
             violations.append("strategy plugin changes require Registration Path evidence")
         if "strategy-plugin-inventory --json" not in text:
             violations.append("strategy plugin changes require inventory evidence")
-        if BUILTIN_MANIFEST in normalized_files:
-            builtin_reason = _extract_field_value(text, "built-in reason")
-            if builtin_reason not in BUILTIN_REASON_TOKENS:
-                violations.append("built-in strategy changes require valid Built-in Reason")
-        if declares_external_path and BUILTIN_MANIFEST in normalized_files:
-            violations.append("external entry-point strategy changes must not edit built-in manifest")
     if core_related and not (
         "architecture_review_required" in text or "architecture_review_complete" in text
     ):

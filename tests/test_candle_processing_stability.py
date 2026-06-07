@@ -166,7 +166,7 @@ class _RuntimeDecisionBundle:
 
 def _install_runtime_gateway(monkeypatch, result_factory) -> None:
     class _Gateway:
-        def decide_bundle(self, conn, *, strategy_set=None, through_ts_ms=None):
+        def decide_bundle(self, conn, *, strategy_set=None, through_ts_ms=None, **_kwargs):
             result = result_factory(conn, through_ts_ms=through_ts_ms)
             result.base_context.update(
                 {

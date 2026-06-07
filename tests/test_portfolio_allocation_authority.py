@@ -1722,7 +1722,7 @@ def test_decision_coordinator_persists_multi_strategy_virtual_and_actual_authori
     )
 
     class _Gateway:
-        def decide_bundle(self, conn, *, strategy_set, through_ts_ms):
+        def decide_bundle(self, conn, *, strategy_set, through_ts_ms, **_kwargs):
             del conn, strategy_set, through_ts_ms
             return typed_bundle
 

@@ -366,6 +366,36 @@ def test_collector_passes_runtime_decision_request() -> None:
     assert isinstance(received[0], RuntimeDecisionRequest)
 
 
+def test_runtime_data_cycle_preflight_hash_is_in_bundle_replay_metadata() -> None:
+    preflight_hash = "sha256:runtime-data-cycle-preflight"
+
+    class _Adapter:
+        strategy_name = "canary_non_sma"
+
+        def decide_feature_snapshot(self, request: RuntimeDecisionRequest, feature_snapshot: Any):
+            del request, feature_snapshot
+            return _RuntimeResult(self.strategy_name)
+
+        def typed_authority_required(self) -> bool:
+            return True
+
+    bundle = RuntimeDecisionGateway(
+        collector=RuntimeStrategyDecisionCollector(
+            adapter_resolver=_adapter_resolver({"canary_non_sma": _Adapter()}),
+        ),
+    ).decide_bundle(
+        _conn(),
+        strategy_set=RuntimeStrategySet(source="unit", strategies=(_canary_spec(),)),
+        through_ts_ms=1_700_000_180_000,
+        runtime_data_cycle_preflight_hash=preflight_hash,
+    )
+
+    assert bundle is not None
+    payload = bundle.as_dict()
+    assert payload["runtime_data_cycle_preflight_hash"] == preflight_hash
+    assert payload["results"][0]["runtime_data_cycle_preflight_hash"] == preflight_hash
+
+
 def test_runtime_decision_entrypoint_accepts_generic_parameter_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

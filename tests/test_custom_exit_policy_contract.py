@@ -44,9 +44,8 @@ def _runtime_custom_exit_provider():
     )
 
 
-def _settings():
-    return replace(
-        settings,
+def _settings(**overrides):
+    values = dict(
         MODE="paper",
         PAIR="KRW-BTC",
         INTERVAL="1m",
@@ -56,6 +55,11 @@ def _settings():
         ACTIVE_STRATEGIES="",
         APPROVED_STRATEGY_PROFILE_PATH="",
         STRATEGY_APPROVED_PROFILE_PATH="",
+    )
+    values.update(overrides)
+    return replace(
+        settings,
+        **values,
     )
 
 
@@ -97,6 +101,72 @@ def test_custom_exit_runtime_request_contains_exit_policy_hashes() -> None:
     assert fields["exit_policy_hash"] == request.exit_policy_hash
     assert fields["exit_policy_config_hash"] == request.exit_policy_config_hash
     assert fields["exit_policy_contract_hash"] == request.exit_policy_contract_hash
+
+
+def test_custom_exit_live_like_contract_preserves_exit_policy_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bithumb_bot import runtime_strategy_set
+
+    materialized = custom_exit_policy_materializer("custom_exit_canary", {"TRAILING_STOP_RATIO": 0.03})
+    profile = build_candidate_profile(
+        {
+            "strategy_name": "custom_exit_canary",
+            "parameter_values": {"TRAILING_STOP_RATIO": 0.03},
+            "parameter_values_raw": {"TRAILING_STOP_RATIO": 0.03},
+            **materialized,
+        }
+    )
+    profile["profile_mode"] = "live_dry_run"
+    profile["profile_content_hash"] = "sha256:custom-exit-approved"
+    profile["strategy_parameters"] = {"TRAILING_STOP_RATIO": 0.03}
+    profile["risk_policy"] = {
+        "policy_status": "disabled_explicit",
+        "missing_policy": "fail_closed_for_live",
+        "source": "unit_approved_profile",
+    }
+    profile["risk_enforcement_mode"] = "telemetry"
+    profile["missing_risk_policy_behavior"] = "fail_closed_for_live"
+
+    monkeypatch.setattr(runtime_strategy_set, "load_approved_profile", lambda _path: dict(profile))
+    monkeypatch.setattr(runtime_strategy_set, "diff_profile_to_runtime", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        runtime_strategy_set,
+        "runtime_contract_from_settings",
+        lambda cfg: {
+            "schema_version": 1,
+            "mode": cfg.MODE,
+                "strategy_name": "custom_exit_canary",
+                "market": cfg.PAIR,
+                "interval": cfg.INTERVAL,
+                "live_dry_run": True,
+                "live_real_order_armed": False,
+                "strategy_parameters": {"TRAILING_STOP_RATIO": 0.03},
+            },
+        )
+
+    request = RuntimeDecisionRequestBuilder(
+        settings_obj=_settings(MODE="live", LIVE_DRY_RUN=True, LIVE_REAL_ORDER_ARMED=False),
+        require_spec_bound_approved_profile=True,
+    ).build_for_spec(
+        RuntimeStrategySpec(
+            strategy_name="custom_exit_canary",
+            pair="KRW-BTC",
+            interval="1m",
+            parameters={"TRAILING_STOP_RATIO": 0.03},
+            approved_profile_path="/tmp/custom-exit-approved.json",
+            approved_profile_hash="sha256:custom-exit-approved",
+        ),
+        through_ts_ms=1,
+    )
+
+    fields = request.observability_fields()
+    for field in (
+        "exit_policy_hash",
+        "exit_policy_config_hash",
+        "exit_policy_contract_hash",
+    ):
+        assert profile[field] == materialized[field]
+        assert fields[field] == materialized[field]
+        assert getattr(request, field) == materialized[field]
 
 
 def test_custom_exit_rule_without_materializer_fails_closed() -> None:

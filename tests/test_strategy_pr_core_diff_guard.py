@@ -76,3 +76,45 @@ inventory evidence: strategy-plugin-inventory --json
     )
 
     assert violations == []
+
+
+def test_builtin_manifest_change_requires_valid_builtin_reason() -> None:
+    violations = validate_strategy_pr_evidence(
+        changed_files=("src/bithumb_bot/strategy_plugins/builtin_manifest.py",),
+        evidence_text="""
+strategy level: level_3_promotion_grade
+contract helper: assert_live_eligible_contract
+registration path: builtin_manifest
+strategy-plugin-inventory --json
+""",
+    )
+
+    assert any(
+        "built-in strategy changes require valid Built-in Reason" in item
+        and "builtin_manifest.py" in item
+        for item in violations
+    )
+
+
+def test_external_entry_point_strategy_rejects_builtin_manifest_change() -> None:
+    violations = validate_strategy_pr_evidence(
+        changed_files=(
+            "src/bithumb_bot/strategy_plugins/example.py",
+            "src/bithumb_bot/strategy_plugins/builtin_manifest.py",
+        ),
+        evidence_text="""
+strategy level: level_3_promotion_grade
+contract helper: assert_live_eligible_contract
+registration path: external_entry_point
+bithumb_bot.strategy_plugins
+entry point group
+built-in reason: canary
+strategy-plugin-inventory --json
+""",
+    )
+
+    assert any(
+        "external entry-point strategy changes must not edit built-in manifest" in item
+        and "builtin_manifest.py" in item
+        for item in violations
+    )

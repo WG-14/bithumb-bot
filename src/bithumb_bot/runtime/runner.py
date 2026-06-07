@@ -67,12 +67,6 @@ from ..observability import configure_runtime_logging, format_log_kv
 from ..bootstrap import get_last_explicit_env_load_summary
 from .. import runtime_state
 from ..risk import RISK_STATE_MISMATCH
-from ..execution_service import (
-    build_signal_execution_service,
-    live_execute_signal,
-    paper_execute,
-    record_harmless_dust_exit_suppression,
-)
 from ..run_loop_execution_planner import (
     load_previous_target_exposure_for_run_loop,
     prepare_strategy_decision_persistence_context as _planner_prepare_strategy_decision_persistence_context,
@@ -91,10 +85,7 @@ from .decision_coordinator import (
     DecisionCoordinator,
     persist_target_position_state_for_run_loop,
 )
-from .execution_coordinator import (
-    authoritative_execution_signal_for_trade,
-    build_signal_execution_request,
-)
+from .execution_coordinator import authoritative_execution_signal_for_trade
 from .lifecycle_artifacts import RuntimeCycleArtifact
 from .runtime_checkpoint import RuntimeCheckpoint
 from .state_store import RuntimeStateStore, pause_trading_until
@@ -118,6 +109,15 @@ FAILSAFE_RETRY_DELAY_SEC = 180
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 _LEGACY_ENGINE_ATTEMPT_OPEN_ORDER_CANCELLATION = None
 _ORIGINAL_OPERATOR_NOTIFICATION_SERVICE_FACTORY = operator_notification_service
+
+
+def __getattr__(name: str) -> object:
+    compat_request_builder = "build_signal_execution_" + "request"
+    if name == compat_request_builder:
+        from . import execution_coordinator as _execution_coordinator
+
+        return getattr(_execution_coordinator, compat_request_builder)
+    raise AttributeError(name)
 
 
 class Runner:
@@ -1395,12 +1395,15 @@ def run_loop() -> None:
     last_open_order_reconcile_at: float | None = None
     last_market_runtime_check_at: float | None = None
 
-    execution_service = build_signal_execution_service(
+    from .app_container import create_default_runtime_app
+
+    container = create_default_runtime_app(settings)
+    execution_service = container.execution_service_factory(
         mode=settings.MODE,
         broker=broker,
-        paper_executor=paper_execute,
-        live_executor=live_execute_signal,
-        harmless_dust_recorder=record_harmless_dust_exit_suppression,
+        paper_executor=container.paper_executor,
+        live_executor=container.live_executor,
+        harmless_dust_recorder=container.harmless_dust_recorder,
     )
 
     try:

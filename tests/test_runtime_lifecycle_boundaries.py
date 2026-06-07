@@ -221,6 +221,19 @@ def test_runner_does_not_directly_submit_orders_or_reconcile_post_trade() -> Non
     assert "LIVE_EXECUTION_BROKER_ERROR" not in source
 
 
+def test_runner_module_does_not_import_or_reference_submit_boundary_symbols() -> None:
+    source = inspect.getsource(runner)
+    for forbidden in {
+        "live_execute_signal",
+        "paper_execute",
+        "build_signal_execution_service",
+        "record_harmless_dust_exit_suppression",
+        "from ..execution_service import",
+        "from bithumb_bot.execution_service import",
+    }:
+        assert forbidden not in source
+
+
 def test_runner_does_not_own_safety_policy_branches() -> None:
     source = inspect.getsource(runner.Runner.run_one_cycle)
     for forbidden in {
