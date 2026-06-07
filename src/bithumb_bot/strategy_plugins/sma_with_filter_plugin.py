@@ -118,6 +118,7 @@ _SMA_WITH_FILTER_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
     decision_payload_adapter=runtime_contract.decision_payload_adapter,
     exit_signal_context_builder=runtime_contract.exit_signal_context,
     exit_rule_factory=runtime_contract.exit_rule_factory,
+    exit_policy_materializer=runtime_contract.exit_policy_materializer,
     research_policy_decision_builder=runtime_contract.research_policy_decision_builder,
     research_export_normalizer=runtime_contract.research_export_normalizer,
     runtime_decision_adapter_factory=runtime_contract.runtime_decision_adapter_factory,

@@ -289,6 +289,14 @@ def exit_rule_factory(
     )
 
 
+def exit_policy_materializer(strategy_name: str, parameter_values: dict[str, Any]) -> dict[str, object]:
+    return SmaWithFilterPolicyAssembly().materialize_exit_policy(
+        strategy_name,
+        parameter_values,
+        materialization_mode=MaterializationMode.RESEARCH_PROMOTION.value,
+    )
+
+
 def research_policy_decision_builder(
     *,
     event: Any,

@@ -227,7 +227,7 @@ class StrategyDecisionInputBundle:
         }
 
     def observability_payload(self) -> dict[str, object]:
-        return {
+        payload = {
             "decision_input_contract_hash": self.decision_input_contract_hash,
             "decision_input_bundle_hash": self.decision_input_bundle_hash,
             "decision_input_bundle_payload_hash": self.decision_input_bundle_payload_hash,
@@ -237,6 +237,16 @@ class StrategyDecisionInputBundle:
             "materialized_parameters_hash": self.materialized_parameters_hash,
             **self.component_hashes(),
         }
+        for key in (
+            "exit_policy_hash",
+            "exit_policy_contract_hash",
+            "exit_policy_source",
+            "exit_policy_materialization_mode",
+        ):
+            value = self.provenance.get(key)
+            if str(value or "").strip():
+                payload[key] = value
+        return payload
 
 
 def _policy_payload(value: object) -> dict[str, object]:

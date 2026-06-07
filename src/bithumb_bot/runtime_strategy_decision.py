@@ -30,6 +30,11 @@ class RuntimeDecisionRequest:
     plugin_contract_hash: str | None
     strategy_version: str | None
     request_hash: str
+    exit_policy_hash: str | None = None
+    exit_policy_contract_hash: str | None = None
+    exit_policy_source: str | None = None
+    exit_policy_materialization_mode: str | None = None
+    exit_policy_config_hash: str | None = None
     runtime_scope_key: RuntimeScopeKey | None = None
     scope_key_hash: str = ""
 
@@ -106,6 +111,11 @@ class RuntimeDecisionRequest:
             "through_ts_ms": self.through_ts_ms,
             "candle_ts": self.through_ts_ms,
             "plugin_contract_hash": self.plugin_contract_hash,
+            "exit_policy_hash": self.exit_policy_hash,
+            "exit_policy_contract_hash": self.exit_policy_contract_hash,
+            "exit_policy_source": self.exit_policy_source,
+            "exit_policy_materialization_mode": self.exit_policy_materialization_mode,
+            "exit_policy_config_hash": self.exit_policy_config_hash,
             "runtime_decision_request_hash": self.request_hash,
             "request_hash": self.request_hash,
             "parameter_source": self.parameter_source,
@@ -482,6 +492,7 @@ def _attach_runtime_request_metadata(
     if isinstance(result.replay_fingerprint, dict):
         result.replay_fingerprint.update(
             {
+                **fields,
                 "runtime_decision_request_hash": request.request_hash,
                 "strategy_instance_id": request.strategy_instance_id,
                 "strategy_parameters_hash": request.strategy_parameters_hash,

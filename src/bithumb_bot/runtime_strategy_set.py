@@ -28,7 +28,8 @@ from .research.strategy_registry import (
     resolve_research_strategy_plugin,
 )
 from .research.strategy_spec import (
-    exit_policy_from_parameters,
+    exit_policy_hash,
+    exit_policy_materialization_from_parameters,
     materialize_strategy_parameters,
     materialized_strategy_parameters_hash,
     runtime_bound_behavior_parameter_names,
@@ -216,6 +217,12 @@ class RuntimeStrategySpec:
     parameter_source: str | None = None
     runtime_contract_hash: str | None = None
     strategy_version: str | None = None
+    exit_policy: Mapping[str, object] | None = None
+    exit_policy_hash: str | None = None
+    exit_policy_contract_hash: str | None = None
+    exit_policy_source: str | None = None
+    exit_policy_materialization_mode: str | None = None
+    exit_policy_config_hash: str | None = None
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -308,6 +315,22 @@ class RuntimeStrategySpec:
             object.__setattr__(self, "strategy_version", str(self.strategy_version).strip() or None)
         if self.strategy_instance_id is not None:
             object.__setattr__(self, "strategy_instance_id", str(self.strategy_instance_id).strip() or None)
+        if self.exit_policy is not None:
+            object.__setattr__(
+                self,
+                "exit_policy",
+                MappingProxyType({str(key): value for key, value in dict(self.exit_policy).items()}),
+            )
+        for field in (
+            "exit_policy_hash",
+            "exit_policy_contract_hash",
+            "exit_policy_source",
+            "exit_policy_materialization_mode",
+            "exit_policy_config_hash",
+        ):
+            value = getattr(self, field)
+            if value is not None:
+                object.__setattr__(self, field, str(value).strip() or None)
         object.__setattr__(
             self,
             "runtime_adapter_config",
@@ -365,6 +388,12 @@ class RuntimeStrategySpec:
             "parameter_source": self.parameter_source,
             "runtime_contract_hash": self.runtime_contract_hash,
             "strategy_version": self.strategy_version,
+            "exit_policy": None if self.exit_policy is None else dict(self.exit_policy),
+            "exit_policy_hash": self.exit_policy_hash,
+            "exit_policy_contract_hash": self.exit_policy_contract_hash,
+            "exit_policy_source": self.exit_policy_source,
+            "exit_policy_materialization_mode": self.exit_policy_materialization_mode,
+            "exit_policy_config_hash": self.exit_policy_config_hash,
         }
 
 
@@ -440,6 +469,7 @@ def derive_strategy_instance_id(
     spec: RuntimeStrategySpec,
     *,
     strategy_parameters_hash: str | None = None,
+    exit_policy_hash: str | None = None,
 ) -> str:
     explicit = str(spec.strategy_instance_id or "").strip()
     if explicit:
@@ -450,17 +480,41 @@ def derive_strategy_instance_id(
     )
     if not parameter_identity_hash:
         try:
-            parameter_identity_hash = materialized_strategy_parameters_hash(
-                materialize_strategy_parameters(spec.strategy_name, dict(spec.parameters or {}))
+            materialized_parameters = materialize_strategy_parameters(
+                spec.strategy_name,
+                dict(spec.parameters or {}),
+            )
+            parameter_identity_hash = materialized_strategy_parameters_hash(materialized_parameters)
+        except Exception:
+            materialized_parameters = dict(spec.parameters or {})
+            parameter_identity_hash = materialized_strategy_parameters_hash(dict(spec.parameters or {}))
+    else:
+        try:
+            materialized_parameters = materialize_strategy_parameters(
+                spec.strategy_name,
+                dict(spec.parameters or {}),
             )
         except Exception:
-            parameter_identity_hash = materialized_strategy_parameters_hash(dict(spec.parameters or {}))
+            materialized_parameters = dict(spec.parameters or {})
+    resolved_exit_policy_hash = str(exit_policy_hash or spec.exit_policy_hash or "").strip()
+    if not resolved_exit_policy_hash:
+        try:
+            resolved_exit_policy_hash = str(
+                exit_policy_materialization_from_parameters(
+                    spec.strategy_name,
+                    dict(materialized_parameters),
+                    materialization_mode="runtime_strategy_instance_identity",
+                ).exit_policy_hash
+            )
+        except Exception:
+            resolved_exit_policy_hash = "exit_policy_hash_unresolved"
     digest = _runtime_strategy_identity_hash(
         {
             "strategy_name": spec.strategy_name,
             "pair": spec.pair,
             "interval": spec.interval,
             "parameter_identity_hash": parameter_identity_hash,
+            "exit_policy_hash": resolved_exit_policy_hash,
         }
     )
     return (
@@ -482,6 +536,12 @@ class RuntimeStrategyInstance:
     runtime_contract_hash: str | None
     plugin_contract_hash: str | None
     strategy_version: str | None
+    exit_policy: Mapping[str, object]
+    exit_policy_hash: str
+    exit_policy_contract_hash: str
+    exit_policy_source: str
+    exit_policy_materialization_mode: str
+    exit_policy_config_hash: str
     runtime_contract: Mapping[str, object]
     runtime_adapter_config: Mapping[str, object]
     risk_profile: StrategyRiskProfile | None = None
@@ -508,6 +568,11 @@ class RuntimeStrategyInstance:
             self,
             "runtime_contract",
             MappingProxyType({str(key): value for key, value in dict(self.runtime_contract or {}).items()}),
+        )
+        object.__setattr__(
+            self,
+            "exit_policy",
+            MappingProxyType({str(key): value for key, value in dict(self.exit_policy or {}).items()}),
         )
         object.__setattr__(
             self,
@@ -573,6 +638,12 @@ class RuntimeStrategyInstance:
             "runtime_contract_hash": self.runtime_contract_hash,
             "plugin_contract_hash": self.plugin_contract_hash,
             "strategy_version": self.strategy_version,
+            "exit_policy": dict(self.exit_policy),
+            "exit_policy_hash": self.exit_policy_hash,
+            "exit_policy_contract_hash": self.exit_policy_contract_hash,
+            "exit_policy_source": self.exit_policy_source,
+            "exit_policy_materialization_mode": self.exit_policy_materialization_mode,
+            "exit_policy_config_hash": self.exit_policy_config_hash,
             "runtime_adapter_config": dict(self.runtime_adapter_config),
             "strategy_risk_profile": (
                 None if self.risk_profile is None else self.risk_profile.as_dict()
@@ -1044,6 +1115,31 @@ class RuntimeStrategySetResolver:
                 str(payload.get("strategy_version") or "").strip()
                 or default.strategy_version
             ),
+            exit_policy=(
+                payload.get("exit_policy")
+                if isinstance(payload.get("exit_policy"), Mapping)
+                else default.exit_policy
+            ),
+            exit_policy_hash=(
+                str(payload.get("exit_policy_hash") or "").strip()
+                or default.exit_policy_hash
+            ),
+            exit_policy_contract_hash=(
+                str(payload.get("exit_policy_contract_hash") or "").strip()
+                or default.exit_policy_contract_hash
+            ),
+            exit_policy_source=(
+                str(payload.get("exit_policy_source") or "").strip()
+                or default.exit_policy_source
+            ),
+            exit_policy_materialization_mode=(
+                str(payload.get("exit_policy_materialization_mode") or "").strip()
+                or default.exit_policy_materialization_mode
+            ),
+            exit_policy_config_hash=(
+                str(payload.get("exit_policy_config_hash") or "").strip()
+                or default.exit_policy_config_hash
+            ),
         )
 
 
@@ -1207,6 +1303,85 @@ class ParameterAuthorityResolver:
         return False
 
 
+def _provided_exit_policy_materialization(
+    *,
+    strategy_name: str,
+    provided: Mapping[str, object],
+    declared_hash: object,
+    contract_hash: object = None,
+    config_hash: object = None,
+    source: object = None,
+    mode: object = None,
+) -> dict[str, object]:
+    policy = dict(provided)
+    actual_hash = exit_policy_hash(policy)
+    expected_hash = str(declared_hash or "").strip()
+    if expected_hash and expected_hash != actual_hash:
+        raise RuntimeError(f"runtime_exit_policy_hash_mismatch:{strategy_name}")
+    resolved_hash = expected_hash or actual_hash
+    return {
+        "exit_policy": policy,
+        "exit_policy_hash": resolved_hash,
+        "exit_policy_contract_hash": str(contract_hash or "").strip()
+        or sha256_prefixed(
+            {
+                "schema_version": 1,
+                "strategy_name": strategy_name,
+                "exit_policy_hash": resolved_hash,
+                "exit_policy_source": source or "runtime_provided_exit_policy",
+            }
+        ),
+        "exit_policy_source": str(source or "runtime_provided_exit_policy"),
+        "exit_policy_materialization_mode": str(mode or "runtime_profile_preserved"),
+        "exit_policy_config_hash": str(config_hash or "").strip() or sha256_prefixed(policy),
+    }
+
+
+def _runtime_exit_policy_materialization(
+    *,
+    spec: RuntimeStrategySpec,
+    parameters: Mapping[str, object],
+    profile: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if spec.exit_policy is not None:
+        return _provided_exit_policy_materialization(
+            strategy_name=spec.strategy_name,
+            provided=spec.exit_policy,
+            declared_hash=spec.exit_policy_hash,
+            contract_hash=spec.exit_policy_contract_hash,
+            config_hash=spec.exit_policy_config_hash,
+            source=spec.exit_policy_source or "runtime_strategy_spec_exit_policy",
+            mode=spec.exit_policy_materialization_mode or "runtime_strategy_spec",
+        )
+    if profile is not None and isinstance(profile.get("exit_policy"), Mapping):
+        resolved = _provided_exit_policy_materialization(
+            strategy_name=spec.strategy_name,
+            provided=profile["exit_policy"],  # type: ignore[arg-type]
+            declared_hash=profile.get("exit_policy_hash"),
+            contract_hash=profile.get("exit_policy_contract_hash"),
+            config_hash=profile.get("exit_policy_config_hash"),
+            source=profile.get("exit_policy_source") or "approved_profile_exit_policy",
+            mode=profile.get("exit_policy_materialization_mode") or "approved_profile",
+        )
+        materialized = exit_policy_materialization_from_parameters(
+            spec.strategy_name,
+            dict(parameters),
+            materialization_mode="runtime_profile_verification",
+        ).as_dict()
+        if materialized["exit_policy_hash"] != resolved["exit_policy_hash"]:
+            raise RuntimeError(f"runtime_exit_policy_materialized_hash_mismatch:{spec.strategy_name}")
+        return resolved
+    materialized = exit_policy_materialization_from_parameters(
+        spec.strategy_name,
+        dict(parameters),
+        materialization_mode="runtime_strategy_instance",
+    ).as_dict()
+    declared_hash = str(spec.exit_policy_hash or "").strip()
+    if declared_hash and declared_hash != str(materialized["exit_policy_hash"]):
+        raise RuntimeError(f"runtime_exit_policy_hash_mismatch:{spec.strategy_name}")
+    return materialized
+
+
 @dataclass(frozen=True)
 class RuntimeDecisionRequestBuilder:
     settings_obj: object = settings
@@ -1316,7 +1491,10 @@ class RuntimeDecisionRequestBuilder:
         try:
             settings_runtime_contract = runtime_contract_from_settings(cfg)
         except (ResearchStrategyRegistryError, ApprovedProfileError):
-            if not _plugin_accepts_empty_runtime_parameters(plugin):
+            if (
+                not _plugin_accepts_empty_runtime_parameters(plugin)
+                and authority.parameter_source != "runtime_strategy_spec"
+            ):
                 raise
             settings_runtime_contract = {
                 "schema_version": 1,
@@ -1333,11 +1511,19 @@ class RuntimeDecisionRequestBuilder:
         runtime_contract["strategy_parameters"] = dict(parameters)
         if approved_profile_path and not str(runtime_contract.get("profile_selector") or "").strip():
             runtime_contract["profile_selector"] = approved_profile_path
-        if _plugin_accepts_empty_runtime_parameters(plugin):
-            runtime_contract["exit_policy"] = dict(plugin.spec.exit_policy_schema)
-        else:
-            runtime_contract["exit_policy"] = exit_policy_from_parameters(spec.strategy_name, dict(parameters))
-        runtime_contract["exit_policy_hash"] = sha256_prefixed(runtime_contract["exit_policy"])
+        exit_materialization = _runtime_exit_policy_materialization(
+            spec=spec,
+            parameters=parameters,
+            profile=profile,
+        )
+        runtime_contract["exit_policy"] = dict(exit_materialization["exit_policy"])  # type: ignore[arg-type]
+        runtime_contract["exit_policy_hash"] = exit_materialization["exit_policy_hash"]
+        runtime_contract["exit_policy_contract_hash"] = exit_materialization["exit_policy_contract_hash"]
+        runtime_contract["exit_policy_source"] = exit_materialization["exit_policy_source"]
+        runtime_contract["exit_policy_materialization_mode"] = exit_materialization[
+            "exit_policy_materialization_mode"
+        ]
+        runtime_contract["exit_policy_config_hash"] = exit_materialization["exit_policy_config_hash"]
 
         if profile is not None:
             expected_modes, mode_reason = expected_profile_modes_for_runtime(runtime_contract)
@@ -1365,6 +1551,7 @@ class RuntimeDecisionRequestBuilder:
         strategy_instance_id = derive_strategy_instance_id(
             spec,
             strategy_parameters_hash=strategy_parameters_hash,
+            exit_policy_hash=str(exit_materialization["exit_policy_hash"]),
         )
         risk_profile = strategy_risk_profile_from_profile_payload(
             strategy_instance_id=strategy_instance_id,
@@ -1391,6 +1578,12 @@ class RuntimeDecisionRequestBuilder:
             runtime_contract_hash=runtime_contract_hash,
             plugin_contract_hash=plugin_contract_hash,
             strategy_version=strategy_version,
+            exit_policy=dict(exit_materialization["exit_policy"]),  # type: ignore[arg-type]
+            exit_policy_hash=str(exit_materialization["exit_policy_hash"]),
+            exit_policy_contract_hash=str(exit_materialization["exit_policy_contract_hash"]),
+            exit_policy_source=str(exit_materialization["exit_policy_source"]),
+            exit_policy_materialization_mode=str(exit_materialization["exit_policy_materialization_mode"]),
+            exit_policy_config_hash=str(exit_materialization["exit_policy_config_hash"]),
             runtime_contract=runtime_contract,
             runtime_adapter_config=dict(spec.runtime_adapter_config or {}),
             risk_profile=risk_profile,
@@ -1423,6 +1616,11 @@ class RuntimeDecisionRequestBuilder:
             "runtime_contract_hash": instance.runtime_contract_hash,
             "plugin_contract_hash": instance.plugin_contract_hash,
             "strategy_version": instance.strategy_version,
+            "exit_policy_hash": instance.exit_policy_hash,
+            "exit_policy_contract_hash": instance.exit_policy_contract_hash,
+            "exit_policy_source": instance.exit_policy_source,
+            "exit_policy_materialization_mode": instance.exit_policy_materialization_mode,
+            "exit_policy_config_hash": instance.exit_policy_config_hash,
             "runtime_strategy_spec": instance.as_dict(),
             "parameter_source": instance.parameter_source,
             "runtime_adapter_config": dict(instance.runtime_adapter_config),
@@ -1456,6 +1654,11 @@ class RuntimeDecisionRequestBuilder:
             parameter_source=instance.parameter_source,
             plugin_contract_hash=instance.plugin_contract_hash,
             strategy_version=instance.strategy_version,
+            exit_policy_hash=instance.exit_policy_hash,
+            exit_policy_contract_hash=instance.exit_policy_contract_hash,
+            exit_policy_source=instance.exit_policy_source,
+            exit_policy_materialization_mode=instance.exit_policy_materialization_mode,
+            exit_policy_config_hash=instance.exit_policy_config_hash,
             request_hash=request_hash,
             runtime_scope_key=scope_key,
             scope_key_hash=scope_key.scope_key_hash(),
@@ -1605,6 +1808,11 @@ def _runtime_result_replay_metadata(result: RuntimeStrategyDecisionResult) -> di
         "runtime_scope_key": base.get("runtime_scope_key"),
         "scope_key_hash": base.get("scope_key_hash"),
         "strategy_parameters_hash": base.get("strategy_parameters_hash"),
+        "exit_policy_hash": base.get("exit_policy_hash"),
+        "exit_policy_config_hash": base.get("exit_policy_config_hash"),
+        "exit_policy_contract_hash": base.get("exit_policy_contract_hash"),
+        "exit_policy_source": base.get("exit_policy_source"),
+        "exit_policy_materialization_mode": base.get("exit_policy_materialization_mode"),
         "approved_profile_hash": base.get("approved_profile_hash"),
         "runtime_contract_hash": base.get("runtime_contract_hash"),
         "plugin_contract_hash": base.get("plugin_contract_hash"),

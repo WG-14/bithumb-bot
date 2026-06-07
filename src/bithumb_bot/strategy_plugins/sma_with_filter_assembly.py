@@ -13,7 +13,7 @@ from bithumb_bot.core.sma_policy import (
 )
 from bithumb_bot.market_regime.policy import normalize_live_regime_policy
 from bithumb_bot.research.strategy_spec import (
-    exit_policy_from_parameters,
+    exit_policy_hash,
     materialize_strategy_parameters,
     runtime_bound_behavior_parameter_names,
     strategy_parameter_source_map,
@@ -411,6 +411,72 @@ class SmaWithFilterPolicyAssembly:
             ),
         )
 
+    def materialize_exit_policy(
+        self,
+        strategy_name: str,
+        parameter_values: dict[str, Any],
+        *,
+        materialization_mode: str = "research_promotion",
+    ) -> dict[str, object]:
+        if str(strategy_name or "").strip().lower() != self.strategy_name:
+            raise SmaPolicyAssemblyError(f"sma_exit_policy_strategy_mismatch:{strategy_name}")
+        values = materialize_strategy_parameters(self.strategy_name, dict(parameter_values))
+        rules = tuple(_exit_rule_names(values["STRATEGY_EXIT_RULES"]))
+        common_rules = tuple(rule for rule in rules if rule in {"stop_loss", "max_holding_time"})
+        strategy_rules = tuple(rule for rule in rules if rule not in set(common_rules))
+        stop_loss_ratio = float(values.get("STRATEGY_EXIT_STOP_LOSS_RATIO") or 0.0)
+        max_holding_min = int(values.get("STRATEGY_EXIT_MAX_HOLDING_MIN") or 0)
+        strategy_specific_exit_policy = {
+            "enabled": "opposite_cross" in rules,
+            "min_take_profit_ratio": float(values.get("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO") or 0.0),
+            "small_loss_tolerance_ratio": float(
+                values.get("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO") or 0.0
+            ),
+        }
+        policy = {
+            "schema_version": 1,
+            "strategy_name": self.strategy_name,
+            "rules": list(rules),
+            "common_rules": list(common_rules),
+            "strategy_rules": list(strategy_rules),
+            "stop_loss": {
+                "enabled": "stop_loss" in rules and stop_loss_ratio > 0.0,
+                "stop_loss_ratio": stop_loss_ratio,
+                "disabled_when_zero": True,
+                "evaluation_price_basis": "closed_candle_mark",
+                "intrabar_stop_modeled": False,
+                "limitation_reasons": [
+                    "intra_candle_path_unavailable",
+                    "candle_close_stop_may_exit_later_than_real_stop",
+                ],
+            },
+            "opposite_cross": strategy_specific_exit_policy,
+            "strategy_specific": strategy_specific_exit_policy,
+            "max_holding_time": {
+                "enabled": "max_holding_time" in rules and max_holding_min > 0,
+                "max_holding_min": max_holding_min,
+                "disabled_when_zero": True,
+            },
+        }
+        config = {
+            "schema_version": 1,
+            "strategy_name": self.strategy_name,
+            "rules": list(rules),
+            "stop_loss_ratio": stop_loss_ratio,
+            "max_holding_min": max_holding_min,
+            "min_take_profit_ratio": strategy_specific_exit_policy["min_take_profit_ratio"],
+            "small_loss_tolerance_ratio": strategy_specific_exit_policy["small_loss_tolerance_ratio"],
+            "live_fee_rate_estimate": float(values.get("LIVE_FEE_RATE_ESTIMATE") or 0.0),
+        }
+        return {
+            "exit_policy": policy,
+            "exit_policy_hash": exit_policy_hash(policy),
+            "exit_policy_config": config,
+            "exit_policy_config_hash": _stable_hash(config),
+            "exit_policy_source": "sma_with_filter_exit_policy_materializer",
+            "exit_policy_materialization_mode": materialization_mode,
+        }
+
     def build_execution_snapshot(
         self,
         materialized: MaterializedSmaWithFilterParameters,
@@ -507,7 +573,11 @@ class SmaWithFilterPolicyAssembly:
             },
             "exit_policy": exit_policy_payload,
             "exit_policy_hash": _stable_hash(exit_policy_payload),
-            "declared_exit_policy": exit_policy_from_parameters(self.strategy_name, strategy_parameter_values),
+            "declared_exit_policy": self.materialize_exit_policy(
+                self.strategy_name,
+                strategy_parameter_values,
+                materialization_mode=materialized.mode.value,
+            )["exit_policy"],
         }
 
     def build_replay_fingerprint_payload(

@@ -10,6 +10,7 @@ from bithumb_bot.research.execution_model import ExecutionModel
 from bithumb_bot.research.experiment_manifest import ExecutionTimingPolicy, PortfolioPolicy
 from bithumb_bot.research.strategy_registry import (
     DecisionPayloadAdapter,
+    ExitPolicyMaterializer,
     ExitRuleFactory,
     ExitSignalContextBuilder,
     ResearchEventBuilder,
@@ -100,6 +101,7 @@ class PromotionGradeStrategyExtension:
     decision_payload_adapter: DecisionPayloadAdapter | None = None
     exit_signal_context_builder: ExitSignalContextBuilder | None = None
     exit_rule_factory: ExitRuleFactory | None = None
+    exit_policy_materializer: ExitPolicyMaterializer | None = None
     research_policy_decision_builder: ResearchPolicyDecisionBuilder | None = None
     single_replay_bundle_builder: SingleReplayBundleBuilder | None = None
     live_dry_run_allowed: bool = False
@@ -132,6 +134,22 @@ class PromotionGradeStrategyExtension:
             "policy_assembly_supported": self.policy_assembly_factory is not None,
             "research_export_normalizer_supported": self.research_export_normalizer is not None,
             "single_replay_bundle_supported": self.single_replay_bundle_builder is not None,
+            "exit_policy_materializer_supported": self.exit_policy_materializer is not None,
+            "exit_policy_materializer_module": (
+                self.exit_policy_materializer.__module__
+                if self.exit_policy_materializer is not None
+                else None
+            ),
+            "exit_policy_materializer_qualname": (
+                self.exit_policy_materializer.__qualname__
+                if self.exit_policy_materializer is not None
+                else None
+            ),
+            "exit_policy_materializer_authority_scope": (
+                "promotion_profile_runtime_live_authority"
+                if self.exit_policy_materializer is not None
+                else "unsupported"
+            ),
             "approved_profile_required": bool(self.approved_profile_required),
             "live_dry_run_allowed": bool(self.live_dry_run_allowed),
             "live_real_order_allowed": bool(self.live_real_order_allowed),
@@ -147,6 +165,7 @@ class ReplayCompatibleStrategyExtension:
     single_replay_bundle_builder: SingleReplayBundleBuilder | None = None
     research_export_normalizer: ResearchExportNormalizer | None = None
     decision_payload_adapter: DecisionPayloadAdapter | None = None
+    exit_policy_materializer: ExitPolicyMaterializer | None = None
     research_policy_decision_builder: ResearchPolicyDecisionBuilder | None = None
     parameter_materializer: ResearchParameterMaterializer | None = None
     fail_closed_reason: str = REPLAY_COMPATIBLE_FAIL_CLOSED_REASON
@@ -174,6 +193,22 @@ class ReplayCompatibleStrategyExtension:
             "single_replay_bundle_supported": self.single_replay_bundle_builder is not None,
             "research_export_normalizer_supported": self.research_export_normalizer is not None,
             "decision_payload_adapter_supported": self.decision_payload_adapter is not None,
+            "exit_policy_materializer_supported": self.exit_policy_materializer is not None,
+            "exit_policy_materializer_module": (
+                self.exit_policy_materializer.__module__
+                if self.exit_policy_materializer is not None
+                else None
+            ),
+            "exit_policy_materializer_qualname": (
+                self.exit_policy_materializer.__qualname__
+                if self.exit_policy_materializer is not None
+                else None
+            ),
+            "exit_policy_materializer_authority_scope": (
+                "profile_export_replay_authority"
+                if self.exit_policy_materializer is not None
+                else "unsupported"
+            ),
             "research_policy_decision_builder_supported": self.research_policy_decision_builder is not None,
             "approved_profile_required": False,
             "live_dry_run_allowed": False,
@@ -205,6 +240,7 @@ class ReplayCompatibleStrategyPlugin:
             decision_contract_version=normalized.decision_contract_version,
             diagnostics_namespace=normalized.diagnostics_namespace,
             decision_payload_adapter=self.extension.decision_payload_adapter,
+            exit_policy_materializer=self.extension.exit_policy_materializer,
             research_policy_decision_builder=self.extension.research_policy_decision_builder,
             research_export_normalizer=self.extension.research_export_normalizer,
             single_replay_bundle_builder=self.extension.single_replay_bundle_builder,
@@ -386,6 +422,7 @@ def promotion_grade_plugin(
         decision_payload_adapter=extension.decision_payload_adapter,
         exit_signal_context_builder=extension.exit_signal_context_builder,
         exit_rule_factory=extension.exit_rule_factory,
+        exit_policy_materializer=extension.exit_policy_materializer,
         research_policy_decision_builder=extension.research_policy_decision_builder,
         research_export_normalizer=extension.research_export_normalizer,
         runtime_decision_adapter_factory=extension.runtime_decision_adapter_factory,
@@ -393,14 +430,14 @@ def promotion_grade_plugin(
         single_replay_bundle_builder=extension.single_replay_bundle_builder,
         policy_assembly_factory=extension.policy_assembly_factory,
         runtime_capabilities=extension.runtime_capabilities(),
-            authoring_contract_kind="promotion_grade",
-            promotion_extension_payload=extension.contract_payload(),
-            decision_evidence_contract=extension.decision_evidence_contract,
-            runtime_data_requirement_builder=(
-                extension.runtime_data_requirement_builder
-                or normalized.runtime_data_requirement_builder
-            ),
-        )
+        authoring_contract_kind="promotion_grade",
+        promotion_extension_payload=extension.contract_payload(),
+        decision_evidence_contract=extension.decision_evidence_contract,
+        runtime_data_requirement_builder=(
+            extension.runtime_data_requirement_builder
+            or normalized.runtime_data_requirement_builder
+        ),
+    )
 
 
 def _runner_for_research_only_plugin(authoring_plugin: ResearchOnlyStrategyPlugin) -> Callable[..., BacktestRun]:

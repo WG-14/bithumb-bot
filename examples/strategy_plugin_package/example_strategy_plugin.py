@@ -5,6 +5,7 @@ from typing import Any
 
 from bithumb_bot.research.strategy_spec import StrategyParameterSchema
 from bithumb_bot.research.strategy_spec import StrategySpec
+from bithumb_bot.research.hashing import sha256_prefixed
 from bithumb_bot.strategy_authoring import ReplayCompatibleStrategyExtension
 from bithumb_bot.strategy_authoring import build_replay_compatible_strategy_plugin
 from bithumb_bot.strategy_authoring import research_plugin_from_decide_snapshot
@@ -213,3 +214,55 @@ LEVEL_2_REPLAY_COMPATIBLE_PLUGIN = build_replay_compatible_strategy_plugin(
         parameter_materializer=_materialize_level_2,
     ),
 )
+
+
+STRATEGY_OWNED_EXIT_SPEC = StrategySpec(
+    strategy_name="example_strategy_owned_exit",
+    strategy_version="example_strategy_owned_exit.v1",
+    accepted_parameter_names=("EXAMPLE_TRAILING_STOP_RATIO",),
+    required_parameter_names=("EXAMPLE_TRAILING_STOP_RATIO",),
+    behavior_affecting_parameter_names=("EXAMPLE_TRAILING_STOP_RATIO",),
+    metadata_only_parameter_names=(),
+    research_only_parameter_names=(),
+    default_parameters={},
+    decision_contract_version="example_strategy_owned_exit.decision.v1",
+    required_data=("candles",),
+    optional_data=(),
+    exit_policy_schema={
+        "schema_version": 1,
+        "rules": ("example_trailing_stop",),
+        "example_trailing_stop": {"unit": "unrealized_pnl_ratio"},
+    },
+)
+
+
+def example_exit_policy_materializer(strategy_name: str, parameters: dict[str, Any]) -> dict[str, object]:
+    ratio = float(parameters["EXAMPLE_TRAILING_STOP_RATIO"])
+    policy = {
+        "schema_version": 1,
+        "strategy_name": strategy_name,
+        "rules": ["example_trailing_stop"],
+        "common_rules": [],
+        "strategy_rules": ["example_trailing_stop"],
+        "example_trailing_stop": {"enabled": ratio > 0.0, "trailing_stop_ratio": ratio},
+    }
+    config = {
+        "schema_version": 1,
+        "strategy_name": strategy_name,
+        "example_trailing_stop_ratio": ratio,
+    }
+    return {
+        "exit_policy": policy,
+        "exit_policy_hash": sha256_prefixed(policy),
+        "exit_policy_contract_hash": sha256_prefixed(
+            {
+                "schema_version": 1,
+                "strategy_name": strategy_name,
+                "materializer": "example_exit_policy_materializer",
+            }
+        ),
+        "exit_policy_config": config,
+        "exit_policy_config_hash": sha256_prefixed(config),
+        "exit_policy_source": "plugin_exit_policy_materializer",
+        "exit_policy_materialization_mode": "profile_export",
+    }

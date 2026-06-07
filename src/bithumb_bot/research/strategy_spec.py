@@ -421,38 +421,98 @@ def materialized_strategy_parameters_hash(parameter_values: dict[str, Any]) -> s
     return sha256_prefixed(dict(parameter_values))
 
 
-def exit_policy_from_parameters(strategy_name: str, parameter_values: dict[str, Any]) -> dict[str, Any]:
+COMMON_EXIT_RULE_NAMES = frozenset({"stop_loss", "max_holding_time"})
+
+
+def exit_policy_materialization_from_parameters(
+    strategy_name: str,
+    parameter_values: dict[str, Any],
+    *,
+    materialization_mode: str = "research_promotion",
+) -> Any:
+    from .strategy_registry import normalize_exit_policy_materialization, resolve_research_strategy_plugin
+
     spec = strategy_spec_for_name(strategy_name)
-    if not spec.exit_policy_schema.get("rules"):
-        return {
-            "schema_version": 1,
-            "strategy_name": strategy_name,
-            "rules": [],
-            "common_rules": [],
-            "strategy_rules": [],
-            "entry_exit_policy": "strategy_emits_no_exit_intent",
-            "stop_loss": {"enabled": False, "disabled_when_zero": True},
-            "max_holding_time": {"enabled": False, "disabled_when_zero": True},
-        }
+    plugin = resolve_research_strategy_plugin(strategy_name)
+    if plugin.exit_policy_materializer is not None:
+        result = plugin.exit_policy_materializer(strategy_name, dict(parameter_values))
+        return normalize_exit_policy_materialization(
+            result,
+            strategy_name=strategy_name,
+            materializer=plugin.exit_policy_materializer,
+            default_source="plugin_exit_policy_materializer",
+            default_mode=materialization_mode,
+        )
+    schema_rules = tuple(str(rule).strip().lower() for rule in spec.exit_policy_schema.get("rules") or ())
+    if not schema_rules:
+        policy = _no_exit_policy(strategy_name)
+        return normalize_exit_policy_materialization(
+            {
+                "exit_policy": policy,
+                "exit_policy_config": {
+                    "schema_version": 1,
+                    "strategy_name": strategy_name,
+                    "rules": [],
+                },
+                "exit_policy_source": "default_no_exit_materializer",
+                "exit_policy_materialization_mode": materialization_mode,
+            },
+            strategy_name=strategy_name,
+            materializer=None,
+            default_source="default_no_exit_materializer",
+            default_mode=materialization_mode,
+        )
+    strategy_owned = sorted(set(schema_rules) - COMMON_EXIT_RULE_NAMES)
+    if strategy_owned:
+        raise StrategySpecError(
+            "strategy exit policy materializer required for strategy-owned rule(s): "
+            + ",".join(strategy_owned)
+        )
+    policy = _common_exit_policy_from_parameters(strategy_name, parameter_values)
+    return normalize_exit_policy_materialization(
+        {
+            "exit_policy": policy,
+            "exit_policy_config": _common_exit_policy_config(policy),
+            "exit_policy_source": "default_common_exit_policy_materializer",
+            "exit_policy_materialization_mode": materialization_mode,
+        },
+        strategy_name=strategy_name,
+        materializer=None,
+        default_source="default_common_exit_policy_materializer",
+        default_mode=materialization_mode,
+    )
+
+
+def exit_policy_from_parameters(strategy_name: str, parameter_values: dict[str, Any]) -> dict[str, Any]:
+    return dict(exit_policy_materialization_from_parameters(strategy_name, parameter_values).exit_policy)
+
+
+def _no_exit_policy(strategy_name: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "strategy_name": strategy_name,
+        "rules": [],
+        "common_rules": [],
+        "strategy_rules": [],
+        "entry_exit_policy": "strategy_emits_no_exit_intent",
+        "stop_loss": {"enabled": False, "disabled_when_zero": True},
+        "max_holding_time": {"enabled": False, "disabled_when_zero": True},
+    }
+
+
+def _common_exit_policy_from_parameters(strategy_name: str, parameter_values: dict[str, Any]) -> dict[str, Any]:
     values = materialize_strategy_parameters(strategy_name, parameter_values)
     rules = _normalize_exit_rule_names(str(values.get("STRATEGY_EXIT_RULES") or ""))
-    common_rules = tuple(rule for rule in rules if rule in {"stop_loss", "max_holding_time"})
-    strategy_rules = tuple(rule for rule in rules if rule not in set(common_rules))
+    _validate_common_exit_rule_names(",".join(rules))
+    common_rules = tuple(rule for rule in rules if rule in COMMON_EXIT_RULE_NAMES)
     stop_loss_ratio = float(values.get("STRATEGY_EXIT_STOP_LOSS_RATIO") or 0.0)
     max_holding_min = int(values.get("STRATEGY_EXIT_MAX_HOLDING_MIN") or 0)
-    strategy_specific_exit_policy = {
-        "enabled": "opposite_cross" in rules,
-        "min_take_profit_ratio": float(values.get("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO") or 0.0),
-        "small_loss_tolerance_ratio": float(
-            values.get("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO") or 0.0
-        ),
-    }
     return {
         "schema_version": 1,
         "strategy_name": strategy_name,
         "rules": list(rules),
         "common_rules": list(common_rules),
-        "strategy_rules": list(strategy_rules),
+        "strategy_rules": [],
         "stop_loss": {
             "enabled": "stop_loss" in rules and stop_loss_ratio > 0.0,
             "stop_loss_ratio": stop_loss_ratio,
@@ -464,13 +524,21 @@ def exit_policy_from_parameters(strategy_name: str, parameter_values: dict[str, 
                 "candle_close_stop_may_exit_later_than_real_stop",
             ],
         },
-        "opposite_cross": strategy_specific_exit_policy,
-        "strategy_specific": strategy_specific_exit_policy,
         "max_holding_time": {
             "enabled": "max_holding_time" in rules and max_holding_min > 0,
             "max_holding_min": max_holding_min,
             "disabled_when_zero": True,
         },
+    }
+
+
+def _common_exit_policy_config(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "strategy_name": policy.get("strategy_name"),
+        "rules": list(policy.get("rules") or []),
+        "stop_loss": dict(policy.get("stop_loss") or {}),
+        "max_holding_time": dict(policy.get("max_holding_time") or {}),
     }
 
 
@@ -486,7 +554,7 @@ def _validate_exit_policy_parameter_values(parameter_space: dict[str, tuple[obje
     rules_values = parameter_space.get("STRATEGY_EXIT_RULES")
     if rules_values is not None:
         for raw_rules in rules_values:
-            _validate_exit_rule_names(raw_rules)
+            _validate_common_exit_rule_names(raw_rules, allow_strategy_owned_rule="opposite_cross")
     ratio_values = parameter_space.get("STRATEGY_EXIT_STOP_LOSS_RATIO")
     if ratio_values is None:
         return
@@ -508,7 +576,10 @@ def _validate_exit_policy_materialized_values(values: dict[str, Any]) -> None:
         "STRATEGY_EXIT_STOP_LOSS_RATIO",
         values.get("STRATEGY_EXIT_STOP_LOSS_RATIO", 0.0),
     )
-    _validate_exit_rule_names(values.get("STRATEGY_EXIT_RULES") or "")
+    _validate_common_exit_rule_names(
+        values.get("STRATEGY_EXIT_RULES") or "",
+        allow_strategy_owned_rule="opposite_cross",
+    )
     rules = _normalize_exit_rule_names(str(values.get("STRATEGY_EXIT_RULES") or ""))
     if stop_loss_ratio > 0.0 and "stop_loss" not in rules:
         raise StrategySpecError(
@@ -526,10 +597,16 @@ def _non_negative_float(name: str, value: object) -> float:
     return resolved
 
 
-def _validate_exit_rule_names(raw: object) -> None:
+def _validate_common_exit_rule_names(
+    raw: object,
+    *,
+    allow_strategy_owned_rule: str | None = None,
+) -> None:
     if not isinstance(raw, str):
         raise StrategySpecError("STRATEGY_EXIT_RULES must be str")
-    supported = {"stop_loss", "opposite_cross", "max_holding_time"}
+    supported = set(COMMON_EXIT_RULE_NAMES)
+    if allow_strategy_owned_rule:
+        supported.add(str(allow_strategy_owned_rule))
     rules = _normalize_exit_rule_names(raw)
     unsupported = sorted(set(rules) - supported)
     if unsupported:

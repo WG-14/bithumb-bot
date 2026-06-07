@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -55,6 +55,7 @@ ExitRuleFactory = Callable[
     ],
     list[Any],
 ]
+ExitPolicyMaterializer = Callable[[str, dict[str, Any]], "ExitPolicyMaterialization | Mapping[str, Any]"]
 ResearchPolicyDecisionBuilder = Callable[..., Any]
 ResearchExportNormalizer = Callable[
     [
@@ -71,6 +72,92 @@ RuntimeDataRequirementBuilder = Callable[[object | None], "ResearchStrategyDataR
 
 class ResearchStrategyRegistryError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class ExitPolicyMaterialization:
+    exit_policy: dict[str, Any]
+    exit_policy_hash: str
+    exit_policy_contract_hash: str
+    exit_policy_config: dict[str, Any]
+    exit_policy_config_hash: str
+    exit_policy_source: str
+    exit_policy_materialization_mode: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.exit_policy, dict):
+            raise TypeError("exit_policy_materialization_policy_must_be_dict")
+        if not str(self.exit_policy_hash or "").startswith("sha256:"):
+            raise ValueError("exit_policy_materialization_hash_missing")
+        if not str(self.exit_policy_contract_hash or "").startswith("sha256:"):
+            raise ValueError("exit_policy_materialization_contract_hash_missing")
+        if not isinstance(self.exit_policy_config, dict):
+            raise TypeError("exit_policy_materialization_config_must_be_dict")
+        if not str(self.exit_policy_config_hash or "").startswith("sha256:"):
+            raise ValueError("exit_policy_materialization_config_hash_missing")
+        source = str(self.exit_policy_source or "").strip()
+        if not source:
+            raise ValueError("exit_policy_materialization_source_missing")
+        mode = str(self.exit_policy_materialization_mode or "").strip()
+        if not mode:
+            raise ValueError("exit_policy_materialization_mode_missing")
+        object.__setattr__(self, "exit_policy", dict(self.exit_policy))
+        object.__setattr__(self, "exit_policy_config", dict(self.exit_policy_config))
+        object.__setattr__(self, "exit_policy_source", source)
+        object.__setattr__(self, "exit_policy_materialization_mode", mode)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "exit_policy": dict(self.exit_policy),
+            "exit_policy_hash": self.exit_policy_hash,
+            "exit_policy_contract_hash": self.exit_policy_contract_hash,
+            "exit_policy_config": dict(self.exit_policy_config),
+            "exit_policy_config_hash": self.exit_policy_config_hash,
+            "exit_policy_source": self.exit_policy_source,
+            "exit_policy_materialization_mode": self.exit_policy_materialization_mode,
+        }
+
+
+def normalize_exit_policy_materialization(
+    result: ExitPolicyMaterialization | Mapping[str, Any],
+    *,
+    strategy_name: str,
+    materializer: ExitPolicyMaterializer | None,
+    default_source: str,
+    default_mode: str,
+) -> ExitPolicyMaterialization:
+    if isinstance(result, ExitPolicyMaterialization):
+        return result
+    if not isinstance(result, Mapping):
+        raise TypeError(f"exit_policy_materializer_result_invalid:{strategy_name}")
+    exit_policy = result.get("exit_policy")
+    if not isinstance(exit_policy, Mapping):
+        raise ValueError(f"exit_policy_materializer_policy_missing:{strategy_name}")
+    exit_policy_config = result.get("exit_policy_config")
+    if not isinstance(exit_policy_config, Mapping):
+        exit_policy_config = exit_policy
+    source = str(result.get("exit_policy_source") or default_source)
+    mode = str(result.get("exit_policy_materialization_mode") or default_mode)
+    contract_payload = {
+        "schema_version": 1,
+        "strategy_name": strategy_name,
+        "materializer_module": materializer.__module__ if materializer is not None else None,
+        "materializer_qualname": materializer.__qualname__ if materializer is not None else None,
+        "exit_policy_source": source,
+    }
+    return ExitPolicyMaterialization(
+        exit_policy=dict(exit_policy),
+        exit_policy_hash=str(result.get("exit_policy_hash") or sha256_prefixed(dict(exit_policy))),
+        exit_policy_contract_hash=str(
+            result.get("exit_policy_contract_hash") or sha256_prefixed(contract_payload)
+        ),
+        exit_policy_config=dict(exit_policy_config),
+        exit_policy_config_hash=str(
+            result.get("exit_policy_config_hash") or sha256_prefixed(dict(exit_policy_config))
+        ),
+        exit_policy_source=source,
+        exit_policy_materialization_mode=mode,
+    )
 
 
 @dataclass(frozen=True)
@@ -331,6 +418,7 @@ class ResearchStrategyPlugin:
     decision_payload_adapter: DecisionPayloadAdapter | None = None
     exit_signal_context_builder: ExitSignalContextBuilder | None = None
     exit_rule_factory: ExitRuleFactory | None = None
+    exit_policy_materializer: ExitPolicyMaterializer | None = None
     research_policy_decision_builder: ResearchPolicyDecisionBuilder | None = None
     research_export_normalizer: ResearchExportNormalizer | None = None
     runtime_decision_adapter_factory: Callable[[], Any] | None = None
@@ -378,6 +466,18 @@ class ResearchStrategyPlugin:
                 and not evidence_payload["required_promotion_provenance_fields"]
             ):
                 raise ValueError(f"strategy live-eligible decision evidence contract missing: {self.name}")
+        if (
+            (self.runtime_capabilities.live_dry_run_allowed or self.runtime_capabilities.live_real_order_allowed)
+            and self.exit_rule_factory is not None
+            and self.exit_policy_materializer is None
+        ):
+            raise ValueError(f"strategy live-eligible exit policy materializer missing: {self.name}")
+        if (
+            self.runtime_capabilities.promotion_runtime_decisions_supported
+            and _exit_policy_schema_has_strategy_owned_rules(self.spec.exit_policy_schema)
+            and self.exit_policy_materializer is None
+        ):
+            raise ValueError(f"strategy promotion exit policy materializer missing: {self.name}")
 
     def contract_payload(self) -> dict[str, Any]:
         data_requirements = ResearchStrategyDataRequirements(
@@ -556,6 +656,22 @@ class ResearchStrategyPlugin:
             "exit_rule_factory_qualname": (
                 self.exit_rule_factory.__qualname__ if self.exit_rule_factory is not None else None
             ),
+            "exit_policy_materializer_supported": self.exit_policy_materializer is not None,
+            "exit_policy_materializer_authority_scope": (
+                "promotion_profile_runtime_live_authority"
+                if self.exit_policy_materializer is not None
+                else "unsupported"
+            ),
+            "exit_policy_materializer_module": (
+                self.exit_policy_materializer.__module__
+                if self.exit_policy_materializer is not None
+                else None
+            ),
+            "exit_policy_materializer_qualname": (
+                self.exit_policy_materializer.__qualname__
+                if self.exit_policy_materializer is not None
+                else None
+            ),
             "research_policy_decision_builder_supported": self.research_policy_decision_builder is not None,
             "research_policy_decision_builder_module": (
                 self.research_policy_decision_builder.__module__
@@ -724,6 +840,12 @@ def _validate_live_real_order_evidence_contract(
             + ":"
             + ",".join(sorted(set(missing)))
         )
+
+
+def _exit_policy_schema_has_strategy_owned_rules(exit_policy_schema: Mapping[str, Any]) -> bool:
+    rules = tuple(str(rule).strip().lower() for rule in exit_policy_schema.get("rules") or ())
+    common = {"stop_loss", "max_holding_time"}
+    return any(rule and rule not in common for rule in rules)
 
 
 def _authoring_level_for_contract_kind(kind: str) -> str:

@@ -195,6 +195,8 @@ class StrategyDecisionService:
             "runtime_contract_hash": request.runtime_contract_hash,
             "plugin_contract_hash": request.plugin_contract_hash,
             "runtime_decision_request_hash": request.request_hash,
+            "exit_policy_hash": request.provenance.get("exit_policy_hash"),
+            "exit_policy_config_hash": request.provenance.get("exit_policy_config_hash"),
             "policy_input_hash": decision.policy_input_hash,
             "policy_decision_hash": decision.policy_decision_hash,
             "policy_contract_hash": decision.policy_contract_hash,

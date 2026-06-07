@@ -21,6 +21,22 @@ Use this decision tree:
 
 New strategy PRs should normally be small. Level 1 usually needs one plugin file and one focused test file. Level 2 usually adds only the replay-compatible plugin file plus one focused replay contract test. Level 3 adds the explicit runtime adapter/policy assembly surface and focused live/promotion contract tests.
 
+Exit policy authoring is part of the strategy contract:
+
+- No-exit strategies declare `exit_policy_schema.rules = ()` and use the canonical no-exit materializer.
+- Common-only protective exits may use only `stop_loss` and `max_holding_time` through the common materializer.
+- Strategy-owned exits, such as a custom trailing stop, must declare a plugin-local `exit_policy_materializer` that emits deterministic `exit_policy`, `exit_policy_hash`, `exit_policy_contract_hash`, `exit_policy_config`, `exit_policy_config_hash`, `exit_policy_source`, and `exit_policy_materialization_mode`.
+
+Do not add strategy-owned custom rule names to the central common-rule validator such as `_validate_exit_rule_names()` or `_validate_common_exit_rule_names()`. Custom rules must not be made live/promotion-capable by editing `STRATEGY_EXIT_RULES` or a core whitelist. `exit_rule_factory` is scoped to `research_exploratory_compatibility_only`; it is not promotion, approved-profile, runtime, live dry-run, or live real-order exit authority.
+
+Custom exit policy PR checklist:
+
+- The plugin contract exposes `exit_policy_materializer_supported`, module, qualname, and authority scope.
+- Candidate and approved profile generation preserves the custom `exit_policy` and rejects `exit_policy_hash` mismatches.
+- Runtime strategy instance/request observability includes `exit_policy_hash` and `exit_policy_config_hash`.
+- Changing a custom exit threshold changes policy/config hashes and at least one profile/runtime identity hash.
+- Focused tests cover no-exit, common-only, and strategy-owned exit examples where applicable.
+
 Public contract helpers are available from `bithumb_bot.strategy_contract_testing`:
 
 - `assert_research_only_contract(plugin)` for Level 1
@@ -45,9 +61,9 @@ not full diff-aware validation.
 
 | Level | Required hooks | Forbidden vocabulary | Stable fail-closed reasons | Expected files | Test helper |
 | --- | --- | --- | --- | --- | --- |
-| Level 1 research-only | `StrategySpec`, `research_event_builder` or `decide_snapshot` | runtime adapter, approved profile, live dry-run, live real-order, promotion extension | `promotion_extension_missing`, `promotion_runtime_unsupported_for_strategy`, `runtime_replay_unsupported_for_strategy`, `live_dry_run_not_allowed_for_strategy` | one plugin file, built-in manifest entry or external entry point, and one focused test file | `assert_research_only_contract` |
-| Level 2 replay-compatible | Level 1 hooks plus parameter schema, deterministic policy material, replay fingerprint material, read-only replay builder | `Settings` fields, `runtime_parameter_adapter.from_settings()`, approved profile requirement, live dry-run, live real-order | `replay_compatible_not_live_eligible`, `promotion_runtime_unsupported_for_strategy`, `runtime_decision_adapter_unsupported_for_strategy`, `live_real_order_not_allowed_for_strategy` | one replay plugin file, built-in manifest entry or external entry point, and one focused replay contract test | `assert_replay_compatible_contract` |
-| Level 3 promotion-grade | Level 1 hooks plus runtime decision adapter, policy assembly, approved-profile binding, execution intent contract, replay support, live capability declaration | direct `ResearchStrategyPlugin(...)` assembly in new strategy modules, strategy-specific common-engine branches, production legacy parameter fallback | strategy-specific capability reason, `approved_profile_required_for_strategy`, decision-equivalence/runtime-contract/profile validation reasons | plugin file, built-in manifest entry or external entry point, plus focused promotion/runtime contract tests | `assert_live_eligible_contract` |
+| Level 1 research-only | `StrategySpec`, `research_event_builder` or `decide_snapshot`; no-exit/common-only exit schema or research-only compatibility exits | runtime adapter, approved profile, live dry-run, live real-order, promotion extension | `promotion_extension_missing`, `promotion_runtime_unsupported_for_strategy`, `runtime_replay_unsupported_for_strategy`, `live_dry_run_not_allowed_for_strategy` | one plugin file, built-in manifest entry or external entry point, and one focused test file | `assert_research_only_contract` |
+| Level 2 replay-compatible | Level 1 hooks plus parameter schema, deterministic policy material, replay fingerprint material, read-only replay builder; strategy-owned exits require replay/profile export-capable `exit_policy_materializer` | `Settings` fields, `runtime_parameter_adapter.from_settings()`, approved profile requirement, live dry-run, live real-order | `replay_compatible_not_live_eligible`, `promotion_runtime_unsupported_for_strategy`, `runtime_decision_adapter_unsupported_for_strategy`, `live_real_order_not_allowed_for_strategy` | one replay plugin file, built-in manifest entry or external entry point, and one focused replay contract test | `assert_replay_compatible_contract` |
+| Level 3 promotion-grade | Level 1 hooks plus runtime decision adapter, policy assembly, approved-profile binding, execution intent contract, replay support, live capability declaration; strategy-owned exits require promotion/runtime/live-capable `exit_policy_materializer` | direct `ResearchStrategyPlugin(...)` assembly in new strategy modules, strategy-specific common-engine branches, production legacy parameter fallback, research compatibility hooks as live authority | strategy-specific capability reason, `approved_profile_required_for_strategy`, decision-equivalence/runtime-contract/profile validation reasons | plugin file, built-in manifest entry or external entry point, plus focused promotion/runtime contract tests | `assert_live_eligible_contract` |
 
 ## Registration Paths
 

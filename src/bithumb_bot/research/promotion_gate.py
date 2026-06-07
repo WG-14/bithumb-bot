@@ -22,7 +22,7 @@ from .experiment_registry import append_promotion_registry_event, validate_exper
 from .final_selection import validate_final_selection_report
 from .deployment_policy import is_production_bound_target, validate_production_calibration_policy
 from .strategy_spec import (
-    exit_policy_from_parameters,
+    exit_policy_materialization_from_parameters,
     exit_policy_hash,
     materialize_strategy_parameters,
     materialized_strategy_parameters_hash,
@@ -126,26 +126,13 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
             slippage_bps=cost_model.get("slippage_bps"),
         )
     )
-    exit_policy = candidate.get("exit_policy")
-    if not isinstance(exit_policy, dict):
-        exit_policy = (
-            exit_policy_from_parameters(strategy_name, effective_parameters)
-            if effective_parameters
-            else {"schema_version": 1, "strategy_name": strategy_name, "rules": []}
-        )
-    elif not _exit_policy_has_current_stop_loss_schema(exit_policy):
-        exit_policy = (
-            exit_policy_from_parameters(strategy_name, effective_parameters)
-            if effective_parameters
-            else {"schema_version": 1, "strategy_name": strategy_name, "rules": []}
-        )
-    resolved_exit_policy_hash = (
-        str(candidate.get("exit_policy_hash"))
-        if isinstance(candidate.get("exit_policy"), dict)
-        and _exit_policy_has_current_stop_loss_schema(candidate.get("exit_policy"))
-        and candidate.get("exit_policy_hash")
-        else exit_policy_hash(exit_policy)
+    exit_materialization = _candidate_exit_policy_materialization(
+        strategy_name=strategy_name,
+        effective_parameters=effective_parameters,
+        candidate=candidate,
     )
+    exit_policy = dict(exit_materialization["exit_policy"])
+    resolved_exit_policy_hash = str(exit_materialization["exit_policy_hash"])
     profile = {
         "strategy_name": candidate.get("strategy_name"),
         "strategy_spec": candidate.get("strategy_spec"),
@@ -154,6 +141,13 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
         "strategy_plugin_contract_hash": candidate.get("strategy_plugin_contract_hash"),
         "exit_policy": exit_policy,
         "exit_policy_hash": resolved_exit_policy_hash,
+        "exit_policy_contract_hash": exit_materialization.get("exit_policy_contract_hash"),
+        "exit_policy_config": exit_materialization.get("exit_policy_config"),
+        "exit_policy_config_hash": exit_materialization.get("exit_policy_config_hash"),
+        "exit_policy_source": exit_materialization.get("exit_policy_source"),
+        "exit_policy_materialization_mode": exit_materialization.get(
+            "exit_policy_materialization_mode"
+        ),
         "behavior_hash": candidate.get("behavior_hash"),
         "decision_behavior_hash": candidate.get("decision_behavior_hash"),
         "trade_ledger_hash": candidate.get("trade_ledger_hash"),
@@ -335,7 +329,84 @@ def build_candidate_profile(candidate: dict[str, Any]) -> dict[str, Any]:
     return _strip_candidate_memory_observability_fields(profile)
 
 
-def _exit_policy_has_current_stop_loss_schema(exit_policy: object) -> bool:
+def _candidate_exit_policy_materialization(
+    *,
+    strategy_name: str,
+    effective_parameters: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    provided = candidate.get("exit_policy")
+    if isinstance(provided, dict):
+        if (
+            strategy_name == "sma_with_filter"
+            and not _legacy_stop_loss_exit_policy_schema_is_current(provided)
+            and effective_parameters
+        ):
+            return exit_policy_materialization_from_parameters(
+                strategy_name,
+                effective_parameters,
+                materialization_mode="legacy_stop_loss_schema_migration",
+            ).as_dict()
+        actual_hash = exit_policy_hash(provided)
+        declared_hash = str(candidate.get("exit_policy_hash") or "").strip()
+        if declared_hash and declared_hash != actual_hash:
+            raise PromotionGateError("candidate_exit_policy_hash_mismatch")
+        config = (
+            dict(candidate.get("exit_policy_config"))
+            if isinstance(candidate.get("exit_policy_config"), dict)
+            else dict(provided)
+        )
+        config_actual_hash = sha256_prefixed(config)
+        config_hash = str(candidate.get("exit_policy_config_hash") or "").strip() or config_actual_hash
+        if str(candidate.get("exit_policy_config_hash") or "").strip() and config_hash != config_actual_hash:
+            raise PromotionGateError("candidate_exit_policy_config_hash_mismatch")
+        contract_hash = str(candidate.get("exit_policy_contract_hash") or "").strip()
+        if not contract_hash:
+            contract_hash = sha256_prefixed(
+                {
+                    "schema_version": 1,
+                    "strategy_name": strategy_name,
+                    "exit_policy_hash": actual_hash,
+                    "exit_policy_source": candidate.get("exit_policy_source")
+                    or "candidate_provided_exit_policy",
+                }
+            )
+        return {
+            "exit_policy": dict(provided),
+            "exit_policy_hash": declared_hash or actual_hash,
+            "exit_policy_contract_hash": contract_hash,
+            "exit_policy_config": config,
+            "exit_policy_config_hash": config_hash,
+            "exit_policy_source": candidate.get("exit_policy_source")
+            or "candidate_provided_exit_policy",
+            "exit_policy_materialization_mode": candidate.get("exit_policy_materialization_mode")
+            or "candidate_profile_preserved",
+        }
+    if effective_parameters:
+        return exit_policy_materialization_from_parameters(
+            strategy_name,
+            effective_parameters,
+            materialization_mode="candidate_profile_generation",
+        ).as_dict()
+    fallback = {"schema_version": 1, "strategy_name": strategy_name, "rules": []}
+    return {
+        "exit_policy": fallback,
+        "exit_policy_hash": exit_policy_hash(fallback),
+        "exit_policy_contract_hash": sha256_prefixed(
+            {
+                "schema_version": 1,
+                "strategy_name": strategy_name,
+                "exit_policy_source": "candidate_profile_missing_policy_no_parameters_fallback",
+            }
+        ),
+        "exit_policy_config": fallback,
+        "exit_policy_config_hash": sha256_prefixed(fallback),
+        "exit_policy_source": "candidate_profile_missing_policy_no_parameters_fallback",
+        "exit_policy_materialization_mode": "candidate_profile_generation",
+    }
+
+
+def _legacy_stop_loss_exit_policy_schema_is_current(exit_policy: object) -> bool:
     if not isinstance(exit_policy, dict):
         return False
     stop_loss = exit_policy.get("stop_loss")
