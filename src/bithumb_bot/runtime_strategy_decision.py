@@ -301,8 +301,8 @@ class DecisionRunner:
     ) -> RuntimeStrategyDecisionResult | None:
         from .runtime_strategy_set import (
             ProfileAuthorityContext,
-            RuntimeDecisionRequestBuilder,
             RuntimeMarketScope,
+            RuntimeStrategyDecisionCollector,
             RuntimeStrategySet,
             RuntimeStrategySetResolver,
             RuntimeStrategySpec,
@@ -366,58 +366,30 @@ class DecisionRunner:
         if adapter is None:
             raise production_runtime_strategy_missing_error(selected_strategy_name)
 
-        builder = RuntimeDecisionRequestBuilder()
-        if authority_context is not None:
-            builder = builder.with_authority_context(authority_context)
-        request = builder.build_for_spec(
-            spec,
-            through_ts_ms=through_ts_ms,
-        )
-        materialized_spec = replace(
-            spec,
-            parameters=dict(request.parameters),
-            parameter_source=request.parameter_source,
-            approved_profile_path=request.approved_profile_path,
-            approved_profile_hash=request.approved_profile_hash,
-            runtime_contract_hash=request.runtime_contract_hash,
-            strategy_version=request.strategy_version,
-        )
-        from .runtime_data_provider import (
-            RuntimeDataRequirementResolver,
-            SQLiteRuntimeDataProvider,
-        )
-
-        provider = SQLiteRuntimeDataProvider(conn)
         strategy_set = RuntimeStrategySet(
-            strategies=(materialized_spec,),
+            strategies=(spec,),
             source="DecisionRunner",
-            market_scope=RuntimeMarketScope(pair=materialized_spec.pair, interval=materialized_spec.interval),
+            market_scope=RuntimeMarketScope(pair=spec.pair, interval=spec.interval),
         )
-        requirements = RuntimeDataRequirementResolver().resolve_for_strategy_set(strategy_set)
-        preflight = provider.preflight(
+        collector = RuntimeStrategyDecisionCollector()
+        request_builder = (
+            collector.request_builder.with_authority_context(authority_context)
+            if authority_context is not None
+            else collector.request_builder
+        )
+        bundle = RuntimeStrategyDecisionCollector(
+            request_builder=request_builder,
+            adapter_resolver=get_runtime_decision_adapter,
+        ).collect(
+            conn,
             strategy_set,
             through_ts_ms=through_ts_ms,
         )
-        if not preflight.ok:
-            raise RuntimeError(";".join(preflight.reasons))
-        feature_snapshot = provider.snapshot(request, requirements)
-        if feature_snapshot is None:
+        if bundle is None:
             return None
-        feature_snapshot = _project_runtime_feature_snapshot(
-            adapter=adapter,
-            request=request,
-            feature_snapshot=feature_snapshot,
-        )
-        if feature_snapshot is None:
-            return None
-        feature_decider = getattr(adapter, "decide_feature_snapshot", None)
-        if not callable(feature_decider):
-            raise RuntimeError(f"runtime_decision_feature_snapshot_required:{selected_strategy_name}")
-        result = feature_decider(request, feature_snapshot)
-        if result is not None:
-            _attach_runtime_feature_snapshot_metadata(result, feature_snapshot)
-            _attach_runtime_request_metadata(result, request)
-        return result
+        if len(bundle.results) != 1:
+            raise RuntimeError("decision_runner_single_result_required")
+        return bundle.results[0]
 
 
 def compute_strategy_decision_snapshot(

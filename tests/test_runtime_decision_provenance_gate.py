@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import ast
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Callable
 
 import pytest
 
+from bithumb_bot.db_core import ensure_schema
+from bithumb_bot import runtime_strategy_decision, runtime_strategy_set
 from bithumb_bot.runtime_strategy_decision import RuntimeDecisionRequest
 from bithumb_bot.runtime_strategy_set import validate_runtime_decision_result_provenance
 from bithumb_bot.strategy_policy_contract import PositionSnapshot, StrategyDecisionV2
@@ -92,6 +96,66 @@ def _result(request: RuntimeDecisionRequest):
     )
 
 
+def _conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    for idx in range(4):
+        ts = 1_700_000_000_000 + idx * 60_000
+        close = 10.0 + idx
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO candles(ts, pair, interval, open, high, low, close, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, "KRW-BTC", "1m", close, close, close, close, 1.0),
+        )
+    conn.commit()
+    return conn
+
+
+def _patch_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Adapter:
+        strategy_name = "canary_non_sma"
+
+        def decide_feature_snapshot(
+            self,
+            request: RuntimeDecisionRequest,
+            feature_snapshot: Any,
+        ):
+            del feature_snapshot
+            return _result(request)
+
+        def typed_authority_required(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        runtime_strategy_decision,
+        "get_runtime_decision_adapter",
+        lambda strategy_name: _Adapter()
+        if str(strategy_name).strip().lower() == "canary_non_sma"
+        else None,
+    )
+
+
+def _run_decision_runner() -> object | None:
+    conn = _conn()
+    try:
+        return runtime_strategy_decision.DecisionRunner().decide_snapshot(
+            conn,
+            strategy_name="canary_non_sma",
+            through_ts_ms=1_700_000_180_000,
+            parameter_overrides={
+                "CANARY_ORDER_START_INDEX": 0,
+                "CANARY_ORDER_SIDE": "BUY",
+                "CANARY_ORDER_REASON": "unit_canary",
+            },
+            parameter_source="runtime_override",
+        )
+    finally:
+        conn.close()
+
+
 def test_runtime_result_bundle_rejects_missing_request_hash() -> None:
     request = _request()
     result = _result(request)
@@ -151,6 +215,104 @@ def test_runtime_result_bundle_creation_validates_provenance() -> None:
     assert "validate_runtime_decision_result_provenance(result, request)" in ast.unparse(bundle_post_init)
 
 
+def test_decision_runner_validates_runtime_decision_provenance_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_adapter(monkeypatch)
+    seen: list[tuple[object, RuntimeDecisionRequest]] = []
+    original = runtime_strategy_set.validate_runtime_decision_result_provenance
+
+    def _record(result: object, request: RuntimeDecisionRequest) -> None:
+        seen.append((result, request))
+        original(result, request)
+
+    monkeypatch.setattr(runtime_strategy_set, "validate_runtime_decision_result_provenance", _record)
+
+    result = _run_decision_runner()
+
+    assert result is not None
+    assert len(seen) >= 1
+    assert seen[-1][0] is result
+
+
+def test_decision_runner_rejects_missing_request_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_adapter(monkeypatch)
+    original = runtime_strategy_set._attach_runtime_request_metadata
+
+    def _attach_without_request_hash(result: object, request: RuntimeDecisionRequest) -> None:
+        original(result, request)
+        result.base_context.pop("runtime_decision_request_hash", None)
+
+    monkeypatch.setattr(runtime_strategy_set, "_attach_runtime_request_metadata", _attach_without_request_hash)
+
+    with pytest.raises(ValueError, match="runtime_decision_request_metadata_missing:runtime_decision_request_hash"):
+        _run_decision_runner()
+
+
+def test_decision_runner_rejects_replay_fingerprint_scope_key_hash_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_adapter(monkeypatch)
+    original = runtime_strategy_set._attach_runtime_request_metadata
+
+    def _attach_with_bad_replay_scope_hash(result: object, request: RuntimeDecisionRequest) -> None:
+        original(result, request)
+        result.replay_fingerprint["scope_key_hash"] = "sha256:wrong"
+
+    monkeypatch.setattr(runtime_strategy_set, "_attach_runtime_request_metadata", _attach_with_bad_replay_scope_hash)
+
+    with pytest.raises(
+        ValueError,
+        match="runtime_decision_request_metadata_mismatch:replay_fingerprint.scope_key_hash",
+    ):
+        _run_decision_runner()
+
+
+@pytest.mark.parametrize(
+    ("location", "mutation", "expected"),
+    (
+        (
+            "base_context",
+            lambda result: result.base_context.pop("plugin_contract_hash", None),
+            "runtime_decision_request_metadata_missing:plugin_contract_hash",
+        ),
+        (
+            "base_context",
+            lambda result: result.base_context.__setitem__("plugin_contract_hash", "sha256:wrong"),
+            "runtime_decision_request_metadata_mismatch:plugin_contract_hash",
+        ),
+        (
+            "replay_fingerprint",
+            lambda result: result.replay_fingerprint.pop("plugin_contract_hash", None),
+            "runtime_decision_request_metadata_missing:replay_fingerprint.plugin_contract_hash",
+        ),
+        (
+            "replay_fingerprint",
+            lambda result: result.replay_fingerprint.__setitem__("plugin_contract_hash", "sha256:wrong"),
+            "runtime_decision_request_metadata_mismatch:replay_fingerprint.plugin_contract_hash",
+        ),
+    ),
+)
+def test_decision_runner_rejects_plugin_contract_hash_provenance_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    mutation: Callable[[Any], object],
+    expected: str,
+) -> None:
+    del location
+    _patch_adapter(monkeypatch)
+    original = runtime_strategy_set._attach_runtime_request_metadata
+
+    def _attach_with_plugin_contract_error(result: object, request: RuntimeDecisionRequest) -> None:
+        original(result, request)
+        mutation(result)
+
+    monkeypatch.setattr(runtime_strategy_set, "_attach_runtime_request_metadata", _attach_with_plugin_contract_error)
+
+    with pytest.raises(ValueError, match=expected):
+        _run_decision_runner()
+
+
 def test_production_runtime_modules_do_not_call_runtime_adapters_directly() -> None:
     allowed = {
         ("src/bithumb_bot/runtime_strategy_set.py", "_decide_with_feature_snapshot"),
@@ -172,7 +334,20 @@ def test_production_runtime_modules_do_not_call_runtime_adapters_directly() -> N
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if not isinstance(func, ast.Attribute) or func.attr not in {"decide", "decide_feature_snapshot"}:
+            forbidden_call = None
+            if isinstance(func, ast.Attribute) and func.attr in {"decide", "decide_feature_snapshot"}:
+                forbidden_call = func.attr
+            if (
+                isinstance(func, ast.Name)
+                and func.id == "feature_decider"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "request"
+                and isinstance(node.args[1], ast.Name)
+                and node.args[1].id == "feature_snapshot"
+            ):
+                forbidden_call = "feature_decider(request, feature_snapshot)"
+            if forbidden_call is None:
                 continue
             parent = parents.get(node)
             function_name = ""
@@ -182,6 +357,6 @@ def test_production_runtime_modules_do_not_call_runtime_adapters_directly() -> N
                     break
                 parent = parents.get(parent)
             if (path, function_name) not in allowed:
-                violations.append(f"{path}:{function_name}:{func.attr}")
+                violations.append(f"{path}:{function_name}:{forbidden_call}")
 
     assert violations == []
