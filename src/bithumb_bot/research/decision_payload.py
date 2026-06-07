@@ -20,6 +20,7 @@ class DecisionPayloadBuilder:
         strategy_spec: Any,
         exit_policy: dict[str, Any],
         exit_policy_hash: str,
+        exit_policy_config_hash: str | None,
         fee_rate: float,
         slippage_bps: float,
         timing_policy: Any,
@@ -86,6 +87,7 @@ class DecisionPayloadBuilder:
             strategy_plugin_contract_hash=strategy_plugin.contract_hash(),
             exit_policy=exit_policy,
             exit_policy_hash=exit_policy_hash,
+            exit_policy_config_hash=exit_policy_config_hash,
             fee_rate=fee_rate,
             slippage_bps=slippage_bps,
             timing_policy=timing_policy,
@@ -204,7 +206,6 @@ class DecisionPayloadBuilder:
                 "position_snapshot_hash",
                 "execution_constraints_hash",
                 "policy_config_hash",
-                "exit_policy_config_hash",
                 "replay_fingerprint_hash",
             ):
                 if str(trace.get(key) or "").strip():
@@ -234,6 +235,10 @@ class DecisionPayloadBuilder:
                 }
             )
             payload["strategy_diagnostics"] = diagnostics
+        if str(exit_policy_config_hash or "").strip() and not str(
+            payload.get("exit_policy_config_hash") or ""
+        ).strip():
+            payload["exit_policy_config_hash"] = str(exit_policy_config_hash)
         return payload
 
 

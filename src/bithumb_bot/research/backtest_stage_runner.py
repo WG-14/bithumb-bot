@@ -27,7 +27,11 @@ from .metrics_contract import EquityPoint
 from .portfolio_ledger import PortfolioLedger
 from .risk_gate_stage import PortfolioRiskSnapshot, RiskContextBuilder
 from .stage_trace_recorder import StageTraceRecorder
-from .strategy_spec import exit_policy_from_parameters, exit_policy_hash, strategy_spec_for_name
+from .strategy_spec import (
+    exit_policy_hash,
+    exit_policy_materialization_from_parameters,
+    strategy_spec_for_name,
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,7 @@ class BacktestEventProcessor:
     strategy_spec: Any
     active_exit_policy: dict[str, Any]
     active_exit_policy_hash: str
+    active_exit_policy_config_hash: str
     buy_fraction: float
     run_context: Any
     ledger: PortfolioLedger
@@ -269,99 +274,10 @@ class BacktestEventProcessor:
         decision_payload_qty = float(self.ledger.qty)
         decision_payload_sellable_qty = float(prepared.sellable_qty)
         if action in {"BUY", "SELL"}:
-            planning = self.execution_planner.plan(
-                ExecutionPlanningRequest(
-                    candle=candle,
-                    event=event,
-                    ledger=self.ledger,
-                    strategy_name=self.strategy_plugin.name,
-                    action=action,
-                    decision_reason=risk_decision.reason_code,
-                    sellable_qty=prepared.sellable_qty,
-                    buy_fraction=self.buy_fraction,
-                    promotion_grade_policy_required=bool(
-                        strategy_envelope.provenance.get("promotion_grade_policy_required")
-                    ),
-                    allow_execution_compatibility_fallback=bool(
-                        strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
-                    ),
-                    policy_drives_execution=True,
-                    policy_decision=policy_decision,
-                )
+            promotion_grade_policy_required = bool(
+                strategy_envelope.provenance.get("promotion_grade_policy_required")
             )
-            self.warnings.extend(planning.warnings)
-            planning_hash = canonical_payload_hash(planning.evidence)
-            self.trace_recorder.record_execution_planning(
-                input_hash=risk.risk_gate_hash,
-                execution_plan_hash=planning_hash,
-                reason_code=str(
-                    planning.evidence.get("execution_plan_reason_code") or risk_decision.reason_code
-                ),
-            )
-            outcome = self.execution_simulator.execute(
-                ExecutionSimulationRequest(
-                    dataset=self.dataset,
-                    candle=candle,
-                    candle_index=int(tick.candle_index),
-                    event=event,
-                    ledger=self.ledger,
-                    timing_policy=self.timing_policy,
-                    execution_model=self.execution_model,
-                    fee_rate=self.fee_rate,
-                    strategy_name=self.strategy_plugin.name,
-                    action=action,
-                    decision_reason=risk_decision.reason_code,
-                    regime_snapshot=prepared.regime_snapshot,
-                    decision_hash=str(
-                        strategy_envelope.replay_fingerprint_hash or risk.strategy.strategy_decision_hash
-                    ),
-                    sellable_qty=prepared.sellable_qty,
-                    buy_fraction=self.buy_fraction,
-                    promotion_grade_policy_required=bool(
-                        strategy_envelope.provenance.get("promotion_grade_policy_required")
-                    ),
-                    allow_execution_compatibility_fallback=bool(
-                        strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
-                    ),
-                    policy_drives_execution=True,
-                    policy_decision=policy_decision,
-                    plan_bundle=planning.plan_bundle,
-                    execution_evidence=planning.evidence,
-                    exit_rule=risk_decision.exit_rule,
-                    exit_reason=risk_decision.exit_reason,
-                )
-            )
-            execution_evidence = dict(outcome.evidence)
-            self.warnings.extend(outcome.warnings)
-            application = self.ledger.apply_execution_outcome(
-                outcome,
-                mark_boundary_ts=prepared.mark_boundary_ts,
-                mark_cash=prepared.mark_cash,
-                mark_qty=prepared.mark_qty,
-            )
-            mark_cash = application.mark_cash
-            mark_qty = application.mark_qty
-            if application.trade_recorded:
-                _record_audit_execution(
-                    self.audit_recorder,
-                    self.run_context,
-                    self.warnings,
-                    self.trace_recorder,
-                    input_hash=canonical_payload_hash(self.ledger.trade_ledger[-1]),
-                    trade=self.ledger.trade_ledger[-1],
-                )
-                self.ledger.apply_pending_fills(prepared.decision_boundary_ts)
-            execution_plan_hash = canonical_payload_hash(execution_evidence)
-            fill_hash = canonical_payload_hash(
-                outcome.fill.as_dict() if outcome.fill is not None and hasattr(outcome.fill, "as_dict") else {}
-            )
-        else:
-            outcome = None
-            policy_position = getattr(policy_decision, "position_snapshot", None)
-            if (
-                bool(strategy_envelope.provenance.get("promotion_grade_policy_required"))
-                and bool(getattr(policy_position, "has_executable_exposure", False))
-            ):
+            try:
                 planning = self.execution_planner.plan(
                     ExecutionPlanningRequest(
                         candle=candle,
@@ -372,7 +288,7 @@ class BacktestEventProcessor:
                         decision_reason=risk_decision.reason_code,
                         sellable_qty=prepared.sellable_qty,
                         buy_fraction=self.buy_fraction,
-                        promotion_grade_policy_required=True,
+                        promotion_grade_policy_required=promotion_grade_policy_required,
                         allow_execution_compatibility_fallback=bool(
                             strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
                         ),
@@ -380,16 +296,141 @@ class BacktestEventProcessor:
                         policy_decision=policy_decision,
                     )
                 )
-                self.warnings.extend(planning.warnings)
-                execution_evidence = dict(planning.evidence)
+            except ValueError as exc:
+                planning_error = str(exc)
+                if promotion_grade_policy_required or planning_error not in {
+                    "research_submit_plan_missing",
+                    "research_typed_submit_plan_missing",
+                }:
+                    raise
+                self.warnings.append(planning_error)
+                outcome = None
+                execution_evidence = blocked_execution_evidence(planning_error)
                 planning_hash = canonical_payload_hash(execution_evidence)
                 self.trace_recorder.record_execution_planning(
                     input_hash=risk.risk_gate_hash,
                     execution_plan_hash=planning_hash,
+                    reason_code=planning_error,
+                )
+                execution_plan_hash = planning_hash
+                fill_hash = canonical_payload_hash({})
+            else:
+                self.warnings.extend(planning.warnings)
+                planning_hash = canonical_payload_hash(planning.evidence)
+                self.trace_recorder.record_execution_planning(
+                    input_hash=risk.risk_gate_hash,
+                    execution_plan_hash=planning_hash,
                     reason_code=str(
-                        execution_evidence.get("execution_plan_reason_code") or risk_decision.reason_code
+                        planning.evidence.get("execution_plan_reason_code") or risk_decision.reason_code
                     ),
                 )
+                outcome = self.execution_simulator.execute(
+                    ExecutionSimulationRequest(
+                        dataset=self.dataset,
+                        candle=candle,
+                        candle_index=int(tick.candle_index),
+                        event=event,
+                        ledger=self.ledger,
+                        timing_policy=self.timing_policy,
+                        execution_model=self.execution_model,
+                        fee_rate=self.fee_rate,
+                        strategy_name=self.strategy_plugin.name,
+                        action=action,
+                        decision_reason=risk_decision.reason_code,
+                        regime_snapshot=prepared.regime_snapshot,
+                        decision_hash=str(
+                            strategy_envelope.replay_fingerprint_hash or risk.strategy.strategy_decision_hash
+                        ),
+                        sellable_qty=prepared.sellable_qty,
+                        buy_fraction=self.buy_fraction,
+                        promotion_grade_policy_required=promotion_grade_policy_required,
+                        allow_execution_compatibility_fallback=bool(
+                            strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
+                        ),
+                        policy_drives_execution=True,
+                        policy_decision=policy_decision,
+                        plan_bundle=planning.plan_bundle,
+                        execution_evidence=planning.evidence,
+                        exit_rule=risk_decision.exit_rule,
+                        exit_reason=risk_decision.exit_reason,
+                    )
+                )
+                execution_evidence = dict(outcome.evidence)
+                self.warnings.extend(outcome.warnings)
+                application = self.ledger.apply_execution_outcome(
+                    outcome,
+                    mark_boundary_ts=prepared.mark_boundary_ts,
+                    mark_cash=prepared.mark_cash,
+                    mark_qty=prepared.mark_qty,
+                )
+                mark_cash = application.mark_cash
+                mark_qty = application.mark_qty
+                if application.trade_recorded:
+                    _record_audit_execution(
+                        self.audit_recorder,
+                        self.run_context,
+                        self.warnings,
+                        self.trace_recorder,
+                        input_hash=canonical_payload_hash(self.ledger.trade_ledger[-1]),
+                        trade=self.ledger.trade_ledger[-1],
+                    )
+                    self.ledger.apply_pending_fills(prepared.decision_boundary_ts)
+                execution_plan_hash = canonical_payload_hash(execution_evidence)
+                fill_hash = canonical_payload_hash(
+                    outcome.fill.as_dict() if outcome.fill is not None and hasattr(outcome.fill, "as_dict") else {}
+                )
+        else:
+            outcome = None
+            policy_position = getattr(policy_decision, "position_snapshot", None)
+            if (
+                bool(strategy_envelope.provenance.get("promotion_grade_policy_required"))
+                and bool(getattr(policy_position, "has_executable_exposure", False))
+            ):
+                try:
+                    planning = self.execution_planner.plan(
+                        ExecutionPlanningRequest(
+                            candle=candle,
+                            event=event,
+                            ledger=self.ledger,
+                            strategy_name=self.strategy_plugin.name,
+                            action=action,
+                            decision_reason=risk_decision.reason_code,
+                            sellable_qty=prepared.sellable_qty,
+                            buy_fraction=self.buy_fraction,
+                            promotion_grade_policy_required=True,
+                            allow_execution_compatibility_fallback=bool(
+                                strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
+                            ),
+                            policy_drives_execution=True,
+                            policy_decision=policy_decision,
+                        )
+                    )
+                except ValueError as exc:
+                    planning_error = str(exc)
+                    if planning_error not in {
+                        "research_submit_plan_missing",
+                        "research_typed_submit_plan_missing",
+                    }:
+                        raise
+                    self.warnings.append(planning_error)
+                    execution_evidence = blocked_execution_evidence(planning_error)
+                    planning_hash = canonical_payload_hash(execution_evidence)
+                    self.trace_recorder.record_execution_planning(
+                        input_hash=risk.risk_gate_hash,
+                        execution_plan_hash=planning_hash,
+                        reason_code=planning_error,
+                    )
+                else:
+                    self.warnings.extend(planning.warnings)
+                    execution_evidence = dict(planning.evidence)
+                    planning_hash = canonical_payload_hash(execution_evidence)
+                    self.trace_recorder.record_execution_planning(
+                        input_hash=risk.risk_gate_hash,
+                        execution_plan_hash=planning_hash,
+                        reason_code=str(
+                            execution_evidence.get("execution_plan_reason_code") or risk_decision.reason_code
+                        ),
+                    )
             else:
                 execution_evidence = blocked_execution_evidence(risk_decision.reason_code)
             execution_plan_hash = canonical_payload_hash(execution_evidence)
@@ -470,6 +511,7 @@ class BacktestEventProcessor:
             strategy_spec=self.strategy_spec,
             exit_policy=self.active_exit_policy,
             exit_policy_hash=self.active_exit_policy_hash,
+            exit_policy_config_hash=self.active_exit_policy_config_hash,
             fee_rate=self.fee_rate,
             slippage_bps=self.slippage_bps,
             timing_policy=self.timing_policy,
@@ -559,8 +601,10 @@ def run_stage_owned_decision_event_backtest(
 
     strategy_plugin = resolve_research_strategy_plugin(strategy_name)
     strategy_spec = strategy_spec_for_name(strategy_name)
-    active_exit_policy = exit_policy_from_parameters(strategy_name, parameter_values)
+    active_exit_policy_materialization = exit_policy_materialization_from_parameters(strategy_name, parameter_values)
+    active_exit_policy = dict(active_exit_policy_materialization.exit_policy)
     active_exit_policy_hash = exit_policy_hash(active_exit_policy)
+    active_exit_policy_config_hash = str(active_exit_policy_materialization.exit_policy_config_hash)
     payload_builder = DecisionPayloadBuilder()
     audit_recorder = AuditTraceRecorder()
     trace_recorder = StageTraceRecorder()
@@ -653,6 +697,7 @@ def run_stage_owned_decision_event_backtest(
         strategy_spec=strategy_spec,
         active_exit_policy=active_exit_policy,
         active_exit_policy_hash=active_exit_policy_hash,
+        active_exit_policy_config_hash=active_exit_policy_config_hash,
         buy_fraction=buy_fraction,
         run_context=run_context,
         ledger=ledger,
@@ -738,6 +783,7 @@ def _build_decision_observability_payload(
     strategy_spec: Any,
     exit_policy: dict[str, Any],
     exit_policy_hash: str,
+    exit_policy_config_hash: str | None,
     fee_rate: float,
     slippage_bps: float,
     timing_policy: Any,
@@ -763,6 +809,7 @@ def _build_decision_observability_payload(
             strategy_spec=strategy_spec,
             exit_policy=exit_policy,
             exit_policy_hash=exit_policy_hash,
+            exit_policy_config_hash=exit_policy_config_hash,
             fee_rate=fee_rate,
             slippage_bps=slippage_bps,
             timing_policy=timing_policy,

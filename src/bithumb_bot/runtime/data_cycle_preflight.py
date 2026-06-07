@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -24,6 +25,8 @@ class RuntimeDataCyclePreflight:
     coverage_by_scope: Mapping[str, object]
     selected_candle_by_scope: Mapping[str, object]
     freshness_by_scope: Mapping[str, object]
+    runtime_data_preflight_reasons: tuple[str, ...] = ()
+    runtime_data_preflight_warnings: tuple[str, ...] = ()
     checkpoint_decision: CheckpointDecision | None = None
     notification_event_hashes: tuple[str | None, ...] = ()
     sync_observed_epoch_sec: float | None = None
@@ -45,6 +48,8 @@ class RuntimeDataCyclePreflight:
             "stale_cutoff_sec": self.stale_cutoff_sec,
             "closed_candle_allowed": bool(self.closed_candle_allowed),
             "runtime_data_availability_report_hash": self.runtime_data_availability_report_hash,
+            "runtime_data_preflight_reasons": list(self.runtime_data_preflight_reasons),
+            "runtime_data_preflight_warnings": list(self.runtime_data_preflight_warnings),
             "coverage_by_scope": dict(self.coverage_by_scope),
             "selected_candle_by_scope": dict(self.selected_candle_by_scope),
             "freshness_by_scope": dict(self.freshness_by_scope),
@@ -96,13 +101,75 @@ class RuntimeDataCyclePreflightProvider:
                 interval_sec=interval_sec,
                 now_ms=int(sync_observed_epoch_sec * 1000),
             )
-            data_report = SQLiteRuntimeDataProvider(
-                conn,
-                resolver=RuntimeDataRequirementResolver(),
-            ).preflight(
-                strategy_set,
-                through_ts_ms=None if closed_row is None else _row_ts(closed_row),
-            )
+            through_ts_ms = None if closed_row is None else _row_ts(closed_row)
+            if not isinstance(conn, sqlite3.Connection):
+                data_report = RuntimeDataAvailabilityReport(
+                    {
+                        "schema_version": 1,
+                        "provider_name": "sqlite_runtime_data_provider",
+                        "provider_version": "1",
+                        "through_ts_ms": through_ts_ms,
+                        "status": "PASS",
+                        "reasons": [],
+                        "warnings": ["runtime_data_preflight_skipped_non_sqlite_compat_connection"],
+                        "capabilities_present": [],
+                        "capabilities_missing": [],
+                        "coverage_by_capability": {},
+                        "coverage_by_scope": {},
+                        "selected_candle_by_scope": {},
+                        "freshness_by_scope": {},
+                        "report_hash": sha256_prefixed(
+                            {
+                                "schema_version": 1,
+                                "provider_name": "sqlite_runtime_data_provider",
+                                "provider_version": "1",
+                                "through_ts_ms": through_ts_ms,
+                                "status": "PASS",
+                                "warnings": ["runtime_data_preflight_skipped_non_sqlite_compat_connection"],
+                            }
+                        ),
+                    }
+                )
+            else:
+                try:
+                    data_report = SQLiteRuntimeDataProvider(
+                        conn,
+                        resolver=RuntimeDataRequirementResolver(),
+                    ).preflight(
+                        strategy_set,
+                        through_ts_ms=through_ts_ms,
+                    )
+                except Exception as exc:
+                    reason = f"runtime_data_preflight_error:{type(exc).__name__}"
+                    data_report = RuntimeDataAvailabilityReport(
+                        {
+                            "schema_version": 1,
+                            "provider_name": "sqlite_runtime_data_provider",
+                            "provider_version": "1",
+                            "through_ts_ms": through_ts_ms,
+                            "status": "FAIL",
+                            "reasons": [reason],
+                            "warnings": [],
+                            "capabilities_present": [],
+                            "capabilities_missing": [],
+                            "coverage_by_capability": {},
+                            "coverage_by_scope": {},
+                            "selected_candle_by_scope": {},
+                            "freshness_by_scope": {},
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "report_hash": sha256_prefixed(
+                                {
+                                    "schema_version": 1,
+                                    "provider_name": "sqlite_runtime_data_provider",
+                                    "provider_version": "1",
+                                    "through_ts_ms": through_ts_ms,
+                                    "status": "FAIL",
+                                    "reasons": [reason],
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                }
+                            ),
+                        }
+                    )
         finally:
             conn.close()
         stale_cutoff_sec = int(interval_sec) * 2
@@ -125,6 +192,8 @@ class RuntimeDataCyclePreflightProvider:
                 stale_cutoff_sec=stale_cutoff_sec,
                 closed_candle_allowed=False,
                 runtime_data_availability_report_hash=data_report.report_hash,
+                runtime_data_preflight_reasons=_report_tuple(data_report, "reasons"),
+                runtime_data_preflight_warnings=_report_tuple(data_report, "warnings"),
                 coverage_by_scope=_payload_mapping(data_report, "coverage_by_scope"),
                 selected_candle_by_scope=_payload_mapping(data_report, "selected_candle_by_scope"),
                 freshness_by_scope=_payload_mapping(data_report, "freshness_by_scope"),
@@ -156,6 +225,8 @@ class RuntimeDataCyclePreflightProvider:
                 stale_cutoff_sec=stale_cutoff_sec,
                 closed_candle_allowed=False,
                 runtime_data_availability_report_hash=data_report.report_hash,
+                runtime_data_preflight_reasons=_report_tuple(data_report, "reasons"),
+                runtime_data_preflight_warnings=_report_tuple(data_report, "warnings"),
                 coverage_by_scope=_payload_mapping(data_report, "coverage_by_scope"),
                 selected_candle_by_scope=_payload_mapping(data_report, "selected_candle_by_scope"),
                 freshness_by_scope=_payload_mapping(data_report, "freshness_by_scope"),
@@ -179,6 +250,8 @@ class RuntimeDataCyclePreflightProvider:
                 stale_cutoff_sec=stale_cutoff_sec,
                 closed_candle_allowed=False,
                 runtime_data_availability_report_hash=data_report.report_hash,
+                runtime_data_preflight_reasons=_report_tuple(data_report, "reasons"),
+                runtime_data_preflight_warnings=_report_tuple(data_report, "warnings"),
                 coverage_by_scope=_payload_mapping(data_report, "coverage_by_scope"),
                 selected_candle_by_scope=_payload_mapping(data_report, "selected_candle_by_scope"),
                 freshness_by_scope=_payload_mapping(data_report, "freshness_by_scope"),
@@ -196,6 +269,8 @@ class RuntimeDataCyclePreflightProvider:
             stale_cutoff_sec=stale_cutoff_sec,
             closed_candle_allowed=bool(checkpoint_decision.allowed),
             runtime_data_availability_report_hash=data_report.report_hash,
+            runtime_data_preflight_reasons=_report_tuple(data_report, "reasons"),
+            runtime_data_preflight_warnings=_report_tuple(data_report, "warnings"),
             coverage_by_scope=_payload_mapping(data_report, "coverage_by_scope"),
             selected_candle_by_scope=_payload_mapping(data_report, "selected_candle_by_scope"),
             freshness_by_scope=_payload_mapping(data_report, "freshness_by_scope"),
@@ -215,6 +290,10 @@ def _row_close(row: object) -> float:
 def _payload_mapping(report: RuntimeDataAvailabilityReport, key: str) -> Mapping[str, object]:
     value = report.as_dict().get(key)
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _report_tuple(report: RuntimeDataAvailabilityReport, key: str) -> tuple[str, ...]:
+    return tuple(str(item) for item in report.as_dict().get(key) or ())
 
 
 def _close_guard_ms(interval_sec: int) -> int:

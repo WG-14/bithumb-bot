@@ -536,14 +536,14 @@ class RuntimeStrategyInstance:
     runtime_contract_hash: str | None
     plugin_contract_hash: str | None
     strategy_version: str | None
-    exit_policy: Mapping[str, object]
-    exit_policy_hash: str
-    exit_policy_contract_hash: str
-    exit_policy_source: str
-    exit_policy_materialization_mode: str
-    exit_policy_config_hash: str
-    runtime_contract: Mapping[str, object]
-    runtime_adapter_config: Mapping[str, object]
+    exit_policy: Mapping[str, object] | None = None
+    exit_policy_hash: str = "exit_policy_hash_missing"
+    exit_policy_contract_hash: str = "exit_policy_contract_hash_missing"
+    exit_policy_source: str = "legacy_constructor_compat_missing"
+    exit_policy_materialization_mode: str = "legacy_constructor_compat_missing"
+    exit_policy_config_hash: str = "exit_policy_config_hash_missing"
+    runtime_contract: Mapping[str, object] | None = None
+    runtime_adapter_config: Mapping[str, object] | None = None
     risk_profile: StrategyRiskProfile | None = None
     parameter_authority_audit: Mapping[str, object] | None = None
     profile_authority_context: Mapping[str, object] | None = None

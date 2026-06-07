@@ -712,11 +712,16 @@ def runtime_decision_to_canonical_event(
             "execution_plan_bundle_hash": execution_evidence["execution_plan_bundle_hash"],
             "execution_evidence_source": execution_evidence["execution_evidence_source"],
             "typed_execution_summary_present": bool(execution_evidence["typed_execution_summary_present"]),
+            "typed_submit_plan": bool(execution_evidence.get("typed_submit_plan")),
+            "promotion_grade": bool(execution_evidence.get("promotion_grade")),
             "execution_plan_bundle_evidence": execution_evidence.get("execution_plan_bundle_evidence"),
             "typed_execution_summary_evidence": execution_evidence.get("typed_execution_summary_evidence"),
             "execution_submit_plan_evidence": execution_evidence.get("execution_submit_plan_evidence"),
             "typed_no_submit_proof": execution_evidence.get("typed_no_submit_proof"),
             "compatibility_fallback": bool(context.get("compatibility_fallback")),
+            "research_compatibility_execution_fallback": bool(
+                execution_evidence.get("research_compatibility_execution_fallback")
+            ),
             "legacy_context_planning_used": bool(context.get("legacy_context_planning_used")),
             "artifact_grade": str(execution_evidence["artifact_grade"]),
             "authority_plane": str(execution_evidence["authority_plane"]),
@@ -755,7 +760,10 @@ def runtime_decision_to_canonical_event(
         "typed_execution_summary_evidence",
         "execution_submit_plan_evidence",
         "typed_no_submit_proof",
+        "typed_submit_plan",
+        "promotion_grade",
         "compatibility_fallback",
+        "research_compatibility_execution_fallback",
         "legacy_context_planning_used",
         "persistence_context_authoritative",
         "runtime_replay_planning_error",
@@ -832,11 +840,16 @@ def research_decision_to_canonical_event(
     payload["execution_plan_bundle_present"] = bool(payload.get("execution_plan_bundle_present"))
     payload["execution_evidence_source"] = str(payload.get("execution_evidence_source") or "")
     payload["typed_execution_summary_present"] = bool(payload.get("typed_execution_summary_present"))
+    payload["typed_submit_plan"] = bool(payload.get("typed_submit_plan"))
+    payload["promotion_grade"] = bool(payload.get("promotion_grade"))
     payload["execution_plan_bundle_evidence"] = payload.get("execution_plan_bundle_evidence")
     payload["typed_execution_summary_evidence"] = payload.get("typed_execution_summary_evidence")
     payload["execution_submit_plan_evidence"] = payload.get("execution_submit_plan_evidence")
     payload["typed_no_submit_proof"] = payload.get("typed_no_submit_proof")
     payload["compatibility_fallback"] = bool(payload.get("compatibility_fallback"))
+    payload["research_compatibility_execution_fallback"] = bool(
+        payload.get("research_compatibility_execution_fallback")
+    )
     payload["legacy_context_planning_used"] = bool(payload.get("legacy_context_planning_used"))
     payload["runtime_replay_planning_error"] = str(payload.get("runtime_replay_planning_error") or "")
     payload["execution_plan_status"] = str(payload.get("execution_plan_status") or "")
@@ -951,6 +964,10 @@ def _runtime_execution_plan_evidence(
             "typed_execution_summary_evidence": summary_payload,
             "execution_evidence_source": PROMOTION_TYPED_EXECUTION_EVIDENCE_SOURCE,
             "typed_execution_summary_present": True,
+            "typed_submit_plan": submit_plan is not None,
+            "promotion_grade": submit_plan is not None,
+            "compatibility_fallback": False,
+            "research_compatibility_execution_fallback": False,
             "artifact_grade": PROMOTION_ARTIFACT_GRADE,
             "authority_plane": PROMOTION_AUTHORITY_PLANE,
             "promotion_rejection_reason": str(observability.get("runtime_replay_planning_error") or ""),

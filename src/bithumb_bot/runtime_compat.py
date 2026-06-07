@@ -6,6 +6,8 @@ from .config import settings
 from .execution_service import build_execution_decision_summary
 from .run_loop_execution_planner import prepare_strategy_decision_persistence_context
 from .runtime.execution_coordinator import (
+    authoritative_execution_signal_for_trade,
+    build_signal_execution_request,
     resolve_typed_execution_submit_expectation as _resolve_typed_execution_submit_expectation,
 )
 from .runtime.cleanup_revalidation import (
@@ -24,9 +26,7 @@ from .runtime.runner import (
     _resolve_target_position_state_for_run_loop,
     _select_latest_closed_candle,
     _typed_runtime_handoff_failure_reason,
-    authoritative_execution_signal_for_trade,
     build_resume_guidance,
-    build_signal_execution_request,
     compute_strategy_decision_snapshot,
     evaluate_restart_readiness,
     get_stale_risk_state_mismatch_halt_diagnostics,

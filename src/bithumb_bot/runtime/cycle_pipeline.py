@@ -167,13 +167,28 @@ class RuntimeCyclePipeline:
                 notification_event_hashes=safety_result.notification_event_hashes,
             )
 
+        paper_runtime_data_preflight_warning = (
+            preflight.reason_code == "runtime_data_preflight_failed"
+            and c.settings_obj.MODE != "live"
+            and preflight.closed_candle_allowed
+        )
         if preflight.reason_code == "runtime_data_preflight_failed":
-            return r._record_artifact(
-                "skip:runtime_data_preflight_failed",
+            runner_module._log_loop_event(
+                logging.WARNING,
+                "[RUN] runtime_data_preflight_failed",
+                symbol=c.settings_obj.PAIR,
+                interval=c.settings_obj.INTERVAL,
                 candle_ts=preflight.closed_candle_ts,
-                startup_state="READY",
+                runtime_data_availability_report_hash=preflight.runtime_data_availability_report_hash or "-",
+                reasons=",".join(str(item) for item in preflight.as_dict().get("runtime_data_preflight_reasons", []) or ()),
             )
-        if not preflight.closed_candle_allowed:
+            if c.settings_obj.MODE == "live":
+                return r._record_artifact(
+                    "skip:runtime_data_preflight_failed",
+                    candle_ts=preflight.closed_candle_ts,
+                    startup_state="READY",
+                )
+        if not preflight.closed_candle_allowed and not paper_runtime_data_preflight_warning:
             checkpoint_decision = preflight.checkpoint_decision
             return r._record_artifact(
                 checkpoint_decision.cycle_id if checkpoint_decision is not None else "skip:no_closed_candle",

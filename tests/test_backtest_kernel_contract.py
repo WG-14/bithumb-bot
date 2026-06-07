@@ -1235,6 +1235,25 @@ def test_non_sma_executable_plugin_runs_buy_sell_custom_exit_with_typed_intent(m
     def _runner(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("test plugin runner is not used by this kernel test")
 
+    def _exit_policy_materializer(_strategy_name, _parameter_values):  # type: ignore[no-untyped-def]
+        policy = {
+            "schema_version": 1,
+            "strategy_name": strategy_name,
+            "rules": ("unit_custom_exit",),
+            "custom_exit": {"rule": "unit_custom_exit"},
+        }
+        return {
+            "exit_policy": policy,
+            "exit_policy_hash": canonical_payload_hash(policy),
+            "exit_policy_config": {
+                "schema_version": 1,
+                "strategy_name": strategy_name,
+                "rules": ("unit_custom_exit",),
+            },
+            "exit_policy_source": "unit_test_exit_policy_materializer",
+            "exit_policy_materialization_mode": "unit_test",
+        }
+
     def _policy_builder(
         *,
         event,
@@ -1348,6 +1367,7 @@ def test_non_sma_executable_plugin_runs_buy_sell_custom_exit_with_typed_intent(m
         runtime_parameter_adapter=None,
         decision_contract_version=spec.decision_contract_version,
         diagnostics_namespace="unit_non_sma",
+        exit_policy_materializer=_exit_policy_materializer,
         research_policy_decision_builder=_policy_builder,
         runtime_capabilities=StrategyRuntimeCapabilities(
             promotion_runtime_decisions_supported=False,

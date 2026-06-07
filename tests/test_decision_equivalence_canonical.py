@@ -119,6 +119,12 @@ def _decision_v2(**overrides: object) -> dict[str, object]:
         "authority_label": "ExecutionPlanBundle",
         "summary_authority": "ExecutionDecisionSummary",
         "submit_plan_authority": "ExecutionSubmitPlan",
+        "compatibility_fallback": False,
+        "promotion_grade": True,
+        "artifact_grade": "promotion_candidate",
+        "authority_plane": "typed_execution_plan_bundle",
+        "execution_evidence_source": "typed_execution_plan_bundle",
+        "live_authoritative": False,
         "planning_error": None,
     }
     summary_evidence = {
@@ -144,6 +150,9 @@ def _decision_v2(**overrides: object) -> dict[str, object]:
         "idempotency_key": None,
         "schema_version": 1,
         "authority_label": "ExecutionSubmitPlan.final_payload.v1",
+        "artifact_grade": "promotion_candidate",
+        "compatibility_fallback": False,
+        "promotion_grade": True,
     }
     submit_evidence["content_hash"] = sha256_prefixed(submit_evidence)
     payload.update(
@@ -183,6 +192,7 @@ def _decision_v2(**overrides: object) -> dict[str, object]:
             "execution_plan_bundle_evidence": bundle_evidence,
             "typed_execution_summary_evidence": summary_evidence,
             "execution_submit_plan_evidence": submit_evidence,
+            "typed_submit_plan": True,
             "final_action": "ENTER_STRATEGY_POSITION",
             "submit_expected": True,
             "pre_submit_proof_status": "not_required",
@@ -193,10 +203,13 @@ def _decision_v2(**overrides: object) -> dict[str, object]:
             "execution_plan_bundle_present": True,
             "execution_evidence_source": "typed_execution_plan_bundle",
             "typed_execution_summary_present": True,
+            "typed_submit_plan": True,
             "decision_authority_source": "DecisionEnvelope.strategy_decision",
             "compatibility_fallback": False,
+            "research_compatibility_execution_fallback": False,
             "legacy_context_planning_used": False,
             "artifact_grade": "promotion_candidate",
+            "promotion_grade": True,
             "authority_plane": "typed_execution_plan_bundle",
             "runtime_replay_planning_error": "",
             "promotion_rejection_reason": "",

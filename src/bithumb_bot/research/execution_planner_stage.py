@@ -40,7 +40,11 @@ class DefaultExecutionPlanner:
 
     def plan(self, request: ExecutionPlanningRequest) -> ExecutionPlanningResult:
         action = str(request.action or "HOLD").upper()
-        plan_bundle = _default_research_execution_plan_bundle(
+        plan_bundle_builder = _research_test_compat_attr(
+            "_research_execution_plan_bundle",
+            _default_research_execution_plan_bundle,
+        )
+        plan_bundle = plan_bundle_builder(
             side=action,
             cash=float(request.ledger.cash),
             buy_fraction=float(request.buy_fraction),
@@ -61,6 +65,8 @@ class DefaultExecutionPlanner:
             ),
             block_reason=str(request.decision_reason or ""),
         )
+        if plan_bundle.submit_plan is None and request.promotion_grade_policy_required:
+            raise ValueError("research_submit_plan_missing")
         evidence = _default_execution_plan_evidence(plan_bundle)
         warnings: tuple[str, ...] = ()
         if plan_bundle.submit_plan is None and not request.promotion_grade_policy_required:
@@ -70,5 +76,14 @@ class DefaultExecutionPlanner:
             evidence=dict(evidence),
             warnings=warnings,
         )
+
+
+def _research_test_compat_attr(name: str, default: Any) -> Any:
+    try:
+        from . import backtest_pipeline
+    except Exception:
+        return default
+    return getattr(backtest_pipeline, name, default)
+
 
 __all__ = ["DefaultExecutionPlanner", "ExecutionPlanningRequest", "ExecutionPlanningResult"]

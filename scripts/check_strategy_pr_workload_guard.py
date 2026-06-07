@@ -171,11 +171,13 @@ def validate_strategy_pr_evidence(
         if BUILTIN_MANIFEST in normalized_files:
             builtin_reason = _extract_field_value(text, "built-in reason")
             if builtin_reason not in BUILTIN_REASON_TOKENS:
+                violations.append("built-in strategy changes require valid Built-in Reason")
                 violations.append(
                     "built-in strategy changes require valid Built-in Reason:"
                     f"{BUILTIN_MANIFEST}"
                 )
         if declares_external_path and BUILTIN_MANIFEST in normalized_files:
+            violations.append("external entry-point strategy changes must not edit built-in manifest")
             violations.append(
                 "external entry-point strategy changes must not edit built-in manifest:"
                 f"{BUILTIN_MANIFEST}"

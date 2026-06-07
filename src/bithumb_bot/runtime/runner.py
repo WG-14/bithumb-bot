@@ -66,6 +66,7 @@ from ..utils_time import kst_str, parse_interval_sec
 from ..observability import configure_runtime_logging, format_log_kv
 from ..bootstrap import get_last_explicit_env_load_summary
 from .. import runtime_state
+from ..execution_service import live_execute_signal
 from ..risk import RISK_STATE_MISMATCH
 from ..run_loop_execution_planner import (
     load_previous_target_exposure_for_run_loop,
