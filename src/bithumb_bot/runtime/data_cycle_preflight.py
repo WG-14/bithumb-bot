@@ -248,7 +248,7 @@ class RuntimeDataCyclePreflightProvider:
                 incomplete_candle_ts=None if incomplete_ts is None else int(incomplete_ts),
                 candle_age_sec=candle_age_sec,
                 stale_cutoff_sec=stale_cutoff_sec,
-                closed_candle_allowed=False,
+                closed_candle_allowed=bool(checkpoint_decision.allowed),
                 runtime_data_availability_report_hash=data_report.report_hash,
                 runtime_data_preflight_reasons=_report_tuple(data_report, "reasons"),
                 runtime_data_preflight_warnings=_report_tuple(data_report, "warnings"),

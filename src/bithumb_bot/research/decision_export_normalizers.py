@@ -116,6 +116,26 @@ def sma_promotion_grade_research_export_decisions(
         if isinstance(profile.get("strategy_parameters"), dict)
         else dict(params)
     )
+    runtime_comparable_exit_policy_config_hash = ""
+    if effective_params:
+        from bithumb_bot.strategy_plugins.sma_with_filter_assembly import (
+            MaterializationMode,
+            SmaWithFilterPolicyAssembly,
+        )
+        from .strategy_spec import runtime_bound_behavior_parameter_names
+
+        assembly = SmaWithFilterPolicyAssembly()
+        runtime_bound_names = set(runtime_bound_behavior_parameter_names(assembly.strategy_name))
+        if runtime_bound_names.issubset(effective_params):
+            materialized = assembly.materialize_parameters(
+                effective_params,
+                MaterializationMode.RUNTIME_REPLAY,
+                profile=profile,
+            )
+            exit_policy_config = assembly.build_exit_policy_config(materialized)
+            runtime_comparable_exit_policy_config_hash = sha256_prefixed(
+                exit_policy_config.policy_input_payload()
+            )
     candles = list(getattr(snapshot, "candles", ()) or ())
     min_rows = max(
         int(effective_params.get("SMA_LONG", 0) or 0) + 2,
@@ -124,11 +144,14 @@ def sma_promotion_grade_research_export_decisions(
     )
     # Keep research export aligned with runtime replay readiness without
     # recalculating policy observability from candle history.
-    return [
-        decision
-        for decision in decisions
-        if len([candle for candle in candles if int(candle.ts) <= int(decision.get("candle_ts") or 0)]) >= min_rows
-    ]
+    aligned: list[dict[str, object]] = []
+    for decision in decisions:
+        if len([candle for candle in candles if int(candle.ts) <= int(decision.get("candle_ts") or 0)]) < min_rows:
+            continue
+        if runtime_comparable_exit_policy_config_hash:
+            decision["exit_policy_config_hash"] = runtime_comparable_exit_policy_config_hash
+        aligned.append(decision)
+    return aligned
 
 
 def _refresh_strategy_behavior_hash(decision: dict[str, object]) -> None:

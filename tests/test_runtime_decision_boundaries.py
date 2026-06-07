@@ -879,13 +879,15 @@ def test_run_loop_does_not_unconditionally_enable_legacy_context_planning() -> N
 
 
 def test_run_loop_uses_decision_coordinator_for_decisions() -> None:
-    source = Path("src/bithumb_bot/runtime/runner.py").read_text(encoding="utf-8-sig")
-    tree = ast.parse(source)
+    runner_source = Path("src/bithumb_bot/runtime/runner.py").read_text(encoding="utf-8-sig")
+    app_container_source = Path("src/bithumb_bot/runtime/app_container.py").read_text(encoding="utf-8")
+    cycle_pipeline_source = Path("src/bithumb_bot/runtime/cycle_pipeline.py").read_text(encoding="utf-8")
+    tree = ast.parse(runner_source)
     run_loop = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run_loop")
-    run_loop_source = ast.get_source_segment(source, run_loop) or ""
+    run_loop_source = ast.get_source_segment(runner_source, run_loop) or ""
 
-    assert "DecisionCoordinator(" in run_loop_source
-    assert ".decide_cycle(" in run_loop_source
+    assert "DecisionCoordinator(" in app_container_source
+    assert ".decide_cycle(" in cycle_pipeline_source
     assert "RuntimeDecisionGateway().decide_bundle(" not in run_loop_source
     assert "record_strategy_decision(" not in run_loop_source
     assert "run_loop_execution_planner(" not in run_loop_source

@@ -389,13 +389,16 @@ def test_runtime_state_store_owns_state_application_boundary() -> None:
 
 def test_runtime_cycle_artifact_is_recorded_for_halt_recovery_and_execution_failure() -> None:
     source = inspect.getsource(runner)
+    from bithumb_bot.runtime import cycle_pipeline
+
+    pipeline_source = inspect.getsource(cycle_pipeline)
     assert '"recovery:initial_reconcile_clear"' in source
     assert '"recovery:live_execution_broker_clear"' in source
     assert '"recovery:risk_state_mismatch_clear"' in source
-    assert "safety_decision_hash=decision.as_dict()" in source
-    assert "state_transition_hash=decision.as_dict()" in source
-    assert "notification_event_hashes=" in source
-    assert "execution_result.planning_status" in source
+    assert "safety_decision_hash=decision.as_dict()" in pipeline_source
+    assert "state_transition_hash=decision.as_dict()" in pipeline_source
+    assert "notification_event_hashes=" in pipeline_source
+    assert "execution_result.planning_status" in pipeline_source
 
 
 def test_startup_controller_prepare_runtime_start_statuses() -> None:

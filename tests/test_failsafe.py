@@ -3073,12 +3073,6 @@ def test_run_loop_target_delta_adopted_target_strategy_sell_submits_delta_sell(m
             {"side": side, "execution_submit_plan": kwargs.get("execution_submit_plan")}
         ),
     )
-    monkeypatch.setattr(
-        "bithumb_bot.runtime.runner.live_execute_signal",
-        lambda _broker, side, ts, market_price, **kwargs: executor_calls.append(
-            {"side": side, "execution_submit_plan": kwargs.get("execution_submit_plan")}
-        ),
-    )
 
     run_loop()
 

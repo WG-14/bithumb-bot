@@ -232,33 +232,6 @@ def _research_execution_plan_bundle(
             raise ValueError("research_submit_plan_missing")
         if promotion_grade_required and missing_typed_submit_plan:
             raise ValueError(missing_typed_submit_reason)
-        if (
-            not promotion_grade_required
-            and normalized_side in {"BUY", "SELL"}
-            and submit_plan is None
-        ):
-            from .compatibility_execution_planning import _research_execution_submit_plan
-
-            submit_plan = _research_execution_submit_plan(
-                side=normalized_side,
-                cash=cash,
-                buy_fraction=buy_fraction,
-                sellable_qty=sellable_qty,
-                reference_price=reference_price,
-                policy_decision=policy_decision,
-            )
-            return ResearchExecutionPlanBundle(
-                submit_plan=submit_plan,
-                summary=summary,
-                source=submit_plan.source,
-                authority=submit_plan.authority,
-                execution_engine="research_virtual",
-                status="PLANNED" if submit_plan.submit_expected else "BLOCKED",
-                reason_code="none" if submit_plan.submit_expected else submit_plan.block_reason,
-                compatibility_fallback=True,
-                promotion_grade=False,
-                recommended_next_action="regenerate_research_decisions_with_typed_execution_submit_plan",
-            )
         return ResearchExecutionPlanBundle(
             submit_plan=submit_plan,
             summary=summary,

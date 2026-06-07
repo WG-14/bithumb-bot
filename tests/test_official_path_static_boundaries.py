@@ -465,10 +465,11 @@ def test_notification_composer_has_no_runtime_state_side_effects() -> None:
 
 def test_runtime_runner_delegates_safety_recovery_and_execution_boundaries() -> None:
     source = (REPO / "src/bithumb_bot/runtime/runner.py").read_text(encoding="utf-8-sig")
+    app_container_source = (REPO / "src/bithumb_bot/runtime/app_container.py").read_text(encoding="utf-8")
 
     assert "RecoveryController(" in source
     assert "SafetyController(" in source
     assert "StartupController(" in source
-    assert "ExecutionCoordinator(" in source
+    assert "ExecutionCoordinator(" in app_container_source
     assert "cancel_open_orders_with_broker(broker)" not in source
     assert "flatten_status = str(flatten_outcome.get" not in source
