@@ -224,6 +224,10 @@ def test_runner_does_not_directly_submit_orders_or_reconcile_post_trade() -> Non
 def test_runner_module_does_not_import_or_reference_submit_boundary_symbols() -> None:
     source = inspect.getsource(runner)
     for forbidden in {
+        "build_signal_execution_",
+        "compat_request_builder",
+        "getattr(_execution_coordinator",
+        "build_signal_execution_request",
         "live_execute_signal",
         "paper_execute",
         "build_signal_execution_service",

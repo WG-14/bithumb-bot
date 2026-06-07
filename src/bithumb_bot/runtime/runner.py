@@ -111,15 +111,6 @@ _LEGACY_ENGINE_ATTEMPT_OPEN_ORDER_CANCELLATION = None
 _ORIGINAL_OPERATOR_NOTIFICATION_SERVICE_FACTORY = operator_notification_service
 
 
-def __getattr__(name: str) -> object:
-    compat_request_builder = "build_signal_execution_" + "request"
-    if name == compat_request_builder:
-        from . import execution_coordinator as _execution_coordinator
-
-        return getattr(_execution_coordinator, compat_request_builder)
-    raise AttributeError(name)
-
-
 class Runner:
     def __init__(self, container: RuntimeAppContainer):
         self.container = container
