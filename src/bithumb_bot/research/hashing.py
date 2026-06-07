@@ -26,6 +26,9 @@ REPORT_RUNTIME_ONLY_FIELDS = frozenset(
     {
         "run_environment",
         "run_environment_hash",
+        "derived_candidates_path",
+        "derived_path",
+        "report_path",
         "failure_artifact_path",
         "statistical_evidence_path",
         "return_panel_path",

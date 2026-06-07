@@ -2966,6 +2966,37 @@ def test_report_content_hash_is_independent_of_data_root(tmp_path, monkeypatch) 
 
 
 @pytest.mark.contract
+def test_report_content_hash_ignores_runtime_local_report_paths() -> None:
+    report = minimal_research_report(
+        artifact_refs={
+            "derived_candidates": "derived/research/unit/backtest_candidates.json",
+            "report": "reports/research/unit/backtest_report.json",
+        },
+        artifact_paths={
+            "derived_path": "/tmp/runtime-a/data_root/paper/derived/research/unit/backtest_candidates.json",
+            "report_path": "/tmp/runtime-a/data_root/paper/reports/research/unit/backtest_report.json",
+        },
+        derived_candidates_path="/tmp/runtime-a/data_root/paper/derived/research/unit/backtest_candidates.json",
+        report_path="/tmp/runtime-a/data_root/paper/reports/research/unit/backtest_report.json",
+    )
+    report["content_hash"] = sha256_prefixed(report_content_hash_payload(report))
+
+    changed = json.loads(json.dumps(report))
+    changed["artifact_paths"]["derived_path"] = (
+        "/tmp/runtime-b/data_root/paper/derived/research/unit/backtest_candidates.json"
+    )
+    changed["artifact_paths"]["report_path"] = (
+        "/tmp/runtime-b/data_root/paper/reports/research/unit/backtest_report.json"
+    )
+    changed["derived_candidates_path"] = (
+        "/tmp/runtime-b/data_root/paper/derived/research/unit/backtest_candidates.json"
+    )
+    changed["report_path"] = "/tmp/runtime-b/data_root/paper/reports/research/unit/backtest_report.json"
+
+    assert sha256_prefixed(report_content_hash_payload(changed)) == report["content_hash"]
+
+
+@pytest.mark.contract
 def test_report_content_hash_is_independent_of_db_path_and_runtime_environment() -> None:
     report = minimal_research_report(
         run_environment={
