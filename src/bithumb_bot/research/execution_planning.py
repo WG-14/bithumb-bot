@@ -28,6 +28,26 @@ PROMOTION_EXECUTION_EVIDENCE_SOURCE = "typed_execution_plan_bundle"
 PROMOTION_EXECUTION_ARTIFACT_GRADE = "promotion_candidate"
 
 
+def _has_diagnostic_submit_plan_marker(payload: dict[str, object] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(
+        payload.get("compatibility_fallback") is True
+        or payload.get("research_compatibility_execution_fallback") is True
+        or payload.get("promotion_grade") is False
+        or payload.get("artifact_grade") == DIAGNOSTIC_EXECUTION_ARTIFACT_GRADE
+        or payload.get("authority_plane") == DIAGNOSTIC_EXECUTION_AUTHORITY_PLANE
+        or payload.get("execution_evidence_source") == DIAGNOSTIC_EXECUTION_EVIDENCE_SOURCE
+    )
+
+
+def _diagnostic_next_action(current: object) -> str:
+    action = str(current or "").strip()
+    if action and action != "none":
+        return action
+    return "regenerate_research_decisions_with_typed_execution_submit_plan"
+
+
 @dataclass(frozen=True)
 class ResearchExecutionPlanBundle:
     submit_plan: ExecutionSubmitPlan | None
@@ -43,10 +63,12 @@ class ResearchExecutionPlanBundle:
 
     @property
     def promotion_authoritative(self) -> bool:
+        submit_payload = None if self.submit_plan is None else self.submit_plan.as_dict()
         return bool(
             self.promotion_grade
             and not self.compatibility_fallback
             and self.summary is not None
+            and not _has_diagnostic_submit_plan_marker(submit_payload)
         )
 
     @property
@@ -64,7 +86,7 @@ class ResearchExecutionPlanBundle:
             "summary": None if self.summary is None else self.summary.as_dict(),
             "submit_plan": None if self.submit_plan is None else self.submit_plan.as_final_payload(),
             "compatibility_fallback": bool(self.compatibility_fallback),
-            "promotion_grade": bool(self.promotion_grade),
+            "promotion_grade": bool(self.promotion_authoritative),
             "artifact_grade": (
                 PROMOTION_EXECUTION_ARTIFACT_GRADE
                 if self.promotion_authoritative
@@ -195,22 +217,12 @@ def _research_execution_plan_bundle(
                     buy_submit_plan=intent_submit_plan,
                 )
                 submit_plan = intent_submit_plan
-        if (
-            submit_plan is None
-            and str(policy_decision.final_signal or "").upper() == "SELL"
-            and bool(summary.submit_expected)
-            and str(summary.final_action) == "EXIT_STRATEGY_POSITION"
-        ):
-            from .compatibility_execution_planning import _research_execution_submit_plan
-
-            submit_plan = _research_execution_submit_plan(
-                side="SELL",
-                cash=cash,
-                buy_fraction=buy_fraction,
-                sellable_qty=sellable_qty,
-                reference_price=reference_price,
-                policy_decision=policy_decision,
-            )
+        missing_typed_submit_plan = bool(summary.submit_expected and submit_plan is None)
+        missing_typed_submit_reason = (
+            summary.block_reason
+            if summary.block_reason and summary.block_reason != "none"
+            else "research_typed_submit_plan_missing"
+        )
         if (
             promotion_grade_required
             and normalized_side in {"BUY", "SELL"}
@@ -218,8 +230,8 @@ def _research_execution_plan_bundle(
             and not allow_compatibility_fallback
         ):
             raise ValueError("research_submit_plan_missing")
-        if promotion_grade_required and bool(summary.submit_expected) and submit_plan is None:
-            raise ValueError(summary.block_reason or "research_typed_submit_plan_missing")
+        if promotion_grade_required and missing_typed_submit_plan:
+            raise ValueError(missing_typed_submit_reason)
         return ResearchExecutionPlanBundle(
             submit_plan=submit_plan,
             summary=summary,
@@ -230,7 +242,15 @@ def _research_execution_plan_bundle(
             reason_code=(
                 "none"
                 if submit_plan is not None and submit_plan.submit_expected
+                else missing_typed_submit_reason
+                if missing_typed_submit_plan
                 else summary.block_reason or "research_typed_submit_plan_missing"
+            ),
+            promotion_grade=not missing_typed_submit_plan,
+            recommended_next_action=(
+                "regenerate_research_decisions_with_typed_execution_submit_plan"
+                if missing_typed_submit_plan
+                else "none"
             ),
         )
     if normalized_side not in {"BUY", "SELL"}:
@@ -317,6 +337,24 @@ def _execution_plan_evidence(plan_bundle: ResearchExecutionPlanBundle | None) ->
         no_submit_proof = build_typed_no_submit_proof(summary_payload)
         bundle_payload = None if plan_bundle is None else plan_bundle.as_dict()
         typed_summary_present = plan_bundle is not None and plan_bundle.summary is not None
+        missing_typed_submit_plan = bool(
+            typed_summary_present and summary_payload.get("submit_expected") is True
+        )
+        promotion_authoritative = bool(
+            typed_summary_present
+            and plan_bundle is not None
+            and plan_bundle.promotion_authoritative
+            and not missing_typed_submit_plan
+        )
+        promotion_rejection_reason = (
+            "typed_execution_submit_plan_missing"
+            if missing_typed_submit_plan
+            else (
+                "compatibility_or_diagnostic_execution_evidence_not_promotion_grade"
+                if plan_bundle is not None and not promotion_authoritative
+                else ""
+            )
+        )
         return {
             "execution_summary_hash": canonical_payload_hash(summary_payload),
             "execution_submit_plan_hash": canonical_payload_hash(no_submit_proof),
@@ -336,14 +374,16 @@ def _execution_plan_evidence(plan_bundle: ResearchExecutionPlanBundle | None) ->
             "execution_plan_bundle_hash": canonical_payload_hash(bundle_payload) if bundle_payload is not None else "",
             "execution_plan_bundle_evidence": bundle_payload,
             "execution_evidence_source": (
-                PROMOTION_EXECUTION_EVIDENCE_SOURCE if typed_summary_present else DIAGNOSTIC_EXECUTION_EVIDENCE_SOURCE
+                PROMOTION_EXECUTION_EVIDENCE_SOURCE
+                if promotion_authoritative
+                else DIAGNOSTIC_EXECUTION_EVIDENCE_SOURCE
             ),
             "typed_execution_summary_present": typed_summary_present,
             "typed_execution_summary_evidence": summary_payload if typed_summary_present else None,
             "typed_no_submit_proof": no_submit_proof if typed_summary_present else None,
-            "artifact_grade": PROMOTION_ARTIFACT_GRADE if typed_summary_present else "",
-            "authority_plane": PROMOTION_AUTHORITY_PLANE if typed_summary_present else DIAGNOSTIC_EXECUTION_AUTHORITY_PLANE,
-            "promotion_rejection_reason": "",
+            "artifact_grade": PROMOTION_ARTIFACT_GRADE if promotion_authoritative else DIAGNOSTIC_EXECUTION_ARTIFACT_GRADE,
+            "authority_plane": PROMOTION_AUTHORITY_PLANE if promotion_authoritative else DIAGNOSTIC_EXECUTION_AUTHORITY_PLANE,
+            "promotion_rejection_reason": promotion_rejection_reason,
             "execution_plan_status": "" if plan_bundle is None else plan_bundle.status,
             "execution_plan_reason_code": "" if plan_bundle is None else plan_bundle.reason_code,
             "typed_execution_service": typed_summary_present,
@@ -353,13 +393,13 @@ def _execution_plan_evidence(plan_bundle: ResearchExecutionPlanBundle | None) ->
                 False if plan_bundle is None else bool(plan_bundle.compatibility_fallback)
             ),
             "compatibility_fallback": False if plan_bundle is None else bool(plan_bundle.compatibility_fallback),
-            "promotion_grade": (
-                True
-                if plan_bundle is None
-                else bool(plan_bundle.promotion_grade and not plan_bundle.compatibility_fallback)
-            ),
+            "promotion_grade": promotion_authoritative,
             "live_authoritative": False,
-            "recommended_next_action": "none" if plan_bundle is None else plan_bundle.recommended_next_action,
+            "recommended_next_action": (
+                "none"
+                if promotion_authoritative or plan_bundle is None
+                else _diagnostic_next_action(plan_bundle.recommended_next_action)
+            ),
         }
     summary_payload_for_engine = None if plan_bundle.summary is None else plan_bundle.summary.as_dict()
     execution_engine = str(
@@ -377,7 +417,17 @@ def _execution_plan_evidence(plan_bundle: ResearchExecutionPlanBundle | None) ->
     }
     plan_payload = submit_plan.as_final_payload()
     bundle_payload = plan_bundle.as_dict()
-    promotion_authoritative = plan_bundle.promotion_authoritative
+    fallback_marker = bool(
+        plan_bundle.compatibility_fallback
+        or plan_payload.get("compatibility_fallback") is True
+        or plan_payload.get("research_compatibility_execution_fallback") is True
+    )
+    diagnostic_submit_plan = bool(
+        fallback_marker
+        or _has_diagnostic_submit_plan_marker(plan_payload)
+        or _has_diagnostic_submit_plan_marker(bundle_payload)
+    )
+    promotion_authoritative = bool(plan_bundle.promotion_authoritative and not diagnostic_submit_plan)
     return {
         "execution_summary_hash": canonical_payload_hash(summary_payload),
         "execution_submit_plan_hash": canonical_payload_hash(plan_payload),
@@ -422,11 +472,15 @@ def _execution_plan_evidence(plan_bundle: ResearchExecutionPlanBundle | None) ->
         "typed_execution_service": True,
         "typed_submit_plan": isinstance(submit_plan, ExecutionSubmitPlan),
         "typed_execution_boundary": "SignalExecutionRequest",
-        "research_compatibility_execution_fallback": bool(plan_bundle.compatibility_fallback),
-        "compatibility_fallback": bool(plan_bundle.compatibility_fallback),
-        "promotion_grade": bool(plan_bundle.promotion_grade and not plan_bundle.compatibility_fallback),
+        "research_compatibility_execution_fallback": fallback_marker,
+        "compatibility_fallback": fallback_marker,
+        "promotion_grade": promotion_authoritative,
         "live_authoritative": False,
-        "recommended_next_action": plan_bundle.recommended_next_action,
+        "recommended_next_action": (
+            plan_bundle.recommended_next_action
+            if promotion_authoritative
+            else _diagnostic_next_action(plan_bundle.recommended_next_action)
+        ),
     }
 
 

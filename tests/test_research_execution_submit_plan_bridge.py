@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from bithumb_bot.core.sma_policy import EntryExecutionIntent, PositionSnapshot, StrategyDecisionV2
+from bithumb_bot.core.sma_policy import (
+    EntryExecutionIntent,
+    ExitExecutionIntent,
+    PositionSnapshot,
+    StrategyDecisionV2,
+)
 from bithumb_bot.execution_service import ExecutionDecisionSummary, ExecutionSubmitPlan, SignalExecutionRequest
 from bithumb_bot.research.backtest_kernel import (
     ResearchExecutionContext,
+    ResearchExecutionPlanBundle,
     ResearchVirtualExecutionService,
     _execution_plan_evidence,
     _research_execution_plan_bundle,
@@ -17,32 +25,64 @@ from bithumb_bot.research.execution_simulator_stage import DefaultExecutionSimul
 
 
 def _typed_decision(*, raw_signal: str = "BUY", final_signal: str = "BUY") -> StrategyDecisionV2:
-    return StrategyDecisionV2(
-        strategy_name="sma_with_filter",
-        raw_signal=raw_signal,
-        raw_reason="typed_raw",
-        entry_signal=final_signal,
-        entry_reason="typed_entry",
-        exit_signal="HOLD",
-        exit_reason="no_exit",
-        final_signal=final_signal,
-        final_reason="typed_final",
-        blocked_filters=(),
-        entry_blocked=False,
-        entry_block_reason=None,
-        exit_rule=None,
-        exit_evaluations=(),
-        protective_exit_overrode_entry=False,
-        exit_filter_suppression_prevented=False,
-        position_snapshot=PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False),
-        execution_intent=EntryExecutionIntent(
+    is_sell = str(final_signal).upper() == "SELL"
+    position_snapshot = (
+        PositionSnapshot(
+            in_position=True,
+            entry_allowed=False,
+            exit_allowed=True,
+            entry_block_reason="position_has_executable_exposure",
+            exit_block_reason="none",
+            terminal_state="research_simulated_open_exposure",
+            qty_open=0.25,
+            raw_qty_open=0.25,
+            raw_total_asset_qty=0.25,
+            open_lot_count=2500,
+            sellable_executable_lot_count=2500,
+            dust_state="no_dust",
+            effective_flat=False,
+            has_executable_exposure=True,
+            has_any_position_residue=True,
+        )
+        if is_sell
+        else PositionSnapshot(in_position=False, entry_allowed=True, exit_allowed=False)
+    )
+    execution_intent = (
+        ExitExecutionIntent(
+            side="SELL",
+            intent="exit",
+            pair="KRW-BTC",
+            requires_execution_sizing=True,
+        )
+        if is_sell
+        else EntryExecutionIntent(
             side="BUY",
             intent="enter",
             pair="KRW-BTC",
             requires_execution_sizing=True,
             budget_fraction_of_cash=0.5,
             max_budget_krw=100_000.0,
-        ),
+        )
+    )
+    return StrategyDecisionV2(
+        strategy_name="sma_with_filter",
+        raw_signal=raw_signal,
+        raw_reason="typed_raw",
+        entry_signal="HOLD" if is_sell else final_signal,
+        entry_reason="position_has_executable_exposure" if is_sell else "typed_entry",
+        exit_signal="SELL" if is_sell else "HOLD",
+        exit_reason="typed_exit" if is_sell else "no_exit",
+        final_signal=final_signal,
+        final_reason="typed_final",
+        blocked_filters=(),
+        entry_blocked=False,
+        entry_block_reason=None,
+        exit_rule="unit_exit" if is_sell else None,
+        exit_evaluations=(),
+        protective_exit_overrode_entry=False,
+        exit_filter_suppression_prevented=False,
+        position_snapshot=position_snapshot,
+        execution_intent=execution_intent,
         entry_decision=object(),  # type: ignore[arg-type]
         trace={},
         policy_hash="sha256:pure",
@@ -608,6 +648,7 @@ def test_research_typed_missing_submit_plan_does_not_fall_back_to_compatibility_
         policy_decision=_typed_decision(raw_signal="SELL", final_signal="SELL"),
         candle_ts=123,
         allow_compatibility_fallback=True,
+        promotion_grade_required=False,
     )
 
     assert bundle.status == "BLOCKED"
@@ -615,3 +656,69 @@ def test_research_typed_missing_submit_plan_does_not_fall_back_to_compatibility_
     assert bundle.submit_plan is None
     assert bundle.reason_code != "none"
     assert bundle.compatibility_fallback is False
+
+
+def test_typed_sell_missing_typed_submit_plan_does_not_call_compatibility_in_promotion_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(**_: object) -> ExecutionSubmitPlan:
+        raise AssertionError("compatibility submit planning must not run for typed promotion SELL")
+
+    monkeypatch.setattr(
+        "bithumb_bot.research.compatibility_execution_planning._research_execution_submit_plan",
+        fail_if_called,
+    )
+
+    with pytest.raises(ValueError, match="research_submit_plan_missing|research_typed_submit_plan_missing"):
+        _research_execution_plan_bundle(
+            side="SELL",
+            cash=500_000.0,
+            buy_fraction=1.0,
+            sellable_qty=0.25,
+            reference_price=10.0,
+            policy_decision=_typed_decision(raw_signal="SELL", final_signal="SELL"),
+            candle_ts=123,
+            promotion_grade_required=True,
+            allow_compatibility_fallback=False,
+        )
+
+
+def test_diagnostic_submit_plan_payload_cannot_be_top_level_promotion_evidence() -> None:
+    diagnostic_plan = replace(
+        _plan(side="BUY", qty=1.0, notional_krw=10_000.0),
+        extra_payload={
+            "compatibility_fallback": True,
+            "research_compatibility_execution_fallback": True,
+            "promotion_grade": False,
+            "artifact_grade": "diagnostic_only",
+            "authority_plane": "diagnostic_research_compatibility_only",
+            "execution_evidence_source": "research_compatibility_fallback",
+            "live_authoritative": False,
+        },
+    )
+    bundle = ResearchExecutionPlanBundle(
+        submit_plan=diagnostic_plan,
+        summary=_summary(diagnostic_plan),
+        source=diagnostic_plan.source,
+        authority=diagnostic_plan.authority,
+        execution_engine="research_virtual",
+        status="PLANNED",
+        reason_code="none",
+        compatibility_fallback=False,
+        promotion_grade=True,
+        recommended_next_action="none",
+    )
+
+    evidence = _execution_plan_evidence(bundle)
+
+    assert evidence["execution_submit_plan_evidence"]["compatibility_fallback"] is True
+    assert evidence["execution_submit_plan_evidence"]["artifact_grade"] == "diagnostic_only"
+    assert evidence["compatibility_fallback"] is True
+    assert evidence["research_compatibility_execution_fallback"] is True
+    assert evidence["promotion_grade"] is False
+    assert evidence["artifact_grade"] == "diagnostic_only"
+    assert evidence["authority_plane"] == "diagnostic_research_compatibility_only"
+    assert evidence["execution_evidence_source"] == "research_compatibility_fallback"
+    assert evidence["promotion_rejection_reason"]
+    assert evidence["recommended_next_action"] != "none"
+    assert evidence["execution_plan_bundle_evidence"]["artifact_grade"] == "diagnostic_only"
