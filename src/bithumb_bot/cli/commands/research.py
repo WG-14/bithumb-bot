@@ -31,6 +31,24 @@ def _readiness(args: argparse.Namespace, _context) -> int:
     return int(cmd_research_readiness(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, missing_classification_path=str(args.missing_classification) if args.missing_classification else None, as_json=bool(args.json)))
 
 
+def _research_forward_diagnostics(args: argparse.Namespace, _context) -> int:
+    from bithumb_bot.research.cli import cmd_research_forward_diagnostics
+
+    return int(
+        cmd_research_forward_diagnostics(
+            manifest_path=str(args.manifest),
+            split_name=str(args.split),
+            features=tuple(args.features),
+            horizons=tuple(args.horizons),
+            bucket=str(args.bucket),
+            entry_price=str(args.entry_price),
+            min_bucket_count=int(args.min_bucket_count),
+            out_path=str(args.out) if args.out else None,
+            as_json=bool(args.json),
+        )
+    )
+
+
 def _walk_forward(args: argparse.Namespace, _context) -> int:
     from bithumb_bot.research.cli import cmd_research_walk_forward
 
@@ -110,6 +128,7 @@ def command_specs() -> list[CommandSpec]:
         make_spec("research-verify-audit", handler=_verify_audit, help="verify research audit trace manifest and JSONL hash chains", build=lambda p: p.add_argument("--experiment-id", required=True), **common),
         make_spec("research-validate", handler=_validate, help="run the fail-closed end-to-end research validation pipeline", description="Run readiness, backtest, required walk-forward, promotion generation, and reproduce from one fixed manifest and write a hash-bound ValidationRun artifact.", build=_build_validate, **common),
         make_spec("research-readiness", handler=_readiness, help="check manifest data readiness before research execution", description="Read-only manifest readiness report for configured DB candle coverage, top-of-book coverage, calibration, and walk-forward prerequisites.", build=_build_readiness, **common),
+        make_spec("research-forward-diagnostics", handler=_research_forward_diagnostics, help="run diagnostic-only forward-return feature bucket analysis", description="Run DatasetSnapshot-based forward-return diagnostics for feature mining only; output is not promotion, approved-profile, live-readiness, or capital-allocation evidence.", build=_build_forward_diagnostics, **common),
         make_spec("research-walk-forward", handler=_walk_forward, help="run walk-forward validation from a research manifest", description="Run research walk-forward validation without live broker or order lifecycle coupling.", build=_build_manifest_calibration, **common),
         make_spec("research-promote-candidate", handler=_promote, help="generate an operator-reviewable promotion artifact for a passing research candidate", description="Generate a promotion artifact; this command never rewrites paper/live env files.", build=_build_promote, **common),
         make_spec("research-reproduce", handler=_reproduce, help="verify a promotion artifact and its recorded experiment lineage", build=lambda p: p.add_argument("--promotion", required=True), **common),
@@ -141,6 +160,18 @@ def _build_validate(parser: argparse.ArgumentParser) -> None:
 def _build_readiness(parser: argparse.ArgumentParser) -> None:
     _build_manifest_calibration(parser)
     parser.add_argument("--missing-classification")
+    parser.add_argument("--json", action="store_true")
+
+
+def _build_forward_diagnostics(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--split", default="train", choices=("train", "validation", "final_holdout"))
+    parser.add_argument("--features", required=True, type=_parse_csv_strings("--features"))
+    parser.add_argument("--horizons", required=True, type=_parse_csv_ints("--horizons"))
+    parser.add_argument("--bucket", required=True)
+    parser.add_argument("--entry-price", default="next_open", choices=("next_open", "signal_close"))
+    parser.add_argument("--min-bucket-count", type=_positive_int_arg, default=30)
+    parser.add_argument("--out")
     parser.add_argument("--json", action="store_true")
 
 
@@ -194,3 +225,34 @@ def _build_replay_decision(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--candle-ts", required=True, type=int)
     parser.add_argument("--readiness-json")
     parser.add_argument("--json", action="store_true")
+
+
+def _parse_csv_values(value: str, *, option_name: str, parser):
+    parts = [part.strip() for part in str(value).split(",") if part.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError(f"{option_name} requires a non-empty comma-separated list")
+    parsed = []
+    for part in parts:
+        try:
+            parsed.append(parser(part))
+        except (TypeError, ValueError) as exc:
+            raise argparse.ArgumentTypeError(f"{option_name} contains invalid value: {part}") from exc
+    return tuple(parsed)
+
+
+def _parse_csv_strings(option_name: str):
+    return lambda value: _parse_csv_values(value, option_name=option_name, parser=str)
+
+
+def _parse_csv_ints(option_name: str):
+    return lambda value: _parse_csv_values(value, option_name=option_name, parser=int)
+
+
+def _positive_int_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("--min-bucket-count must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("--min-bucket-count must be a positive integer")
+    return parsed

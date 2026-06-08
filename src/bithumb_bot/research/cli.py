@@ -26,6 +26,7 @@ from .lineage import reproduce_promotion
 from .run_summary import ResearchRunSummary, build_research_run_summary
 from .validation_pipeline import ValidationRunError, run_research_validation
 from .validation_protocol import ResearchValidationError, run_research_backtest, run_research_walk_forward
+from .forward_diagnostics_cli import cmd_research_forward_diagnostics
 
 
 def _notify_research_command_finished(command: str, started_at: float, rc: int, **fields: object) -> None:
