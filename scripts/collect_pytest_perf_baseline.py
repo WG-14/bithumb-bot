@@ -19,7 +19,9 @@ from scripts.check_pytest_duration_inventory import parse_pytest_duration_file
 from tests.policy.research_runner_policy import research_workload_summary
 
 
-PYTEST_SUMMARY_RE = re.compile(r"=+\s*(?P<count>\d+)\s+passed.*?in\s+(?P<seconds>\d+(?:\.\d+)?)s\s*=+")
+PYTEST_SUMMARY_RE = re.compile(
+    r"^\s*=*\s*(?P<count>\d+)\s+passed\b.*?\bin\s+(?P<seconds>\d+(?:\.\d+)?)s(?:\s+\([^)]*\))?\s*=*\s*$"
+)
 REQUIRED_BASELINE_FIELDS = (
     "pytest_seconds",
     "test_count",

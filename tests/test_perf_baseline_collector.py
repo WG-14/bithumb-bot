@@ -29,6 +29,13 @@ def test_perf_baseline_collector_parses_pytest_seconds(tmp_path: Path) -> None:
     assert count == 4570
 
 
+def test_perf_baseline_collector_parses_bare_quiet_summary() -> None:
+    seconds, count = parse_pytest_summary("4595 passed in 530.37s (0:08:50)")
+
+    assert seconds == 530.37
+    assert count == 4595
+
+
 def test_perf_baseline_collector_records_xdist_settings(tmp_path: Path) -> None:
     baseline = build_perf_baseline(
         durations_file=_duration_file(tmp_path / "durations.txt"),
