@@ -21,7 +21,11 @@
       "duration_budget_seconds": 30,
       "domain": "research_quality",
       "last_measured_seconds": 10,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "promotion_gate",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_promotion"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_depth_walk_research_backtest_fails_closed_when_l2_depth_missing",
@@ -42,7 +46,11 @@
       "duration_budget_seconds": 45,
       "domain": "research_orderbook",
       "last_measured_seconds": 15,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "fail_closed_safety",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_fail_closed"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_depth_walk_research_backtest_uses_signal_level_l2_depth",
@@ -63,7 +71,11 @@
       "duration_budget_seconds": 45,
       "domain": "research_orderbook",
       "last_measured_seconds": 15,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "research_kernel_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_orderbook_boundary"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_latency_adjusted_orderbook_loads_quote_after_latency_plus_wait",
@@ -82,7 +94,11 @@
       },
       "duration_budget_seconds": 20,
       "domain": "research_orderbook",
-      "last_measured_seconds": 8
+      "last_measured_seconds": 8,
+      "must_be_e2e_reason": "research_kernel_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_orderbook_boundary"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_missing_quote_policy_fail_fails_candidate",
@@ -103,70 +119,11 @@
       "duration_budget_seconds": 30,
       "domain": "research_orderbook",
       "last_measured_seconds": 10,
-      "tier": "research_nightly"
-    },
-    {
-      "nodeid": "tests/test_orderbook_top_research.py::test_missing_quote_policy_warn_records_warning_without_promotion_grade_pass",
-      "markers": [
-        "research_e2e"
-      ],
-      "reason": "verifies missing quote warn policy through real candidate evidence and report gates",
-      "expected_workload": {
-        "strategy_runs": "single production backtest",
-        "tick_scope": "small quote fixture",
-        "strategy_count": 1,
-        "manifest_count": 1,
-        "strategy_canary_count": 0,
-        "estimated_strategy_runs": 1,
-        "estimated_tick_events": 4320,
-        "estimated_audit_stream_rows": 0
-      },
-      "duration_budget_seconds": 30,
-      "domain": "research_orderbook",
-      "last_measured_seconds": 10,
-      "tier": "research_nightly"
-    },
-    {
-      "nodeid": "tests/test_orderbook_top_research.py::test_optional_top_of_book_missing_is_visible_warning_not_candidate_failure",
-      "markers": [
-        "research_e2e"
-      ],
-      "reason": "verifies optional top-of-book warning propagation through the real backtest report boundary",
-      "expected_workload": {
-        "strategy_runs": "single production backtest",
-        "tick_scope": "small top-of-book fixture",
-        "strategy_count": 1,
-        "manifest_count": 1,
-        "strategy_canary_count": 0,
-        "estimated_strategy_runs": 1,
-        "estimated_tick_events": 4320,
-        "estimated_audit_stream_rows": 0
-      },
-      "duration_budget_seconds": 30,
-      "domain": "research_orderbook",
-      "last_measured_seconds": 10,
-      "tier": "research_nightly"
-    },
-    {
-      "nodeid": "tests/test_orderbook_top_research.py::test_report_separates_execution_attempt_count_from_closed_trade_count",
-      "markers": [
-        "research_e2e"
-      ],
-      "reason": "verifies real execution metadata aggregation through the production report boundary",
-      "expected_workload": {
-        "strategy_runs": "single production backtest",
-        "tick_scope": "small execution fixture",
-        "strategy_count": 1,
-        "manifest_count": 1,
-        "strategy_canary_count": 0,
-        "estimated_strategy_runs": 1,
-        "estimated_tick_events": 4320,
-        "estimated_audit_stream_rows": 0
-      },
-      "duration_budget_seconds": 30,
-      "domain": "research_orderbook",
-      "last_measured_seconds": 10,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "fail_closed_safety",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_fail_closed"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_required_top_of_book_missing_fails_dataset_quality_and_candidate_gate",
@@ -187,28 +144,11 @@
       "duration_budget_seconds": 30,
       "domain": "research_orderbook",
       "last_measured_seconds": 10,
-      "tier": "research_nightly"
-    },
-    {
-      "nodeid": "tests/test_orderbook_top_research.py::test_research_backtest_metadata_includes_joined_top_of_book",
-      "markers": [
-        "research_e2e"
-      ],
-      "reason": "verifies joined quote metadata from real research loading and evaluation",
-      "expected_workload": {
-        "strategy_runs": "single production backtest",
-        "tick_scope": "small joined quote fixture",
-        "strategy_count": 1,
-        "manifest_count": 1,
-        "strategy_canary_count": 0,
-        "estimated_strategy_runs": 1,
-        "estimated_tick_events": 4320,
-        "estimated_audit_stream_rows": 0
-      },
-      "duration_budget_seconds": 30,
-      "domain": "research_orderbook",
-      "last_measured_seconds": 10,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "promotion_gate",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_promotion"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_signal_event_quote_coverage_reported",
@@ -229,28 +169,11 @@
       "duration_budget_seconds": 60,
       "domain": "research_orderbook",
       "last_measured_seconds": 20,
-      "tier": "research_nightly"
-    },
-    {
-      "nodeid": "tests/test_orderbook_top_research.py::test_stored_l2_depth_rows_are_reported_without_claiming_depth_execution",
-      "markers": [
-        "research_e2e"
-      ],
-      "reason": "verifies real top-of-book and depth capability reporting through the production report boundary",
-      "expected_workload": {
-        "strategy_runs": "single production backtest",
-        "tick_scope": "small top-of-book/depth fixture",
-        "strategy_count": 1,
-        "manifest_count": 1,
-        "strategy_canary_count": 0,
-        "estimated_strategy_runs": 1,
-        "estimated_tick_events": 4320,
-        "estimated_audit_stream_rows": 0
-      },
-      "duration_budget_seconds": 30,
-      "domain": "research_orderbook",
-      "last_measured_seconds": 10,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "research_kernel_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_orderbook_boundary"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_strategy_requiring_top_of_book_fails_closed_when_manifest_lacks_it",
@@ -271,7 +194,11 @@
       "duration_budget_seconds": 30,
       "domain": "research_orderbook",
       "last_measured_seconds": 10,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "fail_closed_safety",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_fail_closed"
     },
     {
       "nodeid": "tests/test_orderbook_top_research.py::test_stress_latency_non_latency_policy_is_flagged_or_failed",
@@ -292,7 +219,11 @@
       "duration_budget_seconds": 45,
       "domain": "research_orderbook",
       "last_measured_seconds": 15,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "fail_closed_safety",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_fail_closed"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_parallel_executor_uses_lightweight_tasks_with_worker_initializer",
@@ -313,7 +244,11 @@
       "duration_budget_seconds": 90,
       "domain": "research_parallel",
       "last_measured_seconds": 30,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "process_boundary",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_parallel"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_parallel_research_failure_is_committed_by_main_process",
@@ -334,7 +269,11 @@
       "duration_budget_seconds": 90,
       "domain": "research_parallel",
       "last_measured_seconds": 30,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "process_boundary",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_parallel"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_aggregates_scenarios_and_promotion_refuses_failed_stress",
@@ -355,7 +294,11 @@
       "duration_budget_seconds": 60,
       "domain": "research_scenarios",
       "last_measured_seconds": 20,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "promotion_gate",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_promotion"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_promotes_candidate_when_base_and_stress_pass",
@@ -375,7 +318,11 @@
       },
       "duration_budget_seconds": 90,
       "domain": "research_promotion_contract",
-      "last_measured_seconds": 30
+      "last_measured_seconds": 30,
+      "must_be_e2e_reason": "promotion_gate",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_promotion"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_sweep_continues_after_guard_failure_and_writes_candidate_artifacts",
@@ -396,7 +343,11 @@
       "duration_budget_seconds": 60,
       "domain": "research_resource_guard",
       "last_measured_seconds": 20,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "fail_closed_safety",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_fail_closed"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_resource_guard_trips_on_candidate_local_rss_delta",
@@ -415,7 +366,11 @@
       },
       "duration_budget_seconds": 30,
       "domain": "research_resource_guard",
-      "last_measured_seconds": 10
+      "last_measured_seconds": 10,
+      "must_be_e2e_reason": "memory_sensitive_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "memory_sensitive"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_resource_guard_uses_candidate_local_rss_delta_not_process_peak",
@@ -434,7 +389,11 @@
       },
       "duration_budget_seconds": 30,
       "domain": "research_resource_guard",
-      "last_measured_seconds": 10
+      "last_measured_seconds": 10,
+      "must_be_e2e_reason": "memory_sensitive_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "memory_sensitive"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_ru_maxrss_conversion_is_platform_explicit_for_large_linux_values",
@@ -453,7 +412,11 @@
       },
       "duration_budget_seconds": 15,
       "domain": "research_resource_guard",
-      "last_measured_seconds": 5
+      "last_measured_seconds": 5,
+      "must_be_e2e_reason": "memory_sensitive_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "memory_sensitive"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_summary_and_full_metrics_v2_gates_match_for_cagr_and_exposure",
@@ -473,7 +436,11 @@
       },
       "duration_budget_seconds": 60,
       "domain": "research_metrics_contract",
-      "last_measured_seconds": 20
+      "last_measured_seconds": 20,
+      "must_be_e2e_reason": "fail_closed_safety",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_fail_closed"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_summary_zero_retention_writes_complete_external_audit_traces",
@@ -494,7 +461,11 @@
       "duration_budget_seconds": 90,
       "domain": "research_audit",
       "last_measured_seconds": 30,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "audit_trace_persistence",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_audit"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_budget_overage_fails_fast_in_pipeline",
@@ -517,7 +488,11 @@
       "duration_budget_seconds": 90,
       "domain": "research_audit_budget",
       "last_measured_seconds": 30,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "audit_trace_persistence",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_audit"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_stream_row_budget_overage_fails_fast_in_pipeline",
@@ -540,7 +515,11 @@
       "duration_budget_seconds": 90,
       "domain": "research_audit_budget",
       "last_measured_seconds": 30,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "audit_trace_persistence",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_audit"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_research_backtest_audit_stream_byte_budget_overage_fails_fast_in_pipeline",
@@ -563,7 +542,11 @@
       "duration_budget_seconds": 90,
       "domain": "research_audit_budget",
       "last_measured_seconds": 30,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "audit_trace_persistence",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_audit"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_tiny_three_day_sma_backtest_completes_structurally",
@@ -583,7 +566,11 @@
       },
       "duration_budget_seconds": 90,
       "domain": "research_smoke_memory",
-      "last_measured_seconds": 30
+      "last_measured_seconds": 30,
+      "must_be_e2e_reason": "memory_sensitive_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "memory_sensitive"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_walk_forward_complete_external_audit_traces_all_windows",
@@ -605,7 +592,11 @@
       "duration_budget_seconds": 120,
       "domain": "research_walk_forward_audit",
       "last_measured_seconds": 40,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "walk_forward_boundary",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_walk_forward"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_walk_forward_report_includes_execution_plan_and_observability",
@@ -625,7 +616,11 @@
       },
       "duration_budget_seconds": 45,
       "domain": "research_walk_forward_contract",
-      "last_measured_seconds": 15
+      "last_measured_seconds": 15,
+      "must_be_e2e_reason": "research_kernel_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_walk_forward_contract"
     },
     {
       "nodeid": "tests/test_research_strategy_canary.py::test_buy_and_hold_full_research_backtest_report_contains_common_kernel_fields",
@@ -646,7 +641,11 @@
       "duration_budget_seconds": 45,
       "domain": "research_strategy_canary",
       "last_measured_seconds": 15,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "research_kernel_behavior",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_strategy_canary"
     },
     {
       "nodeid": "tests/test_research_walk_forward.py::test_insufficient_windows_fails_clearly",
@@ -667,32 +666,11 @@
       "duration_budget_seconds": 45,
       "domain": "research_walk_forward",
       "last_measured_seconds": 15,
-      "tier": "research_nightly"
-    },
-    {
-      "nodeid": "tests/test_research_backtest_reproducibility.py::test_report_write_stage_timing_is_recorded_after_artifact_write",
-      "markers": [
-        "research_e2e"
-      ],
-      "reason": "verifies production research report_write stage timing is recorded only after artifact write observability is available",
-      "expected_workload": {
-        "strategy_runs": "single production backtest",
-        "tick_scope": "small fixture dataset",
-        "strategy_count": 1,
-        "manifest_count": 1,
-        "strategy_canary_count": 0,
-        "estimated_strategy_runs": 1,
-        "estimated_tick_events": 4320,
-        "estimated_audit_stream_rows": 0,
-        "estimated_artifact_write_count": 2,
-        "estimated_hash_payload_bytes": 12000,
-        "estimated_artifact_bytes": 24000,
-        "estimated_artifact_file_count": 2
-      },
-      "duration_budget_seconds": 45,
-      "domain": "research_artifact_observability",
-      "last_measured_seconds": 3,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "walk_forward_boundary",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_walk_forward"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_persisted_report_contains_report_write_stage_timing",
@@ -717,7 +695,11 @@
       "duration_budget_seconds": 45,
       "domain": "research_artifact_observability",
       "last_measured_seconds": 3,
-      "tier": "research_nightly"
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "artifact_persistence_boundary",
+      "lower_level_contract_available": true,
+      "replacement_contract_test": "tests/test_research_report_writer.py::test_report_write_stage_timing_payload_matches_artifact_summary",
+      "e2e_canary_group": "research_artifact_observability"
     }
   ]
 }

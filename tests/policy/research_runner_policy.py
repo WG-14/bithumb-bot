@@ -22,6 +22,20 @@ DEFAULT_FAST_EXCLUDED_RESEARCH_MARKERS = frozenset(
 
 EXPENSIVE_RESEARCH_MARKERS = DEFAULT_FAST_EXCLUDED_RESEARCH_MARKERS
 
+ALLOWED_MUST_BE_E2E_REASONS = frozenset(
+    {
+        "artifact_persistence_boundary",
+        "process_boundary",
+        "fail_closed_safety",
+        "promotion_gate",
+        "audit_trace_persistence",
+        "walk_forward_boundary",
+        "operator_surface_convergence",
+        "research_kernel_behavior",
+        "memory_sensitive_behavior",
+    }
+)
+
 PRODUCTION_RESEARCH_ENTRYPOINTS = {
     "run_research_backtest",
     "run_research_walk_forward",
@@ -83,6 +97,7 @@ SMALL_IN_MEMORY_DATASET_HELPERS = {
 
 PATH_SCOPED_SMALL_IN_MEMORY_DATASET_HELPERS = {
     Path("tests/test_orderbook_top_research.py"): {"_signal_dataset"},
+    Path("tests/test_orderbook_top_contracts.py"): {"_signal_dataset"},
     Path("tests/test_research_strategy_canary.py"): {"_dataset"},
 }
 
@@ -135,6 +150,10 @@ def load_inventory(path: Path = INVENTORY_PATH) -> dict[str, dict[str, object]]:
         owner = item.get("owner")
         domain = item.get("domain")
         last_measured_seconds = item.get("last_measured_seconds")
+        must_be_e2e_reason = item.get("must_be_e2e_reason")
+        lower_level_contract_available = item.get("lower_level_contract_available")
+        replacement_contract_test = item.get("replacement_contract_test")
+        e2e_canary_group = item.get("e2e_canary_group")
         if not isinstance(nodeid, str) or not nodeid:
             raise AssertionError(f"{path} inventory entry missing nodeid")
         if _is_unfilled_placeholder(nodeid):
@@ -150,6 +169,23 @@ def load_inventory(path: Path = INVENTORY_PATH) -> dict[str, dict[str, object]]:
             raise AssertionError(f"{path} inventory entry {nodeid} has malformed markers")
         if marker_set.isdisjoint(EXPENSIVE_RESEARCH_MARKERS):
             raise AssertionError(f"{path} inventory entry {nodeid} lacks an expensive marker")
+        if not isinstance(must_be_e2e_reason, str) or not must_be_e2e_reason.strip():
+            raise AssertionError(f"{path} inventory entry {nodeid} missing must_be_e2e_reason")
+        if must_be_e2e_reason not in ALLOWED_MUST_BE_E2E_REASONS:
+            raise AssertionError(
+                f"{path} inventory entry {nodeid} has unknown must_be_e2e_reason: {must_be_e2e_reason}"
+            )
+        if lower_level_contract_available is not None and not isinstance(lower_level_contract_available, bool):
+            raise AssertionError(f"{path} inventory entry {nodeid} has malformed lower_level_contract_available")
+        if lower_level_contract_available is True and (
+            not isinstance(replacement_contract_test, str) or not replacement_contract_test.strip()
+        ):
+            raise AssertionError(
+                f"{path} inventory entry {nodeid} missing replacement_contract_test "
+                "when lower_level_contract_available=true"
+            )
+        if not isinstance(e2e_canary_group, str) or not e2e_canary_group.strip():
+            raise AssertionError(f"{path} inventory entry {nodeid} missing e2e_canary_group")
         if not isinstance(tier, str) or not tier.strip() or _is_unfilled_placeholder(tier):
             raise AssertionError(f"{path} inventory entry {nodeid} missing tier")
         if not isinstance(expected_workload, dict) or not expected_workload:
@@ -269,6 +305,10 @@ def inventory_entry_skeleton_for_call(call: RunnerCall) -> dict[str, object]:
         "duration_budget_seconds": "__FILL_DURATION_BUDGET_SECONDS__",
         "domain": "__FILL_OWNER_OR_DOMAIN__",
         "last_measured_seconds": "__FILL_LAST_MEASURED_SECONDS__",
+        "must_be_e2e_reason": "__FILL_MUST_BE_E2E_REASON__",
+        "lower_level_contract_available": False,
+        "replacement_contract_test": "",
+        "e2e_canary_group": "__FILL_E2E_CANARY_GROUP__",
         "tier": "research_nightly",
     }
 

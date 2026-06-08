@@ -304,28 +304,6 @@ def test_persisted_report_content_hash_includes_final_artifact_write_summary(tmp
 
 
 @pytest.mark.research_e2e
-def test_report_write_stage_timing_is_recorded_after_artifact_write(tmp_path, monkeypatch) -> None:
-    db_path = tmp_path / "candles.sqlite"
-    _create_db(db_path)
-    payload = _manifest()
-    payload["experiment_id"] = "report_write_stage_order"
-    payload["research_run"] = {"report_detail": "summary"}
-
-    report = run_research_backtest(
-        manifest=parse_manifest(payload),
-        db_path=db_path,
-        manager=_research_manager(tmp_path, monkeypatch),
-        generated_at="2026-05-03T00:00:00+00:00",
-    )
-
-    report_write = [
-        item for item in report["execution_observability"]["stage_timings"] if item["stage"] == "report_write"
-    ][0]
-    assert report_write["artifact_total_bytes"] > 0
-    assert report_write["artifact_file_count"] >= 2
-
-
-@pytest.mark.research_e2e
 def test_persisted_report_contains_report_write_stage_timing(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)

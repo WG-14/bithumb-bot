@@ -1,0 +1,3008 @@
+{
+  "schema_version": 1,
+  "tests": [
+    {
+      "nodeid": "tests/operator/test_accounting_reports.py::test_fee_gap_accounting_repair_converges_recovery_surfaces",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "fee_gap_recovery",
+      "reason": "verifies fee gap repair converges across health/recovery/resume surfaces",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "fee_gap_accounting_candidate",
+      "surface_count": 4,
+      "must_be_integration_reason": "operator_surface_convergence"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_buy_order_qty_for_dust_safety_floors_to_sellable_qty",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_buy_order_qty_for_dust_safety_preserves_only_sellable_entry_qty",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_buy_order_qty_for_dust_safety_rejects_when_no_sellable_qty_remains",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_sell_order_qty_for_dust_safety_blocks_when_broker_precision_still_leaves_dust",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_sell_order_qty_for_dust_safety_blocks_when_step_floor_would_leave_unsellable_dust",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_sell_order_qty_for_dust_safety_exposes_remainder_dust_guard_details",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_sell_order_qty_for_dust_safety_keeps_exact_min_qty_executable",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_adjust_sell_order_qty_for_dust_safety_snaps_tiny_min_qty_boundary_upward",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_authority_boundary_live_execute_signal_sell_does_not_sum_open_exposure_and_dust_tracking_for_submission",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_authority_boundary_live_execute_signal_sell_dust_only_raw_holdings_do_not_restore_submit_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_authority_boundary_live_execute_signal_sell_handoff_uses_canonical_normalized_lot_state_over_stale_qty_candidates",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_authority_boundary_live_execute_signal_sell_records_end_to_end_authority_flow_through_fill_and_reinterpretation",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_authority_boundary_live_execute_signal_sell_uses_exit_sizing_executable_qty_for_final_submit_payload",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_authority_trace_buy_flow_records_authority_sequence_through_fill_and_reinterpretation",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_backfill_broker_order_creates_synthetic_lineage_for_local_missing_execution",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_backfill_broker_order_fee_pending_keeps_recovery_required_with_observation",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_broker_buy_price_none_blocks_market_alias_without_explicit_support",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_broker_buy_price_none_uses_same_contract_object_for_validation_routing_and_diagnostics",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_broker_dry_run",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_broker_rejects_mismatched_submit_plan_inputs_before_dispatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_broker_rejects_missing_live_submit_plan_before_dispatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_bithumb_get_fills_strict_blocks_material_missing_fee_trade_and_salvage_observes",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_broker_auth_runtime_diagnostics_redact_secret_values",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_broker_boundary_accepts_strategy_position_buy_plan_only_for_paper_compat",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_broker_boundary_blocks_strategy_position_buy_plan_in_live_real_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_broker_boundary_target_delta_requires_portfolio_proof_in_live_real_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_build_broker_with_auth_diagnostics_reuses_same_private_auth_preview_for_health_and_run",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_buy_price_none_diagnostics_reuse_submit_contract_fields",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_buy_price_none_order_chance_contract_rejects_validation_type_drift",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_cancel_open_orders_cancels_remote_and_updates_local",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_cancel_open_orders_does_not_bind_by_client_order_id_when_exchange_id_mismatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_cancel_open_orders_escalates_when_post_cancel_status_is_unresolved",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_cancel_open_orders_reports_cancel_failures",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_cancel_open_orders_tracks_cancel_acceptance_and_confirmation",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_canonical_sell_submit_source_returns_typed_lot_native_authority_value",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_each_submit_attempt_records_exactly_one_classification",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_extension_invariant_live_submit_requires_persisted_local_intent_and_preflight",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_fee_pending_accounting_repair_finalizes_observed_fill_and_rebuilds_lot_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_fee_pending_accounting_repair_refuses_material_live_zero_fee",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_harmless_dust_exit_suppression_blocks_sell_path_even_without_sub_min_qty_preview",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_buy_residual_sizing_mode_delta_changes_actual_entry_sizing",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_daily_loss_limit_blocks_new_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_duplicate_intent_after_cancel_is_skipped_by_submit_dedup",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_excessive_spread_rejected_before_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_adjusts_dust_creating_entry_qty",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_blocks_defensively_for_blocking_dust_mismatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_blocks_dust_unsafe_entry_qty_before_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_blocks_when_dust_safe_adjustment_collapses_to_zero",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_dust_unsafe_entry_is_blocked_in_sizing_before_live_guard",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_fallback_dust_guard_logs_unexpected_invariant_mismatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_logs_structured_entry_sizing_diagnostics",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_passes_typed_buy_authority_to_sizing",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_persists_submit_plan_quantity_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_planning_failure_stays_pre_submit_not_submit_ready",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contract",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_flat",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_buy_reject_does_not_classify_market_notional_submit_as_qty_step_mismatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_consumes_residual_plan_as_standard_submit_intent",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_consumes_target_delta_plan_without_residual_policy",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_exit_intent_true_but_quantity_blocked_suppresses_without_order_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_records_observation_when_fee_pending_blocks_apply",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_records_signed_request_phase_event",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_runtime_path_preserves_authority_sequence_through_fill_reinterpretation",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_blocks_when_broker_precision_still_leaves_unsellable_dust",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_blocks_when_only_dust_tracking_remains",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_blocks_when_qty_step_floor_would_leave_unsellable_dust",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_boundary_does_not_override_canonical_authority_snapshot",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_classifies_qty_step_mismatch_broker_reject",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_dedups",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_falls_back_to_harmless_dust_suppression_when_sell_guard_raises",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_fee_created_residue_keeps_raw_holdings_non_executable_and_skips_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_ignores_stale_recorded_sellable_qty_without_current_lot_state",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_min_notional_only_residue_keeps_raw_holdings_non_executable_and_skips_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_no_executable_exit_suppresses_before_broker_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_orderability_constraint_stops_before_execution_stage",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_partial_exit_dust_residue_stays_suppressed_after_reconcile",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_reserved_exit_pending_remains_explicit_no_submit_outcome",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_reserved_exit_state_submits_only_unreserved_lots",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_reserved_exit_stops_before_execution_stage",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_runtime_flow_varies_by_normalized_state",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_snaps_tiny_open_exposure_boundary_upward_with_harmless_dust",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_row",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_treats_sub_min_residual_as_dust_before_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_uses_open_exposure_only_when_dust_tracking_coexists",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_execute_signal_sell_with_dust_and_unresolved_open_order_still_records_dust_evidence",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_failed_before_send_releases_dedup_for_same_intent_retry",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_insufficient_available_balance_rejected",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_invalid_market_price_rejected_before_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_kill_switch_blocks_new_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_open_order_guard_blocks_new_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_planning_failure_is_recorded_before_broker_dispatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_recovery_required_order_blocks_new_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_residual_sell_duplicate_intent_is_deduped",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_runtime_halt_blocks_new_order_submission",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_sell_duplicate_intent_after_cancel_keeps_lot_native_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_sell_failed_before_send_retry_keeps_lot_native_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_stale_unresolved_open_order_blocks_new_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_submit_attempt_reason_codes_cover_ambiguous_paths",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_submit_error_marks_failed_and_records_submit_started",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_submit_intent_is_committed_before_remote_submit",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_submit_phase_progression_is_queryable",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_submit_unknown_unresolved_blocks_and_persists_reason",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_submit_without_exchange_id_marks_submit_unknown",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_success_persists_submit_attempt_record",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_timeout_marks_submit_unknown",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_transport_error_preserves_sent_evidence_and_submit_unknown",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_live_unresolved_open_order_blocks_and_persists_reason",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_lot_native_gate_executable_sell_submit_rejects_observational_qty_preview_source",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_lot_native_gate_harmless_dust_suppression_rejects_observational_qty_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_lot_native_gate_live_execute_signal_sell_ignores_exit_sizing_qty_source_shadow",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_lot_native_gate_sell_dust_error_path_keeps_canonical_authority_separate_from_observational_qty",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_lot_native_gate_sell_dust_unsellable_rejects_observational_qty_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_lot_native_gate_sell_no_executable_exit_suppression_keeps_observational_position_qty_non_authoritative",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_manual_recover_order_attaches_exchange_order_id_and_applies_fills",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_manual_recover_order_salvages_missing_fee_observation_and_keeps_resume_blocked",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_normalize_order_qty_avoids_float_boundary_drift",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_normalize_order_qty_does_not_apply_notional_guard",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_normalize_order_qty_floors_to_step_and_decimals",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_normalize_order_qty_rejects_when_collapses_to_zero",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_apply_fills_and_refresh_accepts_validated_order_level_paid_fee",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_apply_fills_and_refresh_accepts_validated_order_level_paid_fee_with_fee_rate_mismatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_apply_fills_and_refresh_runs_against_confirmed_submission",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_conflicting_sources_halts_conservatively",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_fee_pending_terminal_truth_is_idempotent",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_multi_fill_allocated_paid_fee_completes_accounting_without_fee_pending",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_persists_broker_read_journal_metadata",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_precedence_prefers_open_orders_over_recent_orders",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_records_balance_split_mismatch_metadata",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_records_stray_remote_open_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_recovers_known_local_order_from_recent_activity",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_salvages_missing_fee_observation_without_accounting",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_submit_unknown_recent_fill_path_keeps_manual_recovery_required",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_submit_unknown_recent_order_path_escalates_to_recovery_required",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_submit_unknown_without_exchange_id_ambiguous_remote_fill_escalates",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_submit_unknown_without_exchange_id_weak_order_correlation_escalates",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_unknown_recovery",
+      "reason": "owns slow integration cost for live_submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_unmatched_recent_activity_creates_recovery_required_record",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_reconcile_updates_portfolio",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_run_standard_submit_pipeline_dispatches_buy_submitted_qty_when_request_differs",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_run_standard_submit_pipeline_dispatches_valid_explicit_submit_plan",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_run_standard_submit_pipeline_rejects_missing_explicit_submit_plan",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_run_standard_submit_pipeline_rejects_non_planning_submit_plan_metadata",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_run_standard_submit_pipeline_rejects_unknown_contract_profile",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_run_standard_submit_pipeline_uses_submit_plan_order_type_over_request_copy",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_sell_failure_category_prefers_boundary_kind_over_unsafe_mismatch",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_sell_failure_category_prefers_qty_step_boundary_kind",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_submit_contract_fields_do_not_infer_market_buy_policy_without_planned_context",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_submit_evidence_exposes_generic_buy_price_none_contract_fields",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_submit_evidence_handles_unavailable_optional_fields",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_submit_live_order_and_confirm_does_not_run_reconcile_application",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_target_delta_engine_rejects_residual_plan_without_lot_native_fallback",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_order_rejects_invalid_qty",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_accepts_accounts_snapshot_balance_source",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_applies_side_specific_min_total",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_buy_becomes_more_conservative_when_live_fee_increases",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_buy_uses_live_fee_rate_estimate_not_fee_rate",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_price_protection_blocks_missing_reference_price",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_price_protection_blocks_stale_quote_timestamp",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_price_protection_buy_beyond_threshold",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_price_protection_buy_within_threshold",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_price_protection_sell_beyond_threshold",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_price_protection_sell_within_threshold",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_price_protection_uses_fresh_quote_age_not_last_candle_age",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_rejects_crossed_quote",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_rejects_dry_run_balance_source_in_live_real_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_live_broker.py::test_validate_pretrade_rejects_non_positive_quote",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "live_submit_recovery",
+      "reason": "owns slow integration cost for live_submit_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "live_submit_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "live_submit_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_ambiguous_submit_persists_across_restart_until_reconcile_runs",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee_confirmed",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_lot_native_gate_reconcile_does_not_clear_halt_from_qty_only_holdings_without_lot_native_exposure",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_blocks_local_only_dust_gap_without_broker_match",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_blocks_matched_dust_when_broker_local_gap_exceeds_tolerance",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_blocks_one_sided_dust_gap_without_broker_local_match",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_blocks_qty_dust_when_notional_is_still_tradeable",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_classifies_reviewed_below_min_residual_lot_as_dust_only_restart_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_failure_after_local_write_records_original_error_without_locked_db",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_filled_buy_and_flattened_sell_remains_idempotent",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_identifier_mismatch_marks_recovery_required_with_reason",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_notional_is_also_dust",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_preserves_fee_residue_as_dust_only_restart_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_preserves_rounding_residue_as_dust_only_restart_authority",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_recent_fill_replay_preserves_filled_terminal_state",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_recent_fill_success_clears_prior_locked_post_trade_halt",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_recent_sell_missing_price_blocks_ledger_and_sets_recovery_required",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_recent_sell_valid_price_applies_and_flattens_position",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_recent_sell_zero_fee_blocks_ledger_and_sets_recovery_required",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_repeated_fill_sources_apply_only_once",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_repeated_recent_sell_missing_price_pattern_never_writes_zero_price_trade",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_success_auto_clears_stale_initial_reconcile_halt",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reconcile_uses_client_order_id_lookup_when_exchange_order_id_is_missing",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_recovery_classification_keeps_ambiguous_evidence_manual_recovery_required",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_recovery_classification_marks_recent_fill_as_auto_recoverable_candidate",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_recovery_classification_source_conflict_remains_hard_stop",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reserved_exit_authority_from_unresolved_sell_orders_allows_only_unreserved_sell_remainder",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_reserved_exit_authority_from_unresolved_sell_orders_fully_suppresses_new_sell_sizing",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_after_partial_fill_applies_recent_fill_and_clears_gate",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_after_submit_immediate_exit_keeps_gate_blocked",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_during_cancel_request_reconciles_to_canceled",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_mid_reconcile_rolls_back_then_retries_cleanly",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_reconcile_api_exception_halts_and_prevents_resume",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_reconcile_incomplete_lot_authority_keeps_qty_only_holdings_fail_closed_and_blocked",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_reconcile_keeps_large_holdings_without_lot_metadata_blocked_not_dust",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_reconcile_keeps_open_exposure_dust_tracking_and_recovery_required_distinct",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_reconcile_residual_account_asset_closed_strategy_exposure_stays_non_executable",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_startup_proceeds_when_reconcile_clears_risky_state",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_while_persisted_halted_does_not_resume_trading_loop",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restart_with_risky_state_does_not_resume_trading_loop",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_restarted_ambiguous_order_blocks_new_submit_until_resolved",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_startup_gate_explicitly_blocks_pending_submit_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_startup_gate_explicitly_blocks_submit_unknown_order",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_startup_gate_fee_pending_auto_recovery_clears_persistent_process_pause",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_success_then_crash_restart_blocks_new_submit_attempt",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_timeout_then_restart_moves_to_recovery_required_and_stays_blocked",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "restart_recovery",
+      "reason": "owns slow integration cost for restart_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "restart_recovery_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "resume_gate_safety"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_ambiguous_remote_fill_on_restart_escalates",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_recent_fill_missing_fee_applies_principal_with_pending_fee",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_recent_fill_restart_path_escalates_instead_of_silent_resolution",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_recent_order_restart_path_escalates_to_manual_recovery",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_timeout_metadata_incompatible_status_qty_side_rejected",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_timeout_metadata_multiple_strong_candidates_stays_recovery_required",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_timeout_metadata_no_candidate_records_insufficient_evidence",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_timeout_metadata_recent_fill_only_resolves_on_restart",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_timeout_metadata_recent_order_without_exchange_resolves_on_restart",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "verifies submit_unknown timeout metadata can recover on restart with strong evidence",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_timeout_metadata_weak_correlation_stays_recovery_required",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    },
+    {
+      "nodeid": "tests/test_recovery_restart_regression.py::test_submit_unknown_weak_order_correlation_on_restart_escalates",
+      "markers": [
+        "slow_integration"
+      ],
+      "domain": "submit_unknown_recovery",
+      "reason": "owns slow integration cost for submit_unknown_recovery",
+      "duration_budget_seconds": 70,
+      "last_measured_seconds": 65,
+      "db_seed": "submit_unknown_candidate",
+      "surface_count": 1,
+      "must_be_integration_reason": "submit_unknown_recovery"
+    }
+  ]
+}

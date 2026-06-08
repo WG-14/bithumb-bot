@@ -374,7 +374,12 @@ For every new strategy PR, include the expected default-fast
 `estimated_strategy_runs` delta or the exact phrase `no default-fast workload
 delta` in the PR checklist. Also include the research/nightly workload delta for
 `estimated_strategy_runs`, `estimated_tick_events`, and
-`estimated_audit_stream_rows`. Fast strategy tests should use a fake or minimal
+`estimated_audit_stream_rows`. Include a `workload_delta_json` block with
+machine-readable `base` and `head` values for `expensive_test_count`,
+`strategy_count`, `manifest_count`, `strategy_canary_count`,
+`estimated_strategy_runs`, and `estimated_audit_stream_rows`; reviewers use this
+to verify the `strategy_canary_count delta`, new expensive nodeids, and new E2E
+reasons. Label the reason list as `new E2E reasons` in PR evidence. Fast strategy tests should use a fake or minimal
 `DatasetSnapshot`, direct policy contracts, pure replay material, or a
 deterministic evaluator with `assert_fast_research_workload`. Strategy canaries
 in the default suite should focus on common kernel contracts and minimal

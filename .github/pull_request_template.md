@@ -15,6 +15,10 @@ For strategy-related changes, complete every item below. For non-strategy change
 - Inventory Evidence: `strategy-plugin-inventory --json checked` or `not_strategy_related`.
 - Default-fast workload delta: `estimated_strategy_runs=<delta>` or `no default-fast workload delta`.
 - Research/nightly workload delta: `estimated_strategy_runs=<delta>`, `estimated_tick_events=<delta>`, `estimated_audit_stream_rows=<delta>`, or `no research/nightly workload delta`.
+- Workload delta JSON (`workload_delta_json`): include machine-readable `base` and `head` values for `expensive_test_count`, `strategy_count`, `manifest_count`, `strategy_canary_count`, `estimated_strategy_runs`, and `estimated_audit_stream_rows`.
+- Strategy canary workload: state `strategy_canary_count delta=<delta>`; values greater than 1 require explicit guard-approved evidence.
+- New expensive nodeids: list new expensive nodeids or `none`.
+- New E2E reasons: list each new `must_be_e2e_reason` and `e2e_canary_group` or `none`.
 - Newly added expensive research tests: list any `research_e2e`, `audit_e2e`, `walk_forward_e2e`, `parallel_e2e`, `research_kernel`, `slow_research`, `nightly`, or `memory_sensitive` tests, or state `none`.
 - Real E2E/kernel justification: for each new real E2E/kernel test, explain why lower-level contract coverage is insufficient and confirm inventory/budget metadata was added.
 

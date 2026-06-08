@@ -51,6 +51,11 @@ REQUIRED_PR_TEMPLATE_TOKENS = (
     "architecture_review_required",
     "architecture_review_complete",
     "architecture review marker",
+    "workload_delta_json",
+    "expensive_test_count",
+    "strategy_canary_count delta",
+    "new expensive nodeids",
+    "new E2E reasons",
 )
 
 REQUIRED_AUTHORING_DOC_TOKENS = (
@@ -82,6 +87,11 @@ REQUIRED_AUTHORING_DOC_TOKENS = (
     "assert_research_only_contract",
     "assert_replay_compatible_contract",
     "assert_live_eligible_contract",
+    "workload_delta_json",
+    "expensive_test_count",
+    "strategy_canary_count delta",
+    "new expensive nodeids",
+    "new E2E reasons",
 )
 
 LEVEL_HELPERS = {
@@ -123,6 +133,14 @@ STRATEGY_ADDITION_FORBIDDEN_CORE_FILES = (
 )
 STRATEGY_PLUGIN_PREFIX = "src/bithumb_bot/strategy_plugins/"
 BUILTIN_MANIFEST = "src/bithumb_bot/strategy_plugins/builtin_manifest.py"
+WORKLOAD_DELTA_FIELDS = (
+    "expensive_test_count",
+    "strategy_count",
+    "manifest_count",
+    "strategy_canary_count",
+    "estimated_strategy_runs",
+    "estimated_audit_stream_rows",
+)
 
 
 def missing_tokens(path: Path, tokens: tuple[str, ...]) -> list[str]:
@@ -139,7 +157,15 @@ def validate_strategy_pr_evidence(
     normalized_files = tuple(str(path).replace("\\", "/") for path in changed_files)
     violations: list[str] = []
     strategy_related = any(path.startswith(STRATEGY_PLUGIN_PREFIX) for path in normalized_files)
+    expensive_marker_test_related = any(
+        path.startswith("tests/")
+        and path.endswith(".py")
+        and any(marker in path.lower() for marker in ("research_e2e", "audit_e2e", "walk_forward_e2e", "parallel_e2e"))
+        for path in normalized_files
+    ) or any(marker in text for marker in ("@pytest.mark.research_e2e", "@pytest.mark.audit_e2e", "@pytest.mark.walk_forward_e2e", "@pytest.mark.parallel_e2e"))
+    audit_e2e_related = any("audit_e2e" in path.lower() for path in normalized_files) or "@pytest.mark.audit_e2e" in text
     core_related = any(path.startswith(prefix) for path in normalized_files for prefix in CORE_PATH_PREFIXES)
+    workload_delta = parse_workload_delta_evidence(evidence_text)
     architecture_migration = (
         "architecture_review_required" in text
         or "architecture_review_complete" in text
@@ -152,6 +178,8 @@ def validate_strategy_pr_evidence(
         violations.append("strategy changes require strategy Level declaration")
     if strategy_related and "not_strategy_related" in declared_levels:
         violations.append("strategy changes cannot be marked not_strategy_related")
+    if strategy_related and workload_delta is None:
+        violations.append("strategy changes require workload delta evidence")
     for level, helpers in LEVEL_HELPERS.items():
         if level in text and not any(helper in text for helper in helpers):
             violations.append(f"{level} requires contract helper or equivalent focused test")
@@ -198,6 +226,20 @@ def validate_strategy_pr_evidence(
             violations.append("strategy plugin changes require Registration Path evidence")
         if "strategy-plugin-inventory --json" not in text:
             violations.append("strategy plugin changes require inventory evidence")
+    if expensive_marker_test_related:
+        if "inventory evidence" not in text and "strategy-plugin-inventory --json" not in text:
+            violations.append("new expensive marker tests require inventory evidence")
+        if "must_be_e2e_reason" not in text:
+            violations.append("new expensive marker tests require must_be_e2e_reason evidence")
+        if "e2e_canary_group" not in text:
+            violations.append("new expensive marker tests require e2e_canary_group evidence")
+        if workload_delta is None:
+            violations.append("new expensive marker tests require workload delta evidence")
+    if workload_delta is not None:
+        if workload_delta["delta"].get("strategy_canary_count", 0) > 1 and "strategy_canary_delta_override" not in text:
+            violations.append("strategy_canary_count delta exceeds 1 without validated override")
+        if audit_e2e_related and workload_delta["delta"].get("estimated_audit_stream_rows", 0) <= 0:
+            violations.append("audit_e2e additions require non-zero estimated_audit_stream_rows delta")
     if core_related and not (
         "architecture_review_required" in text or "architecture_review_complete" in text
     ):
@@ -205,6 +247,65 @@ def validate_strategy_pr_evidence(
     if "full default-fast research matrix" in text or "full default-fast research matrices added" in text:
         violations.append("default-fast research matrix expansion is not allowed")
     return violations
+
+
+def parse_workload_delta_evidence(evidence_text: str) -> dict[str, object] | None:
+    payload = _first_json_object_with_base_head(evidence_text)
+    if payload is not None:
+        base = payload.get("base")
+        head = payload.get("head")
+        if isinstance(base, dict) and isinstance(head, dict):
+            delta = {
+                field: int(head.get(field, 0) or 0) - int(base.get(field, 0) or 0)
+                for field in WORKLOAD_DELTA_FIELDS
+            }
+            return {
+                "base": base,
+                "head": head,
+                "delta": delta,
+                "new_expensive_nodeids": payload.get("new_expensive_nodeids", []),
+                "new_e2e_reasons": payload.get("new_e2e_reasons", []),
+            }
+    parsed_delta = _parse_textual_workload_delta(evidence_text)
+    if parsed_delta:
+        return {
+            "base": {},
+            "head": {},
+            "delta": parsed_delta,
+            "new_expensive_nodeids": [],
+            "new_e2e_reasons": [],
+        }
+    return None
+
+
+def _first_json_object_with_base_head(text: str) -> dict[str, object] | None:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "base" in payload and "head" in payload:
+            return payload
+    return None
+
+
+def _parse_textual_workload_delta(text: str) -> dict[str, int]:
+    deltas: dict[str, int] = {}
+    lower = text.lower()
+    for field in WORKLOAD_DELTA_FIELDS:
+        for token in (f"{field} delta=", f"{field}_delta="):
+            if token not in lower:
+                continue
+            after = lower.split(token, 1)[1].strip()
+            value = after.split()[0].strip(",;")
+            try:
+                deltas[field] = int(value)
+            except ValueError:
+                pass
+    return deltas
 
 
 def _extract_field_value(text: str, field: str) -> str:

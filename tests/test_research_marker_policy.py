@@ -7,6 +7,7 @@ import pytest
 
 from tests.factories.research_reports import assert_fast_research_workload, minimal_research_report
 from tests.policy.research_runner_policy import (
+    ALLOWED_MUST_BE_E2E_REASONS,
     DEFAULT_FAST_EXCLUDED_RESEARCH_MARKERS,
     RunnerCall,
     discover_policy_violations,
@@ -78,6 +79,10 @@ def _inventory_entry(nodeid: str, markers: list[str] | None = None) -> dict[str,
         "duration_budget_seconds": 30,
         "domain": "policy_test",
         "last_measured_seconds": 1,
+        "must_be_e2e_reason": "research_kernel_behavior",
+        "lower_level_contract_available": False,
+        "replacement_contract_test": "",
+        "e2e_canary_group": "policy_test",
     }
 
 
@@ -279,11 +284,56 @@ def test_policy_rejects_expensive_inventory_entry_with_missing_workload_dimensio
                 "domain": "policy_test",
                 "duration_budget_seconds": 30,
                 "last_measured_seconds": 1,
+                "must_be_e2e_reason": "research_kernel_behavior",
+                "lower_level_contract_available": False,
+                "replacement_contract_test": "",
+                "e2e_canary_group": "policy_test",
             }
         ],
     )
 
     with pytest.raises(AssertionError, match="expected_workload.strategy_count"):
+        load_inventory(inventory)
+
+
+def test_inventory_requires_must_be_e2e_reason(tmp_path: Path) -> None:
+    entry = _inventory_entry("tests/test_example.py::test_slow_e2e")
+    entry.pop("must_be_e2e_reason")
+    entry.pop("e2e_canary_group")
+    inventory = _write_inventory(tmp_path / "inventory.json", [entry])
+
+    with pytest.raises(AssertionError, match="missing must_be_e2e_reason"):
+        load_inventory(inventory)
+
+
+def test_inventory_rejects_unknown_must_be_e2e_reason(tmp_path: Path) -> None:
+    entry = _inventory_entry("tests/test_example.py::test_slow_e2e")
+    entry["must_be_e2e_reason"] = "field_assertion"
+    inventory = _write_inventory(tmp_path / "inventory.json", [entry])
+
+    assert "field_assertion" not in ALLOWED_MUST_BE_E2E_REASONS
+    with pytest.raises(AssertionError, match="unknown must_be_e2e_reason"):
+        load_inventory(inventory)
+
+
+def test_inventory_requires_replacement_contract_test_when_lower_level_contract_available(
+    tmp_path: Path,
+) -> None:
+    entry = _inventory_entry("tests/test_example.py::test_slow_e2e")
+    entry["lower_level_contract_available"] = True
+    entry["replacement_contract_test"] = ""
+    inventory = _write_inventory(tmp_path / "inventory.json", [entry])
+
+    with pytest.raises(AssertionError, match="missing replacement_contract_test"):
+        load_inventory(inventory)
+
+
+def test_inventory_requires_e2e_canary_group_for_expensive_research_tests(tmp_path: Path) -> None:
+    entry = _inventory_entry("tests/test_example.py::test_slow_e2e")
+    entry.pop("e2e_canary_group")
+    inventory = _write_inventory(tmp_path / "inventory.json", [entry])
+
+    with pytest.raises(AssertionError, match="missing e2e_canary_group"):
         load_inventory(inventory)
 
 
@@ -752,6 +802,10 @@ def test_inventory_validation_rejects_missing_cost_metadata(tmp_path: Path) -> N
                 "tier": "research_nightly",
                 "markers": ["research_e2e"],
                 "reason": "missing cost metadata",
+                "must_be_e2e_reason": "research_kernel_behavior",
+                "lower_level_contract_available": False,
+                "replacement_contract_test": "",
+                "e2e_canary_group": "policy_test",
             }
         ],
     )

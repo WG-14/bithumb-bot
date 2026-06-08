@@ -38,6 +38,7 @@ data/
 tmp/
 archive/
 .cache/
+.diagnostics/
 *.log
 *.pid
 # SQLite/DB runtime artifacts (manual/smoke/test outputs must stay outside repo)
