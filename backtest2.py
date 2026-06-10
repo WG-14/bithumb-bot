@@ -21,13 +21,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True)
     args = parser.parse_args(argv)
 
-    from bithumb_bot.app import main as app_main
+    from bithumb_bot.bootstrap import run_cli
 
     print(
         "[BACKTEST2-DEPRECATED] backtest2.py no longer loads repo-root .env or runs "
         "standalone backtests; delegating to canonical research-backtest."
     )
-    return app_main(["research-backtest", "--manifest", str(args.manifest)])
+    sys.argv = [str(Path(__file__).name), "research-backtest", "--manifest", str(args.manifest)]
+    run_cli()
+    return 0
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ EXPECTED_COMMANDS = {
     "audit-ledger",
     "validate-db",
     "config-dump",
+    "notification-diagnose",
     "orders",
     "fills",
     "trades",
@@ -154,6 +155,7 @@ def test_command_registration_contains_expected_major_groups() -> None:
         ("fee-gap-accounting-repair", ["--apply", "--yes", "--note"]),
         ("recovery-report", ["--json"]),
         ("research-backtest", ["--manifest", "--execution-calibration"]),
+        ("notification-diagnose", ["--json", "--probe", "--notification-policy"]),
         ("research-forward-diagnostics", ["--manifest", "--split", "--features", "--horizons", "--bucket", "--entry-price", "--min-bucket-count", "--out", "--json"]),
         ("profile-promote", ["--profile", "--mode", "--out", "--paper-validation-evidence", "--live-readiness-evidence"]),
         ("backfill-candles", ["--market", "--interval", "--start", "--end", "--batch-size", "--dry-run"]),
@@ -422,6 +424,29 @@ def test_app_main_compatibility_smoke() -> None:
     from bithumb_bot.cli.main import main as cli_main
 
     assert main is cli_main
+
+
+def test_backtest2_does_not_import_app_main_directly() -> None:
+    source = Path("backtest2.py").read_text(encoding="utf-8")
+
+    assert "bithumb_bot.app import main" not in source
+    assert "run_cli" in source
+    assert "bootstrap" in source
+
+
+def test_root_backtest_remains_smoke_only_fail_closed() -> None:
+    source = Path("backtest.py").read_text(encoding="utf-8")
+
+    assert "--diagnostic-smoke-only" in source
+    assert "SMOKE-BACKTEST REFUSED" in source
+    assert "tools.diagnostic_smoke_backtest" in source
+
+
+def test_notification_diagnose_command_registered() -> None:
+    registry = command_registry()
+
+    assert "notification-diagnose" in registry
+    assert registry["notification-diagnose"].json_output_supported is True
 
 
 def test_app_impl_main_compatibility_smoke(capsys: pytest.CaptureFixture[str]) -> None:

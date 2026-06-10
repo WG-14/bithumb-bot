@@ -9,6 +9,18 @@ import pytest
 from bithumb_bot import notifier
 from bithumb_bot.notifier import AlertSeverity
 from bithumb_bot.observability import safety_event
+from bithumb_bot.operator_notification_service import OperatorNotificationService
+
+
+class FakeResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            exc = RuntimeError(f"HTTP {self.status_code}")
+            exc.response = self
+            raise exc
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +30,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch):
         "NOTIFIER_WEBHOOK_URL",
         "NTFY_TOPIC",
         "NTFY_SERVER",
+        "NTFY_URL",
         "NTFY_TITLE_PREFIX",
         "NTFY_PRIORITY_SUCCESS",
         "NTFY_PRIORITY_FAILURE",
@@ -58,7 +71,7 @@ def test_ntfy_posts_plain_text_to_configured_topic(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("NTFY_PRIORITY_SUCCESS", "2")
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=fake_post))
 
-    assert notifier._post_ntfy("done", severity=AlertSeverity.INFO) is True
+    result = notifier._post_ntfy("done", severity=AlertSeverity.INFO)
 
     assert calls == [
         (
@@ -68,6 +81,8 @@ def test_ntfy_posts_plain_text_to_configured_topic(monkeypatch: pytest.MonkeyPat
             5.0,
         )
     ]
+    assert result.attempted is True
+    assert result.delivered is True
 
 
 @pytest.mark.notification_transport_mock
@@ -81,10 +96,11 @@ def test_ntfy_uses_failure_priority_for_warn(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NTFY_PRIORITY_FAILURE", "4")
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=fake_post))
 
-    assert notifier._post_ntfy("failed", severity=AlertSeverity.WARN) is True
+    result = notifier._post_ntfy("failed", severity=AlertSeverity.WARN)
 
     assert calls[0][2]["Priority"] == "4"
     assert calls[0][2]["Tags"] == "warning"
+    assert result.delivered is True
 
 
 @pytest.mark.notification_transport_mock
@@ -92,9 +108,82 @@ def test_ntfy_skips_without_topic(monkeypatch: pytest.MonkeyPatch):
     calls = []
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=lambda **kwargs: calls.append(kwargs)))
 
-    assert notifier._post_ntfy("done", severity=AlertSeverity.INFO) is False
+    result = notifier._post_ntfy("done", severity=AlertSeverity.INFO)
 
     assert calls == []
+    assert result.attempted is False
+    assert result.delivered is False
+
+
+@pytest.mark.notification_transport_mock
+def test_notify_returns_result_for_ntfy_delivery(monkeypatch: pytest.MonkeyPatch):
+    def fake_post(url: str, *, content: bytes, headers: dict[str, str], timeout: float):
+        return FakeResponse(200)
+
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=fake_post))
+
+    result = notifier.notify("hello")
+
+    assert result.final_status == "delivered"
+    assert result.enabled is True
+    assert result.configured is True
+    assert result.attempted_transports == ("ntfy",)
+    assert result.delivered_transports == ("ntfy",)
+    assert result.attempts[0].http_status == 200
+
+
+def test_notify_returns_skipped_disabled_result(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NOTIFIER_ENABLED", "false")
+
+    result = notifier.notify("hello")
+
+    assert result.final_status == "skipped_disabled"
+    assert result.enabled is False
+    assert result.configured is False
+    assert result.attempted_transports == ()
+    assert result.fallback_printed is False
+
+
+def test_notify_returns_skipped_unconfigured_result(capsys: pytest.CaptureFixture[str]):
+    result = notifier.notify("hello")
+
+    assert result.final_status == "skipped_unconfigured"
+    assert result.enabled is True
+    assert result.configured is False
+    assert result.attempted_transports == ()
+    assert result.fallback_printed is True
+    assert "[NOTIFY] hello" in capsys.readouterr().out
+
+
+def test_notify_records_transport_exception_in_result(monkeypatch: pytest.MonkeyPatch):
+    def fail_ntfy(msg: str, *, severity: AlertSeverity):
+        raise TimeoutError("boom")
+
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setattr(notifier, "_post_ntfy", fail_ntfy)
+
+    result = notifier.notify("done")
+
+    assert result.final_status == "failed"
+    assert result.attempted_transports == ("ntfy",)
+    assert result.delivered_transports == ()
+    assert result.attempts[0].failure_class == "TimeoutError"
+
+
+def test_operator_notification_service_returns_notification_result():
+    expected = notifier.NotificationResult(
+        message="event=hello",
+        severity=AlertSeverity.INFO,
+        enabled=False,
+        configured=False,
+        final_status="skipped_disabled",
+    )
+    service = OperatorNotificationService(message_sender=lambda msg: expected)
+
+    result = service.send_event("hello")
+
+    assert result is expected
 
 
 def test_inherited_notification_env_is_cleared_by_pytest_policy():
@@ -112,11 +201,12 @@ def test_notify_tolerates_ntfy_delivery_exception(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(notifier, "_post_ntfy", fail_ntfy)
 
-    notifier.notify("done")
+    result = notifier.notify("done")
 
     out = capsys.readouterr().out
     assert "[NOTIFY] ntfy delivery failed: RuntimeError" in out
     assert "[NOTIFY] done" in out
+    assert result.attempts[0].failure_class == "RuntimeError"
 
 
 def test_notify_pytest_blocks_real_looking_ntfy_target_fail_closed(
@@ -167,9 +257,10 @@ def test_notify_uses_telegram_without_logging_secret(monkeypatch: pytest.MonkeyP
 
 
 def test_notify_falls_back_to_stdout(capsys: pytest.CaptureFixture[str]):
-    notifier.notify("fallback")
+    result = notifier.notify("fallback")
     out = capsys.readouterr().out
     assert "[NOTIFY] fallback" in out
+    assert result.final_status == "skipped_unconfigured"
 
 
 def test_format_event_skips_empty_fields():
@@ -265,6 +356,105 @@ def test_notify_does_not_suppress_identical_info_duplicates(monkeypatch: pytest.
     notifier.notify("dupe", severity=AlertSeverity.INFO)
 
     assert len(calls) == 2
+
+
+@pytest.mark.notification_transport_mock
+def test_ntfy_http_2xx_records_delivered(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(post=lambda *args, **kwargs: FakeResponse(202)),
+    )
+
+    result = notifier.notify("done")
+
+    assert result.final_status == "delivered"
+    assert result.delivered_transports == ("ntfy",)
+    assert result.attempts[0].http_status == 202
+
+
+@pytest.mark.notification_transport_mock
+def test_ntfy_http_429_records_failed_status(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(post=lambda *args, **kwargs: FakeResponse(429)),
+    )
+
+    result = notifier.notify("rate limited")
+
+    assert result.final_status == "failed"
+    assert result.delivered_transports == ()
+    assert result.attempts[0].http_status == 429
+    assert result.attempts[0].failure_class == "RuntimeError"
+
+
+@pytest.mark.notification_transport_mock
+def test_ntfy_http_500_records_failed_status(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(post=lambda *args, **kwargs: FakeResponse(500)),
+    )
+
+    result = notifier.notify("server failed")
+
+    assert result.final_status == "failed"
+    assert result.delivered_transports == ()
+    assert result.attempts[0].http_status == 500
+
+
+@pytest.mark.notification_transport_mock
+def test_notify_does_not_mark_http_error_as_delivered(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(post=lambda *args, **kwargs: FakeResponse(429)),
+    )
+
+    result = notifier.notify("rate limited")
+
+    assert "ntfy" not in result.delivered_transports
+    assert result.final_status == "failed"
+
+
+@pytest.mark.notification_transport_mock
+def test_ntfy_server_takes_priority_over_ntfy_url_alias(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_post(url: str, *, content: bytes, headers: dict[str, str], timeout: float):
+        calls.append(url)
+        return FakeResponse(200)
+
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setenv("NTFY_SERVER", "https://server-a")
+    monkeypatch.setenv("NTFY_URL", "https://server-b")
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=fake_post))
+
+    notifier.notify("done")
+
+    assert calls == ["https://server-a/topic-123"]
+
+
+@pytest.mark.notification_transport_mock
+def test_ntfy_url_alias_is_supported_when_ntfy_server_missing(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_post(url: str, *, content: bytes, headers: dict[str, str], timeout: float):
+        calls.append(url)
+        return FakeResponse(200)
+
+    monkeypatch.setenv("NTFY_TOPIC", "topic-123")
+    monkeypatch.setenv("NTFY_URL", "https://server-b")
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=fake_post))
+
+    notifier.notify("done")
+
+    assert calls == ["https://server-b/topic-123"]
 
 
 def test_safety_event_keeps_common_operator_fields_in_payload():

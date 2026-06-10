@@ -17,7 +17,7 @@ fi
 title="$1"
 priority="$2"
 message="$3"
-base_url="${NTFY_URL:-https://ntfy.sh}"
+base_url="${NTFY_SERVER:-${NTFY_URL:-https://ntfy.sh}}"
 
 curl --fail --show-error --silent \
   -H "Title: ${title}" \

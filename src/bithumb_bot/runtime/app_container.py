@@ -528,11 +528,11 @@ def persist_run_start_manifests(container: RuntimeAppContainer, *, created_ts: i
 
 def _operator_notification_proxy(service: Any) -> Any:
     class _NotificationProxy:
-        def send_event(self, event_name: str, /, **fields: object) -> None:
-            service.send_event(event_name, **fields)
+        def send_event(self, event_name: str, /, **fields: object) -> Any:
+            return service.send_event(event_name, **fields)
 
-        def send_message(self, message: str) -> None:
-            service.send_message(message)
+        def send_message(self, message: str) -> Any:
+            return service.send_message(message)
 
     return _NotificationProxy()
 

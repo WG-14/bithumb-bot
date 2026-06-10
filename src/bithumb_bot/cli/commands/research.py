@@ -15,6 +15,7 @@ def _backtest(args: argparse.Namespace, _context) -> int:
             manifest_path=str(args.manifest),
             execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None,
             diagnostic_mode=str(args.diagnostic_mode) if args.diagnostic_mode else None,
+            notification_policy=str(args.notification_policy) if args.notification_policy else None,
         )
     )
 
@@ -28,7 +29,7 @@ def _verify_audit(args: argparse.Namespace, _context) -> int:
 def _validate(args: argparse.Namespace, _context) -> int:
     from bithumb_bot.research.cli import cmd_research_validate
 
-    return int(cmd_research_validate(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, candidate_id=str(args.candidate_id) if args.candidate_id else None, out_path=str(args.out) if args.out else None, mode=str(args.mode)))
+    return int(cmd_research_validate(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, candidate_id=str(args.candidate_id) if args.candidate_id else None, out_path=str(args.out) if args.out else None, mode=str(args.mode), notification_policy=str(args.notification_policy) if args.notification_policy else None))
 
 
 def _readiness(args: argparse.Namespace, _context) -> int:
@@ -60,7 +61,7 @@ def _research_forward_diagnostics(args: argparse.Namespace, _context) -> int:
 def _walk_forward(args: argparse.Namespace, _context) -> int:
     from bithumb_bot.research.cli import cmd_research_walk_forward
 
-    return int(cmd_research_walk_forward(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None))
+    return int(cmd_research_walk_forward(manifest_path=str(args.manifest), execution_calibration_path=str(args.execution_calibration) if args.execution_calibration else None, notification_policy=str(args.notification_policy) if args.notification_policy else None))
 
 
 def _promote(args: argparse.Namespace, _context) -> int:
@@ -156,6 +157,11 @@ def command_specs() -> list[CommandSpec]:
 def _build_manifest_calibration(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--execution-calibration")
+    parser.add_argument(
+        "--notification-policy",
+        choices=("best_effort", "require_delivery", "disabled"),
+        help="research completion notification policy; defaults to RESEARCH_NOTIFICATION_POLICY or best_effort",
+    )
 
 
 def _build_backtest(parser: argparse.ArgumentParser) -> None:

@@ -2,7 +2,7 @@
 
 This file is generated from `src/bithumb_bot/config_spec.py`.
 Schema version: `config_spec_v1`
-Spec hash: `sha256:8ea24cde5e1e0c6ae87dfbdc9a2048d946e0b7015103afc0463c48b6647f68f7`
+Spec hash: `sha256:89c12bc449c4a126b4e891ef1e4f2df843e9968d20012f89c086bf493559821e`
 
 | Name | Type | Scope | Default | Live required | Secret | Deprecated/Ignored | Safety | Validation | Description |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -143,9 +143,10 @@ Spec hash: `sha256:8ea24cde5e1e0c6ae87dfbdc9a2048d946e0b7015103afc0463c48b6647f6
 | `NOTIFIER_WEBHOOK_URL` | string | common |  | no | yes | no | P1 |  | NOTIFIER_WEBHOOK_URL runtime configuration. |
 | `NTFY_PRIORITY_FAILURE` | string | common |  | no | no | no | P1 |  | NTFY_PRIORITY_FAILURE runtime configuration. |
 | `NTFY_PRIORITY_SUCCESS` | string | common |  | no | no | no | P1 |  | NTFY_PRIORITY_SUCCESS runtime configuration. |
-| `NTFY_SERVER` | string | common |  | no | no | no | P1 |  | NTFY_SERVER runtime configuration. |
+| `NTFY_SERVER` | string | common |  | no | no | no | P1 |  | Standard ntfy server base URL. NTFY_URL is a deprecated compatibility alias. |
 | `NTFY_TITLE_PREFIX` | string | common |  | no | no | no | P1 |  | NTFY_TITLE_PREFIX runtime configuration. |
 | `NTFY_TOPIC` | string | common |  | no | no | no | P1 |  | NTFY_TOPIC runtime configuration. |
+| `NTFY_URL` | string | common |  | no | no | deprecated | P1 |  | Deprecated compatibility alias for NTFY_SERVER; NTFY_SERVER takes priority when both are set. |
 | `OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC` | number | common |  | no | no | no | P1 |  | OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC runtime configuration. |
 | `PAIR` | string | common | `KRW-BTC` | no | no | no | P1 |  | PAIR runtime configuration. |
 | `PAPER_EXECUTION_LATENCY_MS` | number | paper |  | no | no | no | P2 |  | PAPER_EXECUTION_LATENCY_MS runtime configuration. |
@@ -162,6 +163,7 @@ Spec hash: `sha256:8ea24cde5e1e0c6ae87dfbdc9a2048d946e0b7015103afc0463c48b6647f6
 | `PYTEST_XDIST_WORKERS` | number | internal |  | no | no | no | internal |  | PYTEST_XDIST_WORKERS runtime configuration. |
 | `PYTEST_XDIST_WORKER_COUNT` | number | internal |  | no | no | no | internal |  | PYTEST_XDIST_WORKER_COUNT runtime configuration. |
 | `REQUIRE_BROKER_LOCAL_CONVERGENCE` | string | common |  | no | no | no | P1 |  | REQUIRE_BROKER_LOCAL_CONVERGENCE runtime configuration. |
+| `RESEARCH_NOTIFICATION_POLICY` | string | common |  | no | no | no | P1 |  | Research command notification policy: best_effort, require_delivery, or disabled. Defaults to best_effort. |
 | `RESIDUAL_BUY_SIZING_MODE` | string | common |  | no | no | no | P1 |  | RESIDUAL_BUY_SIZING_MODE runtime configuration. |
 | `RESIDUAL_INVENTORY_MODE` | string | common |  | no | no | no | P1 |  | RESIDUAL_INVENTORY_MODE runtime configuration. |
 | `RESIDUAL_LIVE_SELL_MODE` | string | common |  | no | no | no | P1 |  | RESIDUAL_LIVE_SELL_MODE runtime configuration. |

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
 from bithumb_bot.config import PATH_MANAGER, settings
-from bithumb_bot.notifier import AlertSeverity, format_event, notify
+from bithumb_bot.notification_outbox import append_notification_result
+from bithumb_bot.notifier import AlertSeverity, NotificationResult, format_event, is_configured, notify
 from bithumb_bot.paths import PathManager
 from bithumb_bot.storage_io import write_json_atomic
 
@@ -33,19 +35,91 @@ from .validation_protocol import ResearchValidationError, run_research_backtest,
 from .forward_diagnostics_cli import cmd_research_forward_diagnostics
 
 
-def _notify_research_command_finished(command: str, started_at: float, rc: int, **fields: object) -> None:
-    status = "success" if rc == 0 else "failure"
-    notify(
-        format_event(
-            "research_command_finished",
-            command=command,
-            status=status,
-            exit_code=rc,
-            elapsed_sec=f"{monotonic() - started_at:.1f}",
-            **fields,
-        ),
-        severity=AlertSeverity.INFO if rc == 0 else AlertSeverity.WARN,
+RESEARCH_NOTIFICATION_POLICIES = {"best_effort", "require_delivery", "disabled"}
+
+
+def resolve_research_notification_policy(policy: str | None = None) -> str:
+    raw = policy if policy is not None else os.getenv("RESEARCH_NOTIFICATION_POLICY", "best_effort")
+    normalized = str(raw or "best_effort").strip().lower()
+    if normalized not in RESEARCH_NOTIFICATION_POLICIES:
+        allowed = ", ".join(sorted(RESEARCH_NOTIFICATION_POLICIES))
+        raise ValueError(f"invalid research notification policy={raw!r}; allowed values: {allowed}")
+    return normalized
+
+
+def _disabled_notification_result(
+    message: str,
+    *,
+    severity: AlertSeverity,
+    command: str,
+    policy: str,
+) -> NotificationResult:
+    return NotificationResult(
+        message=message,
+        severity=severity,
+        enabled=False,
+        configured=False,
+        fallback_printed=False,
+        final_status="skipped_disabled",
+        event_name="research_command_finished",
+        policy=policy,
+        source_command=command,
     )
+
+
+def _record_notification_result(result: NotificationResult, *, command: str, policy: str) -> None:
+    append_notification_result(
+        result,
+        manager=PATH_MANAGER,
+        event_name="research_command_finished",
+        policy=policy,
+        source_command=command,
+    )
+
+
+def _notify_research_command_finished(
+    command: str,
+    started_at: float,
+    rc: int,
+    *,
+    notification_policy: str | None = None,
+    **fields: object,
+) -> NotificationResult:
+    policy = resolve_research_notification_policy(notification_policy)
+    status = "success" if rc == 0 else "failure"
+    severity = AlertSeverity.INFO if rc == 0 else AlertSeverity.WARN
+    message = format_event(
+        "research_command_finished",
+        command=command,
+        status=status,
+        exit_code=rc,
+        elapsed_sec=f"{monotonic() - started_at:.1f}",
+        **fields,
+    )
+    if policy == "disabled":
+        result = _disabled_notification_result(message, severity=severity, command=command, policy=policy)
+    else:
+        result = notify(
+            message,
+            severity=severity,
+            event_name="research_command_finished",
+            policy=policy,
+            source_command=command,
+        )
+    try:
+        _record_notification_result(result, command=command, policy=policy)
+    except Exception as exc:
+        print(f"[RESEARCH-NOTIFICATION] outbox_write_failed={exc.__class__.__name__}")
+    return result
+
+
+def _require_delivery_preflight(policy: str, *, command: str) -> bool:
+    if policy != "require_delivery":
+        return True
+    if is_configured():
+        return True
+    print(f"[{command.upper()}] notification_policy=require_delivery notifier_unconfigured")
+    return False
 
 
 def cmd_research_backtest(
@@ -53,9 +127,14 @@ def cmd_research_backtest(
     manifest_path: str,
     execution_calibration_path: str | None = None,
     diagnostic_mode: str | None = None,
+    notification_policy: str | None = None,
 ) -> int:
+    policy = resolve_research_notification_policy(notification_policy)
+    if not _require_delivery_preflight(policy, command="research-backtest"):
+        return 1
     started_at = monotonic()
     rc = 1
+    notification_result: NotificationResult | None = None
     try:
         try:
             manifest = load_manifest(manifest_path)
@@ -86,31 +165,42 @@ def cmd_research_backtest(
             )
             print(f"[RESEARCH-BACKTEST] artifact_budget_failure={json.dumps(payload, sort_keys=True)}")
             rc = 1
-            return rc
         except (ManifestValidationError, ExecutionCalibrationError, ResearchValidationError, OSError, ValueError) as exc:
             print(f"[RESEARCH-BACKTEST] error={exc}")
             rc = 1
-            return rc
-        _print_report_summary("RESEARCH-BACKTEST", report)
-        if _standalone_report_is_non_promotable_production_diagnostic(report):
-            rc = 1
-            return rc
-        rc = 0
-        return rc
+        else:
+            _print_report_summary("RESEARCH-BACKTEST", report)
+            if _standalone_report_is_non_promotable_production_diagnostic(report):
+                rc = 1
+            else:
+                rc = 0
     finally:
-        _notify_research_command_finished(
+        notification_result = _notify_research_command_finished(
             "research-backtest",
             started_at,
             rc,
+            notification_policy=policy,
             manifest=manifest_path,
             execution_calibration=execution_calibration_path,
             diagnostic_mode=diagnostic_mode,
         )
+    if policy == "require_delivery" and notification_result.final_status != "delivered":
+        rc = 1
+    return rc
 
 
-def cmd_research_walk_forward(*, manifest_path: str, execution_calibration_path: str | None = None) -> int:
+def cmd_research_walk_forward(
+    *,
+    manifest_path: str,
+    execution_calibration_path: str | None = None,
+    notification_policy: str | None = None,
+) -> int:
+    policy = resolve_research_notification_policy(notification_policy)
+    if not _require_delivery_preflight(policy, command="research-walk-forward"):
+        return 1
     started_at = monotonic()
     rc = 1
+    notification_result: NotificationResult | None = None
     try:
         try:
             manifest = load_manifest(manifest_path)
@@ -135,25 +225,27 @@ def cmd_research_walk_forward(*, manifest_path: str, execution_calibration_path:
             )
             print(f"[RESEARCH-WALK-FORWARD] artifact_budget_failure={json.dumps(payload, sort_keys=True)}")
             rc = 1
-            return rc
         except (ManifestValidationError, ExecutionCalibrationError, ResearchValidationError, OSError, ValueError) as exc:
             print(f"[RESEARCH-WALK-FORWARD] error={exc}")
             rc = 1
-            return rc
-        _print_report_summary("RESEARCH-WALK-FORWARD", report)
-        if _standalone_report_is_non_promotable_production_diagnostic(report):
-            rc = 1
-            return rc
-        rc = 0
-        return rc
+        else:
+            _print_report_summary("RESEARCH-WALK-FORWARD", report)
+            if _standalone_report_is_non_promotable_production_diagnostic(report):
+                rc = 1
+            else:
+                rc = 0
     finally:
-        _notify_research_command_finished(
+        notification_result = _notify_research_command_finished(
             "research-walk-forward",
             started_at,
             rc,
+            notification_policy=policy,
             manifest=manifest_path,
             execution_calibration=execution_calibration_path,
         )
+    if policy == "require_delivery" and notification_result.final_status != "delivered":
+        rc = 1
+    return rc
 
 
 def _write_artifact_budget_failure_payload(
@@ -186,9 +278,14 @@ def cmd_research_validate(
     candidate_id: str | None = None,
     out_path: str | None = None,
     mode: str = "strict",
+    notification_policy: str | None = None,
 ) -> int:
+    policy = resolve_research_notification_policy(notification_policy)
+    if not _require_delivery_preflight(policy, command="research-validate"):
+        return 1
     started_at = monotonic()
     rc = 1
+    notification_result: NotificationResult | None = None
     try:
         try:
             manifest = load_manifest(manifest_path)
@@ -215,21 +312,24 @@ def cmd_research_validate(
         ) as exc:
             print(f"[RESEARCH-VALIDATE] error={exc}")
             rc = 1
-            return rc
-        _print_validation_run_summary(validation_run)
-        rc = 0 if validation_run.get("end_to_end_validation_result") == "PASS" else 1
-        return rc
+        else:
+            _print_validation_run_summary(validation_run)
+            rc = 0 if validation_run.get("end_to_end_validation_result") == "PASS" else 1
     finally:
-        _notify_research_command_finished(
+        notification_result = _notify_research_command_finished(
             "research-validate",
             started_at,
             rc,
+            notification_policy=policy,
             manifest=manifest_path,
             execution_calibration=execution_calibration_path,
             candidate_id=candidate_id,
             out=out_path,
             mode=mode,
         )
+    if policy == "require_delivery" and notification_result.final_status != "delivered":
+        rc = 1
+    return rc
 
 
 def cmd_research_reproduce(*, promotion_path: str) -> int:

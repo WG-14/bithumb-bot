@@ -59,6 +59,18 @@ def _config_dump(args: argparse.Namespace, _context) -> None:
     cmd_config_dump(masked=bool(args.masked))
 
 
+def _notification_diagnose(args: argparse.Namespace, _context) -> int:
+    from bithumb_bot.notification_diagnostics import cmd_notification_diagnose
+
+    return int(
+        cmd_notification_diagnose(
+            as_json=bool(args.json),
+            probe=bool(args.probe),
+            policy=str(args.notification_policy) if args.notification_policy else None,
+        )
+    )
+
+
 def _validate_db(args: argparse.Namespace, _context) -> int:
     from bithumb_bot.operator_commands import cmd_validate_db
 
@@ -150,6 +162,15 @@ def command_specs() -> list[CommandSpec]:
             description="Print selected effective settings; use --masked for normal operator use.",
             build=lambda p: p.add_argument("--masked", action="store_true"),
         ),
+        make_spec(
+            "notification-diagnose",
+            domain="runtime",
+            handler=_notification_diagnose,
+            help="inspect notification configuration or explicitly send a probe",
+            description="Print masked notification configuration; --probe explicitly attempts delivery.",
+            build=_build_notification_diagnose,
+            json_output_supported=True,
+        ),
         make_spec("orders", domain="runtime", handler=_with_limit("cmd_orders"), build=_limit(50)),
         make_spec("fills", domain="runtime", handler=_with_limit("cmd_fills"), build=_limit(50)),
         make_spec("trades", domain="runtime", handler=_with_limit("cmd_trades"), build=_limit(20)),
@@ -192,3 +213,13 @@ def command_specs() -> list[CommandSpec]:
             json_output_supported=True,
         ),
     ]
+
+
+def _build_notification_diagnose(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--probe", action="store_true")
+    parser.add_argument(
+        "--notification-policy",
+        choices=("best_effort", "require_delivery", "disabled"),
+        help="policy label to include in diagnostic output",
+    )

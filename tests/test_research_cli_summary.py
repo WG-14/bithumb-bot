@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from bithumb_bot.notifier import AlertSeverity
+from bithumb_bot.notifier import AlertSeverity, NotificationResult
 from bithumb_bot.paths import PathManager
 from bithumb_bot.research import cli as research_cli
 from bithumb_bot.research.artifact_store import ArtifactBudgetExceeded
@@ -209,11 +209,24 @@ def test_fail_report_summary_includes_top_fail_reasons() -> None:
 
 def test_research_command_finished_helper_emits_success_notification(monkeypatch) -> None:
     calls = []
+    sent_result = NotificationResult(
+        message="sent",
+        severity=AlertSeverity.INFO,
+        enabled=False,
+        configured=False,
+        final_status="skipped_disabled",
+    )
 
     monkeypatch.setattr(research_cli, "monotonic", lambda: 12.5)
-    monkeypatch.setattr(research_cli, "notify", lambda msg, *, severity: calls.append((msg, severity)))
+    monkeypatch.setattr(
+        research_cli,
+        "notify",
+        lambda msg, *, severity, event_name=None, policy=None, source_command=None: calls.append((msg, severity))
+        or sent_result,
+    )
+    monkeypatch.setattr(research_cli, "_record_notification_result", lambda *args, **kwargs: None)
 
-    research_cli._notify_research_command_finished(
+    result = research_cli._notify_research_command_finished(
         "research-backtest",
         10.0,
         0,
@@ -227,13 +240,51 @@ def test_research_command_finished_helper_emits_success_notification(monkeypatch
             AlertSeverity.INFO,
         )
     ]
+    assert result is sent_result
+
+
+def test_research_command_finished_exposes_notification_result(monkeypatch) -> None:
+    expected = NotificationResult(
+        message="sent",
+        severity=AlertSeverity.INFO,
+        enabled=True,
+        configured=True,
+        attempted_transports=("ntfy",),
+        delivered_transports=("ntfy",),
+        final_status="delivered",
+    )
+
+    monkeypatch.setattr(research_cli, "monotonic", lambda: 12.5)
+    monkeypatch.setattr(
+        research_cli,
+        "notify",
+        lambda msg, *, severity, event_name=None, policy=None, source_command=None: expected,
+    )
+    monkeypatch.setattr(research_cli, "_record_notification_result", lambda *args, **kwargs: None)
+
+    result = research_cli._notify_research_command_finished("research-backtest", 10.0, 0)
+
+    assert result is expected
 
 
 def test_research_backtest_notifies_on_success_and_failure(monkeypatch) -> None:
     calls = []
+    sent_result = NotificationResult(
+        message="sent",
+        severity=AlertSeverity.INFO,
+        enabled=False,
+        configured=False,
+        final_status="skipped_disabled",
+    )
 
     monkeypatch.setattr(research_cli, "load_manifest", lambda path: SimpleNamespace(deployment_tier="research_only"))
-    monkeypatch.setattr(research_cli, "notify", lambda msg, *, severity: calls.append((msg, severity)))
+    monkeypatch.setattr(
+        research_cli,
+        "notify",
+        lambda msg, *, severity, event_name=None, policy=None, source_command=None: calls.append((msg, severity))
+        or sent_result,
+    )
+    monkeypatch.setattr(research_cli, "_record_notification_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(research_cli, "_print_report_summary", lambda label, report: None)
     monkeypatch.setattr(research_cli, "monotonic", lambda: 10.0)
     monkeypatch.setattr(

@@ -180,6 +180,7 @@ DECLARED_ENV_NAMES: tuple[str, ...] = (
     "NTFY_SERVER",
     "NTFY_TITLE_PREFIX",
     "NTFY_TOPIC",
+    "NTFY_URL",
     "OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC",
     "PAIR",
     "PAPER_EXECUTION_LATENCY_MS",
@@ -192,6 +193,7 @@ DECLARED_ENV_NAMES: tuple[str, ...] = (
     "PAPER_FEE_RATE_ESTIMATE",
     "PRETRADE_BALANCE_BUFFER_BPS",
     "PRE_TRADE_ECONOMICS_BLOCKING_ENABLED",
+    "RESEARCH_NOTIFICATION_POLICY",
     "REQUIRE_BROKER_LOCAL_CONVERGENCE",
     "RESIDUAL_BUY_SIZING_MODE",
     "RESIDUAL_INVENTORY_MODE",
@@ -321,6 +323,10 @@ DEPRECATED_IGNORED_KEYS = {
     "LIVE_ALLOW_ORDER_RULE_FALLBACK",
 }
 
+DEPRECATED_ALIAS_KEYS = {
+    "NTFY_URL",
+}
+
 EXAMPLE_DEFAULTS = {
     "MODE": "paper",
     "MARKET": "KRW-BTC",
@@ -345,6 +351,11 @@ DESCRIPTIONS = {
     ),
     "NOTIFIER_DEDUPE_WINDOW_SEC": (
         "Notifier duplicate suppression window in seconds. Internal operational setting, documented for reproducibility."
+    ),
+    "NTFY_SERVER": "Standard ntfy server base URL. NTFY_URL is a deprecated compatibility alias.",
+    "NTFY_URL": "Deprecated compatibility alias for NTFY_SERVER; NTFY_SERVER takes priority when both are set.",
+    "RESEARCH_NOTIFICATION_POLICY": (
+        "Research command notification policy: best_effort, require_delivery, or disabled. Defaults to best_effort."
     ),
     "DB_PATH": "Compatibility override for the mode-specific SQLite trade ledger path.",
     "RUN_LOCK_PATH": "Compatibility override for the mode-specific run lock path.",
@@ -441,7 +452,7 @@ def _build_spec(name: str) -> EnvVarSpec:
         description=DESCRIPTIONS.get(name, f"{name} runtime configuration."),
         mode_scope=scope,
         secret=name in SECRET_KEYS,
-        deprecated=name in DEPRECATED_IGNORED_KEYS,
+        deprecated=name in DEPRECATED_IGNORED_KEYS or name in DEPRECATED_ALIAS_KEYS,
         ignored=name in DEPRECATED_IGNORED_KEYS,
         required_in_live=name in LIVE_REQUIRED_KEYS,
         operator_visible=scope != "internal",

@@ -29,9 +29,24 @@ notify() {
   local title="$1"
   local priority="$2"
   local message="$3"
+  local notify_exit=0
+  local result_path="${CODEX_PYTEST_WORK_DIR%/}/notification_result.jsonl"
 
   if [[ -x "${NOTIFY_SCRIPT}" && -n "${NTFY_TOPIC:-}" ]]; then
-    "${NOTIFY_SCRIPT}" "${title}" "${priority}" "${message}" || true
+    set +e
+    "${NOTIFY_SCRIPT}" "${title}" "${priority}" "${message}"
+    notify_exit=$?
+    set -e
+    mkdir -p "${CODEX_PYTEST_WORK_DIR}"
+    if [[ "${notify_exit}" -ne 0 ]]; then
+      echo "[NOTIFY-RESULT] transport=ntfy status=failed exit_code=${notify_exit} stage=${stage}" >&2
+      printf '{"transport":"ntfy","status":"failed","exit_code":%s,"stage":"%s"}\n' \
+        "${notify_exit}" "${stage}" >> "${result_path}"
+    else
+      echo "[NOTIFY-RESULT] transport=ntfy status=delivered exit_code=0 stage=${stage}" >&2
+      printf '{"transport":"ntfy","status":"delivered","exit_code":0,"stage":"%s"}\n' \
+        "${stage}" >> "${result_path}"
+    fi
   else
     echo "[PYTEST-PIPELINE] ntfy notification skipped; set NTFY_TOPIC and ensure ${NOTIFY_SCRIPT} is executable" >&2
   fi

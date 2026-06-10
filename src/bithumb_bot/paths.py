@@ -260,6 +260,9 @@ class PathManager:
     def recovery_report_path(self, day: str | None = None, ext: str = "json") -> Path:
         return self.report_path("recovery_report", day=day, ext=ext)
 
+    def notification_events_path(self) -> Path:
+        return self.data_dir() / "reports" / "notifications" / "notification_events.jsonl"
+
     def cash_drift_report_path(self, day: str | None = None, ext: str = "json") -> Path:
         return self.report_path("cash_drift_report", day=day, ext=ext)
 
