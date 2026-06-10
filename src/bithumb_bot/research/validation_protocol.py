@@ -48,7 +48,12 @@ from .deployment_policy import is_production_bound_target, validate_production_c
 from .execution_calibration import compare_calibration_to_scenario
 from .execution_model import DepthWalkExecutionModel, FixedBpsExecutionModel, StressExecutionModel, model_params_hash
 from .execution_timing import execution_reality_gate, signal_quote_coverage_summary
-from .experiment_manifest import DateRange, ExecutionScenario, ExperimentManifest
+from .experiment_manifest import (
+    DateRange,
+    ExecutionScenario,
+    ExperimentManifest,
+    required_execution_scenarios,
+)
 from .execution_plan import (
     ResearchExecutionPlan,
     ResearchWorkUnit,
@@ -733,8 +738,9 @@ def _execution_boundary_observability(
     else:
         actual_execution_mode = "contract_evaluator_in_process"
         actual_worker_context_mode = "in_process_contract"
+    execution_scenarios = required_execution_scenarios(manifest.execution_model.scenarios)
     requested_task_count = (
-        len(manifest.execution_model.scenarios) * len(iter_parameter_candidates(manifest.parameter_space))
+        len(execution_scenarios) * len(iter_parameter_candidates(manifest.parameter_space))
         if requested_mode == "parallel"
         else 0
     )
@@ -1239,6 +1245,7 @@ def _evaluate_candidates(
     }
     build_work_tasks_started = time.perf_counter()
     raw_candidates = iter_parameter_candidates(manifest.parameter_space)
+    execution_scenarios = required_execution_scenarios(manifest.execution_model.scenarios)
     aggregates: dict[str, dict[str, Any]] = {}
     manifest_hash = manifest.manifest_hash()
     dataset_hash = combined_dataset_fingerprint(tuple(snapshots.values()))
@@ -1261,13 +1268,13 @@ def _evaluate_candidates(
         progress_callback,
         stage="workload",
         candidate_count=len(raw_candidates),
-        scenario_count=len(manifest.execution_model.scenarios),
+        scenario_count=len(execution_scenarios),
         split_candle_counts=",".join(
             f"{split_name}:{len(snapshot.candles)}" for split_name, snapshot in sorted(snapshots.items())
         ),
         estimated_strategy_runs=_estimated_strategy_runs(
             candidate_count=len(raw_candidates),
-            scenario_count=len(manifest.execution_model.scenarios),
+            scenario_count=len(execution_scenarios),
             split_count=len(snapshots),
             include_walk_forward=include_walk_forward,
             walk_forward_split_count=sum(1 for key in snapshots if key.startswith("window_")),
@@ -1280,7 +1287,7 @@ def _evaluate_candidates(
 
     work_tasks: list[dict[str, Any]] = []
     simulation_seed_scope_hash = manifest.simulation_seed_scope_hash()
-    for scenario_index, scenario in enumerate(manifest.execution_model.scenarios):
+    for scenario_index, scenario in execution_scenarios:
         scenario_id = _scenario_id(scenario, scenario_index)
         for index, params in enumerate(raw_candidates):
             work_unit = build_research_work_unit(
@@ -1521,7 +1528,7 @@ def _evaluate_candidates(
             raise ResearchValidationError(f"work_result_missing_base_result: {result.work_unit_hash}")
         base_results_by_scenario.setdefault(result.scenario_index, []).append(result.base_result)
 
-    for scenario_index, scenario in enumerate(manifest.execution_model.scenarios):
+    for scenario_index, scenario in execution_scenarios:
         scenario_id = _scenario_id(scenario, scenario_index)
         expected_calibration_hash = (
             execution_calibration.get("content_hash")
@@ -1959,7 +1966,7 @@ def _evaluate_candidates(
         _stage_timing(
             "scenario_gate_aggregation",
             gate_aggregation_started,
-            scenario_count=len(manifest.execution_model.scenarios),
+            scenario_count=len(execution_scenarios),
             candidate_count=len(aggregates),
         )
     )
@@ -2413,10 +2420,20 @@ def _evaluate_candidate_base_result(
     )
 
     def _run(split_name: str) -> BacktestRun:
+        executable_scenarios = required_execution_scenarios(manifest.execution_model.scenarios)
+        executable_scenario_count = len(executable_scenarios)
+        scenario_ordinal = next(
+            (
+                ordinal
+                for ordinal, (required_index, _) in enumerate(executable_scenarios, start=1)
+                if required_index == scenario_index
+            ),
+            min(scenario_index + 1, executable_scenario_count),
+        )
         _emit_progress(
             progress_callback,
             stage="evaluate",
-            scenario=f"{scenario_index + 1}/{len(manifest.execution_model.scenarios)}",
+            scenario=f"{scenario_ordinal}/{executable_scenario_count}",
             candidate=f"{index + 1}/{raw_candidate_count}",
             split=split_name,
             candles=len(snapshots[split_name].candles),
@@ -4619,7 +4636,7 @@ def _report_workload_estimate(
         estimate = dict(execution_plan.payload["workload_estimate"])
     else:
         snapshot_candles = sum(len(snapshot.candles) for snapshot in snapshots)
-        scenario_count = len(manifest.execution_model.scenarios)
+        scenario_count = len(required_execution_scenarios(manifest.execution_model.scenarios))
         split_count = len(snapshots)
         work_unit_count = len(candidates) * scenario_count
         estimated_tick_events = snapshot_candles * len(candidates) * scenario_count

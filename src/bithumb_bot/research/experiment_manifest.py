@@ -336,6 +336,25 @@ class ExecutionModelConfig:
         }
 
 
+def scenario_is_diagnostic_only(scenario: ExecutionScenario) -> bool:
+    if scenario.scenario_role == "diagnostic_zero_cost":
+        return True
+    return (
+        scenario.cost_assumption is not None
+        and scenario.cost_assumption.role == "diagnostic_zero_cost"
+    )
+
+
+def required_execution_scenarios(
+    scenarios: tuple[ExecutionScenario, ...],
+) -> tuple[tuple[int, ExecutionScenario], ...]:
+    return tuple(
+        (index, scenario)
+        for index, scenario in enumerate(scenarios)
+        if not scenario_is_diagnostic_only(scenario)
+    )
+
+
 @dataclass(frozen=True)
 class ExecutionTimingPolicy:
     signal_basis: str = "closed_candle"

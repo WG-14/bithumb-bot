@@ -190,6 +190,7 @@ class DecisionPayloadBuilder:
             if isinstance(counts, dict):
                 payload["strategy_diagnostic_counts"] = counts
             payload["strategy_diagnostic_counts_authority"] = "diagnostic_non_authoritative"
+        _attach_common_exit_diagnostic_counts(payload)
         if policy_decision is not None:
             payload["pure_policy_hash"] = policy_decision.policy_hash
             payload["policy_contract_hash"] = policy_decision.policy_contract_hash
@@ -245,6 +246,31 @@ class DecisionPayloadBuilder:
         ).strip():
             payload["exit_policy_config_hash"] = str(exit_policy_config_hash)
         return payload
+
+
+def _attach_common_exit_diagnostic_counts(payload: dict[str, object]) -> None:
+    increments: dict[str, int] = {}
+    for evaluation in payload.get("exit_evaluations") or []:
+        if not isinstance(evaluation, dict) or not bool(evaluation.get("triggered")):
+            continue
+        rule = str(evaluation.get("rule") or "")
+        if rule == "stop_loss":
+            increments["stop_loss_exit_count"] = increments.get("stop_loss_exit_count", 0) + 1
+        elif rule == "max_holding_time":
+            increments["max_holding_exit_count"] = increments.get("max_holding_exit_count", 0) + 1
+    if not increments:
+        return
+    defaults = payload.get("strategy_diagnostic_count_defaults")
+    if not isinstance(defaults, dict):
+        defaults = {}
+        payload["strategy_diagnostic_count_defaults"] = defaults
+    counts = payload.get("strategy_diagnostic_counts")
+    if not isinstance(counts, dict):
+        counts = {}
+        payload["strategy_diagnostic_counts"] = counts
+    for key, increment in increments.items():
+        defaults.setdefault(key, 0)
+        counts.setdefault(key, int(increment))
 
 
 __all__ = ["DecisionPayloadBuilder"]

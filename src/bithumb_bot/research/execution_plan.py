@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .dataset_snapshot import DatasetQualityReport, DatasetSnapshot, combined_dataset_quality_hash
-from .experiment_manifest import ExecutionScenario, ExperimentManifest
+from .experiment_manifest import ExecutionScenario, ExperimentManifest, required_execution_scenarios
 from .hashing import sha256_prefixed
 from .parameter_space import candidate_id, iter_parameter_candidates
 from .process_runtime import process_policy_observability
@@ -73,12 +73,13 @@ def build_research_execution_plan(
     include_walk_forward: bool = False,
 ) -> ResearchExecutionPlan:
     candidates = iter_parameter_candidates(manifest.parameter_space)
+    execution_scenarios = required_execution_scenarios(manifest.execution_model.scenarios)
     split_names = _ordered_split_names(snapshots)
     split_count = len(split_names)
     walk_forward_split_count = sum(1 for split_name in split_names if split_name.startswith("window_"))
-    strategy_run_count = len(candidates) * len(manifest.execution_model.scenarios) * split_count
+    strategy_run_count = len(candidates) * len(execution_scenarios) * split_count
     if include_walk_forward:
-        strategy_run_count = len(candidates) * len(manifest.execution_model.scenarios) * (
+        strategy_run_count = len(candidates) * len(execution_scenarios) * (
             max(0, split_count - walk_forward_split_count) + walk_forward_split_count
         )
     dataset_candles = sum(len(snapshot.candles) for snapshot in snapshots.values())
@@ -87,7 +88,7 @@ def build_research_execution_plan(
     estimated_plugin_runtime_us = (
         int(dataset_candles)
         * len(candidates)
-        * len(manifest.execution_model.scenarios)
+        * len(execution_scenarios)
         * plugin_expected_us_per_candle
     )
     run_environment = build_run_environment(
@@ -103,7 +104,7 @@ def build_research_execution_plan(
         "dataset_hashes": {name: snapshots[name].content_hash() for name in split_names},
         "dataset_quality_hash": combined_dataset_quality_hash(tuple(quality_reports.values())),
         "candidate_count": len(candidates),
-        "scenario_count": len(manifest.execution_model.scenarios),
+        "scenario_count": len(execution_scenarios),
         "split_count": split_count,
         "split_names": split_names,
         "estimated_strategy_runs": strategy_run_count,
@@ -112,7 +113,7 @@ def build_research_execution_plan(
         "estimated_candle_evaluations": (
             dataset_candles
             * len(candidates)
-            * len(manifest.execution_model.scenarios)
+            * len(execution_scenarios)
         ),
         "plugin_complexity": plugin_complexity,
         "estimated_plugin_runtime_us": estimated_plugin_runtime_us,
@@ -130,23 +131,23 @@ def build_research_execution_plan(
         audit_mode=manifest.research_run.audit_trail.mode,
         dataset_candles=dataset_candles,
         candidate_count=len(candidates),
-        scenario_count=len(manifest.execution_model.scenarios),
+        scenario_count=len(execution_scenarios),
     )
     estimated_artifact_write_count = _estimated_artifact_write_count(
         audit_mode=manifest.research_run.audit_trail.mode,
         full_decisions_external_jsonl=manifest.research_run.artifact_policy.full_decisions_external_jsonl,
-        work_unit_count=len(candidates) * len(manifest.execution_model.scenarios),
+        work_unit_count=len(candidates) * len(execution_scenarios),
         split_count=split_count,
     )
     estimated_hash_payload_bytes = _estimated_hash_payload_bytes(
         dataset_candles=dataset_candles,
         candidate_count=len(candidates),
-        scenario_count=len(manifest.execution_model.scenarios),
+        scenario_count=len(execution_scenarios),
         split_count=split_count,
     )
     estimated_artifact_bytes = _estimated_artifact_bytes(
         candidate_count=len(candidates),
-        scenario_count=len(manifest.execution_model.scenarios),
+        scenario_count=len(execution_scenarios),
         split_count=split_count,
         audit_mode=manifest.research_run.audit_trail.mode,
         estimated_audit_stream_rows=estimated_audit_stream_rows,

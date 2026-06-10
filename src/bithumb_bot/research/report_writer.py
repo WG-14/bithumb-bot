@@ -639,6 +639,7 @@ def _derived_candidate_index_summary(candidate: dict[str, Any], *, include_compa
         "exploratory_result",
     )
     summary = {key: candidate[key] for key in summary_keys if key in candidate}
+    _compact_derived_candidate_large_blocks(summary)
     if include_compact:
         _copy_compact_diagnostics(summary, candidate)
     if "resource_guard" in candidate:
@@ -653,6 +654,44 @@ def _derived_candidate_index_summary(candidate: dict[str, Any], *, include_compa
     )
     summary["candidate_result_detail_policy"] = "summary_bounded"
     return summary
+
+
+def _compact_derived_candidate_large_blocks(summary: dict[str, Any]) -> None:
+    cost_sensitivity = summary.pop("cost_sensitivity", None)
+    if isinstance(cost_sensitivity, dict):
+        summary["cost_sensitivity_hash"] = sha256_prefixed(cost_sensitivity)
+        summary["cost_sensitivity_status"] = {
+            key: value.get("status") if isinstance(value, dict) else None
+            for key, value in cost_sensitivity.items()
+            if key in {"zero_cost", "base_cost", "stress_cost"}
+        }
+        if cost_sensitivity.get("promotion_authority"):
+            summary["cost_sensitivity_promotion_authority"] = cost_sensitivity["promotion_authority"]
+    elif cost_sensitivity is not None:
+        summary["cost_sensitivity_hash"] = sha256_prefixed(cost_sensitivity)
+
+    position_sizing = summary.pop("position_sizing_sensitivity", None)
+    if isinstance(position_sizing, dict):
+        summary["position_sizing_sensitivity_hash"] = sha256_prefixed(position_sizing)
+        if position_sizing.get("status"):
+            summary["position_sizing_sensitivity_status"] = position_sizing["status"]
+    elif position_sizing is not None:
+        summary["position_sizing_sensitivity_hash"] = sha256_prefixed(position_sizing)
+
+    capabilities = summary.pop("strategy_runtime_capabilities", None)
+    if isinstance(capabilities, dict):
+        summary["strategy_runtime_capabilities_hash"] = sha256_prefixed(capabilities)
+        for key in (
+            "research_only",
+            "promotion_runtime_decisions_supported",
+            "live_dry_run_allowed",
+            "live_real_order_allowed",
+            "fail_closed_reason",
+        ):
+            if key in capabilities:
+                summary[f"strategy_runtime_capability_{key}"] = capabilities[key]
+    elif capabilities is not None:
+        summary["strategy_runtime_capabilities_hash"] = sha256_prefixed(capabilities)
 
 
 def _derived_scenario_index_summary(scenario: Any, *, include_compact: bool = True) -> dict[str, Any]:
@@ -1171,6 +1210,16 @@ def _compact_candidate_artifact_summary(summary: dict[str, Any]) -> None:
         summary["regime_gate_result"] = _compact_regime_gate_result(summary["regime_gate_result"])
     if "resource_guard" in summary:
         summary["resource_guard"] = _compact_resource_guard(summary["resource_guard"])
+    if "retained_detail_summary" in summary:
+        summary["retained_detail_summary"] = _compact_retained_detail_summary(
+            summary["retained_detail_summary"]
+        )
+    if "position_sizing_sensitivity" in summary:
+        summary["position_sizing_sensitivity"] = _compact_large_diagnostic_block(
+            summary["position_sizing_sensitivity"],
+            hash_key="position_sizing_sensitivity_hash",
+            status_key="position_sizing_sensitivity_status",
+        )
     if "execution_calibration_gate" in summary:
         summary["execution_calibration_gate"] = _compact_status_payload(
             summary["execution_calibration_gate"],
@@ -1181,6 +1230,33 @@ def _compact_candidate_artifact_summary(summary: dict[str, Any]) -> None:
             summary["production_calibration_policy_result"],
             hash_key="production_calibration_policy_hash",
         )
+
+
+def _compact_large_diagnostic_block(value: Any, *, hash_key: str, status_key: str) -> Any:
+    if not isinstance(value, dict):
+        return value
+    if _json_byte_count(value) <= 1500:
+        return value
+    compact: dict[str, Any] = {hash_key: sha256_prefixed(value)}
+    if value.get("status"):
+        compact[status_key] = value["status"]
+    return compact
+
+
+def _compact_retained_detail_summary(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    if len(value) <= 8:
+        return value
+    return {
+        "retained_detail_summary_hash": sha256_prefixed(value),
+        "retained_detail_summary_key_count": len(value),
+        "report_detail": value.get("report_detail"),
+        "decision_count": value.get("decision_count"),
+        "retained_decision_count": value.get("retained_decision_count"),
+        "retained_equity_point_count": value.get("retained_equity_point_count"),
+        "retained_regime_snapshot_count": value.get("retained_regime_snapshot_count"),
+    }
 
 
 def _compact_metrics_payload(metrics: Any) -> Any:

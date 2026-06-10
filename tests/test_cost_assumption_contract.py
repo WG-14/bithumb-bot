@@ -249,9 +249,16 @@ def test_explicit_base_and_stress_cost_assumptions_pass_policy() -> None:
 
     manifest = parse_manifest(payload)
 
-    assert manifest.execution_model.scenarios[0].cost_assumption is not None
-    assert manifest.execution_model.scenarios[0].cost_assumption.promotable_as_base is True
-    assert manifest.execution_model.scenarios[1].scenario_role == "stress"
+    base = next(
+        scenario for scenario in manifest.execution_model.scenarios if scenario.scenario_role == "base"
+    )
+    stress = next(
+        scenario for scenario in manifest.execution_model.scenarios if scenario.scenario_role == "stress"
+    )
+
+    assert base.cost_assumption is not None
+    assert base.cost_assumption.promotable_as_base is True
+    assert stress.scenario_role == "stress"
 
 
 def test_legacy_cost_model_research_only_is_marked_legacy_non_promotable() -> None:
