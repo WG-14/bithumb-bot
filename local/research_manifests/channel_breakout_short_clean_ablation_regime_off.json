@@ -1,0 +1,127 @@
+{
+  "acceptance_gate": {
+    "max_mdd_pct": 15,
+    "metrics_contract_required": false,
+    "min_profit_factor": 1.1,
+    "min_trade_count": 5,
+    "oos_return_must_be_positive": true,
+    "parameter_stability_required": false,
+    "reject_open_position_at_end": false,
+    "walk_forward_required": false
+  },
+  "cost_model": {
+    "fee_rate": 0.0004,
+    "slippage_bps": [
+      10
+    ]
+  },
+  "dataset": {
+    "snapshot_id": "channel_breakout_krw_btc_1m_short_clean_ablation_regime_off_v1",
+    "source": "sqlite_candles",
+    "train": {
+      "end": "2025-12-30",
+      "start": "2025-12-01"
+    },
+    "validation": {
+      "end": "2026-02-28",
+      "start": "2026-02-01"
+    }
+  },
+  "deployment_tier": "research_only",
+  "execution_model": {
+    "scenario_policy": "must_pass_base_and_survive_stress",
+    "scenarios": [
+      {
+        "fee_authority_policy": "research_declared_runtime_reference",
+        "fee_rate": 0.0004,
+        "fee_source": "operator_declared_bithumb_app_fee",
+        "label": "research_fee_0004_slippage_10bps",
+        "promotable_as_base": false,
+        "scenario_role": "base",
+        "slippage_bps": 10,
+        "slippage_source": "research_assumption"
+      },
+      {
+        "fee_authority_policy": "not_promotable_as_runtime_base",
+        "fee_rate": 0.0025,
+        "fee_source": "stress_assumption",
+        "label": "research_stress_fee_0025_slippage_20bps",
+        "promotable_as_base": false,
+        "scenario_role": "stress",
+        "slippage_bps": 20,
+        "slippage_source": "stress_assumption"
+      }
+    ]
+  },
+  "experiment_id": "channel_breakout_short_clean_v1_2026_06_ablation_regime_off",
+  "hypothesis": "A candle-only 1m channel breakout with range, volume, and regime filters shows usable diagnostic expectancy on clean short windows.",
+  "interval": "1m",
+  "market": "KRW-BTC",
+  "parameter_space": {
+    "CHANNEL_BREAKOUT_LOOKBACK": [
+      10
+    ],
+    "CHANNEL_BREAKOUT_RANGE_RATIO_MIN": [
+      1.1,
+      1.2
+    ],
+    "CHANNEL_BREAKOUT_RANGE_WINDOW": [
+      20
+    ],
+    "CHANNEL_BREAKOUT_REGIME_FILTER_ENABLED": [
+      false
+    ],
+    "CHANNEL_BREAKOUT_VOLUME_RATIO_MIN": [
+      0.8,
+      1.0
+    ],
+    "CHANNEL_BREAKOUT_VOLUME_WINDOW": [
+      10
+    ],
+    "STRATEGY_EXIT_MAX_HOLDING_MIN": [
+      30
+    ],
+    "STRATEGY_EXIT_RULES": [
+      "stop_loss,max_holding_time"
+    ],
+    "STRATEGY_EXIT_STOP_LOSS_RATIO": [
+      0.01
+    ]
+  },
+  "portfolio_policy": {
+    "cash_interest_policy": "zero",
+    "initial_position_qty": 0.0,
+    "position_sizing": {
+      "buy_fraction": 0.99,
+      "cash_buffer_policy": "retain_1_percent_before_fees",
+      "max_order_krw": null,
+      "min_order_krw": null,
+      "rounding_policy": "engine_float_no_exchange_lot_rounding",
+      "sell_policy": "sell_all_available_position",
+      "type": "fractional_cash"
+    },
+    "quote_currency": "KRW",
+    "schema_version": 1,
+    "source": "manifest",
+    "starting_cash_krw": 1000000
+  },
+  "research_run": {
+    "artifact_policy": {
+      "candidate_journal": true,
+      "failed_candidate_evidence": true,
+      "full_decisions_external_jsonl": false
+    },
+    "audit_trail": {
+      "mode": "summary_only"
+    },
+    "execution": {
+      "deterministic_merge_order": "scenario_index,candidate_index,split_name",
+      "max_workers": 8,
+      "mode": "parallel",
+      "process_start_method": "auto_safe",
+      "work_unit": "candidate_scenario"
+    },
+    "report_detail": "summary"
+  },
+  "strategy_name": "channel_breakout_with_regime_filter"
+}
