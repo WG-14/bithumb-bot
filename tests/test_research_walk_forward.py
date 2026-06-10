@@ -292,7 +292,9 @@ def test_walk_forward_summary_report_uses_candidate_artifact_ref(tmp_path, monke
     persisted = json.loads(result.paths.report_path.read_text(encoding="utf-8"))
     derived = json.loads(result.paths.derived_path.read_text(encoding="utf-8"))
     assert persisted["artifact_refs"]["derived_candidates"] == "derived/research/walk_summary_ref/walk_forward_candidates.json"
-    assert "decisions" in derived["candidates"][0]
+    assert derived["candidates"][0]["derived_detail_policy"] == "summary_bounded"
+    assert derived["candidates"][0]["candidate_payload_hash"].startswith("sha256:")
+    assert "decisions" not in derived["candidates"][0]
     assert "decisions" not in persisted["candidates"][0]
 
 

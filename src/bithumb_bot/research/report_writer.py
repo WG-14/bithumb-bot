@@ -300,8 +300,111 @@ def summarize_derived_candidate(candidate: Any, report_detail: str) -> Any:
         return candidate
     if not isinstance(candidate, dict):
         return {"candidate_repr_hash": sha256_prefixed(report_content_hash_payload(candidate))}
-    summary = summarize_candidate_result(candidate, report_detail)
+    summary = _derived_candidate_index_summary(candidate)
     summary["derived_detail_policy"] = "summary_bounded"
+    return summary
+
+
+def _derived_candidate_index_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    summary_keys = (
+        "experiment_id",
+        "manifest_hash",
+        "dataset_snapshot_id",
+        "dataset_content_hash",
+        "dataset_quality_hash",
+        "dataset_quality_gate_status",
+        "strategy_name",
+        "parameter_candidate_id",
+        "candidate_id",
+        "parameter_values",
+        "effective_strategy_parameters_hash",
+        "candidate_behavior_profile_hash",
+        "candidate_profile_hash",
+        "acceptance_gate_result",
+        "acceptance_gate_status",
+        "gate_fail_reasons",
+        "warnings",
+        "failure_artifact_path",
+        "failure_artifact_ref",
+        "behavior_hash",
+        "decision_behavior_hash",
+        "trade_ledger_hash",
+        "equity_curve_hash",
+        "composite_behavior_hash",
+        "common_decision_behavior_hash",
+        "strategy_behavior_hash",
+        "composite_behavior_hash_v2",
+        "metrics_hash",
+        "candidate_failed_before_complete_metrics",
+        "evaluation_status",
+        "metrics_status",
+        "metrics_v2_source",
+        "retained_detail_summary",
+    )
+    summary = {key: candidate[key] for key in summary_keys if key in candidate}
+    if "resource_guard" in candidate:
+        summary["resource_guard"] = _compact_resource_guard(candidate["resource_guard"])
+    summary["scenario_results"] = [
+        _derived_scenario_index_summary(scenario) for scenario in candidate.get("scenario_results") or []
+    ]
+    summary["candidate_payload_hash"] = sha256_prefixed(report_content_hash_payload(candidate))
+    summary["candidate_result_detail_policy"] = "summary_bounded"
+    return summary
+
+
+def _derived_scenario_index_summary(scenario: Any) -> dict[str, Any]:
+    if not isinstance(scenario, dict):
+        return {"scenario_repr_hash": sha256_prefixed(report_content_hash_payload(scenario))}
+    summary_keys = (
+        "scenario_id",
+        "scenario_index",
+        "scenario_type",
+        "scenario_role",
+        "scenario_acceptance_gate_result",
+        "scenario_fail_reasons",
+        "behavior_hash",
+        "decision_behavior_hash",
+        "trade_ledger_hash",
+        "equity_curve_hash",
+        "composite_behavior_hash",
+        "common_decision_behavior_hash",
+        "strategy_behavior_hash",
+        "composite_behavior_hash_v2",
+        "train_behavior_hash",
+        "validation_behavior_hash",
+        "final_holdout_behavior_hash",
+        "candidate_failed",
+        "candidate_failed_before_complete_metrics",
+        "evaluation_status",
+        "metrics_status",
+        "metrics_v2_source",
+        "failure_reason",
+        "failure_artifact_ref",
+        "failure_artifact_path",
+        "retained_detail_summary",
+        "train_resource_usage",
+        "validation_resource_usage",
+        "final_holdout_resource_usage",
+        "train_audit_trace_index",
+        "validation_audit_trace_index",
+        "final_holdout_audit_trace_index",
+    )
+    summary = {key: scenario[key] for key in summary_keys if key in scenario}
+    if "resource_guard" in scenario:
+        summary["resource_guard"] = _compact_resource_guard(scenario["resource_guard"])
+    summary["train_equity_curve"] = []
+    summary["validation_equity_curve"] = []
+    summary["final_holdout_equity_curve"] = []
+    for key in (
+        "train_resource_usage",
+        "validation_resource_usage",
+        "final_holdout_resource_usage",
+    ):
+        if key in summary:
+            summary[key] = summarize_resource_usage_for_candidate_artifact(summary[key])
+    summary["detail_artifact_ref"] = scenario.get("detail_artifact_ref")
+    summary["scenario_payload_hash"] = sha256_prefixed(report_content_hash_payload(scenario))
+    _ensure_scenario_retained_detail_evidence(summary)
     return summary
 
 
@@ -359,6 +462,7 @@ def summarize_candidate_result(candidate: Any, report_detail: str) -> Any:
         "retained_detail_summary",
     )
     summary = {key: candidate[key] for key in summary_keys if key in candidate}
+    _compact_candidate_artifact_summary(summary)
     summary["scenario_results"] = [
         _scenario_result_summary(scenario) for scenario in candidate.get("scenario_results") or []
     ]
@@ -372,6 +476,17 @@ def summarize_resource_usage_for_candidate_artifact(resource_usage: Any) -> Any:
         return resource_usage
     summary: dict[str, Any] = {}
     for key, value in resource_usage.items():
+        if key in {
+            "applied_resource_limits",
+            "memory_sampling_policy",
+            "resource_policy",
+            "strategy_diagnostics",
+            "strategy_specific_diagnostics",
+        }:
+            summary[f"{key}_hash"] = sha256_prefixed(value)
+            if isinstance(value, (dict, list, tuple)):
+                summary[f"{key}_count"] = len(value)
+            continue
         if key == "stage_trace":
             if isinstance(value, (list, tuple)):
                 summary["stage_trace_count"] = len(value)
@@ -446,6 +561,7 @@ def _scenario_result_summary(scenario: Any) -> dict[str, Any]:
         "final_holdout_audit_trace_index",
     )
     summary = {key: scenario[key] for key in summary_keys if key in scenario}
+    _compact_candidate_artifact_summary(summary)
     for key in (
         "train_resource_usage",
         "validation_resource_usage",
@@ -458,7 +574,222 @@ def _scenario_result_summary(scenario: Any) -> dict[str, Any]:
     summary["final_holdout_equity_curve"] = []
     summary["detail_artifact_ref"] = scenario.get("detail_artifact_ref")
     summary["scenario_payload_hash"] = sha256_prefixed(report_content_hash_payload(scenario))
+    _ensure_scenario_retained_detail_evidence(summary)
     return summary
+
+
+def _ensure_scenario_retained_detail_evidence(summary: dict[str, Any]) -> None:
+    if summary.get("equity_curve_hash") or summary.get("retained_detail_summary"):
+        return
+    summary["retained_detail_summary"] = {
+        "detail_unavailable_reason": (
+            summary.get("failure_reason")
+            or summary.get("evaluation_status")
+            or "summary_detail_not_retained"
+        ),
+        "scenario_payload_hash": summary["scenario_payload_hash"],
+    }
+
+
+def _compact_candidate_artifact_summary(summary: dict[str, Any]) -> None:
+    for key in (
+        "validation_metrics",
+        "validation_metrics_v2",
+        "final_holdout_metrics",
+        "final_holdout_metrics_v2",
+        "train_metrics",
+        "train_metrics_v2",
+        "walk_forward_metrics",
+    ):
+        if key in summary:
+            summary[key] = _compact_metrics_payload(summary[key])
+    for key in ("market_regime_bucket_performance", "market_regime_coverage"):
+        if key in summary:
+            summary[key] = _hashed_collection_summary(summary[key])
+    if "execution_reality_summary" in summary:
+        summary["execution_reality_summary"] = _compact_execution_reality_summary(
+            summary["execution_reality_summary"]
+        )
+    if "regime_gate_result" in summary:
+        summary["regime_gate_result"] = _compact_regime_gate_result(summary["regime_gate_result"])
+    if "resource_guard" in summary:
+        summary["resource_guard"] = _compact_resource_guard(summary["resource_guard"])
+    if "execution_calibration_gate" in summary:
+        summary["execution_calibration_gate"] = _compact_status_payload(
+            summary["execution_calibration_gate"],
+            hash_key="execution_calibration_gate_hash",
+        )
+    if "production_calibration_policy_result" in summary:
+        summary["production_calibration_policy_result"] = _compact_status_payload(
+            summary["production_calibration_policy_result"],
+            hash_key="production_calibration_policy_hash",
+        )
+
+
+def _compact_metrics_payload(metrics: Any) -> Any:
+    if not isinstance(metrics, dict):
+        return metrics
+    compact: dict[str, Any] = {}
+    for key in (
+        "metrics_schema_version",
+        "metrics_status",
+        "metrics_v2_source",
+        "evaluation_status",
+        "candidate_failed_before_complete_metrics",
+    ):
+        if key in metrics:
+            compact[key] = metrics[key]
+    if "limitation_reasons" in metrics:
+        compact["limitation_reasons"] = metrics["limitation_reasons"]
+    for section, keys in {
+        "return_risk": (
+            "total_return_pct",
+            "realized_return_pct",
+            "max_drawdown_pct",
+            "cagr_pct",
+            "open_position_at_end",
+        ),
+        "trade_quality": (
+            "closed_trade_count",
+            "execution_count",
+            "profit_factor",
+            "win_rate",
+            "single_trade_dependency_score",
+        ),
+        "time_exposure": (
+            "active_bar_count",
+            "exposure_time_pct",
+            "period_start_ts",
+            "period_end_ts",
+        ),
+        "cost_execution": (
+            "fee_total",
+            "slippage_total",
+            "filled_execution_count",
+            "failed_execution_count",
+            "skipped_execution_count",
+        ),
+    }.items():
+        value = metrics.get(section)
+        if isinstance(value, dict):
+            compact[section] = {key: value[key] for key in keys if key in value}
+    for key in (
+        "return_pct",
+        "max_drawdown_pct",
+        "profit_factor",
+        "profit_factor_unbounded",
+        "trade_count",
+        "win_rate",
+        "fee_total",
+        "slippage_total",
+    ):
+        if key in metrics:
+            compact[key] = metrics[key]
+    compact["metrics_payload_hash"] = sha256_prefixed(metrics)
+    return compact
+
+
+def _hashed_collection_summary(value: Any) -> Any:
+    if not isinstance(value, (list, tuple)):
+        return value
+    return {
+        "item_count": len(value),
+        "payload_hash": sha256_prefixed(list(value)),
+    }
+
+
+def _compact_execution_reality_summary(summary: Any) -> Any:
+    if not isinstance(summary, dict):
+        return summary
+    compact = {
+        key: summary[key]
+        for key in (
+            "execution_reality_level",
+            "execution_reality_gate_status",
+            "execution_reality_gate_reasons",
+            "execution_reference_policy",
+            "signal_event_count",
+            "fillable_signal_event_count",
+            "filled_execution_count",
+            "failed_execution_count",
+            "skipped_execution_count",
+            "pending_execution_count",
+            "pending_execution_at_end_count",
+        )
+        if key in summary
+    }
+    compact["execution_reality_payload_hash"] = sha256_prefixed(summary)
+    return compact
+
+
+def _compact_regime_gate_result(result: Any) -> Any:
+    if not isinstance(result, dict):
+        return result
+    compact = {
+        key: result[key]
+        for key in (
+            "result",
+            "status",
+            "passed",
+            "reasons",
+            "allowed_live_regimes",
+            "blocked_live_regimes",
+        )
+        if key in result
+    }
+    compact["regime_gate_payload_hash"] = sha256_prefixed(result)
+    return compact
+
+
+def _compact_resource_guard(resource_guard: Any) -> Any:
+    if not isinstance(resource_guard, dict):
+        return resource_guard
+    compact = {
+        key: resource_guard[key]
+        for key in (
+            "status",
+            "reasons",
+            "stage",
+            "split",
+            "scenario",
+            "candles_processed",
+            "decision_count",
+            "signal_count",
+            "trade_count",
+            "closed_trade_count",
+            "retained_decision_count",
+            "retained_equity_point_count",
+            "rss_delta_mb",
+        )
+        if key in resource_guard
+    }
+    compact["resource_guard_payload_hash"] = sha256_prefixed(resource_guard)
+    return compact
+
+
+def _compact_status_payload(payload: Any, *, hash_key: str) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    compact = {
+        key: payload[key]
+        for key in (
+            "status",
+            "result",
+            "passed",
+            "required",
+            "target",
+            "policy_source",
+            "operator_next_step",
+            "reasons",
+        )
+        if key in payload
+    }
+    for key in ("scenario_gates", "artifact_hashes"):
+        value = payload.get(key)
+        if isinstance(value, (list, tuple)):
+            compact[f"{key}_count"] = len(value)
+    compact[hash_key] = sha256_prefixed(payload)
+    return compact
 
 
 def _json_byte_count(payload: dict[str, Any]) -> int:

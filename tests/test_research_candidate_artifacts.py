@@ -12,7 +12,7 @@ from bithumb_bot.paths import PathManager
 from bithumb_bot.research.experiment_manifest import parse_manifest
 from bithumb_bot.research.hashing import sha256_prefixed
 from bithumb_bot.research.validation_protocol import run_research_backtest
-from tests.factories.research_reports import DeterministicResearchEvaluator
+from tests.factories.research_reports import DeterministicResearchEvaluator, assert_fast_research_workload
 
 
 FORBIDDEN_DETAIL_KEYS = {
@@ -143,16 +143,30 @@ def _manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PathManager:
     return PathManager.from_env(Path.cwd())
 
 
+def _run_contract_research_backtest(**kwargs: object) -> dict[str, Any]:
+    report = run_research_backtest(
+        candidate_evaluator=StageTraceContractEvaluator(),
+        **kwargs,  # type: ignore[arg-type]
+    )
+    assert_fast_research_workload(
+        report,
+        max_strategy_runs=12,
+        max_tick_events=144,
+        max_matrix_size=12,
+        max_artifact_write_count=7,
+    )
+    return report
+
+
 @pytest.fixture()
 def summary_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     db_path = tmp_path / "candles.sqlite"
     _create_db(db_path)
     manager = _manager(tmp_path, monkeypatch)
-    report = run_research_backtest(
+    report = _run_contract_research_backtest(
         manifest=parse_manifest(_manifest()),
         db_path=db_path,
         manager=manager,
-        candidate_evaluator=StageTraceContractEvaluator(),
         generated_at="2026-05-03T00:00:00+00:00",
     )
     root = manager.data_dir() / "derived" / "research" / "summary_candidate_artifacts"
