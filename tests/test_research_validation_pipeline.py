@@ -179,6 +179,7 @@ def test_research_validate_cli_dispatches(monkeypatch):
         "candidate_id": "candidate_001",
         "out_path": "/tmp/validation_run.json",
         "mode": "strict",
+        "notification_policy": None,
     }
 
 
