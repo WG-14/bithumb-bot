@@ -59,6 +59,7 @@ from .execution_plan import (
     ResearchWorkUnit,
     build_research_execution_plan,
     build_research_work_unit,
+    precompute_dataset_hashes,
     _estimated_artifact_bytes,
 )
 from .executor import (
@@ -129,6 +130,12 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 _CANDIDATE_SCENARIO_WORKER_CONTEXT: dict[str, Any] | None = None
 FAST_TEST_TIER_ENV = "BITHUMB_TEST_TIER"
 FAST_TEST_TIER_VALUE = "fast"
+PARENT_SERIAL_TIMING_STAGES = {
+    "pre_parallel_hash_materialization",
+    "build_work_tasks",
+    "append_candidate_start_events",
+    "parallel_worker_pool_start",
+}
 
 
 @dataclass(frozen=True)
@@ -382,6 +389,8 @@ def _prefixed_stage_timings(prefix: str, timings: list[dict[str, Any]]) -> list[
         if not stage:
             continue
         if stage == "candidate_profile_hash" or stage.startswith("candidate_profile_hash."):
+            prefixed.append({"stage": stage, **{k: v for k, v in item.items() if k != "stage"}})
+        if stage in PARENT_SERIAL_TIMING_STAGES:
             prefixed.append({"stage": stage, **{k: v for k, v in item.items() if k != "stage"}})
         prefixed.append({"stage": f"{prefix}.{stage}", **{k: v for k, v in item.items() if k != "stage"}})
     return prefixed
@@ -771,6 +780,9 @@ def _execution_observability_payload(
     execution_boundary: dict[str, Any],
     snapshots: dict[str, DatasetSnapshot],
 ) -> dict[str, Any]:
+    worker_pid_set = _observed_worker_pid_set(work_unit_observability)
+    parallel_executor_used = bool(execution_boundary.get("parallel_executor_used"))
+    parallel_worker_timing = _last_stage_timing(stage_timings, "parallel_worker_execution")
     return {
         "stage_timings": stage_timings,
         "work_units": work_unit_observability,
@@ -779,8 +791,58 @@ def _execution_observability_payload(
         "max_workers": manifest.research_run.execution.max_workers,
         "work_unit_type": manifest.research_run.execution.work_unit,
         "approx_snapshot_candle_count": sum(len(snapshot.candles) for snapshot in snapshots.values()),
+        "parallel_executor_used": parallel_executor_used,
+        "research_max_workers_requested": int(
+            execution_boundary.get("research_max_workers_requested")
+            or manifest.research_run.execution.max_workers
+        ),
+        "research_max_workers_effective": int(
+            execution_boundary.get("research_max_workers_effective")
+            or (manifest.research_run.execution.max_workers if parallel_executor_used else 1)
+        ),
+        "effective_process_start_method": execution_boundary.get("effective_process_start_method"),
+        "worker_pid_set": worker_pid_set,
+        "observed_worker_count": len(worker_pid_set) if parallel_executor_used else 0,
+        "parent_serial_stage_timings": [
+            dict(item)
+            for item in stage_timings
+            if str(item.get("stage") or "") in PARENT_SERIAL_TIMING_STAGES
+        ],
+        "parallel_worker_execution_wall_seconds": (
+            parallel_worker_timing.get("wall_seconds") if parallel_worker_timing is not None else None
+        ),
         **execution_boundary,
     }
+
+
+def _observed_worker_pid_set(work_unit_observability: list[dict[str, Any]]) -> list[int]:
+    pids: set[int] = set()
+    for item in work_unit_observability:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("worker_process_evidence")
+        worker_pid = None
+        if isinstance(evidence, dict):
+            worker_pid = evidence.get("worker_pid")
+        if worker_pid is None:
+            worker_pid = item.get("worker_pid")
+        if isinstance(worker_pid, bool) or worker_pid in (None, ""):
+            continue
+        try:
+            pids.add(int(worker_pid))
+        except (TypeError, ValueError):
+            continue
+    return sorted(pids)
+
+
+def _last_stage_timing(stage_timings: list[dict[str, Any]], stage: str) -> dict[str, Any] | None:
+    for item in reversed(stage_timings):
+        if not isinstance(item, dict):
+            continue
+        item_stage = str(item.get("stage") or "")
+        if item_stage == stage or item_stage.endswith(f".{stage}"):
+            return item
+    return None
 
 
 def run_research_backtest(
@@ -1243,9 +1305,12 @@ def _evaluate_candidates(
         "candidate_result_total_bytes": 0,
         "candidate_result_write_wall_seconds": 0.0,
     }
-    build_work_tasks_started = time.perf_counter()
     raw_candidates = iter_parameter_candidates(manifest.parameter_space)
     execution_scenarios = required_execution_scenarios(manifest.execution_model.scenarios)
+    candidate_count = len(raw_candidates)
+    scenario_count = len(execution_scenarios)
+    split_count = len(snapshots)
+    expected_work_task_count = candidate_count * scenario_count
     aggregates: dict[str, dict[str, Any]] = {}
     manifest_hash = manifest.manifest_hash()
     dataset_hash = combined_dataset_fingerprint(tuple(snapshots.values()))
@@ -1267,8 +1332,8 @@ def _evaluate_candidates(
     _emit_progress(
         progress_callback,
         stage="workload",
-        candidate_count=len(raw_candidates),
-        scenario_count=len(execution_scenarios),
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
         split_candle_counts=",".join(
             f"{split_name}:{len(snapshot.candles)}" for split_name, snapshot in sorted(snapshots.items())
         ),
@@ -1285,14 +1350,55 @@ def _evaluate_candidates(
         calibration_required=manifest.execution_model.calibration_required,
     )
 
+    hash_materialization_started = time.perf_counter()
+    _emit_progress(
+        progress_callback,
+        stage="pre_parallel_hash_materialization_start",
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
+        work_task_count=expected_work_task_count,
+        split_count=split_count,
+    )
+    dataset_hashes = precompute_dataset_hashes(snapshots)
+    hash_materialization_elapsed = time.perf_counter() - hash_materialization_started
+    substage_timings.append(
+        _stage_timing(
+            "pre_parallel_hash_materialization",
+            hash_materialization_started,
+            candidate_count=candidate_count,
+            scenario_count=scenario_count,
+            work_task_count=expected_work_task_count,
+            split_count=split_count,
+            dataset_hash_call_count=split_count,
+        )
+    )
+    _emit_progress(
+        progress_callback,
+        stage="pre_parallel_hash_materialization_complete",
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
+        work_task_count=expected_work_task_count,
+        split_count=split_count,
+        elapsed_s=round(hash_materialization_elapsed, 3),
+    )
+
     work_tasks: list[dict[str, Any]] = []
     simulation_seed_scope_hash = manifest.simulation_seed_scope_hash()
+    build_work_tasks_started = time.perf_counter()
+    _emit_progress(
+        progress_callback,
+        stage="build_work_tasks_start",
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
+        work_task_count=expected_work_task_count,
+        split_count=split_count,
+    )
     for scenario_index, scenario in execution_scenarios:
         scenario_id = _scenario_id(scenario, scenario_index)
         for index, params in enumerate(raw_candidates):
             work_unit = build_research_work_unit(
                 manifest=manifest,
-                snapshots=snapshots,
+                dataset_hashes=dataset_hashes,
                 params=params,
                 candidate_index=index,
                 scenario=scenario,
@@ -1311,8 +1417,26 @@ def _evaluate_candidates(
                     "work_unit": work_unit,
                 }
             )
+    build_work_tasks_elapsed = time.perf_counter() - build_work_tasks_started
     substage_timings.append(
-        _stage_timing("build_work_tasks", build_work_tasks_started, task_count=len(work_tasks))
+        _stage_timing(
+            "build_work_tasks",
+            build_work_tasks_started,
+            candidate_count=candidate_count,
+            scenario_count=scenario_count,
+            work_task_count=len(work_tasks),
+            split_count=split_count,
+            task_count=len(work_tasks),
+        )
+    )
+    _emit_progress(
+        progress_callback,
+        stage="build_work_tasks_complete",
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
+        work_task_count=len(work_tasks),
+        split_count=split_count,
+        elapsed_s=round(build_work_tasks_elapsed, 3),
     )
 
     evaluator = candidate_evaluator or ProductionCandidateScenarioEvaluator()
@@ -1325,6 +1449,15 @@ def _evaluate_candidates(
     )
     if parallel_executor_used:
         append_start_started = time.perf_counter()
+        append_start_bytes_before = int(getattr(artifact_context, "total_bytes", 0) or 0)
+        _emit_progress(
+            progress_callback,
+            stage="candidate_start_journal_append_start",
+            candidate_count=candidate_count,
+            scenario_count=scenario_count,
+            work_task_count=len(work_tasks),
+            split_count=split_count,
+        )
         for task in work_tasks:
             _append_candidate_event(
                 manager=manager,
@@ -1339,8 +1472,31 @@ def _evaluate_candidates(
                     "work_unit_hash": task["work_unit"].work_unit_hash,
                 },
             )
+        append_start_elapsed = time.perf_counter() - append_start_started
+        append_start_bytes_after = int(getattr(artifact_context, "total_bytes", 0) or append_start_bytes_before)
+        append_start_bytes_written = max(0, append_start_bytes_after - append_start_bytes_before)
         substage_timings.append(
-            _stage_timing("append_candidate_start_events", append_start_started, event_count=len(work_tasks))
+            _stage_timing(
+                "append_candidate_start_events",
+                append_start_started,
+                candidate_count=candidate_count,
+                scenario_count=scenario_count,
+                work_task_count=len(work_tasks),
+                split_count=split_count,
+                event_count=len(work_tasks),
+                bytes_written=append_start_bytes_written,
+            )
+        )
+        _emit_progress(
+            progress_callback,
+            stage="candidate_start_journal_append_complete",
+            candidate_count=candidate_count,
+            scenario_count=scenario_count,
+            work_task_count=len(work_tasks),
+            split_count=split_count,
+            event_count=len(work_tasks),
+            bytes_written=append_start_bytes_written,
+            elapsed_s=round(append_start_elapsed, 3),
         )
         worker_context = {
             "manifest": manifest,
@@ -1351,6 +1507,29 @@ def _evaluate_candidates(
             "raw_candidate_count": len(raw_candidates),
         }
         worker_started = time.perf_counter()
+        _emit_progress(
+            progress_callback,
+            stage="parallel_worker_pool_start",
+            candidate_count=candidate_count,
+            scenario_count=scenario_count,
+            work_task_count=len(work_tasks),
+            split_count=split_count,
+            max_workers=manifest.research_run.execution.max_workers,
+            process_start_method=manifest.research_run.execution.process_start_method,
+            elapsed_s=0.0,
+        )
+        substage_timings.append(
+            {
+                "stage": "parallel_worker_pool_start",
+                "wall_seconds": 0.0,
+                "candidate_count": candidate_count,
+                "scenario_count": scenario_count,
+                "work_task_count": len(work_tasks),
+                "split_count": split_count,
+                "max_workers": manifest.research_run.execution.max_workers,
+                "process_start_method": manifest.research_run.execution.process_start_method,
+            }
+        )
         raw_results = execute_research_work_units_parallel(
             tasks=work_tasks,
             worker=_candidate_scenario_worker_from_context,
@@ -1383,7 +1562,16 @@ def _evaluate_candidates(
     else:
         raw_results = []
         append_start_wall_seconds = 0.0
+        append_start_bytes_before = int(getattr(artifact_context, "total_bytes", 0) or 0)
         worker_wall_seconds = 0.0
+        _emit_progress(
+            progress_callback,
+            stage="candidate_start_journal_append_start",
+            candidate_count=candidate_count,
+            scenario_count=scenario_count,
+            work_task_count=len(work_tasks),
+            split_count=split_count,
+        )
         for task in work_tasks:
             work_unit = task["work_unit"]
             if not isinstance(work_unit, ResearchWorkUnit):
@@ -1454,8 +1642,32 @@ def _evaluate_candidates(
             {
                 "stage": "append_candidate_start_events",
                 "wall_seconds": round(append_start_wall_seconds, 6),
+                "candidate_count": candidate_count,
+                "scenario_count": scenario_count,
+                "work_task_count": len(work_tasks),
+                "split_count": split_count,
                 "event_count": len(work_tasks),
+                "bytes_written": max(
+                    0,
+                    int(getattr(artifact_context, "total_bytes", 0) or append_start_bytes_before)
+                    - append_start_bytes_before,
+                ),
             }
+        )
+        _emit_progress(
+            progress_callback,
+            stage="candidate_start_journal_append_complete",
+            candidate_count=candidate_count,
+            scenario_count=scenario_count,
+            work_task_count=len(work_tasks),
+            split_count=split_count,
+            event_count=len(work_tasks),
+            bytes_written=max(
+                0,
+                int(getattr(artifact_context, "total_bytes", 0) or append_start_bytes_before)
+                - append_start_bytes_before,
+            ),
+            elapsed_s=round(append_start_wall_seconds, 3),
         )
         substage_timings.append(
             {
@@ -4658,6 +4870,7 @@ def _report_workload_estimate(
             + (work_unit_count * split_count if full_decisions else 0)
         )
         estimated_hash_payload_bytes = snapshot_candles * 128 + work_unit_count * split_count * 512 + 4096
+        pre_parallel_dataset_hash_payload_bytes = snapshot_candles * 128 + split_count * 2048
         estimate = {
             "schema_version": 1,
             "candidate_count": len(candidates),
@@ -4682,6 +4895,11 @@ def _report_workload_estimate(
             "estimated_audit_stream_rows": estimated_audit_stream_rows,
             "estimated_artifact_write_count": estimated_artifact_write_count,
             "estimated_hash_payload_bytes": estimated_hash_payload_bytes,
+            "pre_parallel_work_unit_count": work_unit_count,
+            "pre_parallel_split_hash_count": split_count,
+            "pre_parallel_dataset_hash_payload_bytes": pre_parallel_dataset_hash_payload_bytes,
+            "pre_parallel_dataset_hash_call_count": split_count,
+            "pre_parallel_parent_serial_estimate_status": "precomputed_split_hashes",
             "estimated_artifact_bytes": _estimated_artifact_bytes(
                 candidate_count=len(candidates),
                 scenario_count=scenario_count,

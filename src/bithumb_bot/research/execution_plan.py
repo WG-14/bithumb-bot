@@ -75,6 +75,7 @@ def build_research_execution_plan(
     candidates = iter_parameter_candidates(manifest.parameter_space)
     execution_scenarios = required_execution_scenarios(manifest.execution_model.scenarios)
     split_names = _ordered_split_names(snapshots)
+    dataset_hashes = precompute_dataset_hashes(snapshots)
     split_count = len(split_names)
     walk_forward_split_count = sum(1 for split_name in split_names if split_name.startswith("window_"))
     strategy_run_count = len(candidates) * len(execution_scenarios) * split_count
@@ -101,7 +102,7 @@ def build_research_execution_plan(
         "manifest_hash": manifest.manifest_hash(),
         "simulation_seed_scope_hash": manifest.simulation_seed_scope_hash(),
         "experiment_id": manifest.experiment_id,
-        "dataset_hashes": {name: snapshots[name].content_hash() for name in split_names},
+        "dataset_hashes": {name: dataset_hashes[name] for name in split_names},
         "dataset_quality_hash": combined_dataset_quality_hash(tuple(quality_reports.values())),
         "candidate_count": len(candidates),
         "scenario_count": len(execution_scenarios),
@@ -145,6 +146,13 @@ def build_research_execution_plan(
         scenario_count=len(execution_scenarios),
         split_count=split_count,
     )
+    pre_parallel_dataset_hash_payload_bytes = _estimated_pre_parallel_dataset_hash_payload_bytes(
+        snapshots=snapshots,
+        split_names=split_names,
+    )
+    pre_parallel_work_unit_count = len(candidates) * len(execution_scenarios)
+    pre_parallel_split_hash_count = split_count
+    pre_parallel_dataset_hash_call_count = pre_parallel_split_hash_count
     estimated_artifact_bytes = _estimated_artifact_bytes(
         candidate_count=len(candidates),
         scenario_count=len(execution_scenarios),
@@ -179,6 +187,11 @@ def build_research_execution_plan(
         "estimated_audit_stream_rows": estimated_audit_stream_rows,
         "estimated_artifact_write_count": estimated_artifact_write_count,
         "estimated_hash_payload_bytes": estimated_hash_payload_bytes,
+        "pre_parallel_work_unit_count": pre_parallel_work_unit_count,
+        "pre_parallel_split_hash_count": pre_parallel_split_hash_count,
+        "pre_parallel_dataset_hash_payload_bytes": pre_parallel_dataset_hash_payload_bytes,
+        "pre_parallel_dataset_hash_call_count": pre_parallel_dataset_hash_call_count,
+        "pre_parallel_parent_serial_estimate_status": "precomputed_split_hashes",
         "estimated_artifact_bytes": estimated_artifact_bytes,
         "estimated_artifact_detail_policy": (
             "summary_bounded_candidate_artifacts"
@@ -200,7 +213,8 @@ def build_research_execution_plan(
 def build_research_work_unit(
     *,
     manifest: ExperimentManifest,
-    snapshots: dict[str, DatasetSnapshot],
+    dataset_hashes: dict[str, str] | None = None,
+    snapshots: dict[str, DatasetSnapshot] | None = None,
     params: dict[str, Any],
     candidate_index: int,
     scenario: ExecutionScenario,
@@ -211,7 +225,11 @@ def build_research_work_unit(
     split_name: str = "candidate_scenario",
 ) -> ResearchWorkUnit:
     candidate = candidate_id(params, candidate_index)
-    dataset_hashes = {name: snapshot.content_hash() for name, snapshot in sorted(snapshots.items())}
+    if dataset_hashes is None:
+        if snapshots is None:
+            raise ValueError("dataset_hashes_required")
+        dataset_hashes = _compat_dataset_hashes_from_snapshot_metadata(snapshots)
+    ordered_dataset_hashes = {name: dataset_hashes[name] for name in sorted(dataset_hashes)}
     seed_context = {
         "simulation_seed_scope_hash": simulation_seed_scope_hash or manifest_hash,
         "scenario_id": scenario_id,
@@ -225,7 +243,7 @@ def build_research_work_unit(
         "scenario_id": scenario_id,
         "split_name": split_name,
         "parameter_values": params,
-        "dataset_content_hash": sha256_prefixed(dataset_hashes),
+        "dataset_content_hash": sha256_prefixed(ordered_dataset_hashes),
         "portfolio_policy_hash": manifest.portfolio_policy_hash(),
         "simulation_policy_hash": manifest.simulation_policy_hash(),
         "execution_model_hash": sha256_prefixed(scenario.as_dict()),
@@ -281,6 +299,32 @@ def build_run_environment(
         "work_unit_type": manifest.research_run.execution.work_unit,
         "db_path_fingerprint": sha256_prefixed({"db_path": resolved_db_path}),
         "manifest_hash": manifest.manifest_hash(),
+    }
+
+
+def precompute_dataset_hashes(snapshots: dict[str, DatasetSnapshot]) -> dict[str, str]:
+    return {
+        split_name: snapshot.content_hash()
+        for split_name, snapshot in sorted(snapshots.items())
+    }
+
+
+def _compat_dataset_hashes_from_snapshot_metadata(snapshots: dict[str, DatasetSnapshot]) -> dict[str, str]:
+    return {
+        split_name: str(
+            snapshot.source_content_hash
+            or sha256_prefixed(
+                {
+                    "snapshot_id": snapshot.snapshot_id,
+                    "source": snapshot.source,
+                    "market": snapshot.market,
+                    "interval": snapshot.interval,
+                    "split_name": snapshot.split_name,
+                    "date_range": snapshot.date_range.as_dict(),
+                }
+            )
+        )
+        for split_name, snapshot in sorted(snapshots.items())
     }
 
 
@@ -359,6 +403,21 @@ def _estimated_hash_payload_bytes(
         + int(candidate_count) * int(scenario_count) * int(split_count) * 512
         + 4096
     )
+
+
+def _estimated_pre_parallel_dataset_hash_payload_bytes(
+    *,
+    snapshots: dict[str, DatasetSnapshot],
+    split_names: list[str],
+) -> int:
+    candle_payload_bytes = 0
+    for split_name in split_names:
+        snapshot = snapshots[split_name]
+        candle_payload_bytes += len(snapshot.candles) * 128
+        candle_payload_bytes += len(snapshot.top_of_book_quotes) * 96
+        candle_payload_bytes += len(snapshot.top_of_book_event_quotes) * 96
+        candle_payload_bytes += len(snapshot.orderbook_depth_snapshots) * 256
+    return int(candle_payload_bytes + len(split_names) * 2048)
 
 
 def _estimated_artifact_bytes(

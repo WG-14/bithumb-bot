@@ -17,7 +17,7 @@ from bithumb_bot.research.artifact_store import (
 )
 from bithumb_bot.research.audit_trail import AuditTraceScope, AuditTrailPolicy, write_trace_manifest
 from bithumb_bot.research.experiment_manifest import ResearchResourceLimits, parse_manifest
-from bithumb_bot.research.execution_plan import _estimated_artifact_bytes
+from bithumb_bot.research.execution_plan import _estimated_artifact_bytes, build_research_execution_plan
 from bithumb_bot.research.experiment_registry import (
     EXPERIMENT_REGISTRY_BUDGET_POLICY,
     reserve_research_attempt,
@@ -31,6 +31,9 @@ from bithumb_bot.research.report_writer import write_research_report
 from bithumb_bot.research.return_panel import write_candidate_return_panel
 from bithumb_bot.research.statistical_selection import write_statistical_selection_evidence
 from bithumb_bot.research.validation_protocol import _append_candidate_event
+from bithumb_bot.research import validation_protocol
+from tests.factories.research_reports import DeterministicResearchEvaluator
+from tests.test_research_execution_plan import _quality_report, _snapshot
 from tests.policy.research_runner_policy import research_workload_summary
 from tests.test_research_backtest_reproducibility import _manifest
 
@@ -110,6 +113,84 @@ def test_summary_artifact_estimate_uses_bounded_candidate_size() -> None:
 
     assert summary < full
     assert summary > common["estimated_hash_payload_bytes"]
+
+
+def test_execution_plan_reports_pre_parallel_workload_fields() -> None:
+    manifest = parse_manifest(_manifest())
+    snapshots = {name: _snapshot(name) for name in ("train", "validation", "final_holdout")}
+    quality_reports = {name: _quality_report(name) for name in snapshots}
+
+    plan = build_research_execution_plan(
+        manifest=manifest,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        db_path="/tmp/unit.sqlite",
+        repository_version="test",
+        created_at="2026-06-11T00:00:00+00:00",
+    )
+    estimate = plan.payload["workload_estimate"]
+
+    assert estimate["pre_parallel_work_unit_count"] == 1
+    assert estimate["pre_parallel_split_hash_count"] == 3
+    assert estimate["pre_parallel_dataset_hash_call_count"] == 3
+    assert "pre_parallel_dataset_hash_payload_bytes" in estimate
+    assert estimate["pre_parallel_parent_serial_estimate_status"] == "precomputed_split_hashes"
+
+
+def test_research_workload_budget_script_fails_pre_parallel_hash_call_excess(tmp_path: Path) -> None:
+    estimate_path = tmp_path / "estimate.json"
+    estimate = {
+        "estimated_tick_events": 0,
+        "estimated_audit_stream_rows": 0,
+        "estimated_artifact_write_count": 0,
+        "estimated_hash_payload_bytes": 0,
+        "estimated_artifact_bytes": 0,
+        "estimated_artifact_file_count": 0,
+        "estimated_plugin_runtime_us": 0,
+        "pre_parallel_work_unit_count": 0,
+        "pre_parallel_dataset_hash_payload_bytes": 0,
+        "pre_parallel_dataset_hash_call_count": 13,
+    }
+    estimate_path.write_text(json.dumps(estimate), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_research_workload_budget.py",
+            "--suite",
+            "fast",
+            "--estimate-json",
+            str(estimate_path),
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "pre_parallel_dataset_hash_call_count" in result.stderr
+
+
+def test_candidate_start_append_is_timed_and_counted(tmp_path: Path, monkeypatch) -> None:
+    manifest = parse_manifest(_manifest())
+    snapshots = {name: _snapshot(name) for name in ("train", "validation", "final_holdout")}
+    quality_reports = {name: _quality_report(name) for name in snapshots}
+
+    result = validation_protocol._evaluate_candidates(
+        manifest=manifest,
+        manager=_paper_manager(tmp_path, monkeypatch),
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        include_walk_forward=False,
+        execution_calibration=None,
+        candidate_evaluator=DeterministicResearchEvaluator(),
+    )
+
+    timing = next(item for item in result.substage_timings if item["stage"] == "append_candidate_start_events")
+    assert timing["event_count"] == 1
+    assert timing["work_task_count"] == 1
+    assert "bytes_written" in timing
 
 
 def test_run_wide_artifact_context_accumulates_trace_scopes_and_reports(tmp_path: Path, monkeypatch) -> None:

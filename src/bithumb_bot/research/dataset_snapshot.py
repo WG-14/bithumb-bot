@@ -125,7 +125,12 @@ class DatasetSnapshot:
         }
 
     def content_hash(self) -> str:
-        return sha256_prefixed(self.fingerprint_payload())
+        cached = getattr(self, "_content_hash_cache", None)
+        if cached is not None:
+            return str(cached)
+        value = sha256_prefixed(self.fingerprint_payload())
+        object.__setattr__(self, "_content_hash_cache", value)
+        return value
 
     def top_of_book_for_ts(self, ts: int) -> TopOfBookQuote | None:
         if not self.top_of_book_quotes:

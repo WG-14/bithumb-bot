@@ -18,6 +18,9 @@ REQUIRED_LIMIT_FIELDS = (
     "max_estimated_artifact_bytes",
     "max_estimated_artifact_file_count",
     "max_estimated_plugin_runtime_us",
+    "max_pre_parallel_work_unit_count",
+    "max_pre_parallel_dataset_hash_payload_bytes",
+    "max_pre_parallel_dataset_hash_call_count",
 )
 ESTIMATE_TO_LIMIT_FIELDS = (
     ("estimated_tick_events", "max_estimated_tick_events"),
@@ -27,6 +30,9 @@ ESTIMATE_TO_LIMIT_FIELDS = (
     ("estimated_artifact_bytes", "max_estimated_artifact_bytes"),
     ("estimated_artifact_file_count", "max_estimated_artifact_file_count"),
     ("estimated_plugin_runtime_us", "max_estimated_plugin_runtime_us"),
+    ("pre_parallel_work_unit_count", "max_pre_parallel_work_unit_count"),
+    ("pre_parallel_dataset_hash_payload_bytes", "max_pre_parallel_dataset_hash_payload_bytes"),
+    ("pre_parallel_dataset_hash_call_count", "max_pre_parallel_dataset_hash_call_count"),
 )
 
 
@@ -105,6 +111,15 @@ def main() -> int:
             "estimated_artifact_bytes": summary["total_estimated_artifact_bytes"],
             "estimated_artifact_file_count": summary["total_estimated_artifact_file_count"],
             "estimated_plugin_runtime_us": summary.get("total_estimated_plugin_runtime_us", 0),
+            "pre_parallel_work_unit_count": summary.get("total_pre_parallel_work_unit_count", 0),
+            "pre_parallel_dataset_hash_payload_bytes": summary.get(
+                "total_pre_parallel_dataset_hash_payload_bytes",
+                0,
+            ),
+            "pre_parallel_dataset_hash_call_count": summary.get(
+                "total_pre_parallel_dataset_hash_call_count",
+                0,
+            ),
         }
 
     violations = check_estimate(estimate, budgets[args.suite])
@@ -118,7 +133,12 @@ def main() -> int:
 
 
 def _non_negative_int(payload: dict[str, Any], field: str, *, source: str) -> int:
-    if field == "estimated_plugin_runtime_us" and field not in payload:
+    if field in {
+        "estimated_plugin_runtime_us",
+        "pre_parallel_work_unit_count",
+        "pre_parallel_dataset_hash_payload_bytes",
+        "pre_parallel_dataset_hash_call_count",
+    } and field not in payload:
         return 0
     value = payload.get(field)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:

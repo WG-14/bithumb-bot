@@ -248,6 +248,29 @@ def cmd_research_walk_forward(
     return rc
 
 
+def cmd_research_workload_estimate(*, manifest_path: str, as_json: bool = False) -> int:
+    try:
+        from .workload_estimate import build_manifest_workload_estimate_from_path
+
+        payload = build_manifest_workload_estimate_from_path(manifest_path)
+    except (ManifestValidationError, OSError, ValueError) as exc:
+        print(f"[RESEARCH-WORKLOAD-ESTIMATE] error={exc}")
+        return 1
+    if as_json:
+        print(json.dumps(payload, sort_keys=True, indent=2))
+    else:
+        print(
+            "[RESEARCH-WORKLOAD-ESTIMATE] "
+            f"experiment_id={payload['experiment_id']} "
+            f"candidate_count={payload['candidate_count']} "
+            f"scenario_count={payload['scenario_count']} "
+            f"split_count={payload['split_count']} "
+            f"work_unit_count={payload['work_unit_count']} "
+            f"pre_parallel_dataset_hash_call_count={payload['pre_parallel_dataset_hash_call_count']}"
+        )
+    return 0
+
+
 def _write_artifact_budget_failure_payload(
     *,
     manager: PathManager,

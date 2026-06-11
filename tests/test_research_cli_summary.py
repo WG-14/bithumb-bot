@@ -207,6 +207,24 @@ def test_fail_report_summary_includes_top_fail_reasons() -> None:
     }
 
 
+def test_research_backtest_progress_prints_parent_serial_stages(capsys) -> None:
+    _print_research_backtest_progress(
+        {
+            "stage": "build_work_tasks_complete",
+            "candidate_count": 5,
+            "scenario_count": 2,
+            "work_task_count": 10,
+            "split_count": 3,
+            "elapsed_s": 1.25,
+        }
+    )
+
+    out = capsys.readouterr().out
+    assert "stage=build_work_tasks_complete" in out
+    assert "elapsed_s=1.25" in out
+    assert "work_task_count=10" in out
+
+
 def test_research_command_finished_helper_emits_success_notification(monkeypatch) -> None:
     calls = []
     sent_result = NotificationResult(
