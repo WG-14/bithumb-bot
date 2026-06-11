@@ -1955,13 +1955,15 @@ def test_classify_persistent_missing_cli_output_and_path_policy(
 
 
 def test_console_entrypoint_propagates_cli_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
     import sys
     from bithumb_bot.bootstrap import run_cli
 
     monkeypatch.setattr(sys, "argv", ["bithumb-bot", "research-readiness", "--manifest", "missing.json"])
     monkeypatch.setattr("bithumb_bot.bootstrap.bootstrap_argv", lambda argv: argv)
     monkeypatch.setattr("bithumb_bot.observability.configure_runtime_logging", lambda: None)
-    monkeypatch.setattr("bithumb_bot.cli.main", lambda: 1)
+    cli_main_module = importlib.import_module("bithumb_bot.cli.main")
+    monkeypatch.setattr(cli_main_module, "main", lambda argv=None: 1)
 
     with pytest.raises(SystemExit) as exc:
         run_cli()

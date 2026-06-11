@@ -82,16 +82,19 @@ def test_bootstrap_is_consistent_across_all_entrypoints(tmp_path, monkeypatch):
     def _run_and_capture(command: str):
         monkeypatch.setenv("BITHUMB_ENV_FILE", str(env_file))
         monkeypatch.delenv("BOOTSTRAP_SHARED", raising=False)
-        monkeypatch.setattr("bithumb_bot.cli.main", lambda: None)
+        cli_main_module = importlib.import_module("bithumb_bot.cli.main")
+        monkeypatch.setattr(cli_main_module, "main", lambda argv=None: 0)
         monkeypatch.setattr("bithumb_bot.bootstrap._load_dotenv", fake_load_dotenv)
 
-        if command == "bot.py":
-            runpy.run_path(str(bot_entry), run_name="__main__")
-        elif command == "main.py":
-            runpy.run_path(str(main_entry), run_name="__main__")
-        else:
-            runpy.run_module("bithumb_bot", run_name="__main__")
+        with pytest.raises(SystemExit) as exc:
+            if command == "bot.py":
+                runpy.run_path(str(bot_entry), run_name="__main__")
+            elif command == "main.py":
+                runpy.run_path(str(main_entry), run_name="__main__")
+            else:
+                runpy.run_module("bithumb_bot", run_name="__main__")
 
+        assert exc.value.code == 0
         return os.environ.get("BOOTSTRAP_SHARED")
 
     assert _run_and_capture("bot.py") == "ok"
