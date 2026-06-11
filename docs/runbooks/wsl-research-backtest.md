@@ -129,6 +129,52 @@ grep -q 'bithumb-bot' pyproject.toml
 uv run bithumb-bot --help >/dev/null
 ```
 
+### Same-Shell Runtime Preflight
+
+Pin runtime variables in the same shell before creating manifests or running
+readiness, backtest, or validation commands. Do not rely on a previous terminal
+tab, shell profile, or copied path fragment.
+
+Concrete `$HOME/bithumb-runtime` example:
+
+```bash
+cd ~/work/bithumb-bot
+
+RUNTIME_ROOT="$HOME/bithumb-runtime"
+export BITHUMB_ENV_FILE="$RUNTIME_ROOT/env/paper.research.env"
+export DATA_ROOT="$RUNTIME_ROOT/data"
+export NTFY_TOPIC=bithumb-bot-dnjsckd5025
+
+DB_PATH="$DATA_ROOT/paper/trades/paper.sqlite"
+MANIFEST_DIR="$DATA_ROOT/paper/reports/research/manifests"
+READINESS_DIR="$DATA_ROOT/paper/reports/research/readiness"
+DIAG_DIR="$DATA_ROOT/paper/reports/research/diagnostic"
+
+mkdir -p "$MANIFEST_DIR" "$READINESS_DIR" "$DIAG_DIR"
+
+echo "BITHUMB_ENV_FILE=$BITHUMB_ENV_FILE"
+echo "DATA_ROOT=$DATA_ROOT"
+echo "DB_PATH=$DB_PATH"
+echo "MANIFEST_DIR=$MANIFEST_DIR"
+
+test -f "$BITHUMB_ENV_FILE" || { echo "missing env file: $BITHUMB_ENV_FILE"; exit 1; }
+test -f "$DB_PATH" || { echo "missing DB: $DB_PATH"; exit 1; }
+test -d "$MANIFEST_DIR" || { echo "missing MANIFEST_DIR: $MANIFEST_DIR"; exit 1; }
+```
+
+Expected path shape:
+
+```text
+DATA_ROOT=/home/<user>/bithumb-runtime/data
+DB_PATH=/home/<user>/bithumb-runtime/data/paper/trades/paper.sqlite
+MANIFEST_DIR=/home/<user>/bithumb-runtime/data/paper/reports/research/manifests
+```
+
+Stop if any path resolves to `/paper/...`, `/reports/...`, the Git repository,
+or an empty string. That means the runtime variables were not pinned in the
+current shell, and continuing risks writing manifests or reports to the wrong
+place.
+
 ## Manifest Selection
 
 Repository files under `examples/research/*.json` are examples:
@@ -230,6 +276,43 @@ resource budget or explicit cap is required:
     "work_unit": "candidate_scenario"
   }
 }
+```
+
+This is a manifest JSON fragment, not a Bash command. Do not paste only this
+fragment into the shell. Write it into a manifest file with
+`cat > "$MANIFEST" <<EOF ... EOF`, copy it from a reviewed example manifest, or
+generate it with `jq`.
+
+Bad:
+
+```bash
+"research_run": {
+  "execution": {
+    "max_workers": 8
+  }
+}
+```
+
+That kind of paste can produce shell errors such as
+`research_run:: command not found` or `max_workers:: command not found`.
+
+Good:
+
+```bash
+cat > "$MANIFEST" <<EOF
+{
+  "experiment_id": "example_parallel_w8",
+  "strategy_name": "sma_with_filter",
+  "research_run": {
+    "execution": {
+      "mode": "parallel",
+      "max_workers": 8,
+      "process_start_method": "auto_safe",
+      "work_unit": "candidate_scenario"
+    }
+  }
+}
+EOF
 ```
 
 See `Parallel Research on WSL` below for effective-worker interpretation and
@@ -650,11 +733,40 @@ Treat these observed gaps as persistent dataset-quality evidence unless repaired
 
 ## Report Inspection Commands
 
+Prefer the report path emitted by the CLI log:
+
+```bash
+REPORT="$(grep -o 'report_path=.*' "$BACKTEST_LOG" | tail -1 | cut -d= -f2-)"
+echo "$REPORT"
+test -f "$REPORT"
+```
+
+For probe logs:
+
+```bash
+REPORT="$(grep -o 'report_path=.*' "$PROBE_LOG" | tail -1 | cut -d= -f2-)"
+echo "$REPORT"
+test -f "$REPORT"
+```
+
+If the log is unavailable, use mtime as the fallback. Do not use lexicographic
+path sort because it can select the wrong report:
+
+```bash
+REPORT="$(find "$DATA_ROOT/paper/reports/research" \
+  -name backtest_report.json \
+  -printf '%T@ %p\n' \
+  | sort -n \
+  | tail -1 \
+  | cut -d' ' -f2-)"
+
+echo "$REPORT"
+test -f "$REPORT"
+```
+
 Backtest report inspection:
 
 ```bash
-REPORT="$DATA_ROOT/paper/reports/research/<experiment_id>/backtest_report.json"
-
 jq '{
   manifest_hash,
   dataset_content_hash,
@@ -669,6 +781,27 @@ jq '{
   next_action
 }' "$REPORT"
 ```
+
+Inspect execution policy and observability on parallel runs:
+
+```bash
+jq '{
+  execution_policy,
+  execution_plan: {
+    execution_mode: .execution_plan.execution_mode,
+    max_workers: .execution_plan.max_workers,
+    work_unit_type: .execution_plan.work_unit_type,
+    estimated_strategy_runs: .execution_plan.estimated_strategy_runs,
+    candidate_count: .execution_plan.candidate_count,
+    scenario_count: .execution_plan.scenario_count
+  },
+  run_environment,
+  execution_observability
+}' "$REPORT"
+```
+
+If these fields are all null, the first suspicion should be that the wrong
+report file was selected.
 
 Validation run inspection:
 
@@ -730,19 +863,23 @@ that 8 workers actually ran.
 Optional caps:
 
 ```bash
-export BITHUMB_RESEARCH_MAX_WORKERS=4
-export BITHUMB_TOTAL_PROCESS_BUDGET=6
+export BITHUMB_RESEARCH_MAX_WORKERS=8
+export BITHUMB_TOTAL_PROCESS_BUDGET=8
 ```
+
+These caps may be left unset when no cap is needed. Values below 8 are
+low-resource diagnostic exceptions, not the normal WSL research path. Name
+low-resource exceptions explicitly in the manifest name, `experiment_id`, and
+operator notes.
 
 Actual or effective workers may be lower than requested because of
 `BITHUMB_RESEARCH_MAX_WORKERS`, `BITHUMB_TOTAL_PROCESS_BUDGET`, WSL resource
 limits, or too few candidate/scenario work units. The generated report's
 `execution_observability` is the evidence for actual execution.
 
-Inspect the latest generated report:
+Inspect the generated report selected from the CLI log or mtime fallback:
 
 ```bash
-REPORT="$(find "$DATA_ROOT/paper/reports/research" -name backtest_report.json -print | sort | tail -1)"
 jq '.execution_observability' "$REPORT"
 ```
 
@@ -757,6 +894,170 @@ Check at least:
 - `requested_process_start_method`
 - `effective_process_start_method`
 - `work_units`
+
+### 8-Worker Parallel Probe Before Large Sweeps
+
+Before a large parameter sweep, run a small probe that still requests
+`max_workers=8` but uses a small parameter grid. The goal is not strategy
+quality. The goal is verifying the WSL shell, manifest, process start method,
+worker wiring, and report path.
+
+Create a probe manifest:
+
+```bash
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+PROBE_MANIFEST="$MANIFEST_DIR/channel_breakout_parallel_probe_w8_$RUN_TS.json"
+
+cat > "$PROBE_MANIFEST" <<EOF
+{
+  "experiment_id": "channel_breakout_parallel_probe_w8_$RUN_TS",
+  "hypothesis": "8-worker WSL process and report-path probe; not strategy-quality evidence",
+  "strategy_name": "channel_breakout",
+  "deployment_tier": "research_only",
+  "market": "KRW-BTC",
+  "interval": "1m",
+  "dataset": {
+    "source": "sqlite_candles",
+    "snapshot_id": "clean_segments_without_missing_candles_v1",
+    "train": {"start": "2024-01-05T00:00:00Z", "end": "2024-01-07T23:59:00Z"},
+    "validation": {"start": "2024-10-14T00:00:00Z", "end": "2024-10-16T23:59:00Z"}
+  },
+  "parameter_space": {
+    "ENTRY_MODE": ["immediate_breakout", "delayed_confirmation"],
+    "CONFIRMATION_WINDOW_MIN": [1, 2],
+    "PULLBACK_RATIO": [0.0, 0.001],
+    "COOLDOWN_MIN": [0, 3],
+    "CHANNEL_WINDOW_MIN": [45],
+    "BREAKOUT_BUFFER_PCT": [0.001],
+    "STOP_LOSS_PCT": [0.01],
+    "TAKE_PROFIT_PCT": [0.02],
+    "MAX_HOLD_MIN": [240]
+  },
+  "cost_model": {"fee_bps": 5, "slippage_bps": 5},
+  "acceptance_gate": {
+    "walk_forward_required": false,
+    "min_trades": 1
+  },
+  "research_run": {
+    "execution": {
+      "mode": "parallel",
+      "max_workers": 8,
+      "process_start_method": "auto_safe",
+      "work_unit": "candidate_scenario"
+    }
+  }
+}
+EOF
+```
+
+Probe grid shape:
+
+```text
+ENTRY_MODE = ["immediate_breakout", "delayed_confirmation"]
+CONFIRMATION_WINDOW_MIN = [1, 2]
+PULLBACK_RATIO = [0.0, 0.001]
+COOLDOWN_MIN = [0, 3]
+```
+
+All other listed parameters are single-valued. That yields
+`candidate_count=16`, `scenario_count=2`, and `work_units=32`.
+
+Check the manifest math and worker request:
+
+```bash
+jq '{
+  experiment_id,
+  candidate_count: (
+    (.parameter_space.ENTRY_MODE | length)
+    * (.parameter_space.CONFIRMATION_WINDOW_MIN | length)
+    * (.parameter_space.PULLBACK_RATIO | length)
+    * (.parameter_space.COOLDOWN_MIN | length)
+    * (.parameter_space.CHANNEL_WINDOW_MIN | length)
+    * (.parameter_space.BREAKOUT_BUFFER_PCT | length)
+    * (.parameter_space.STOP_LOSS_PCT | length)
+    * (.parameter_space.TAKE_PROFIT_PCT | length)
+    * (.parameter_space.MAX_HOLD_MIN | length)
+  ),
+  scenario_count: ([.dataset.train, .dataset.validation] | length),
+  work_units: (
+    (
+      (.parameter_space.ENTRY_MODE | length)
+      * (.parameter_space.CONFIRMATION_WINDOW_MIN | length)
+      * (.parameter_space.PULLBACK_RATIO | length)
+      * (.parameter_space.COOLDOWN_MIN | length)
+      * (.parameter_space.CHANNEL_WINDOW_MIN | length)
+      * (.parameter_space.BREAKOUT_BUFFER_PCT | length)
+      * (.parameter_space.STOP_LOSS_PCT | length)
+      * (.parameter_space.TAKE_PROFIT_PCT | length)
+      * (.parameter_space.MAX_HOLD_MIN | length)
+    ) * ([.dataset.train, .dataset.validation] | length)
+  ),
+  workers: .research_run.execution.max_workers
+}' "$PROBE_MANIFEST"
+```
+
+Run readiness for the probe:
+
+```bash
+BITHUMB_ENV_FILE="$BITHUMB_ENV_FILE" \
+DB_PATH="$DB_PATH" \
+uv run bithumb-bot research-readiness --manifest "$PROBE_MANIFEST" --json \
+  | tee "$READINESS_DIR/readiness.parallel-probe-w8.json"
+```
+
+Run the probe backtest:
+
+```bash
+set -o pipefail
+PROBE_LOG="$DIAG_DIR/research-backtest.parallel-probe-w8.$RUN_TS.log"
+
+BITHUMB_ENV_FILE="$BITHUMB_ENV_FILE" \
+DB_PATH="$DB_PATH" \
+BITHUMB_RESEARCH_MAX_WORKERS=8 \
+BITHUMB_TOTAL_PROCESS_BUDGET=8 \
+uv run bithumb-bot research-backtest --manifest "$PROBE_MANIFEST" \
+  2>&1 | tee "$PROBE_LOG"
+```
+
+Then select the report from the probe log:
+
+```bash
+REPORT="$(grep -o 'report_path=.*' "$PROBE_LOG" | tail -1 | cut -d= -f2-)"
+echo "$REPORT"
+test -f "$REPORT"
+```
+
+### Live Worker Observation
+
+In another WSL terminal, observe the parent and worker processes:
+
+```bash
+watch -n 1 "ps -eo pid,ppid,pcpu,pmem,cmd | grep -E 'bithumb-bot|python|forkserver|resource_tracker' | grep -v grep | sort -nrk3 | head -30"
+```
+
+In `top`, press `1` to show per-core CPU usage.
+
+Expected 8-worker shape:
+
+- up to 8 forkserver worker Python processes
+- multiple CPU cores near 100% when enough CPUs are available
+- a resource tracker process present
+- parent `bithumb-bot` process lower than active workers during worker execution
+
+"8 workers" means up to 8 requested research worker processes, not a guarantee
+that 8 physical CPU cores are reserved.
+
+### Large-Grid Serial Pre-Work
+
+Large parameter grids may temporarily show one parent `bithumb-bot` process
+using one CPU before workers appear. This does not necessarily mean the
+8-worker manifest policy was ignored. The runner first builds work tasks and
+records candidate-start events from the parent process; the parallel stage
+begins only after the worker pool is created.
+
+Do not judge parallel execution from the first few seconds of a large run. Run
+the small 8-worker probe first, then confirm report evidence plus live
+forkserver workers.
 
 ## Disk and Workspace Safety
 
@@ -785,10 +1086,15 @@ Do not clean up by deleting random files inside the Git repository. Generated ru
 | `python backtest.py` exits 2 | Expected fail-closed smoke wrapper behavior | Use `research-validate --manifest <path>` |
 | empty or non-file `MANIFEST` | The command has no reviewed manifest input | Set `MANIFEST` to a non-empty JSON file under the repo-external runtime reports tree and run JSON/JQ inspection |
 | `research-readiness` fails | Dataset/env/calibration/walk-forward prerequisite is not ready | Inspect `next_actions`; fix data/env/manifest first |
+| `MANIFEST_DIR=/paper/...` or manifest write failure under `/paper/reports/...` | Runtime variables were not pinned in the current shell, so the manifest path lost its repo-external `DATA_ROOT` prefix | Stop; rerun Same-Shell Runtime Preflight; verify `DATA_ROOT`, `DB_PATH`, and `MANIFEST_DIR` print repo-external absolute paths before writing manifests |
+| `research_run:: command not found` or `max_workers:: command not found` | A manifest JSON fragment was pasted into Bash instead of written into a manifest file | Create or edit the manifest with `cat > "$MANIFEST" <<EOF ... EOF`, a reviewed copy, or `jq`; then validate JSON before running readiness |
 | split-level missing candles in readiness | The selected manifest split is not usable from the configured dataset source | Use clean segments; run targeted backfill/retry when appropriate; classify remaining gaps as persistent dataset evidence; do not use missing ranges for validation or final holdout; rerun readiness before backtest or validation |
 | `dataset_quality_gate_status=FAIL` | Dataset evidence failure | Fix dataset or manifest; do not tune strategy around it |
 | attempted use of `live.sqlite` as research backtest source | Live runtime observation evidence is being misused as research source data | Stop and use `$DATA_ROOT/paper/trades/paper.sqlite` or a reviewed immutable research dataset |
 | treating full-DB coverage as sufficient without manifest readiness | Whole-DB summaries do not prove selected split readiness | Run `research-readiness --manifest "$MANIFEST"` against the exact source DB and require split-level PASS |
+| Large sweep initially shows one parent `bithumb-bot` process using one CPU | The runner may be doing serial pre-work before creating the worker pool | Do not conclude parallelism failed from the first seconds; run the 8-worker probe first and inspect report observability plus live forkserver workers |
+| `execution_observability` null for every inspected field | The wrong report file was probably selected, or the report predates observability fields | Select the report from `report_path=` in the CLI log or mtime fallback; rerun the probe if needed |
+| `research_max_workers_effective < 8` | Env caps, total process budget, WSL limits, or too few work units reduced the effective worker count | For normal WSL research, remove low caps or set both caps to 8, confirm `max_workers=8`, and use the 32-work-unit probe before a large sweep |
 | `walk_forward_required_but_not_executed_in_this_run` | Standalone diagnostic backtest did not run full lifecycle | Run `research-validate` |
 | `promotion_allowed=0` | Candidate is not promotable | Do not run profile generation or live readiness from this evidence |
 | `validation_run_not_passed` | Full validation did not pass | Inspect `.stages[]` in `validation_run.json` |
@@ -800,9 +1106,15 @@ Do not clean up by deleting random files inside the Git repository. Generated ru
 
 ```text
 [ ] Current shell is in the Git repository root.
+[ ] Same-shell runtime preflight printed repo-external DATA_ROOT, DB_PATH, and MANIFEST_DIR.
+[ ] MANIFEST_DIR did not resolve to /paper/... or an empty path.
 [ ] `MANIFEST` is set and points to a real JSON file.
 [ ] Manifest `market` is `KRW-BTC`.
 [ ] Manifest `interval` is `1m`.
+[ ] Manifest has `research_run.execution.mode = parallel`.
+[ ] Manifest has `research_run.execution.max_workers = 8` for normal WSL research.
+[ ] Manifest has `research_run.execution.process_start_method = auto_safe`.
+[ ] Manifest has `research_run.execution.work_unit = candidate_scenario`.
 [ ] `DB_PATH` points to `$DATA_ROOT/paper/trades/paper.sqlite`.
 [ ] `research-readiness --json` was run for this exact manifest and DB.
 [ ] `status = PASS`.
@@ -813,6 +1125,10 @@ Do not clean up by deleting random files inside the Git repository. Generated ru
 [ ] The result is understood as `research_only` when the manifest is `research_only`.
 [ ] Readiness JSON is preserved under repo-external runtime reports.
 [ ] Diagnostic backtest log path is repo-external.
+[ ] For a large sweep, an 8-worker parallel probe was run first.
+[ ] The report path was taken from CLI output or mtime, not lexicographic path sort.
+[ ] `execution_plan.max_workers` is 8.
+[ ] `execution_observability` was inspected.
 ```
 
 ## Do Not Do
