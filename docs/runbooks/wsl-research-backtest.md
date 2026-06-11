@@ -919,8 +919,8 @@ cat > "$PROBE_MANIFEST" <<EOF
   "dataset": {
     "source": "sqlite_candles",
     "snapshot_id": "clean_segments_without_missing_candles_v1",
-    "train": {"start": "2024-01-05T00:00:00Z", "end": "2024-01-07T23:59:00Z"},
-    "validation": {"start": "2024-10-14T00:00:00Z", "end": "2024-10-16T23:59:00Z"}
+    "train": {"start": "2024-01-05", "end": "2024-01-07"},
+    "validation": {"start": "2024-10-14", "end": "2024-10-16"}
   },
   "parameter_space": {
     "CHANNEL_BREAKOUT_LOOKBACK": [20],
@@ -963,10 +963,37 @@ cat > "$PROBE_MANIFEST" <<EOF
       }
     ]
   },
-  "cost_model": {"fee_bps": 5, "slippage_bps": 5},
+  "cost_model": {
+    "fee_rate": 0.0004,
+    "slippage_bps": [10]
+  },
+  "portfolio_policy": {
+    "schema_version": 1,
+    "starting_cash_krw": 1000000,
+    "quote_currency": "KRW",
+    "initial_position_qty": 0.0,
+    "cash_interest_policy": "zero",
+    "position_sizing": {
+      "type": "fractional_cash",
+      "buy_fraction": 0.99,
+      "sell_policy": "sell_all_available_position",
+      "cash_buffer_policy": "retain_1_percent_before_fees",
+      "min_order_krw": null,
+      "max_order_krw": null,
+      "rounding_policy": "engine_float_no_exchange_lot_rounding"
+    },
+    "source": "manifest"
+  },
   "acceptance_gate": {
+    "min_trade_count": 1,
+    "max_mdd_pct": 50,
+    "min_profit_factor": 0.1,
+    "oos_return_must_be_positive": false,
+    "parameter_stability_required": false,
     "walk_forward_required": false,
-    "min_trades": 1
+    "final_holdout_required_for_promotion": false,
+    "reject_open_position_at_end": false,
+    "metrics_contract_required": false
   },
   "research_run": {
     "execution": {
