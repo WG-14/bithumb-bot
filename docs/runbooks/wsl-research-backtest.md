@@ -4,6 +4,14 @@
 
 Use this document when answering WSL or Linux questions about running a backtest, `research-backtest`, `research-validate`, or `research-readiness` for this repository. WSL/Linux is the local reference behavior for execution, paths, locking, process behavior, and operational validation. Use `uv run bithumb-bot ...` as the canonical CLI form. Use `BITHUMB_ENV_FILE` with repo-external runtime roots such as `DATA_ROOT`; keep any `DB_PATH` repo-external too. Do not recommend `python backtest.py` as the official backtest path. Root `backtest.py` is a fail-closed diagnostic smoke wrapper only. Use `research-readiness` before expensive research runs. `live.sqlite` is runtime observation evidence, not a research backtest source. `research-readiness` is split-range evidence, not proof that the entire DB is dense or complete. Use `research-validate --manifest <path>` as the normal validation path. Use `research-backtest --manifest <path>` only for diagnostic/development investigation unless the full validation lifecycle binds the evidence. For normal WSL `research-backtest` recommendations, GPT should default to manifest-configured parallel research execution with `research_run.execution.mode=parallel`, `max_workers=8`, `process_start_method=auto_safe`, and `work_unit=candidate_scenario`. `PYTEST_XDIST_WORKERS` must not be used as a substitute for research CLI workers. Recommend fewer than 8 research workers only when the user explicitly asks for a low-resource run, the manifest or env caps already constrain workers, the machine or process budget requires it, or the task is a pytest/parallel-safety matrix rather than a normal WSL research backtest. Smoke output and `research_only` readiness/backtest evidence are not production promotion, paper trading approval, live readiness, execution-quality evidence, or capital-allocation approval. Runtime artifacts, research outputs, pytest workspaces, reports, derived artifacts, traces, logs, and DB files must stay outside the Git repository.
 
+For notification-enabled WSL research backtest outputs, include this export before notifier setup or research commands:
+
+```bash
+export NTFY_TOPIC=bithumb-bot-dnjsckd5025
+```
+
+`bithumb-bot-dnjsckd5025` is an operator-approved notification routing identifier for this WSL runbook, not a credential. Do not document ntfy auth tokens, webhook secrets, bearer values, or private secret values.
+
 ## Scope
 
 This runbook covers local WSL execution for:
@@ -396,12 +404,14 @@ Notification settings are runtime/operator configuration. Do not put `NTFY_TOPIC
 
 The manifest defines the research hypothesis, data, candidates, cost model, and validation policy. Notification delivery belongs in the explicit env file or a CLI policy override.
 
-The WSL env example above uses `RESEARCH_NOTIFICATION_POLICY=disabled` for quiet local diagnostic runs. For notification-enabled WSL research, use a repository-external env file and document only placeholder values, never a real private topic:
+The WSL env example above uses `RESEARCH_NOTIFICATION_POLICY=disabled` for quiet local diagnostic runs. For notification-enabled WSL research, use a repository-external env file or invoking shell. This runbook intentionally documents the operator-approved WSL ntfy topic so GPT/Codex outputs do not invent a topic or leave a placeholder. `bithumb-bot-dnjsckd5025` is a notification routing identifier, not a credential. Do not document ntfy auth tokens, webhook secrets, bearer values, or private secret values.
 
 ```bash
-cat >> "$BITHUMB_ENV_FILE" <<'EOF'
+export NTFY_TOPIC=bithumb-bot-dnjsckd5025
+
+cat >> "$BITHUMB_ENV_FILE" <<EOF
 NOTIFIER_ENABLED=true
-NTFY_TOPIC=<topic>
+NTFY_TOPIC=$NTFY_TOPIC
 NTFY_SERVER=https://ntfy.sh
 RESEARCH_NOTIFICATION_POLICY=best_effort
 EOF
@@ -824,7 +834,7 @@ Do not clean up by deleting random files inside the Git repository. Generated ru
 - Do not use `./data`, `./tmp`, `./backups`, or repo-root `*.log` for runtime artifacts.
 - Do not edit generated report hashes, registry rows, validation runs, or promotion artifacts by hand.
 - Do not tune runtime env values until a backtest looks good.
-- Do not put real ntfy topics, webhook URLs, or notification secrets in manifests, docs, logs, or examples; keep them in repository-external env files.
+- Do not put ntfy auth tokens, webhook secrets, bearer values, or unapproved private notification topics in manifests, docs, logs, or examples; only `bithumb-bot-dnjsckd5025` is allowed as the operator-approved documented ntfy topic for this WSL runbook, and notification settings still belong in repository-external env files or the invoking shell.
 - Do not use native Windows path behavior as runtime correctness evidence.
 
 ## Related Documents
