@@ -2,7 +2,7 @@
 
 ## GPT Quick Context
 
-Use this document when answering WSL or Linux questions about running a backtest, `research-backtest`, `research-validate`, or `research-readiness` for this repository. WSL/Linux is the local reference behavior for execution, paths, locking, process behavior, and operational validation. Use `uv run bithumb-bot ...` as the canonical CLI form. Use `BITHUMB_ENV_FILE` with repo-external runtime roots such as `DATA_ROOT`; keep any `DB_PATH` repo-external too. Do not recommend `python backtest.py` as the official backtest path. Root `backtest.py` is a fail-closed diagnostic smoke wrapper only. Use `research-readiness` before expensive research runs. `live.sqlite` is runtime observation evidence, not a research backtest source. `research-readiness` is split-range evidence, not proof that the entire DB is dense or complete. Use `research-validate --manifest <path>` as the normal validation path. Use `research-backtest --manifest <path>` only for diagnostic/development investigation unless the full validation lifecycle binds the evidence. Smoke output and `research_only` readiness/backtest evidence are not production promotion, paper trading approval, live readiness, execution-quality evidence, or capital-allocation approval. Runtime artifacts, research outputs, pytest workspaces, reports, derived artifacts, traces, logs, and DB files must stay outside the Git repository.
+Use this document when answering WSL or Linux questions about running a backtest, `research-backtest`, `research-validate`, or `research-readiness` for this repository. WSL/Linux is the local reference behavior for execution, paths, locking, process behavior, and operational validation. Use `uv run bithumb-bot ...` as the canonical CLI form. Use `BITHUMB_ENV_FILE` with repo-external runtime roots such as `DATA_ROOT`; keep any `DB_PATH` repo-external too. Do not recommend `python backtest.py` as the official backtest path. Root `backtest.py` is a fail-closed diagnostic smoke wrapper only. Use `research-readiness` before expensive research runs. `live.sqlite` is runtime observation evidence, not a research backtest source. `research-readiness` is split-range evidence, not proof that the entire DB is dense or complete. Use `research-validate --manifest <path>` as the normal validation path. Use `research-backtest --manifest <path>` only for diagnostic/development investigation unless the full validation lifecycle binds the evidence. For normal WSL `research-backtest` recommendations, GPT should default to manifest-configured parallel research execution with `research_run.execution.mode=parallel`, `max_workers=8`, `process_start_method=auto_safe`, and `work_unit=candidate_scenario`. `PYTEST_XDIST_WORKERS` must not be used as a substitute for research CLI workers. Recommend fewer than 8 research workers only when the user explicitly asks for a low-resource run, the manifest or env caps already constrain workers, the machine or process budget requires it, or the task is a pytest/parallel-safety matrix rather than a normal WSL research backtest. Smoke output and `research_only` readiness/backtest evidence are not production promotion, paper trading approval, live readiness, execution-quality evidence, or capital-allocation approval. Runtime artifacts, research outputs, pytest workspaces, reports, derived artifacts, traces, logs, and DB files must stay outside the Git repository.
 
 ## Scope
 
@@ -600,9 +600,13 @@ jq '.stages[] | {
 
 ## Parallel Research on WSL
 
-`PYTEST_XDIST_WORKERS` does not control research CLI workers.
+`PYTEST_XDIST_WORKERS` controls pytest workers only. It does not control
+`research-backtest` or `research-validate` research worker processes, and it
+must not be used as a substitute for research CLI worker configuration.
 
-Configure research execution in the manifest:
+WSL `research-backtest` parallelism is configured in the manifest. For normal
+WSL `research-backtest` guidance, request up to 8 research workers with this
+manifest execution policy:
 
 ```json
 "research_run": {
@@ -615,6 +619,10 @@ Configure research execution in the manifest:
 }
 ```
 
+In this runbook, "8 workers" means up to 8 research worker processes requested
+by the manifest. It does not mean 8 CPU cores are reserved, and it is not proof
+that 8 workers actually ran.
+
 Optional caps:
 
 ```bash
@@ -622,7 +630,29 @@ export BITHUMB_RESEARCH_MAX_WORKERS=4
 export BITHUMB_TOTAL_PROCESS_BUDGET=6
 ```
 
-Effective workers may be lower than requested. Inspect reports for execution observability.
+Actual or effective workers may be lower than requested because of
+`BITHUMB_RESEARCH_MAX_WORKERS`, `BITHUMB_TOTAL_PROCESS_BUDGET`, WSL resource
+limits, or too few candidate/scenario work units. The generated report's
+`execution_observability` is the evidence for actual execution.
+
+Inspect the latest generated report:
+
+```bash
+REPORT="$(find "$DATA_ROOT/paper/reports/research" -name backtest_report.json -print | sort | tail -1)"
+jq '.execution_observability' "$REPORT"
+```
+
+Check at least:
+
+- `requested_execution_mode`
+- `requested_max_workers`
+- `actual_execution_mode`
+- `parallel_executor_used`
+- `research_max_workers_requested`
+- `research_max_workers_effective`
+- `requested_process_start_method`
+- `effective_process_start_method`
+- `work_units`
 
 ## Disk and Workspace Safety
 
