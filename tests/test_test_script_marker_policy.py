@@ -266,6 +266,9 @@ def test_broad_runner_scripts_have_codex_only_self_guard() -> None:
         Path("scripts/run_fast_pr_tests.sh"),
         Path("scripts/full_suite.sh"),
         Path("scripts/run_full_pytest_tests.sh"),
+        Path("run_pytest_diagnostics.sh"),
+        Path("run_remaining_test_results.sh"),
+        Path("run_patch_diagnostics.sh"),
     ]:
         text = path.read_text(encoding="utf-8")
 
@@ -281,6 +284,9 @@ def test_codex_default_pipeline_passes_child_broad_runner_sentinel_and_blocks_fa
     assert 'BITHUMB_CODEX_MODE="default_patch"' in text
     assert "BITHUMB_CODEX_BLOCK_BROAD_TEST_RUNNERS=1" in text
     assert "./scripts/run_fast_pr_tests.sh|scripts/run_fast_pr_tests.sh|*/scripts/run_fast_pr_tests.sh" in text
+    assert "./run_pytest_diagnostics.sh|run_pytest_diagnostics.sh|*/run_pytest_diagnostics.sh" in text
+    assert "./run_remaining_test_results.sh|run_remaining_test_results.sh|*/run_remaining_test_results.sh" in text
+    assert "./run_patch_diagnostics.sh|run_patch_diagnostics.sh|*/run_patch_diagnostics.sh" in text
     assert "Default Patch Mode blocks broad test runner" in text
     assert "focused validation only" in text
 
@@ -291,6 +297,9 @@ def test_codex_pytest_pipeline_passes_child_broad_runner_sentinel_and_blocks_fas
     assert 'BITHUMB_CODEX_MODE="pytest_repair"' in text
     assert "BITHUMB_CODEX_BLOCK_BROAD_TEST_RUNNERS=1" in text
     assert "./scripts/run_fast_pr_tests.sh|scripts/run_fast_pr_tests.sh|*/scripts/run_fast_pr_tests.sh" in text
+    assert "./run_pytest_diagnostics.sh|run_pytest_diagnostics.sh|*/run_pytest_diagnostics.sh" in text
+    assert "./run_remaining_test_results.sh|run_remaining_test_results.sh|*/run_remaining_test_results.sh" in text
+    assert "./run_patch_diagnostics.sh|run_patch_diagnostics.sh|*/run_patch_diagnostics.sh" in text
     assert "Do not run ./scripts/run_fast_pr_tests.sh inside Codex." in text
     assert "Broad test runner ${arg} is blocked inside Codex" in text
 

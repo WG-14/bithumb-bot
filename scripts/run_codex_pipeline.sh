@@ -119,7 +119,10 @@ is_broad_test_runner_arg() {
   case "$1" in
     ./scripts/run_fast_pr_tests.sh|scripts/run_fast_pr_tests.sh|*/scripts/run_fast_pr_tests.sh|\
     ./scripts/full_suite.sh|scripts/full_suite.sh|*/scripts/full_suite.sh|\
-    ./scripts/run_full_pytest_tests.sh|scripts/run_full_pytest_tests.sh|*/scripts/run_full_pytest_tests.sh)
+    ./scripts/run_full_pytest_tests.sh|scripts/run_full_pytest_tests.sh|*/scripts/run_full_pytest_tests.sh|\
+    ./run_pytest_diagnostics.sh|run_pytest_diagnostics.sh|*/run_pytest_diagnostics.sh|\
+    ./run_remaining_test_results.sh|run_remaining_test_results.sh|*/run_remaining_test_results.sh|\
+    ./run_patch_diagnostics.sh|run_patch_diagnostics.sh|*/run_patch_diagnostics.sh)
       return 0
       ;;
   esac
