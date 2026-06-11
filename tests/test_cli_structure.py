@@ -70,6 +70,7 @@ EXPECTED_COMMANDS = {
     "decision-attribution",
     "execution-quality-report",
     "research-backtest",
+    "research-workload-estimate",
     "research-verify-audit",
     "research-validate",
     "research-readiness",
