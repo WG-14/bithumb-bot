@@ -4,7 +4,7 @@ import os
 import subprocess
 import time
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
@@ -234,7 +234,9 @@ def _evaluate_candidate_scenario_task(
     worker_pid: int | None,
 ) -> ResearchWorkResult:
     manifest = task["manifest"]
-    snapshots = task["snapshots"]
+    snapshots = task.get("snapshots")
+    if snapshots is None:
+        snapshots = _load_worker_task_snapshots(task=task, manifest=manifest)
     params = dict(task["params"])
     index = int(task["candidate_index"])
     scenario = task["scenario"]
@@ -289,6 +291,7 @@ def _evaluate_candidate_scenario_task(
             reason=exc.reason,
             resource_guard=exc.evidence,
         )
+
         base = _failed_candidate_base_result(
             manifest=manifest,
             candidate_index=index,
@@ -365,10 +368,64 @@ def _evaluate_candidate_scenario_task(
         )
 
 
+def _load_worker_task_snapshots(*, task: dict[str, Any], manifest: ExperimentManifest) -> dict[str, DatasetSnapshot]:
+    db_path = task.get("db_path")
+    if db_path is None:
+        raise ResearchValidationError("parallel_worker_db_path_missing")
+    split_names = tuple(str(name) for name in task.get("split_names") or ("train", "validation"))
+    if any(name.startswith("window_") for name in split_names):
+        if manifest.walk_forward is None:
+            raise ResearchValidationError("parallel_worker_walk_forward_manifest_missing")
+        return _load_walk_forward_snapshots(
+            db_path=db_path,
+            manifest=manifest,
+            windows=_rolling_walk_forward_windows(manifest),
+        )
+    return {
+        split_name: load_dataset_split(db_path=db_path, manifest=manifest, split_name=split_name)
+        for split_name in split_names
+    }
+
+
 def _emit_progress(callback: ProgressCallback | None, **payload: Any) -> None:
     if callback is None:
         return
     callback(payload)
+
+
+def _apply_memory_admission_policy(
+    *,
+    manifest: ExperimentManifest,
+    execution_plan: ResearchExecutionPlan,
+) -> tuple[ExperimentManifest, dict[str, Any]]:
+    estimate = dict((execution_plan.payload.get("workload_estimate") or {}))
+    status = str(estimate.get("memory_budget_status") or "NOT_EVALUATED")
+    safe_workers = int(estimate.get("safe_max_workers_by_memory_budget") or manifest.research_run.execution.max_workers)
+    requested_workers = int(manifest.research_run.execution.max_workers)
+    policy = str(getattr(manifest.research_run.resource_limits, "memory_admission_policy", "fail_fast"))
+    payload = {
+        "policy": policy,
+        "status": status,
+        "requested_max_workers": requested_workers,
+        "safe_max_workers_by_memory_budget": safe_workers,
+        "memory_budget_reasons": list(estimate.get("memory_budget_reasons") or []),
+        "effective_max_workers": requested_workers,
+        "max_in_flight_tasks": max(1, requested_workers * 2),
+    }
+    if status != "WARN":
+        return manifest, payload
+    if policy == "fail_fast":
+        payload["action"] = "fail_fast"
+        raise ResearchValidationError("memory_admission_budget_exceeded")
+    if policy in {"cap_workers", "batch_candidates"}:
+        capped_workers = max(1, min(requested_workers, safe_workers))
+        payload["action"] = "cap_workers" if policy == "cap_workers" else "batch_candidates"
+        payload["effective_max_workers"] = capped_workers
+        payload["max_in_flight_tasks"] = max(1, capped_workers * 2)
+        adjusted_execution = replace(manifest.research_run.execution, max_workers=capped_workers)
+        adjusted_run = replace(manifest.research_run, execution=adjusted_execution)
+        return replace(manifest, research_run=adjusted_run), payload
+    raise ResearchValidationError(f"memory_admission_policy_unsupported:{policy}")
 
 
 def _stage_timing(stage: str, started_at: float, **details: Any) -> dict[str, Any]:
@@ -466,6 +523,23 @@ def _candidate_events_path(manager: PathManager, experiment_id: str) -> Path:
 
 def _candidate_result_path(manager: PathManager, experiment_id: str, candidate_id: str) -> Path:
     return _research_artifact_root(manager, experiment_id) / "candidate_results" / f"{candidate_id}.json"
+
+
+def _candidate_detail_result_path(
+    manager: PathManager,
+    experiment_id: str,
+    *,
+    candidate_id: str,
+    scenario_id: str,
+    work_unit_hash: str,
+) -> Path:
+    safe_work_hash = str(work_unit_hash).replace(":", "_")
+    return (
+        _research_artifact_root(manager, experiment_id)
+        / "candidate_detail_results"
+        / str(candidate_id)
+        / f"{scenario_id}_{safe_work_hash}.json"
+    )
 
 
 def _candidate_failure_path(manager: PathManager, experiment_id: str, candidate_id: str) -> Path:
@@ -1023,6 +1097,22 @@ def run_research_backtest(
         created_at=generated_at,
         include_walk_forward=False,
     )
+    manifest, memory_admission = _apply_memory_admission_policy(
+        manifest=manifest,
+        execution_plan=execution_plan,
+    )
+    if int(memory_admission.get("effective_max_workers") or manifest.research_run.execution.max_workers) != int(
+        execution_plan.payload["max_workers"]
+    ):
+        execution_plan = build_research_execution_plan(
+            manifest=manifest,
+            snapshots=snapshots,
+            quality_reports=quality_reports,
+            db_path=db_path,
+            repository_version=_repository_version(),
+            created_at=generated_at,
+            include_walk_forward=False,
+        )
     _emit_progress(
         progress_callback,
         stage="execution_plan",
@@ -1035,6 +1125,7 @@ def run_research_backtest(
     evaluation = _evaluate_candidates(
         manifest=manifest,
         manager=manager,
+        db_path=db_path,
         snapshots=snapshots,
         quality_reports=quality_reports,
         include_walk_forward=False,
@@ -1057,6 +1148,7 @@ def run_research_backtest(
         execution_boundary=evaluation.execution_boundary,
         snapshots=snapshots,
     )
+    execution_observability["memory_admission"] = dict(memory_admission)
     execution_observability["candidate_artifact_write"] = dict(evaluation.candidate_artifact_observability)
     execution_observability["candidate_profile_hash_observability"] = dict(
         evaluation.candidate_profile_hash_observability
@@ -1247,6 +1339,22 @@ def run_research_walk_forward(
         created_at=generated_at,
         include_walk_forward=True,
     )
+    manifest, memory_admission = _apply_memory_admission_policy(
+        manifest=manifest,
+        execution_plan=execution_plan,
+    )
+    if int(memory_admission.get("effective_max_workers") or manifest.research_run.execution.max_workers) != int(
+        execution_plan.payload["max_workers"]
+    ):
+        execution_plan = build_research_execution_plan(
+            manifest=manifest,
+            snapshots=snapshots,
+            quality_reports=quality_reports,
+            db_path=db_path,
+            repository_version=_repository_version(),
+            created_at=generated_at,
+            include_walk_forward=True,
+        )
     _emit_progress(
         progress_callback,
         stage="execution_plan",
@@ -1259,6 +1367,7 @@ def run_research_walk_forward(
     evaluation = _evaluate_candidates(
         manifest=manifest,
         manager=manager,
+        db_path=db_path,
         snapshots=snapshots,
         quality_reports=quality_reports,
         include_walk_forward=True,
@@ -1281,6 +1390,7 @@ def run_research_walk_forward(
         execution_boundary=evaluation.execution_boundary,
         snapshots=snapshots,
     )
+    execution_observability["memory_admission"] = dict(memory_admission)
     execution_observability["candidate_artifact_write"] = dict(evaluation.candidate_artifact_observability)
     execution_observability["candidate_profile_hash_observability"] = dict(
         evaluation.candidate_profile_hash_observability
@@ -1352,6 +1462,7 @@ def _evaluate_candidates(
     manifest: ExperimentManifest,
     manager: PathManager,
     snapshots: dict[str, DatasetSnapshot],
+    db_path: str | Path | None = None,
     quality_reports: dict[str, DatasetQualityReport],
     include_walk_forward: bool,
     execution_calibration: dict[str, Any] | None,
@@ -1589,7 +1700,10 @@ def _evaluate_candidates(
         )
         worker_context = {
             "manifest": manifest,
-            "snapshots": snapshots,
+            "db_path": str(db_path) if db_path is not None else None,
+            "split_names": tuple(snapshots.keys()),
+            "dataset_hashes": dict(dataset_hashes),
+            "dataset_quality_hash": dataset_quality_hash,
             "manifest_hash": manifest_hash,
             "simulation_seed_scope_hash": simulation_seed_scope_hash,
             "include_walk_forward": include_walk_forward,
@@ -1619,7 +1733,19 @@ def _evaluate_candidates(
                 "process_start_method": manifest.research_run.execution.process_start_method,
             }
         )
-        raw_results = execute_research_work_units_parallel(
+        raw_results = []
+
+        def collect_parallel_result(result: ResearchWorkResult) -> None:
+            raw_results.append(
+                _compact_work_result_with_detail_artifact(
+                    manager=manager,
+                    manifest=manifest,
+                    result=result,
+                    artifact_context=artifact_context,
+                )
+            )
+
+        execute_research_work_units_parallel(
             tasks=work_tasks,
             worker=_candidate_scenario_worker_from_context,
             max_workers=manifest.research_run.execution.max_workers,
@@ -1628,6 +1754,7 @@ def _evaluate_candidates(
             initargs=(worker_context,),
             runtime_observability_sink=process_runtime_observability,
             max_in_flight_tasks=max(1, int(manifest.research_run.execution.max_workers) * 2),
+            result_callback=collect_parallel_result,
         )
         substage_timings.append(
             _stage_timing(
@@ -1703,28 +1830,34 @@ def _evaluate_candidates(
             )
             append_start_wall_seconds += time.perf_counter() - append_started
             worker_started = time.perf_counter()
-            raw_results.extend(
-                execute_research_work_units_serial(
-                    tasks=(
-                        EvaluationContext(
-                            manifest=manifest,
-                            manager=manager,
-                            snapshots=snapshots,
-                            manifest_hash=manifest_hash,
-                            simulation_seed_scope_hash=simulation_seed_scope_hash,
-                            include_walk_forward=include_walk_forward,
-                            raw_candidate_count=len(raw_candidates),
-                            params=params,
-                            candidate_index=int(task["candidate_index"]),
-                            scenario=task["scenario"],
-                            scenario_index=int(task["scenario_index"]),
-                            scenario_id=str(task["scenario_id"]),
-                            progress_callback=progress_callback,
-                            artifact_context=artifact_context,
-                            worker_pid=None,
-                        ),
+            serial_result = execute_research_work_units_serial(
+                tasks=(
+                    EvaluationContext(
+                        manifest=manifest,
+                        manager=manager,
+                        snapshots=snapshots,
+                        manifest_hash=manifest_hash,
+                        simulation_seed_scope_hash=simulation_seed_scope_hash,
+                        include_walk_forward=include_walk_forward,
+                        raw_candidate_count=len(raw_candidates),
+                        params=params,
+                        candidate_index=int(task["candidate_index"]),
+                        scenario=task["scenario"],
+                        scenario_index=int(task["scenario_index"]),
+                        scenario_id=str(task["scenario_id"]),
+                        progress_callback=progress_callback,
+                        artifact_context=artifact_context,
+                        worker_pid=None,
                     ),
-                    worker=lambda context: evaluator.evaluate(work_unit, context),
+                ),
+                worker=lambda context: evaluator.evaluate(work_unit, context),
+            )[0]
+            raw_results.append(
+                _compact_work_result_with_detail_artifact(
+                    manager=manager,
+                    manifest=manifest,
+                    result=serial_result,
+                    artifact_context=artifact_context,
                 )
             )
             worker_wall_seconds += time.perf_counter() - worker_started
@@ -1824,11 +1957,11 @@ def _evaluate_candidates(
                 candles_processed=int((result.observability or {}).get("candles_processed") or 0),
             )
     gate_aggregation_started = time.perf_counter()
-    base_results_by_scenario: dict[int, list[dict[str, Any]]] = {}
+    compact_results_by_scenario: dict[int, list[dict[str, Any]]] = {}
     for result in work_results:
         if result.base_result is None:
             raise ResearchValidationError(f"work_result_missing_base_result: {result.work_unit_hash}")
-        base_results_by_scenario.setdefault(result.scenario_index, []).append(result.base_result)
+        compact_results_by_scenario.setdefault(result.scenario_index, []).append(result.base_result)
 
     for scenario_index, scenario in execution_scenarios:
         scenario_id = _scenario_id(scenario, scenario_index)
@@ -1862,7 +1995,7 @@ def _evaluate_candidates(
                 or manifest.execution_model.calibration_strictness == "fail"
             ),
         )
-        base_results = sorted(base_results_by_scenario.get(scenario_index, []), key=lambda item: int(item["index"]))
+        base_results = sorted(compact_results_by_scenario.get(scenario_index, []), key=lambda item: int(item["index"]))
         stability = _parameter_stability_scores(
             manifest=manifest,
             candidates=raw_candidates,
@@ -2169,7 +2302,19 @@ def _evaluate_candidates(
                 "resource_guard": base.get("resource_guard"),
                 "failure_artifact_ref": base.get("failure_artifact_ref"),
                 "failure_artifact_path": base.get("failure_artifact_path"),
+                "detail_artifact_ref": base.get("detail_artifact_ref"),
+                "detail_artifact_path": base.get("detail_artifact_path"),
+                "detail_artifact_hash": base.get("detail_artifact_hash"),
                 "retained_detail_summary": base.get("retained_detail_summary"),
+                "train_closed_trade_count": base.get("train_closed_trade_count"),
+                "validation_closed_trade_count": base.get("validation_closed_trade_count"),
+                "final_holdout_closed_trade_count": base.get("final_holdout_closed_trade_count"),
+                "train_closed_trades_hash": base.get("train_closed_trades_hash"),
+                "validation_closed_trades_hash": base.get("validation_closed_trades_hash"),
+                "final_holdout_closed_trades_hash": base.get("final_holdout_closed_trades_hash"),
+                "train_equity_curve_count": base.get("train_equity_curve_count"),
+                "validation_equity_curve_count": base.get("validation_equity_curve_count"),
+                "final_holdout_equity_curve_count": base.get("final_holdout_equity_curve_count"),
                 "train_resource_usage": base.get("train_resource_usage"),
                 "validation_resource_usage": base.get("validation_resource_usage"),
                 "final_holdout_resource_usage": base.get("final_holdout_resource_usage"),
@@ -2179,13 +2324,6 @@ def _evaluate_candidates(
                 "train_execution_metadata": base.get("train_execution_metadata") or [],
                 "validation_execution_metadata": base.get("validation_execution_metadata") or [],
                 "final_holdout_execution_metadata": base.get("final_holdout_execution_metadata"),
-                "validation_closed_trades": [
-                    trade.as_dict() if hasattr(trade, "as_dict") else trade
-                    for trade in (base.get("validation_closed_trades") or [])
-                ],
-                "train_equity_curve": list(base.get("train_equity_curve") or []),
-                "validation_equity_curve": list(base.get("validation_equity_curve") or []),
-                "final_holdout_equity_curve": list(base.get("final_holdout_equity_curve") or []),
             }
             candidate_payload = aggregates.setdefault(
                 base["candidate_id"],
@@ -2397,6 +2535,9 @@ def _evaluate_candidates(
                 "resource_guard": primary.get("resource_guard"),
                 "failure_artifact_ref": primary.get("failure_artifact_ref"),
                 "failure_artifact_path": primary.get("failure_artifact_path"),
+                "detail_artifact_ref": primary.get("detail_artifact_ref"),
+                "detail_artifact_path": primary.get("detail_artifact_path"),
+                "detail_artifact_hash": primary.get("detail_artifact_hash"),
                 "retained_detail_summary": primary.get("retained_detail_summary"),
                 "train_resource_usage": primary.get("train_resource_usage"),
                 "validation_resource_usage": primary.get("validation_resource_usage"),
@@ -2404,8 +2545,10 @@ def _evaluate_candidates(
                 "train_audit_trace_index": primary.get("train_audit_trace_index"),
                 "validation_audit_trace_index": primary.get("validation_audit_trace_index"),
                 "final_holdout_audit_trace_index": primary.get("final_holdout_audit_trace_index"),
-                "validation_equity_curve": primary.get("validation_equity_curve") or [],
-                "final_holdout_equity_curve": primary.get("final_holdout_equity_curve") or [],
+                "validation_equity_curve_count": primary.get("validation_equity_curve_count"),
+                "final_holdout_equity_curve_count": primary.get("final_holdout_equity_curve_count"),
+                "validation_equity_curve_hash": primary.get("validation_equity_curve_hash"),
+                "final_holdout_equity_curve_hash": primary.get("final_holdout_equity_curve_hash"),
             }
         )
         warning_reasons = _execution_calibration_warning_reasons(candidate_payload)
@@ -2646,6 +2789,101 @@ def _normalize_failed_work_result_without_base(
         failure_evidence=evidence,
         observability=result.observability,
     )
+
+
+_DETAIL_ONLY_RESULT_KEYS = frozenset(
+    {
+        "train_closed_trades",
+        "validation_closed_trades",
+        "final_holdout_closed_trades",
+        "train_equity_curve",
+        "validation_equity_curve",
+        "final_holdout_equity_curve",
+    }
+)
+
+
+def _compact_work_result_with_detail_artifact(
+    *,
+    manager: PathManager,
+    manifest: ExperimentManifest,
+    result: ResearchWorkResult,
+    artifact_context: ResearchArtifactContext | None,
+) -> ResearchWorkResult:
+    if result.base_result is None:
+        return result
+    detail_payload = _json_safe_payload(result.base_result)
+    detail_hash = sha256_prefixed(detail_payload, label="candidate_detail_artifact_hash")
+    path = _candidate_detail_result_path(
+        manager,
+        manifest.experiment_id,
+        candidate_id=str(result.candidate_id),
+        scenario_id=str(result.scenario_id),
+        work_unit_hash=str(result.work_unit_hash),
+    )
+    store = artifact_context or ResearchArtifactContext(
+        manager=manager,
+        experiment_id=manifest.experiment_id,
+        budget=_artifact_budget_from_limits(manifest.research_run.resource_limits),
+    )
+    store.write_json_atomic(
+        path,
+        {
+            "artifact_type": "candidate_detail_result",
+            "schema_version": 1,
+            "candidate_id": result.candidate_id,
+            "scenario_id": result.scenario_id,
+            "work_unit_hash": result.work_unit_hash,
+            "detail_artifact_hash": detail_hash,
+            "base_result": detail_payload,
+        },
+    )
+    compact = _compact_base_result_for_parent(result.base_result)
+    compact["detail_artifact_ref"] = _data_dir_relative_ref(manager, path)
+    compact["detail_artifact_path"] = str(path.resolve())
+    compact["detail_artifact_hash"] = detail_hash
+    return ResearchWorkResult(
+        work_unit=result.work_unit,
+        work_unit_hash=result.work_unit_hash,
+        candidate_index=result.candidate_index,
+        candidate_id=result.candidate_id,
+        scenario_index=result.scenario_index,
+        scenario_id=result.scenario_id,
+        status=result.status,
+        base_result=compact,
+        failure_reason=result.failure_reason,
+        failure_evidence=result.failure_evidence,
+        observability=result.observability,
+        content_hash=result.content_hash,
+    )
+
+
+def _compact_base_result_for_parent(base: dict[str, Any]) -> dict[str, Any]:
+    compact = {key: value for key, value in base.items() if key not in _DETAIL_ONLY_RESULT_KEYS}
+    for split in ("train", "validation", "final_holdout"):
+        trades = base.get(f"{split}_closed_trades") or ()
+        equity_curve = base.get(f"{split}_equity_curve") or ()
+        compact[f"{split}_closed_trade_count"] = len(trades)
+        compact[f"{split}_closed_trades_hash"] = sha256_prefixed(
+            _json_safe_payload(trades),
+            label=f"{split}_closed_trades_hash",
+        )
+        compact[f"{split}_equity_curve_count"] = len(equity_curve)
+        compact[f"{split}_equity_curve_hash"] = sha256_prefixed(
+            _json_safe_payload(equity_curve),
+            label=f"{split}_equity_curve_hash",
+        )
+    return compact
+
+
+def _json_safe_payload(value: Any) -> Any:
+    if hasattr(value, "as_dict"):
+        return _json_safe_payload(value.as_dict())
+    if isinstance(value, dict):
+        return {str(key): _json_safe_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_payload(item) for item in value]
+    return value
 
 
 def _mark_noop_behavior_hash_groups(

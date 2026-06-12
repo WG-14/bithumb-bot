@@ -485,6 +485,7 @@ class ResearchResourceLimits:
     max_audit_stream_bytes: int | None = 128 * 1024 * 1024
     max_artifact_file_count: int | None = 10_000
     max_total_memory_mb: float | None = None
+    memory_admission_policy: str = "fail_fast"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -498,6 +499,7 @@ class ResearchResourceLimits:
             "max_audit_stream_bytes": self.max_audit_stream_bytes,
             "max_artifact_file_count": self.max_artifact_file_count,
             "max_total_memory_mb": self.max_total_memory_mb,
+            "memory_admission_policy": self.memory_admission_policy,
             "max_rss_mb_semantics": "candidate_local_rss_delta_mb",
             "memory_sampling_policy": {
                 "cadence": "per_resource_limit_check_event",
@@ -2769,6 +2771,7 @@ def _parse_research_resource_limits(value: Any) -> ResearchResourceLimits:
         "max_audit_stream_bytes",
         "max_artifact_file_count",
         "max_total_memory_mb",
+        "memory_admission_policy",
     }
     unknown = sorted(set(value) - allowed_fields)
     if unknown:
@@ -2808,6 +2811,7 @@ def _parse_research_resource_limits(value: Any) -> ResearchResourceLimits:
             value.get("max_total_memory_mb"),
             "research_run.resource_limits.max_total_memory_mb",
         ),
+        memory_admission_policy=_memory_admission_policy(value.get("memory_admission_policy", "fail_fast")),
     )
 
 
@@ -2940,6 +2944,17 @@ def _optional_positive_float(value: Any, field: str) -> float | None:
     if parsed <= 0.0:
         return None
     return float(parsed)
+
+
+def _memory_admission_policy(value: Any) -> str:
+    policy = str(value or "fail_fast").strip()
+    allowed = {"fail_fast", "cap_workers", "batch_candidates"}
+    if policy not in allowed:
+        raise ManifestValidationError(
+            "research_run.resource_limits.memory_admission_policy unsupported value: "
+            + ",".join(sorted(allowed))
+        )
+    return policy
 
 
 def _optional_pct(value: Any, field: str) -> float | None:

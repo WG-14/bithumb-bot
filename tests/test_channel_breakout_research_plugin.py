@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from bithumb_bot.research.backtest_engine import BacktestRunContext
+from bithumb_bot.research.backtest_kernel import run_decision_event_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.execution_timing import candle_close_ts
 from bithumb_bot.research.experiment_manifest import DateRange, ExecutionTimingPolicy, legacy_research_portfolio_policy
@@ -65,13 +67,15 @@ def _materialized(**overrides: object) -> dict[str, object]:
 
 
 def _events(dataset: DatasetSnapshot, params: dict[str, object]):
-    return build_channel_breakout_research_events(
-        dataset=dataset,
-        parameter_values=params,
-        fee_rate=0.001,
-        slippage_bps=0.0,
-        execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
-        portfolio_policy=legacy_research_portfolio_policy(),
+    return tuple(
+        build_channel_breakout_research_events(
+            dataset=dataset,
+            parameter_values=params,
+            fee_rate=0.001,
+            slippage_bps=0.0,
+            execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+            portfolio_policy=legacy_research_portfolio_policy(),
+        )
     )
 
 
@@ -497,13 +501,15 @@ def test_delayed_confirmation_regime_failure_reason_is_emitted(monkeypatch: pyte
 
     monkeypatch.setattr(module, "classify_market_regime_from_arrays", fake_regime)
 
-    event = module.build_channel_breakout_research_events(
-        dataset=dataset,
-        parameter_values=params,
-        fee_rate=0.001,
-        slippage_bps=0.0,
-        execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
-        portfolio_policy=legacy_research_portfolio_policy(),
+    event = tuple(
+        module.build_channel_breakout_research_events(
+            dataset=dataset,
+            parameter_values=params,
+            fee_rate=0.001,
+            slippage_bps=0.0,
+            execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+            portfolio_policy=legacy_research_portfolio_policy(),
+        )
     )[5]
 
     assert event.final_signal == "HOLD"
@@ -733,13 +739,15 @@ def test_event_builder_emits_required_event_fields() -> None:
     )
     timing_policy = ExecutionTimingPolicy(decision_guard_ms=250)
 
-    events = build_channel_breakout_research_events(
-        dataset=dataset,
-        parameter_values=params,
-        fee_rate=0.001,
-        slippage_bps=0.0,
-        execution_timing_policy=timing_policy,
-        portfolio_policy=legacy_research_portfolio_policy(),
+    events = tuple(
+        build_channel_breakout_research_events(
+            dataset=dataset,
+            parameter_values=params,
+            fee_rate=0.001,
+            slippage_bps=0.0,
+            execution_timing_policy=timing_policy,
+            portfolio_policy=legacy_research_portfolio_policy(),
+        )
     )
     event = events[-1]
 
@@ -763,6 +771,80 @@ def test_event_builder_emits_required_event_fields() -> None:
     assert event.strategy_diagnostics["schema_version"] == 1
     assert event.strategy_diagnostics["blocked_filters"] == ()
     assert event.strategy_diagnostics["regime_filter_enabled"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.contract
+@pytest.mark.resource_guard
+def test_channel_breakout_event_builder_returns_one_shot_iterable_without_materializing_all_events() -> None:
+    dataset = _dataset()
+    params = _materialized(
+        CHANNEL_BREAKOUT_RANGE_RATIO_MIN=1.0,
+        CHANNEL_BREAKOUT_VOLUME_RATIO_MIN=1.0,
+    )
+
+    events = build_channel_breakout_research_events(
+        dataset=dataset,
+        parameter_values=params,
+        fee_rate=0.001,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+        portfolio_policy=legacy_research_portfolio_policy(),
+    )
+
+    assert not isinstance(events, (tuple, list))
+    first_pass = tuple(events)
+    second_pass = tuple(events)
+    assert len(first_pass) == len(dataset.candles)
+    assert second_pass == ()
+
+
+@pytest.mark.unit
+@pytest.mark.contract
+@pytest.mark.resource_guard
+def test_channel_breakout_streaming_delayed_confirmation_preserves_state() -> None:
+    dataset = _breakout_confirmation_dataset(extra_confirming_candle=True)
+    params = _materialized(
+        CHANNEL_BREAKOUT_RANGE_RATIO_MIN=1.0,
+        CHANNEL_BREAKOUT_VOLUME_RATIO_MIN=1.0,
+        ENTRY_MODE="delayed_confirmation",
+        CONFIRMATION_WINDOW_MIN=2,
+        PULLBACK_RATIO=0.05,
+    )
+    kwargs = {
+        "dataset": dataset,
+        "strategy_name": "channel_breakout_with_regime_filter",
+        "parameter_values": params,
+        "fee_rate": 0.001,
+        "slippage_bps": 0.0,
+        "context": BacktestRunContext(report_detail="summary"),
+    }
+    streaming_events = build_channel_breakout_research_events(
+        dataset=dataset,
+        parameter_values=params,
+        fee_rate=0.001,
+        slippage_bps=0.0,
+        execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+        portfolio_policy=legacy_research_portfolio_policy(),
+    )
+    tuple_events = tuple(
+        build_channel_breakout_research_events(
+            dataset=dataset,
+            parameter_values=params,
+            fee_rate=0.001,
+            slippage_bps=0.0,
+            execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+            portfolio_policy=legacy_research_portfolio_policy(),
+        )
+    )
+
+    assert any(event.reason == "delayed_breakout_confirmed" for event in tuple_events)
+    tuple_result = run_decision_event_backtest(decision_events=tuple_events, **kwargs)
+    streaming_result = run_decision_event_backtest(decision_events=streaming_events, **kwargs)
+
+    assert tuple_result.resource_usage["decision_behavior_hash"] == streaming_result.resource_usage[
+        "decision_behavior_hash"
+    ]
 
 
 def test_cooldown_blocks_buy_until_window_elapses() -> None:
@@ -891,13 +973,15 @@ def test_event_builder_precomputes_ohlcv_arrays_once() -> None:
     dataset = _dataset(candles=candles)  # type: ignore[arg-type]
     params = _materialized()
 
-    events = build_channel_breakout_research_events(
-        dataset=dataset,
-        parameter_values=params,
-        fee_rate=0.001,
-        slippage_bps=0.0,
-        execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
-        portfolio_policy=legacy_research_portfolio_policy(),
+    events = tuple(
+        build_channel_breakout_research_events(
+            dataset=dataset,
+            parameter_values=params,
+            fee_rate=0.001,
+            slippage_bps=0.0,
+            execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+            portfolio_policy=legacy_research_portfolio_policy(),
+        )
     )
 
     assert len(events) == len(candles)
@@ -909,13 +993,15 @@ def test_event_builder_does_not_materialize_dataset_per_candle() -> None:
     dataset = _dataset(candles=candles)  # type: ignore[arg-type]
     params = _materialized()
 
-    events = build_channel_breakout_research_events(
-        dataset=dataset,
-        parameter_values=params,
-        fee_rate=0.001,
-        slippage_bps=0.0,
-        execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
-        portfolio_policy=legacy_research_portfolio_policy(),
+    events = tuple(
+        build_channel_breakout_research_events(
+            dataset=dataset,
+            parameter_values=params,
+            fee_rate=0.001,
+            slippage_bps=0.0,
+            execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+            portfolio_policy=legacy_research_portfolio_policy(),
+        )
     )
 
     assert len(events) == len(candles)
@@ -936,13 +1022,15 @@ def test_channel_breakout_context_builder_used_once_per_backtest(monkeypatch: py
 
     monkeypatch.setattr(module, "prepare_channel_breakout_context", spy_prepare_context)
 
-    events = module.build_channel_breakout_research_events(
-        dataset=dataset,
-        parameter_values=_materialized(),
-        fee_rate=0.001,
-        slippage_bps=0.0,
-        execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
-        portfolio_policy=legacy_research_portfolio_policy(),
+    events = tuple(
+        module.build_channel_breakout_research_events(
+            dataset=dataset,
+            parameter_values=_materialized(),
+            fee_rate=0.001,
+            slippage_bps=0.0,
+            execution_timing_policy=ExecutionTimingPolicy(decision_guard_ms=0),
+            portfolio_policy=legacy_research_portfolio_policy(),
+        )
     )
 
     assert len(events) == len(dataset.candles)

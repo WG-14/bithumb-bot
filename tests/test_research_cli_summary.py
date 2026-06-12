@@ -1624,4 +1624,6 @@ def test_cli_prints_effective_worker_warning(capsys) -> None:
     output = capsys.readouterr().out
     assert "requested_max_workers=8" in output
     assert "research_max_workers_effective=1" in output
+    assert "observed_worker_count=1" in output
+    assert "effective_process_start_method=forkserver" in output
     assert "worker_budget_warning_reasons=effective_workers_below_requested" in output

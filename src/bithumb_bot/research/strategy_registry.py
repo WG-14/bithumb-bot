@@ -19,7 +19,7 @@ from ..strategy_evidence_contract import GENERIC_DECISION_EVIDENCE_CONTRACT
 from ..runtime_data_capabilities import normalize_runtime_data_capability
 
 
-ResearchEventBuilder = Callable[..., tuple[ResearchDecisionEvent, ...]]
+ResearchEventBuilder = Callable[..., Iterable[ResearchDecisionEvent]]
 ResearchParameterMaterializer = Callable[..., dict[str, Any]]
 
 

@@ -744,6 +744,7 @@ def _derived_scenario_index_summary(scenario: Any, *, include_compact: bool = Tr
         if key in scenario:
             summary[key] = summarize_resource_usage_for_candidate_artifact(scenario[key])
     summary["detail_artifact_ref"] = scenario.get("detail_artifact_ref")
+    summary["detail_artifact_hash"] = scenario.get("detail_artifact_hash")
     summary["scenario_payload_hash"] = sha256_prefixed(
         scenario_evidence_hash_inputs(scenario),
         label="scenario_evidence_hash",
@@ -1120,6 +1121,7 @@ def _scenario_result_summary(
     summary["validation_equity_curve"] = []
     summary["final_holdout_equity_curve"] = []
     summary["detail_artifact_ref"] = scenario.get("detail_artifact_ref")
+    summary["detail_artifact_hash"] = scenario.get("detail_artifact_hash")
     summary["scenario_payload_hash"] = sha256_prefixed(
         scenario_evidence_hash_inputs(scenario),
         label="candidate_result_scenario_evidence_hash",

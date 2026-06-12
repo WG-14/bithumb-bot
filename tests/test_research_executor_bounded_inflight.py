@@ -50,7 +50,10 @@ def _worker(task: dict[str, object]) -> ResearchWorkResult:
         scenario_index=work_unit.scenario_index,
         scenario_id=work_unit.scenario_id,
         status="completed",
-        base_result={"index": work_unit.candidate_index},
+        base_result={
+            "index": work_unit.candidate_index,
+            "validation_closed_trades": [{"trade": work_unit.candidate_index}],
+        },
     )
 
 
@@ -168,3 +171,27 @@ def test_bounded_executor_handles_worker_exception_with_task_mapping(monkeypatch
     assert results[0].status == "failed"
     assert results[0].failure_reason == "parallel_executor_exception"
     assert results[0].failure_evidence["candidate_id"] == "candidate_1"
+
+
+@pytest.mark.unit
+@pytest.mark.contract
+@pytest.mark.resource_guard
+def test_bounded_executor_streams_results_to_callback_without_retaining_base_result(monkeypatch) -> None:
+    monkeypatch.setattr(executor, "ProcessPoolExecutor", _FakePool)
+    monkeypatch.setattr(executor, "wait", _fake_wait)
+    streamed: list[ResearchWorkResult] = []
+
+    results = executor._execute_with_runtime(
+        tasks=(_task(index) for index in range(20)),
+        worker=_worker,
+        initializer=None,
+        initargs=(),
+        runtime=_Runtime(),
+        max_in_flight_tasks=4,
+        result_callback=streamed.append,
+    )
+
+    assert results == []
+    assert len(streamed) == 20
+    assert all((result.base_result or {}).get("validation_closed_trades") for result in streamed)
+    assert _FakePool.peak_active <= 4

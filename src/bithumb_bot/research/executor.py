@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
@@ -63,6 +62,7 @@ class ResearchWorkResult:
 
 
 ResearchWorker = Callable[[Any], ResearchWorkResult]
+ResearchResultCallback = Callable[[ResearchWorkResult], None]
 
 
 def _promote_resource_guard_summary(payload: dict[str, Any], resource_guard: dict[str, Any]) -> None:
@@ -122,21 +122,22 @@ def execute_research_work_units_parallel(
     initargs: tuple[Any, ...] = (),
     runtime_observability_sink: list[dict[str, Any]] | None = None,
     max_in_flight_tasks: int | None = None,
+    result_callback: ResearchResultCallback | None = None,
 ) -> list[ResearchWorkResult]:
     results: list[ResearchWorkResult] = []
-    task_list = list(tasks)
     runtime = resolve_research_process_runtime(
         requested_start_method=process_start_method,
         requested_max_workers=int(max_workers),
     )
     try:
         results = _execute_with_runtime(
-            task_list=task_list,
+            tasks=tasks,
             worker=worker,
             initializer=initializer,
             initargs=initargs,
             runtime=runtime,
             max_in_flight_tasks=max_in_flight_tasks,
+            result_callback=result_callback,
         )
     except PermissionError:
         if runtime.requested_start_method not in {"auto_safe", "auto"} or runtime.effective_start_method != "forkserver":
@@ -148,12 +149,13 @@ def execute_research_work_units_parallel(
             fallback_reason="forkserver_pool_create_permission_error",
         )
         results = _execute_with_runtime(
-            task_list=task_list,
+            tasks=tasks,
             worker=worker,
             initializer=initializer,
             initargs=initargs,
             runtime=runtime,
             max_in_flight_tasks=max_in_flight_tasks,
+            result_callback=result_callback,
         )
     if runtime_observability_sink is not None:
         runtime_observability_sink.append(runtime.observability_payload())
@@ -162,14 +164,18 @@ def execute_research_work_units_parallel(
 
 def _execute_with_runtime(
     *,
-    task_list: list[Any],
+    tasks: Iterable[Any] | None = None,
+    task_list: Iterable[Any] | None = None,
     worker: ResearchWorker,
     initializer: Callable[..., None] | None,
     initargs: tuple[Any, ...],
     runtime: Any,
     max_in_flight_tasks: int | None,
+    result_callback: ResearchResultCallback | None = None,
 ) -> list[ResearchWorkResult]:
     results: list[ResearchWorkResult] = []
+    task_iter = iter(tasks if tasks is not None else task_list if task_list is not None else ())
+    pending_exhausted = False
     max_in_flight = _resolve_max_in_flight_tasks(
         max_in_flight_tasks=max_in_flight_tasks,
         max_workers=int(runtime.max_workers_effective),
@@ -180,16 +186,20 @@ def _execute_with_runtime(
         initializer=initializer,
         initargs=initargs,
     ) as pool:
-        pending_tasks = deque(task_list)
         future_to_task: dict[Any, Any] = {}
 
         def submit_next() -> None:
-            if not pending_tasks:
+            nonlocal pending_exhausted
+            if pending_exhausted:
                 return
-            task = pending_tasks.popleft()
+            try:
+                task = next(task_iter)
+            except StopIteration:
+                pending_exhausted = True
+                return
             future_to_task[pool.submit(worker, task)] = task
 
-        while pending_tasks and len(future_to_task) < max_in_flight:
+        while len(future_to_task) < max_in_flight and not pending_exhausted:
             submit_next()
 
         completion_order = 0
@@ -204,24 +214,27 @@ def _execute_with_runtime(
                 observability = dict(result.observability or {})
                 observability["completion_order"] = completion_order
                 observability["max_in_flight_tasks"] = max_in_flight
-                results.append(
-                    ResearchWorkResult(
-                        work_unit=result.work_unit,
-                        work_unit_hash=result.work_unit_hash,
-                        candidate_index=result.candidate_index,
-                        candidate_id=result.candidate_id,
-                        scenario_index=result.scenario_index,
-                        scenario_id=result.scenario_id,
-                        status=result.status,
-                        base_result=result.base_result,
-                        failure_reason=result.failure_reason,
-                        failure_evidence=result.failure_evidence,
-                        observability=observability,
-                        content_hash=result.content_hash,
-                    )
+                completed_base_result = result.base_result
+                completed = ResearchWorkResult(
+                    work_unit=result.work_unit,
+                    work_unit_hash=result.work_unit_hash,
+                    candidate_index=result.candidate_index,
+                    candidate_id=result.candidate_id,
+                    scenario_index=result.scenario_index,
+                    scenario_id=result.scenario_id,
+                    status=result.status,
+                    base_result=completed_base_result,
+                    failure_reason=result.failure_reason,
+                    failure_evidence=result.failure_evidence,
+                    observability=observability,
+                    content_hash=result.content_hash,
                 )
+                if result_callback is not None:
+                    result_callback(completed)
+                else:
+                    results.append(completed)
                 completion_order += 1
-                while pending_tasks and len(future_to_task) < max_in_flight:
+                while len(future_to_task) < max_in_flight and not pending_exhausted:
                     submit_next()
     return results
 

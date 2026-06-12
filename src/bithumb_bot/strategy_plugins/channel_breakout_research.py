@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from statistics import fmean
 from time import gmtime, strftime
+from collections.abc import Iterator
 from typing import Any
 
 from bithumb_bot.market_regime import classify_market_regime_from_arrays
@@ -429,7 +430,7 @@ def build_channel_breakout_research_events(
     execution_timing_policy: ExecutionTimingPolicy,
     portfolio_policy: PortfolioPolicy,
     context: Any | None = None,
-) -> tuple[ResearchDecisionEvent, ...]:
+) -> Iterator[ResearchDecisionEvent]:
     del fee_rate, slippage_bps, portfolio_policy, context
     prepared = prepare_channel_breakout_context(dataset)
     candles = prepared.candles
@@ -437,7 +438,6 @@ def build_channel_breakout_research_events(
     pending = BreakoutPendingState()
     last_buy_index: int | None = None
     trade_count_by_day: dict[str, int] = {}
-    events: list[ResearchDecisionEvent] = []
     for candle_index, candle in enumerate(candles):
         decision = decide_channel_breakout_snapshot(
             candle=candle,
@@ -472,38 +472,35 @@ def build_channel_breakout_research_events(
         decision_ts = candle_close_ts(candle, interval=dataset.interval) + int(
             execution_timing_policy.decision_guard_ms
         )
-        events.append(
-            ResearchDecisionEvent(
-                candle_ts=int(candle.ts),
-                decision_ts=int(decision_ts),
-                strategy_name=CHANNEL_BREAKOUT_SPEC.strategy_name,
-                strategy_version=CHANNEL_BREAKOUT_SPEC.strategy_version,
-                raw_signal=signal,
-                final_signal=signal,
-                reason=str(decision.get("reason") or "channel_breakout_research_decision"),
-                feature_snapshot=feature_snapshot,
-                strategy_diagnostics=dict(decision.get("strategy_diagnostics") or {}),
-                entry_signal=signal if signal == "BUY" else "HOLD",
-                exit_signal="HOLD",
-                blocked_filters=blocked_filters,
-                order_intent=(
-                    dict(decision["order_intent"])
-                    if isinstance(decision.get("order_intent"), dict)
-                    else None
-                ),
-                exit_intent={
-                    "mode": "evaluate_exit_policy",
-                    "base_signal": "HOLD",
-                    "base_reason": "common_exit_policy_only",
-                },
-                extra_payload={"strategy_family": "channel_breakout", "research_only": True},
-            )
+        yield ResearchDecisionEvent(
+            candle_ts=int(candle.ts),
+            decision_ts=int(decision_ts),
+            strategy_name=CHANNEL_BREAKOUT_SPEC.strategy_name,
+            strategy_version=CHANNEL_BREAKOUT_SPEC.strategy_version,
+            raw_signal=signal,
+            final_signal=signal,
+            reason=str(decision.get("reason") or "channel_breakout_research_decision"),
+            feature_snapshot=feature_snapshot,
+            strategy_diagnostics=dict(decision.get("strategy_diagnostics") or {}),
+            entry_signal=signal if signal == "BUY" else "HOLD",
+            exit_signal="HOLD",
+            blocked_filters=blocked_filters,
+            order_intent=(
+                dict(decision["order_intent"])
+                if isinstance(decision.get("order_intent"), dict)
+                else None
+            ),
+            exit_intent={
+                "mode": "evaluate_exit_policy",
+                "base_signal": "HOLD",
+                "base_reason": "common_exit_policy_only",
+            },
+            extra_payload={"strategy_family": "channel_breakout", "research_only": True},
         )
         if signal == "BUY":
             last_buy_index = int(candle_index)
             day_key = _candle_utc_day_key(candle)
             trade_count_by_day[day_key] = trade_count_by_day.get(day_key, 0) + 1
-    return tuple(events)
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
