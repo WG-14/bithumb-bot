@@ -103,9 +103,31 @@ def minimal_metrics_v2(
 
 
 def minimal_resource_usage(*, label: str = "validation") -> dict[str, Any]:
+    executed_policy = {
+        "schema_version": 1,
+        "starting_cash_krw": 1_000_000.0,
+        "quote_currency": "KRW",
+        "initial_position_qty": 0.0,
+        "cash_interest_policy": "zero",
+        "position_sizing": {
+            "type": "fractional_cash",
+            "buy_fraction": 0.99,
+            "sell_policy": "sell_all_available_position",
+            "cash_buffer_policy": "retain_1_percent_before_fees",
+            "min_order_krw": None,
+            "max_order_krw": None,
+            "rounding_policy": "engine_float_no_exchange_lot_rounding",
+        },
+        "source": "manifest",
+    }
     return {
         "schema_version": 1,
         "experiment_id": "contract_experiment",
+        "executed_portfolio_policy": executed_policy,
+        "executed_portfolio_policy_hash": sha256_prefixed(executed_policy),
+        "ledger_starting_cash_krw": 1_000_000.0,
+        "ledger_initial_position_qty": 0.0,
+        "position_sizing_policy": executed_policy["position_sizing"],
         "behavior_hash": sha256_prefixed({"label": label, "behavior": "factory"}),
         "decision_behavior_hash": sha256_prefixed({"label": label, "decision": "factory"}),
         "trade_ledger_hash": sha256_prefixed({"label": label, "trade": "factory"}),
@@ -253,6 +275,22 @@ class DeterministicResearchEvaluator:
             include_final_holdout="final_holdout" in context.snapshots,
             include_walk_forward=context.include_walk_forward,
         )
+        policy = context.manifest.portfolio_policy
+        policy_payload = policy.as_dict()
+        policy_hash = policy.policy_hash()
+        for split in ("train", "validation", "final_holdout"):
+            resource_key = f"{split}_resource_usage"
+            resource_usage = base.get(resource_key)
+            if isinstance(resource_usage, dict):
+                resource_usage.update(
+                    {
+                        "executed_portfolio_policy": policy_payload,
+                        "executed_portfolio_policy_hash": policy_hash,
+                        "ledger_starting_cash_krw": float(policy.starting_cash_krw),
+                        "ledger_initial_position_qty": float(policy.initial_position_qty),
+                        "position_sizing_policy": policy.position_sizing.as_dict(),
+                    }
+                )
         scenario_payload = context.scenario.as_dict() if hasattr(context.scenario, "as_dict") else {}
         if scenario_payload.get("type") == "stress":
             seed = int(scenario_payload.get("seed") or 0)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from itertools import tee
+from dataclasses import replace
 from typing import Any
 
 from .backtest_types import BacktestRun, BacktestRunContext
@@ -57,27 +58,33 @@ def run_plugin_backtest(
     try:
         next(emptiness_probe)
     except StopIteration:
-        return _empty_plugin_backtest_result(
-            plugin=plugin,
-            dataset=dataset,
-            parameter_stability_score=parameter_stability_score,
-            portfolio_policy=policy,
-            context=context,
+        return _with_portfolio_policy_evidence(
+            _empty_plugin_backtest_result(
+                plugin=plugin,
+                dataset=dataset,
+                parameter_stability_score=parameter_stability_score,
+                portfolio_policy=policy,
+                context=context,
+            ),
+            policy=policy,
         )
     from . import backtest_kernel
 
-    return backtest_kernel.run_decision_event_backtest(
-        dataset=dataset,
-        strategy_name=plugin.name,
-        parameter_values=effective_parameters,
-        fee_rate=fee_rate,
-        slippage_bps=slippage_bps,
-        decision_events=decision_events,
-        parameter_stability_score=parameter_stability_score,
-        execution_model=execution_model,
-        execution_timing_policy=timing_policy,
-        portfolio_policy=policy,
-        context=context,
+    return _with_portfolio_policy_evidence(
+        backtest_kernel.run_decision_event_backtest(
+            dataset=dataset,
+            strategy_name=plugin.name,
+            parameter_values=effective_parameters,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            decision_events=decision_events,
+            parameter_stability_score=parameter_stability_score,
+            execution_model=execution_model,
+            execution_timing_policy=timing_policy,
+            portfolio_policy=policy,
+            context=context,
+        ),
+        policy=policy,
     )
 
 
@@ -122,3 +129,21 @@ def _empty_plugin_backtest_result(
         ),
         audit_trace_index=audit_trace_index,
     )
+
+
+def _portfolio_policy_evidence(policy: PortfolioPolicy) -> dict[str, Any]:
+    return {
+        "executed_portfolio_policy": policy.as_dict(),
+        "executed_portfolio_policy_hash": policy.policy_hash(),
+        "ledger_starting_cash_krw": float(policy.starting_cash_krw),
+        "ledger_initial_position_qty": float(policy.initial_position_qty),
+        "position_sizing_policy": policy.position_sizing.as_dict(),
+        "legacy_research_portfolio_policy_used": policy.source == "legacy_research_default",
+    }
+
+
+def _with_portfolio_policy_evidence(run: BacktestRun, *, policy: PortfolioPolicy) -> BacktestRun:
+    resource_usage = dict(run.resource_usage or {})
+    resource_usage.update(_portfolio_policy_evidence(policy))
+    warnings = tuple(sorted(set(run.warnings) | set(policy.warning_codes())))
+    return replace(run, resource_usage=resource_usage, warnings=warnings)

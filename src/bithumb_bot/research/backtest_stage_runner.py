@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
 from . import backtest_support as support
@@ -683,12 +683,15 @@ def run_stage_owned_decision_event_backtest(
         diagnostics_namespace=strategy_plugin.diagnostics_namespace,
     )
     if not candles:
-        return result_assembler.empty_run(
-            run_context=run_context,
-            accumulator=accumulator,
-            starting_cash=starting_cash,
-            initial_position_qty=float(policy.initial_position_qty),
-            parameter_stability_score=parameter_stability_score,
+        return _with_portfolio_policy_evidence(
+            result_assembler.empty_run(
+                run_context=run_context,
+                accumulator=accumulator,
+                starting_cash=starting_cash,
+                initial_position_qty=float(policy.initial_position_qty),
+                parameter_stability_score=parameter_stability_score,
+            ),
+            policy=policy,
         )
 
     if prepared_ticks is None:
@@ -863,21 +866,42 @@ def run_stage_owned_decision_event_backtest(
         ):
             accumulator.record_audit_equity_event()
 
-    return result_assembler.assemble(
-        dataset=dataset,
-        candles=tuple(candles),
-        decision_events=decision_events,
-        ledger=ledger,
-        accumulator=accumulator,
-        run_context=run_context,
-        starting_cash=starting_cash,
-        parameter_stability_score=parameter_stability_score,
-        regime_snapshots=regime_snapshots,
-        regime_coverage_accumulator=regime_coverage_accumulator,
-        decisions=decisions,
-        warnings=warnings,
-        stage_trace_evidence=trace_recorder.compact_evidence(),
+    return _with_portfolio_policy_evidence(
+        result_assembler.assemble(
+            dataset=dataset,
+            candles=tuple(candles),
+            decision_events=decision_events,
+            ledger=ledger,
+            accumulator=accumulator,
+            run_context=run_context,
+            starting_cash=starting_cash,
+            parameter_stability_score=parameter_stability_score,
+            regime_snapshots=regime_snapshots,
+            regime_coverage_accumulator=regime_coverage_accumulator,
+            decisions=decisions,
+            warnings=warnings,
+            stage_trace_evidence=trace_recorder.compact_evidence(),
+        ),
+        policy=policy,
     )
+
+
+def _portfolio_policy_evidence(policy: Any) -> dict[str, Any]:
+    return {
+        "executed_portfolio_policy": policy.as_dict(),
+        "executed_portfolio_policy_hash": policy.policy_hash(),
+        "ledger_starting_cash_krw": float(policy.starting_cash_krw),
+        "ledger_initial_position_qty": float(policy.initial_position_qty),
+        "position_sizing_policy": policy.position_sizing.as_dict(),
+        "legacy_research_portfolio_policy_used": policy.source == "legacy_research_default",
+    }
+
+
+def _with_portfolio_policy_evidence(run: Any, *, policy: Any) -> Any:
+    resource_usage = dict(run.resource_usage or {})
+    resource_usage.update(_portfolio_policy_evidence(policy))
+    warnings = tuple(sorted(set(run.warnings) | set(policy.warning_codes())))
+    return replace(run, resource_usage=resource_usage, warnings=warnings)
 
 
 def _build_decision_observability_payload(

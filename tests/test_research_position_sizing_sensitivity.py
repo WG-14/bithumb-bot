@@ -1,7 +1,20 @@
 from __future__ import annotations
 
-from bithumb_bot.research.experiment_manifest import legacy_research_portfolio_policy
-from bithumb_bot.research.validation_protocol import _position_sizing_sensitivity_summary
+from types import SimpleNamespace
+
+from bithumb_bot.research.dataset_snapshot import DatasetSnapshot
+from bithumb_bot.research.experiment_manifest import (
+    DateRange,
+    PortfolioPolicy,
+    PositionSizingPolicy,
+    legacy_research_portfolio_policy,
+)
+from bithumb_bot.research.validation_protocol import (
+    PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON,
+    _invoke_strategy_runner,
+    _portfolio_policy_execution_gate_reasons,
+    _position_sizing_sensitivity_summary,
+)
 
 
 def _candidate() -> dict[str, object]:
@@ -17,6 +30,79 @@ def _candidate() -> dict[str, object]:
             {"entry_ts": 5, "exit_ts": 6, "return_pct": 20.0, "net_pnl": 198_000.0},
         ],
     }
+
+
+def _manifest_portfolio_policy(*, starting_cash: float = 100_000.0) -> PortfolioPolicy:
+    return PortfolioPolicy(
+        schema_version=1,
+        starting_cash_krw=starting_cash,
+        quote_currency="KRW",
+        initial_position_qty=0.0,
+        cash_interest_policy="zero",
+        position_sizing=PositionSizingPolicy(
+            type="fractional_cash",
+            buy_fraction=0.99,
+            sell_policy="sell_all_available_position",
+            cash_buffer_policy="retain_1_percent_before_fees",
+            min_order_krw=None,
+            max_order_krw=None,
+            rounding_policy="engine_float_no_exchange_lot_rounding",
+        ),
+        source="manifest",
+    )
+
+
+def test_invoke_strategy_runner_keeps_manifest_starting_cash_when_risk_policy_unsupported() -> None:
+    received: dict[str, object] = {}
+
+    def fake_runner(
+        *,
+        dataset,
+        parameter_values,
+        fee_rate,
+        slippage_bps,
+        parameter_stability_score=None,
+        execution_model=None,
+        execution_timing_policy=None,
+        portfolio_policy=None,
+        context=None,
+    ):
+        received["starting_cash_krw"] = portfolio_policy.starting_cash_krw
+        received["risk_policy_present"] = "risk_policy" in locals()
+        return SimpleNamespace(resource_usage={})
+
+    _invoke_strategy_runner(
+        runner=fake_runner,
+        dataset=DatasetSnapshot(
+            snapshot_id="empty",
+            source="unit",
+            market="KRW-BTC",
+            interval="1m",
+            split_name="validation",
+            date_range=DateRange(start="2023-01-01", end="2023-01-01"),
+            candles=(),
+        ),
+        parameter_values={},
+        fee_rate=0.0004,
+        slippage_bps=0.0,
+        parameter_stability_score=None,
+        execution_model=None,
+        execution_timing_policy=None,
+        portfolio_policy=_manifest_portfolio_policy(starting_cash=100_000.0),
+        risk_policy=object(),
+        context=None,
+    )
+
+    assert received["starting_cash_krw"] == 100_000.0
+
+
+def test_portfolio_policy_mismatch_fails_with_fixed_reason() -> None:
+    assert _portfolio_policy_execution_gate_reasons(
+        {
+            "work_unit_portfolio_policy_hash": "sha256:manifest",
+            "executed_portfolio_policy_hash": "sha256:legacy",
+        }
+    ) == [PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON]
 
 
 def test_position_sizing_sensitivity_keeps_separate_portfolio_policy_hashes() -> None:

@@ -1015,6 +1015,50 @@ def _portfolio_policy(*, starting_cash: float = 1_000_000.0, buy_fraction: float
     }
 
 
+def _policy_artifact_manifest(
+    *,
+    experiment_id: str,
+    portfolio_policy: dict[str, object] | None,
+    report_detail: str = "summary",
+) -> dict[str, object]:
+    payload = _manifest()
+    payload["experiment_id"] = experiment_id
+    payload["cost_model"] = {"fee_rate": 0.0004, "slippage_bps": [0]}
+    payload["research_run"] = {
+        "report_detail": report_detail,
+        "execution": {"mode": "serial", "max_workers": 1},
+        "resource_limits": {
+            "max_runtime_s_per_candidate_split": 60,
+            "max_decisions_retained": 0,
+            "max_equity_points_retained": 0,
+            "max_rss_mb": None,
+        },
+    }
+    if portfolio_policy is not None:
+        payload["portfolio_policy"] = portfolio_policy
+    return payload
+
+
+def _candidate_detail_base_results(manager: PathManager, experiment_id: str) -> list[dict[str, object]]:
+    detail_root = manager.data_dir() / "derived" / "research" / experiment_id / "candidate_detail_results"
+    detail_paths = sorted(detail_root.glob("candidate_*/*.json"))
+    assert detail_paths
+    bases: list[dict[str, object]] = []
+    for path in detail_paths:
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        assert artifact["artifact_type"] == "candidate_detail_result"
+        bases.append(artifact["base_result"])
+    return bases
+
+
+def _first_validation_closed_trade(manager: PathManager, experiment_id: str) -> dict[str, object]:
+    for base in _candidate_detail_base_results(manager, experiment_id):
+        trades = base.get("validation_closed_trades")
+        if isinstance(trades, list) and trades:
+            return trades[0]
+    raise AssertionError("candidate detail did not contain a validation closed trade")
+
+
 def _risk_policy() -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -1024,6 +1068,167 @@ def _risk_policy() -> dict[str, object]:
         "kill_switch": False,
         "source": "manifest",
     }
+
+
+def test_candidate_detail_notional_uses_manifest_starting_cash(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("BITHUMB_TEST_TIER", raising=False)
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path, minutes_per_day=24)
+    manager = _research_manager(tmp_path, monkeypatch)
+    payload = _policy_artifact_manifest(
+        experiment_id="policy_100k_detail",
+        portfolio_policy=_portfolio_policy(starting_cash=100_000.0, buy_fraction=0.99),
+    )
+
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    base = _candidate_detail_base_results(manager, "policy_100k_detail")[0]
+    assert base["executed_portfolio_policy"]["starting_cash_krw"] == 100_000.0
+    assert base["ledger_starting_cash_krw"] == 100_000.0
+    assert base["work_unit_portfolio_policy_hash"] == report["portfolio_policy_hash"]
+    assert base["executed_portfolio_policy_hash"] == report["portfolio_policy_hash"]
+    trade = _first_validation_closed_trade(manager, "policy_100k_detail")
+    entry_notional = float(trade["entry_notional"])
+    fee_basis = float(trade["fee_total"]) / 0.0008
+    assert abs(entry_notional - 99_000.0) < 1_000.0
+    assert fee_basis < 150_000.0
+
+
+def test_portfolio_policy_hash_chain_manifest_work_unit_detail_matches(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path, minutes_per_day=24)
+    manager = _research_manager(tmp_path, monkeypatch)
+    payload = _policy_artifact_manifest(
+        experiment_id="policy_hash_chain",
+        portfolio_policy=_portfolio_policy(starting_cash=100_000.0, buy_fraction=0.99),
+    )
+    manifest = parse_manifest(payload)
+
+    report = _run_contract_research_backtest(
+        manifest=manifest,
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    base = _candidate_detail_base_results(manager, "policy_hash_chain")[0]
+    work_unit = report["execution_observability"]["work_units"][0]["work_unit"]
+    assert report["portfolio_policy_hash"] == manifest.portfolio_policy_hash()
+    assert work_unit["portfolio_policy_hash"] == report["portfolio_policy_hash"]
+    assert base["work_unit_portfolio_policy_hash"] == report["portfolio_policy_hash"]
+    assert base["executed_portfolio_policy_hash"] == report["portfolio_policy_hash"]
+
+
+def test_legacy_missing_manifest_policy_keeps_legacy_990k_detail_evidence(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("BITHUMB_TEST_TIER", raising=False)
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path, minutes_per_day=24)
+    manager = _research_manager(tmp_path, monkeypatch)
+    payload = _policy_artifact_manifest(
+        experiment_id="policy_legacy_detail",
+        portfolio_policy=None,
+    )
+
+    run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    base = _candidate_detail_base_results(manager, "policy_legacy_detail")[0]
+    assert base["executed_portfolio_policy"]["source"] == "legacy_research_default"
+    assert base["executed_portfolio_policy"]["starting_cash_krw"] == 1_000_000.0
+    trade = _first_validation_closed_trade(manager, "policy_legacy_detail")
+    assert abs(float(trade["entry_notional"]) - 990_000.0) < 10_000.0
+
+
+def test_summary_candidate_result_retains_portfolio_policy_evidence(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("BITHUMB_TEST_TIER", raising=False)
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path, minutes_per_day=24)
+    manager = _research_manager(tmp_path, monkeypatch)
+    payload = _policy_artifact_manifest(
+        experiment_id="policy_summary_evidence",
+        portfolio_policy=_portfolio_policy(starting_cash=100_000.0, buy_fraction=0.99),
+        report_detail="summary",
+    )
+
+    run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    result_paths = sorted(
+        (manager.data_dir() / "derived" / "research" / "policy_summary_evidence" / "candidate_results").glob("candidate_*.json")
+    )
+    assert len(result_paths) == 1
+    candidate = json.loads(result_paths[0].read_text(encoding="utf-8"))
+    assert candidate["portfolio_policy"]["starting_cash_krw"] == 100_000.0
+    assert candidate["portfolio_policy_hash"].startswith("sha256:")
+    assert candidate["executed_portfolio_policy_hash"] == candidate["portfolio_policy_hash"]
+    assert candidate["scenario_results"][0]["executed_portfolio_policy_hash"] == candidate["portfolio_policy_hash"]
+
+
+class _MismatchedPortfolioPolicyEvaluator(DeterministicResearchEvaluator):
+    def evaluate(self, work_unit, context):  # type: ignore[no-untyped-def]
+        result = super().evaluate(work_unit, context)
+        assert result.base_result is not None
+        base = dict(result.base_result)
+        for split in ("train", "validation", "final_holdout"):
+            resource_key = f"{split}_resource_usage"
+            resource_usage = base.get(resource_key)
+            if isinstance(resource_usage, dict):
+                tampered = dict(resource_usage)
+                tampered["executed_portfolio_policy_hash"] = legacy_research_portfolio_policy().policy_hash()
+                tampered["executed_portfolio_policy"] = legacy_research_portfolio_policy().as_dict()
+                tampered["ledger_starting_cash_krw"] = 1_000_000.0
+                base[resource_key] = tampered
+        return ResearchWorkResult(
+            work_unit=result.work_unit,
+            work_unit_hash=result.work_unit_hash,
+            candidate_index=result.candidate_index,
+            candidate_id=result.candidate_id,
+            scenario_index=result.scenario_index,
+            scenario_id=result.scenario_id,
+            status=result.status,
+            base_result=base,
+            failure_reason=result.failure_reason,
+            failure_evidence=result.failure_evidence,
+            observability=result.observability,
+            content_hash=result.content_hash,
+        )
+
+
+def test_candidate_fails_when_executed_portfolio_policy_differs_from_manifest(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path, minutes_per_day=24)
+    manager = _research_manager(tmp_path, monkeypatch)
+    payload = _policy_artifact_manifest(
+        experiment_id="policy_mismatch_research_only",
+        portfolio_policy=_portfolio_policy(starting_cash=100_000.0, buy_fraction=0.99),
+    )
+
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+        candidate_evaluator=_MismatchedPortfolioPolicyEvaluator(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["deployment_tier"] == "research_only"
+    assert candidate["acceptance_gate_result"] == "FAIL"
+    assert "portfolio_policy_execution_mismatch" in candidate["gate_fail_reasons"]
+    assert "portfolio_policy_execution_mismatch" in candidate["scenario_results"][0]["scenario_fail_reasons"]
 
 
 def _max_holding_dataset() -> DatasetSnapshot:

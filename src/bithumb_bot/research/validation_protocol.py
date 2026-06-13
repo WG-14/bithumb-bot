@@ -130,6 +130,7 @@ TOP_OF_BOOK_OPERATOR_NEXT_ACTION = (
     "collect orderbook top snapshots with sync-orderbook-top, rerun research-backtest, "
     "and verify top_of_book_coverage_pct"
 )
+PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON = "portfolio_policy_execution_mismatch"
 ProgressCallback = Callable[[dict[str, Any]], None]
 _CANDIDATE_SCENARIO_WORKER_CONTEXT: dict[str, Any] | None = None
 FAST_TEST_TIER_ENV = "BITHUMB_TEST_TIER"
@@ -2282,6 +2283,10 @@ def _evaluate_candidates(
                     }
                     | set(str(item) for item in (base.get("resource_guard") or {}).get("reasons", []))
                 )
+            policy_mismatch_reasons = _portfolio_policy_execution_gate_reasons(base)
+            if policy_mismatch_reasons:
+                gate_result = "FAIL"
+                fail_reasons = sorted(set(fail_reasons) | set(policy_mismatch_reasons))
             cost_model = {
                 "fee_rate": scenario.fee_rate,
                 "slippage_bps": float(scenario.slippage_bps),
@@ -2329,6 +2334,18 @@ def _evaluate_candidates(
                 "execution_timing_policy": manifest.execution_timing.as_dict(),
                 "portfolio_policy": portfolio_policy,
                 "portfolio_policy_hash": portfolio_policy_hash,
+                "work_unit_portfolio_policy_hash": base.get("work_unit_portfolio_policy_hash"),
+                "executed_portfolio_policy": base.get("executed_portfolio_policy"),
+                "executed_portfolio_policy_hash": base.get("executed_portfolio_policy_hash"),
+                "ledger_starting_cash_krw": base.get("ledger_starting_cash_krw"),
+                "ledger_initial_position_qty": base.get("ledger_initial_position_qty"),
+                "position_sizing_policy": base.get("position_sizing_policy"),
+                "train_executed_portfolio_policy": base.get("train_executed_portfolio_policy"),
+                "train_executed_portfolio_policy_hash": base.get("train_executed_portfolio_policy_hash"),
+                "validation_executed_portfolio_policy": base.get("validation_executed_portfolio_policy"),
+                "validation_executed_portfolio_policy_hash": base.get("validation_executed_portfolio_policy_hash"),
+                "final_holdout_executed_portfolio_policy": base.get("final_holdout_executed_portfolio_policy"),
+                "final_holdout_executed_portfolio_policy_hash": base.get("final_holdout_executed_portfolio_policy_hash"),
                 "simulation_policy_hash": simulation_policy_hash,
                 "execution_reality_contract": execution_contract,
                 "execution_contract_hash": execution_contract["execution_contract_hash"],
@@ -2564,6 +2581,12 @@ def _evaluate_candidates(
                 "cost_assumption_contract": manifest.execution_model.as_dict(),
                 "portfolio_policy": portfolio_policy,
                 "portfolio_policy_hash": portfolio_policy_hash,
+                "work_unit_portfolio_policy_hash": primary.get("work_unit_portfolio_policy_hash"),
+                "executed_portfolio_policy": primary.get("executed_portfolio_policy"),
+                "executed_portfolio_policy_hash": primary.get("executed_portfolio_policy_hash"),
+                "ledger_starting_cash_krw": primary.get("ledger_starting_cash_krw"),
+                "ledger_initial_position_qty": primary.get("ledger_initial_position_qty"),
+                "position_sizing_policy": primary.get("position_sizing_policy"),
                 "simulation_policy_hash": simulation_policy_hash,
                 "execution_model": primary.get("execution_model"),
                 "execution_calibration_gate": _combined_calibration_gate(candidate_payload.get("scenario_results") or []),
@@ -2954,7 +2977,8 @@ def _compact_work_result_with_detail_artifact(
 ) -> ResearchWorkResult:
     if result.base_result is None:
         return result
-    detail_payload = _json_safe_payload(result.base_result)
+    base_result = _base_result_with_work_unit_policy_evidence(result.base_result, work_unit=result.work_unit)
+    detail_payload = _json_safe_payload(base_result)
     detail_hash = sha256_prefixed(detail_payload, label="candidate_detail_artifact_hash")
     path = _candidate_detail_result_path(
         manager,
@@ -2980,7 +3004,7 @@ def _compact_work_result_with_detail_artifact(
             "base_result": detail_payload,
         },
     )
-    compact = _compact_base_result_for_parent(result.base_result)
+    compact = _compact_base_result_for_parent(base_result)
     compact["detail_artifact_ref"] = _data_dir_relative_ref(manager, path)
     compact["detail_artifact_path"] = str(path.resolve())
     compact["detail_artifact_hash"] = detail_hash
@@ -2998,6 +3022,41 @@ def _compact_work_result_with_detail_artifact(
         observability=result.observability,
         content_hash=result.content_hash,
     )
+
+
+def _base_result_with_work_unit_policy_evidence(
+    base: dict[str, Any],
+    *,
+    work_unit: ResearchWorkUnit,
+) -> dict[str, Any]:
+    enriched = dict(base)
+    enriched.setdefault("work_unit_portfolio_policy_hash", work_unit.portfolio_policy_hash)
+    if enriched.get("executed_portfolio_policy_hash"):
+        return enriched
+    split_evidence: dict[str, dict[str, Any]] = {}
+    for split in ("train", "validation", "final_holdout"):
+        resource_usage = enriched.get(f"{split}_resource_usage")
+        if not isinstance(resource_usage, dict):
+            continue
+        evidence = {
+            "executed_portfolio_policy": resource_usage.get("executed_portfolio_policy"),
+            "executed_portfolio_policy_hash": resource_usage.get("executed_portfolio_policy_hash"),
+            "ledger_starting_cash_krw": resource_usage.get("ledger_starting_cash_krw"),
+            "ledger_initial_position_qty": resource_usage.get("ledger_initial_position_qty"),
+            "position_sizing_policy": resource_usage.get("position_sizing_policy"),
+        }
+        if evidence["executed_portfolio_policy_hash"]:
+            split_evidence[split] = evidence
+            enriched.setdefault(f"{split}_executed_portfolio_policy", evidence["executed_portfolio_policy"])
+            enriched.setdefault(f"{split}_executed_portfolio_policy_hash", evidence["executed_portfolio_policy_hash"])
+    primary = split_evidence.get("final_holdout") or split_evidence.get("validation") or split_evidence.get("train")
+    if primary:
+        enriched.setdefault("executed_portfolio_policy", primary.get("executed_portfolio_policy"))
+        enriched.setdefault("executed_portfolio_policy_hash", primary.get("executed_portfolio_policy_hash"))
+        enriched.setdefault("ledger_starting_cash_krw", primary.get("ledger_starting_cash_krw"))
+        enriched.setdefault("ledger_initial_position_qty", primary.get("ledger_initial_position_qty"))
+        enriched.setdefault("position_sizing_policy", primary.get("position_sizing_policy"))
+    return enriched
 
 
 def _compact_base_result_for_parent(base: dict[str, Any]) -> dict[str, Any]:
@@ -3213,6 +3272,12 @@ def _evaluate_candidate_base_result(
         if include_walk_forward
         else None
     )
+    executed_policy_evidence = _candidate_executed_portfolio_policy_evidence(
+        train=train,
+        validation=validation,
+        final_holdout=final_holdout,
+        work_unit=work_unit,
+    )
     work_wall_seconds = time.perf_counter() - work_started
     work_cpu_seconds = time.process_time() - work_cpu_started
     candles_processed = sum(int(item.get("candles_processed") or 0) for item in split_observability)
@@ -3252,6 +3317,8 @@ def _evaluate_candidate_base_result(
         "candidate_failed_before_complete_metrics": False,
         "evaluation_status": "completed",
         "metrics_status": "complete",
+        "work_unit_portfolio_policy_hash": work_unit.portfolio_policy_hash,
+        **executed_policy_evidence,
         "metrics_v2_source": "computed",
         "parameter_values": params,
         "train_metrics": train.metrics.as_dict(),
@@ -3341,47 +3408,95 @@ def _invoke_strategy_runner(
     risk_policy: Any,
     context: BacktestRunContext | None,
 ) -> BacktestRun:
-    try:
-        return runner(
-            dataset=dataset,
-            parameter_values=parameter_values,
-            fee_rate=fee_rate,
-            slippage_bps=slippage_bps,
-            parameter_stability_score=parameter_stability_score,
-            execution_model=execution_model,
-            execution_timing_policy=execution_timing_policy,
-            portfolio_policy=portfolio_policy,
-            risk_policy=risk_policy,
-            context=context,
-        )
-    except TypeError as exc:
-        message = str(exc)
-        if (
-            "risk_policy" not in message
-            and "portfolio_policy" not in message
-            and "unexpected keyword argument 'dataset'" not in message
-        ):
-            raise
-        if context is None:
-            return runner(
-                dataset,
-                parameter_values,
-                fee_rate,
-                slippage_bps,
-                parameter_stability_score,
-                execution_model,
-                execution_timing_policy,
-            )
-        return runner(
-            dataset=dataset,
-            parameter_values=parameter_values,
-            fee_rate=fee_rate,
-            slippage_bps=slippage_bps,
-            parameter_stability_score=parameter_stability_score,
-            execution_model=execution_model,
-            execution_timing_policy=execution_timing_policy,
-            context=context,
-        )
+    signature = inspect.signature(runner)
+    parameters = signature.parameters
+    accepts_var_keyword = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+    def supports_keyword(name: str) -> bool:
+        if accepts_var_keyword:
+            return True
+        parameter = parameters.get(name)
+        return parameter is not None and parameter.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+
+    runner_kwargs = {
+        "dataset": dataset,
+        "parameter_values": parameter_values,
+        "fee_rate": fee_rate,
+        "slippage_bps": slippage_bps,
+        "parameter_stability_score": parameter_stability_score,
+        "execution_model": execution_model,
+        "execution_timing_policy": execution_timing_policy,
+        "portfolio_policy": portfolio_policy,
+        "risk_policy": risk_policy,
+        "context": context,
+    }
+    if not supports_keyword("portfolio_policy") and getattr(portfolio_policy, "source", None) == "manifest":
+        raise ResearchValidationError("strategy_runner_portfolio_policy_unsupported")
+    supported_kwargs = {
+        key: value
+        for key, value in runner_kwargs.items()
+        if supports_keyword(key)
+    }
+    return runner(**supported_kwargs)
+
+
+def _candidate_executed_portfolio_policy_evidence(
+    *,
+    train: BacktestRun,
+    validation: BacktestRun,
+    final_holdout: BacktestRun | None,
+    work_unit: ResearchWorkUnit,
+) -> dict[str, Any]:
+    split_evidence = {
+        "train": _run_portfolio_policy_evidence(train),
+        "validation": _run_portfolio_policy_evidence(validation),
+        "final_holdout": _run_portfolio_policy_evidence(final_holdout) if final_holdout else None,
+    }
+    primary = (
+        split_evidence.get("final_holdout")
+        or split_evidence.get("validation")
+        or split_evidence.get("train")
+        or {}
+    )
+    payload: dict[str, Any] = {
+        "work_unit_portfolio_policy_hash": work_unit.portfolio_policy_hash,
+        "train_executed_portfolio_policy": split_evidence["train"].get("executed_portfolio_policy"),
+        "train_executed_portfolio_policy_hash": split_evidence["train"].get("executed_portfolio_policy_hash"),
+        "validation_executed_portfolio_policy": split_evidence["validation"].get("executed_portfolio_policy"),
+        "validation_executed_portfolio_policy_hash": split_evidence["validation"].get("executed_portfolio_policy_hash"),
+        "final_holdout_executed_portfolio_policy": (
+            split_evidence["final_holdout"].get("executed_portfolio_policy")
+            if isinstance(split_evidence.get("final_holdout"), dict)
+            else None
+        ),
+        "final_holdout_executed_portfolio_policy_hash": (
+            split_evidence["final_holdout"].get("executed_portfolio_policy_hash")
+            if isinstance(split_evidence.get("final_holdout"), dict)
+            else None
+        ),
+        "executed_portfolio_policy": primary.get("executed_portfolio_policy"),
+        "executed_portfolio_policy_hash": primary.get("executed_portfolio_policy_hash"),
+        "ledger_starting_cash_krw": primary.get("ledger_starting_cash_krw"),
+        "ledger_initial_position_qty": primary.get("ledger_initial_position_qty"),
+        "position_sizing_policy": primary.get("position_sizing_policy"),
+    }
+    return payload
+
+
+def _run_portfolio_policy_evidence(run: BacktestRun | None) -> dict[str, Any]:
+    if run is None or not isinstance(run.resource_usage, dict):
+        return {}
+    resource_usage = run.resource_usage
+    return {
+        "executed_portfolio_policy": resource_usage.get("executed_portfolio_policy"),
+        "executed_portfolio_policy_hash": resource_usage.get("executed_portfolio_policy_hash"),
+        "ledger_starting_cash_krw": resource_usage.get("ledger_starting_cash_krw"),
+        "ledger_initial_position_qty": resource_usage.get("ledger_initial_position_qty"),
+        "position_sizing_policy": resource_usage.get("position_sizing_policy"),
+    }
 
 
 def _failed_candidate_base_result(
@@ -3525,8 +3640,28 @@ def _pre_stress_gate_summaries(
                 }
                 | set(str(item) for item in (base.get("resource_guard") or {}).get("reasons", []))
             )
+        policy_mismatch_reasons = _portfolio_policy_execution_gate_reasons(base)
+        if policy_mismatch_reasons:
+            gate_result = "FAIL"
+            fail_reasons = sorted(set(fail_reasons) | set(policy_mismatch_reasons))
         summaries[index] = {"gate_result": gate_result, "fail_reasons": sorted(set(fail_reasons))}
     return summaries
+
+
+def _portfolio_policy_execution_gate_reasons(base: dict[str, Any]) -> list[str]:
+    declared_hash = str(base.get("work_unit_portfolio_policy_hash") or "").strip()
+    executed_hash = str(base.get("executed_portfolio_policy_hash") or "").strip()
+    if not declared_hash:
+        return []
+    if not executed_hash or executed_hash != declared_hash:
+        return [PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON]
+    for split in ("train", "validation", "final_holdout"):
+        split_hash = base.get(f"{split}_executed_portfolio_policy_hash")
+        if split_hash is None:
+            continue
+        if str(split_hash).strip() != declared_hash:
+            return [PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON]
+    return []
 
 
 def _parameter_perturbation_candidates(
