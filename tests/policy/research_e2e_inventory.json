@@ -698,7 +698,7 @@
       "e2e_canary_group": "memory_sensitive"
     },
     {
-      "nodeid": "tests/test_research_backtest_reproducibility.py::test_candidate_detail_notional_uses_manifest_starting_cash",
+      "nodeid": "tests/test_research_backtest_reproducibility.py::test_tiny_portfolio_policy_smoke_records_100k_entry_notional_in_candidate_detail",
       "markers": [
         "research_e2e"
       ],
@@ -726,6 +726,66 @@
       "lower_level_contract_available": false,
       "replacement_contract_test": "",
       "e2e_canary_group": "research_portfolio_policy"
+    },
+    {
+      "nodeid": "tests/test_research_backtest_reproducibility.py::test_resource_limited_candidate_detail_records_executed_portfolio_policy",
+      "markers": [
+        "research_e2e"
+      ],
+      "reason": "verifies resource-limit failures still persist executed portfolio policy evidence through the real production research detail artifact boundary",
+      "expected_workload": {
+        "strategy_count": 1,
+        "manifest_count": 1,
+        "strategy_canary_count": 0,
+        "estimated_strategy_runs": 1,
+        "estimated_tick_events": 72,
+        "estimated_audit_stream_rows": 0,
+        "estimated_artifact_write_count": 4,
+        "estimated_hash_payload_bytes": 13824,
+        "estimated_artifact_bytes": 30208,
+        "estimated_artifact_file_count": 4,
+        "pre_parallel_work_unit_count": 1,
+        "pre_parallel_dataset_hash_call_count": 3,
+        "pre_parallel_dataset_hash_payload_bytes": 9216
+      },
+      "duration_budget_seconds": 30,
+      "domain": "research_portfolio_policy",
+      "last_measured_seconds": 10,
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "artifact_persistence_boundary",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_portfolio_policy"
+    },
+    {
+      "nodeid": "tests/test_research_backtest_reproducibility.py::test_resource_limited_candidate_separates_resource_failure_from_policy_mismatch",
+      "markers": [
+        "research_e2e"
+      ],
+      "reason": "verifies resource-limit failures remain distinct from portfolio policy mismatch failures through the real production research candidate gate",
+      "expected_workload": {
+        "strategy_count": 1,
+        "manifest_count": 1,
+        "strategy_canary_count": 0,
+        "estimated_strategy_runs": 1,
+        "estimated_tick_events": 72,
+        "estimated_audit_stream_rows": 0,
+        "estimated_artifact_write_count": 4,
+        "estimated_hash_payload_bytes": 13824,
+        "estimated_artifact_bytes": 30208,
+        "estimated_artifact_file_count": 4,
+        "pre_parallel_work_unit_count": 1,
+        "pre_parallel_dataset_hash_call_count": 3,
+        "pre_parallel_dataset_hash_payload_bytes": 9216
+      },
+      "duration_budget_seconds": 30,
+      "domain": "research_portfolio_policy",
+      "last_measured_seconds": 10,
+      "tier": "research_nightly",
+      "must_be_e2e_reason": "fail_closed_safety",
+      "lower_level_contract_available": false,
+      "replacement_contract_test": "",
+      "e2e_canary_group": "research_fail_closed"
     },
     {
       "nodeid": "tests/test_research_backtest_reproducibility.py::test_legacy_missing_manifest_policy_keeps_legacy_990k_detail_evidence",
@@ -758,7 +818,7 @@
       "e2e_canary_group": "research_portfolio_policy"
     },
     {
-      "nodeid": "tests/test_research_backtest_reproducibility.py::test_summary_candidate_result_retains_portfolio_policy_evidence",
+      "nodeid": "tests/test_research_backtest_reproducibility.py::test_summary_candidate_result_retains_completed_executed_policy_evidence",
       "markers": [
         "research_e2e"
       ],

@@ -695,6 +695,7 @@ def _derived_candidate_index_summary(candidate: dict[str, Any], *, include_compa
     summary = {key: candidate[key] for key in summary_keys if key in candidate}
     _drop_runtime_local_artifact_paths(summary)
     _compact_derived_candidate_large_blocks(summary)
+    _compact_retained_detail_fields(summary)
     if include_compact:
         _copy_compact_diagnostics(summary, candidate)
     if "resource_guard" in candidate:
@@ -807,6 +808,7 @@ def _derived_scenario_index_summary(scenario: Any, *, include_compact: bool = Tr
     summary = {key: scenario[key] for key in summary_keys if key in scenario}
     _drop_runtime_local_artifact_paths(summary)
     _compact_scenario_metric_bodies(summary)
+    _compact_retained_detail_fields(summary)
     if include_compact:
         _copy_compact_diagnostics(summary, scenario)
         _drop_repeated_scenario_diagnostics(summary)
@@ -1181,8 +1183,12 @@ def summarize_resource_usage_for_candidate_artifact(
             continue
         if key in {
             "applied_resource_limits",
-            "memory_sampling_policy",
             "resource_policy",
+            "stage_trace_sample",
+        }:
+            continue
+        if key in {
+            "memory_sampling_policy",
             "strategy_diagnostics",
             "strategy_specific_diagnostics",
         }:
@@ -1514,6 +1520,13 @@ def _compact_retained_detail_summary(value: Any) -> Any:
         "retained_equity_point_count": value.get("retained_equity_point_count"),
         "retained_regime_snapshot_count": value.get("retained_regime_snapshot_count"),
     }
+
+
+def _compact_retained_detail_fields(summary: dict[str, Any]) -> None:
+    if "retained_detail_summary" in summary:
+        summary["retained_detail_summary"] = _compact_retained_detail_summary(
+            summary["retained_detail_summary"]
+        )
 
 
 def _compact_metrics_payload(metrics: Any) -> Any:

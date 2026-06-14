@@ -720,14 +720,17 @@ def test_summary_derived_candidate_resource_usage_is_bounded() -> None:
             {
                 "scenario_id": "scenario_001",
                 "train_resource_usage": {
+                    "applied_resource_limits": {"max_trades": 1},
                     "behavior_hash": "sha256:train-behavior",
                     "canonical_hash_payload_bytes": 123_456,
                     "canonical_payload_hash_call_count": 10,
                     "equity_curve_hash": "sha256:train-equity",
                     "observability_policy": "summary_aggregate",
+                    "resource_policy": {"max_decisions_retained": 0},
                     "nested": {"stage_trace": [{"stage": "nested"}]},
                     "stage_trace": [{"stage": "train"}],
                     "stage_trace_hash": "sha256:stage-trace",
+                    "stage_trace_sample": [{"stage": "sample"}],
                     "stable_value_call_count": 20,
                     "tick_observability_policy": {"name": "summary_aggregate"},
                 },
@@ -752,10 +755,56 @@ def test_summary_derived_candidate_resource_usage_is_bounded() -> None:
     assert "canonical_hash_payload_bytes" not in usage
     assert "canonical_payload_hash_call_count" not in usage
     assert "observability_policy" not in usage
+    assert "applied_resource_limits_hash" not in usage
+    assert "resource_policy_hash" not in usage
     assert "stable_value_call_count" not in usage
+    assert "stage_trace_sample_count" not in usage
+    assert "stage_trace_sample_hash" not in usage
     assert "tick_observability_policy" not in usage
     assert usage["stage_trace_hash"] == "sha256:stage-trace"
     assert usage["nested"]["stage_trace_count"] == 1
     assert scenario["validation_equity_curve"] == []
     assert "validation_execution_metadata" not in scenario
     assert scenario["retained_detail_summary"] == {"retained_equity_point_count": 0}
+
+
+def test_summary_derived_candidate_compacts_large_retained_detail_summary() -> None:
+    retained_detail_summary = {
+        "report_detail": "summary",
+        "decision_count": 120,
+        "retained_decision_count": 0,
+        "retained_equity_point_count": 0,
+        "retained_regime_snapshot_count": 0,
+        "decision_hash": "sha256:decision",
+        "behavior_hash": "sha256:behavior",
+        "trade_ledger_hash": "sha256:ledger",
+        "equity_curve_hash": "sha256:equity",
+    }
+    candidate = {
+        "parameter_candidate_id": "candidate_001",
+        "retained_detail_summary": retained_detail_summary,
+        "scenario_results": [
+            {
+                "scenario_id": "scenario_001",
+                "retained_detail_summary": retained_detail_summary,
+            }
+        ],
+    }
+
+    summary = summarize_derived_candidate(candidate, "summary")
+
+    compact = summary["retained_detail_summary"]
+    assert compact["retained_detail_summary_hash"].startswith("sha256:")
+    assert compact == {
+        "retained_detail_summary_hash": compact["retained_detail_summary_hash"],
+        "retained_detail_summary_key_count": 9,
+        "report_detail": "summary",
+        "decision_count": 120,
+        "retained_decision_count": 0,
+        "retained_equity_point_count": 0,
+        "retained_regime_snapshot_count": 0,
+    }
+    scenario = summary["scenario_results"][0]
+    assert scenario["retained_detail_summary"]["retained_detail_summary_hash"].startswith("sha256:")
+    assert scenario["retained_detail_summary"]["decision_count"] == 120
+    assert "decision_hash" not in scenario["retained_detail_summary"]
