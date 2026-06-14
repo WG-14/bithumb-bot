@@ -132,6 +132,7 @@ TOP_OF_BOOK_OPERATOR_NEXT_ACTION = (
 )
 PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON = "portfolio_policy_execution_mismatch"
 MISSING_EXECUTED_PORTFOLIO_POLICY_EVIDENCE_REASON = "missing_executed_portfolio_policy_evidence"
+MAX_SIMULATION_INTEGRITY_SMOKE_CANDLES = 1000
 ProgressCallback = Callable[[dict[str, Any]], None]
 _CANDIDATE_SCENARIO_WORKER_CONTEXT: dict[str, Any] | None = None
 FAST_TEST_TIER_ENV = "BITHUMB_TEST_TIER"
@@ -335,6 +336,7 @@ def _evaluate_candidate_scenario_task(
             work_unit=work_unit,
             reason=exc.reason,
             resource_guard=exc.evidence,
+            limits=manifest.research_run.resource_limits,
         )
 
         base = _failed_candidate_base_result(
@@ -384,6 +386,7 @@ def _evaluate_candidate_scenario_task(
             work_unit=work_unit,
             reason="candidate_exception",
             resource_guard=evidence,
+            limits=manifest.research_run.resource_limits,
         )
         base = _failed_candidate_base_result(
             manifest=manifest,
@@ -900,6 +903,26 @@ def _artifact_budget_from_limits(limits) -> ArtifactBudget:
     )
 
 
+def _validate_run_purpose_dataset_scope(
+    *,
+    manifest: ExperimentManifest,
+    snapshots: dict[str, DatasetSnapshot],
+) -> None:
+    if manifest.research_run.run_purpose != "simulation_integrity_smoke":
+        return
+    oversized = {
+        split_name: len(snapshot.candles)
+        for split_name, snapshot in sorted(snapshots.items())
+        if len(snapshot.candles) > MAX_SIMULATION_INTEGRITY_SMOKE_CANDLES
+    }
+    if oversized:
+        details = ",".join(f"{split}:{count}" for split, count in oversized.items())
+        raise ResearchValidationError(
+            "simulation_integrity_smoke_split_too_large:"
+            f"max_candles={MAX_SIMULATION_INTEGRITY_SMOKE_CANDLES}:{details}"
+        )
+
+
 def _progress_and_journal(
     *,
     callback: ProgressCallback | None,
@@ -1171,17 +1194,6 @@ def run_research_backtest(
             status=report.quality_gate_status,
             reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
         )
-    experiment_registry_reservation = _reserve_experiment_attempt(
-        manifest=manifest,
-        manager=manager,
-        snapshots=snapshots,
-        quality_reports=quality_reports,
-        manifest_path=manifest_path,
-        command_name="research-backtest",
-        command_args=command_args,
-        repository_version=_repository_version(),
-        created_at=generated_at,
-    )
     if manifest.dataset.split.final_holdout is not None:
         stage_started = time.perf_counter()
         snapshots["final_holdout"] = load_dataset_split(
@@ -1221,6 +1233,18 @@ def run_research_backtest(
             status=report.quality_gate_status,
             reasons=",".join(report.quality_gate_reasons) if report.quality_gate_reasons else "none",
         )
+    _validate_run_purpose_dataset_scope(manifest=manifest, snapshots=snapshots)
+    experiment_registry_reservation = _reserve_experiment_attempt(
+        manifest=manifest,
+        manager=manager,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        manifest_path=manifest_path,
+        command_name="research-backtest",
+        command_args=command_args,
+        repository_version=_repository_version(),
+        created_at=generated_at,
+    )
     _require_enough_candles(snapshots.values())
 
     execution_plan = build_research_execution_plan(
@@ -2328,6 +2352,7 @@ def _evaluate_candidates(
                 "scenario_type": scenario.type,
                 "scenario_role": scenario.scenario_role,
                 "scenario_role_source": scenario.scenario_role_source,
+                "run_purpose": manifest.research_run.run_purpose,
                 "execution_model": execution_model_payload,
                 "execution_model_hash": execution_model_payload["model_params_hash"],
                 "model_params_hash": execution_model_payload["model_params_hash"],
@@ -2456,6 +2481,7 @@ def _evaluate_candidates(
                 "metrics_v2_source": base.get("metrics_v2_source"),
                 "failure_reason": base.get("failure_reason"),
                 "resource_guard": base.get("resource_guard"),
+                "suggested_rerun_scope": base.get("suggested_rerun_scope"),
                 "failure_artifact_ref": base.get("failure_artifact_ref"),
                 "failure_artifact_path": base.get("failure_artifact_path"),
                 "detail_artifact_ref": base.get("detail_artifact_ref"),
@@ -2484,7 +2510,7 @@ def _evaluate_candidates(
                 "validation_execution_metadata": base.get("validation_execution_metadata") or [],
                 "final_holdout_execution_metadata": base.get("final_holdout_execution_metadata"),
             }
-            scenario_result.update(_classified_fail_reasons(fail_reasons))
+            _apply_fail_reason_classification(scenario_result, reason_key="scenario_fail_reasons")
             candidate_payload = aggregates.setdefault(
                 base["candidate_id"],
                 {
@@ -2512,6 +2538,7 @@ def _evaluate_candidates(
                         depth_available=l2_depth_complete_snapshots_available,
                     ),
                     "strategy_name": manifest.strategy_name,
+                    "run_purpose": manifest.research_run.run_purpose,
                     "strategy_spec": strategy_spec.as_dict(),
                     "strategy_spec_hash": strategy_spec.spec_hash(),
                     "strategy_plugin_contract": strategy_plugin.contract_payload(),
@@ -2704,6 +2731,7 @@ def _evaluate_candidates(
                 "validation_strategy_diagnostics": primary.get("validation_strategy_diagnostics"),
                 "final_holdout_strategy_diagnostics": primary.get("final_holdout_strategy_diagnostics"),
                 "strategy_diagnostics": primary.get("strategy_diagnostics"),
+                "run_purpose": manifest.research_run.run_purpose,
                 "candidate_failed": bool(primary.get("candidate_failed")),
                 "candidate_failed_before_complete_metrics": bool(primary.get("candidate_failed_before_complete_metrics")),
                 "evaluation_status": primary.get("evaluation_status"),
@@ -2711,6 +2739,7 @@ def _evaluate_candidates(
                 "metrics_v2_source": primary.get("metrics_v2_source"),
                 "failure_reason": primary.get("failure_reason"),
                 "resource_guard": primary.get("resource_guard"),
+                "suggested_rerun_scope": primary.get("suggested_rerun_scope"),
                 "failure_artifact_ref": primary.get("failure_artifact_ref"),
                 "failure_artifact_path": primary.get("failure_artifact_path"),
                 "detail_artifact_ref": primary.get("detail_artifact_ref"),
@@ -3333,6 +3362,7 @@ def _evaluate_candidate_base_result(
     return {
         "index": index,
         "candidate_id": param_candidate_id,
+        "run_purpose": manifest.research_run.run_purpose,
         "candidate_failed": False,
         "candidate_failed_before_complete_metrics": False,
         "evaluation_status": "completed",
@@ -3394,15 +3424,24 @@ def _record_failed_work_unit(
     work_unit: ResearchWorkUnit,
     reason: str,
     resource_guard: dict[str, Any],
+    limits: Any,
 ) -> None:
     if work_unit_observability is None:
         return
+    rerun_scope = _suggested_rerun_scope(
+        candidate_id=work_unit.candidate_id,
+        scenario_id=work_unit.scenario_id,
+        reason=reason,
+        resource_guard=resource_guard,
+        limits=limits,
+    )
     work_unit_observability.append(
         {
             "work_unit": work_unit.as_dict(),
             "status": "failed",
             "failure_reason": reason,
             "resource_guard": resource_guard,
+            "suggested_rerun_scope": rerun_scope,
             "content_hash": sha256_prefixed(
                 {
                     "work_unit_hash": work_unit.work_unit_hash,
@@ -3556,6 +3595,13 @@ def _failed_candidate_base_result(
     split = str(resource_guard.get("split") or "unknown") if isinstance(resource_guard, dict) else "unknown"
     audit_index = resource_guard.get("audit_trace_index") if isinstance(resource_guard.get("audit_trace_index"), dict) else None
     work_unit_policy_hash = work_unit.portfolio_policy_hash if work_unit is not None else None
+    rerun_scope = _suggested_rerun_scope(
+        candidate_id=candidate_id,
+        scenario_id=scenario_id,
+        reason=reason,
+        resource_guard=resource_guard,
+        limits=manifest.research_run.resource_limits,
+    )
     policy_evidence = (
         _resource_guard_portfolio_policy_evidence(resource_guard)
         if isinstance(resource_guard, dict)
@@ -3570,6 +3616,7 @@ def _failed_candidate_base_result(
     return {
         "index": candidate_index,
         "candidate_id": candidate_id,
+        "run_purpose": manifest.research_run.run_purpose,
         "parameter_values": params,
         "work_unit_portfolio_policy_hash": work_unit_policy_hash,
         **policy_evidence,
@@ -3601,6 +3648,7 @@ def _failed_candidate_base_result(
         "metrics_v2_source": "failure_fallback",
         "failure_reason": reason,
         "resource_guard": resource_guard,
+        "suggested_rerun_scope": rerun_scope,
         "failed_split": split,
         "scenario_id": scenario_id,
         "scenario_index": scenario_index,
@@ -3609,6 +3657,38 @@ def _failed_candidate_base_result(
         "train_audit_trace_index": audit_index if split == "train" else None,
         "validation_audit_trace_index": audit_index if split == "validation" else None,
         "final_holdout_audit_trace_index": audit_index if split == "final_holdout" else None,
+    }
+
+
+def _suggested_rerun_scope(
+    *,
+    candidate_id: str,
+    scenario_id: str,
+    reason: str,
+    resource_guard: dict[str, Any],
+    limits: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(resource_guard, dict):
+        return None
+    guard_reasons = [str(item) for item in resource_guard.get("reasons") or []]
+    if reason != "candidate_resource_limit_exceeded" and not any(
+        item in RESOURCE_INTEGRITY_REASON_CODES for item in guard_reasons
+    ):
+        return None
+    return {
+        "candidate_id": candidate_id,
+        "scenario_id": scenario_id,
+        "failed_split": str(resource_guard.get("split") or "unknown"),
+        "reason": reason,
+        "resource_guard_reasons": sorted(set(guard_reasons)),
+        "candles_processed": int(resource_guard.get("candles_processed") or 0),
+        "total_candles": int(resource_guard.get("total_candles") or 0),
+        "original_max_runtime_s_per_candidate_split": getattr(
+            limits,
+            "max_runtime_s_per_candidate_split",
+            None,
+        ),
+        "recommended_rerun_mode": "narrow_candidate_single_split",
     }
 
 
@@ -3761,7 +3841,23 @@ def _apply_fail_reason_classification(payload: dict[str, Any], *, reason_key: st
     reasons = payload.get(reason_key)
     if not isinstance(reasons, (list, tuple, set)):
         reasons = []
-    payload.update(_classified_fail_reasons(reasons))
+    classification = _classified_fail_reasons(reasons)
+    if _candidate_metrics_not_evaluated(payload):
+        classification["strategy_performance_gate_status"] = "NOT_EVALUATED"
+        classification["strategy_performance_fail_reasons"] = []
+        classification["strategy_performance_not_evaluated_reasons"] = [
+            "candidate_failed_before_complete_metrics"
+        ]
+    payload.update(classification)
+
+
+def _candidate_metrics_not_evaluated(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("candidate_failed_before_complete_metrics") is True
+        or payload.get("metrics_v2_source") == "failure_fallback"
+        or payload.get("evaluation_status") == "resource_limited"
+        or payload.get("metrics_status") == "unavailable"
+    )
 
 
 def _parameter_perturbation_candidates(
@@ -5314,6 +5410,7 @@ def _report_payload(
         stress_summary_candidate = candidates[0]
     warnings = {warning for candidate in candidates for warning in candidate.get("warnings", [])}
     warnings.update(manifest.portfolio_policy.warning_codes())
+    warnings.update(_resource_budget_warnings(manifest))
     if experiment_registry_fields.get("registry_gate_result") == "WARN":
         warnings.update(str(item) for item in experiment_registry_fields.get("registry_gate_fail_reasons") or [])
     if isinstance(statistical_evidence, dict) and not statistical_evidence.get(
@@ -5339,9 +5436,13 @@ def _report_payload(
         "aggregate_gate_source": "required_scenario_policy",
         "candidate_eligibility_gate": "aggregate_acceptance_gate_result",
     }
+    resource_budget = _resource_budget_report(manifest)
+    resource_summary = _resource_integrity_summary(candidates)
+    top_level_classification = _top_level_classification(candidates)
     payload = {
         "report_kind": report_kind,
         "experiment_id": manifest.experiment_id,
+        "run_purpose": manifest.research_run.run_purpose,
         "hypothesis": manifest.hypothesis,
         "manifest_hash": manifest.manifest_hash(),
         "dataset_snapshot_id": manifest.dataset.snapshot_id,
@@ -5451,6 +5552,7 @@ def _report_payload(
         "portfolio_policy_hash": portfolio_policy_hash,
         "simulation_policy_hash": simulation_policy_hash,
         "research_run": manifest.research_run.as_dict(),
+        "resource_budget": resource_budget,
         "diagnostic_mode": manifest.research_run.diagnostic_mode,
         "diagnostic_only": manifest.research_run.diagnostic_mode == "exploratory",
         "promotion_gate_non_authoritative": manifest.research_run.diagnostic_mode == "exploratory",
@@ -5476,6 +5578,8 @@ def _report_payload(
             }
         ),
         "execution_observability": execution_observability or {"stage_timings": [], "work_units": []},
+        "resource_integrity_summary": resource_summary,
+        **top_level_classification,
         "audit_trail_policy": manifest.research_run.audit_trail.as_dict(),
         "audit_trail_status": "PASS" if manifest.research_run.audit_trail.complete_external and not audit_reasons else (
             "DISABLED" if not manifest.research_run.audit_trail.complete_external else "FAIL"
@@ -6377,6 +6481,151 @@ def _report_execution_event_summary(candidates: list[dict[str, Any]]) -> dict[st
                 )
             }
     return None
+
+
+def _resource_integrity_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(candidates)
+    computed = [candidate for candidate in candidates if candidate.get("metrics_v2_source") == "computed"]
+    fallback = [candidate for candidate in candidates if candidate.get("metrics_v2_source") == "failure_fallback"]
+    resource_limited = [candidate for candidate in candidates if _candidate_resource_limited(candidate)]
+    by_split: dict[str, int] = {}
+    for candidate in candidates:
+        resource_guard = candidate.get("resource_guard")
+        reasons = candidate.get("resource_integrity_fail_reasons") or []
+        guard_reasons = resource_guard.get("reasons") if isinstance(resource_guard, dict) else []
+        if "max_runtime_exceeded" not in {str(reason) for reason in list(reasons) + list(guard_reasons or [])}:
+            continue
+        split = (
+            str(resource_guard.get("split") or candidate.get("failed_split") or "unknown")
+            if isinstance(resource_guard, dict)
+            else str(candidate.get("failed_split") or "unknown")
+        )
+        by_split[split] = by_split.get(split, 0) + 1
+    slowest = sorted(
+        (
+            (
+                _candidate_elapsed_s(candidate),
+                str(candidate.get("parameter_candidate_id") or candidate.get("candidate_id") or ""),
+            )
+            for candidate in candidates
+        ),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    return {
+        "computed_candidate_count": len(computed),
+        "failure_fallback_candidate_count": len(fallback),
+        "resource_limited_candidate_count": len(resource_limited),
+        "max_runtime_exceeded_count": sum(by_split.values()),
+        "max_runtime_exceeded_by_split": dict(sorted(by_split.items())),
+        "computed_candidate_ratio": (len(computed) / total) if total else 0.0,
+        "slowest_candidate_ids": [candidate_id for _, candidate_id in slowest[:5] if candidate_id],
+    }
+
+
+def _candidate_resource_limited(candidate: dict[str, Any]) -> bool:
+    if candidate.get("evaluation_status") == "resource_limited":
+        return True
+    if candidate.get("failure_reason") == "candidate_resource_limit_exceeded":
+        return True
+    reasons = set(str(item) for item in candidate.get("resource_integrity_fail_reasons") or [])
+    guard = candidate.get("resource_guard")
+    if isinstance(guard, dict):
+        reasons.update(str(item) for item in guard.get("reasons") or [])
+    return "max_runtime_exceeded" in reasons or any(reason in RESOURCE_INTEGRITY_REASON_CODES for reason in reasons)
+
+
+def _candidate_elapsed_s(candidate: dict[str, Any]) -> float:
+    values: list[float] = []
+    for key in ("train_resource_usage", "validation_resource_usage", "final_holdout_resource_usage", "resource_guard"):
+        payload = candidate.get(key)
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get("elapsed_s")
+        if value is not None:
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                pass
+    return max(values, default=0.0)
+
+
+def _top_level_classification(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    simulation_reasons: set[str] = set()
+    resource_reasons: set[str] = set()
+    performance_reasons: set[str] = set()
+    deployment_reasons: set[str] = set()
+    computed_count = 0
+    not_evaluated_count = 0
+    for candidate in candidates:
+        scopes = [candidate]
+        scopes.extend(item for item in candidate.get("scenario_results") or [] if isinstance(item, dict))
+        if _is_computed_candidate(candidate):
+            computed_count += 1
+        elif _candidate_metrics_not_evaluated(candidate):
+            not_evaluated_count += 1
+        for item in scopes:
+            simulation_reasons.update(str(reason) for reason in item.get("simulation_integrity_fail_reasons") or [])
+            resource_reasons.update(str(reason) for reason in item.get("resource_integrity_fail_reasons") or [])
+            deployment_reasons.update(str(reason) for reason in item.get("deployment_eligibility_reasons") or [])
+            if _is_computed_candidate(candidate):
+                performance_reasons.update(str(reason) for reason in item.get("strategy_performance_fail_reasons") or [])
+    if performance_reasons:
+        performance_status = "FAIL"
+    elif computed_count:
+        performance_status = "PASS"
+    elif not_evaluated_count:
+        performance_status = "NOT_EVALUATED"
+    else:
+        performance_status = "SKIPPED"
+    return {
+        "simulation_integrity_status": "FAIL" if simulation_reasons else "PASS",
+        "simulation_integrity_fail_reasons": sorted(simulation_reasons),
+        "resource_integrity_status": "FAIL" if resource_reasons else "PASS",
+        "resource_integrity_fail_reasons": sorted(resource_reasons),
+        "strategy_performance_gate_status": performance_status,
+        "strategy_performance_fail_reasons": sorted(performance_reasons),
+        "deployment_eligibility_status": "FAIL" if deployment_reasons else "PASS",
+        "deployment_eligibility_reasons": sorted(deployment_reasons),
+    }
+
+
+def _is_computed_candidate(candidate: dict[str, Any]) -> bool:
+    return (
+        candidate.get("metrics_v2_source") == "computed"
+        and candidate.get("candidate_failed_before_complete_metrics") is False
+        and candidate.get("evaluation_status") == "completed"
+        and candidate.get("metrics_status") == "complete"
+    )
+
+
+def _resource_budget_report(manifest: ExperimentManifest) -> dict[str, Any]:
+    limits = manifest.research_run.resource_limits
+    raw_research_run = manifest.raw.get("research_run") if isinstance(manifest.raw, dict) else None
+    raw_limits = raw_research_run.get("resource_limits") if isinstance(raw_research_run, dict) else None
+    manifest_override = isinstance(raw_limits, dict) and "max_runtime_s_per_candidate_split" in raw_limits
+    override_reason = raw_limits.get("override_reason") if isinstance(raw_limits, dict) else None
+    source = "manifest" if manifest_override else "default"
+    return {
+        "applied_limits": {
+            "max_runtime_s_per_candidate_split": limits.max_runtime_s_per_candidate_split,
+            "max_trades": limits.max_trades,
+            "max_rss_mb": limits.max_rss_mb,
+        },
+        "authority": "research_run.resource_limits",
+        "override_source": source,
+        "override_reason": override_reason,
+    }
+
+
+def _resource_budget_warnings(manifest: ExperimentManifest) -> list[str]:
+    raw_research_run = manifest.raw.get("research_run") if isinstance(manifest.raw, dict) else None
+    raw_limits = raw_research_run.get("resource_limits") if isinstance(raw_research_run, dict) else None
+    if not isinstance(raw_limits, dict):
+        return []
+    if "max_runtime_s_per_candidate_split" in raw_limits and not raw_limits.get("override_reason"):
+        return ["resource_budget_override_reason_missing"]
+    return []
 
 
 def _base_report_scenario(manifest: ExperimentManifest) -> ExecutionScenario:

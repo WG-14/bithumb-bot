@@ -87,6 +87,10 @@ def _candidate(
         "primary_metric_scenario_id": "scenario_base",
         "aggregate_gate_source": "required_scenario_policy",
         "metrics_schema_version": 2,
+        "metrics_v2_source": "computed",
+        "candidate_failed_before_complete_metrics": False,
+        "evaluation_status": "completed",
+        "metrics_status": "complete",
         "final_holdout_present": True,
         "statistical_gate_result": "PASS",
         "stress_suite_gate_result": "PASS",
@@ -153,6 +157,46 @@ def test_final_selection_rejects_fallback_metrics_even_when_gate_is_pass() -> No
     assert "final_selection_candidate_failed_before_complete_metrics" in reasons
     assert "final_selection_metrics_unavailable" in reasons
     assert "final_selection_metrics_failure_fallback" in reasons
+
+
+def test_final_selection_computed_only_excludes_failure_fallback_placeholder_metrics_by_default() -> None:
+    fallback = _candidate("candidate_fallback", final_expectancy=0.0)
+    fallback["candidate_failed_before_complete_metrics"] = True
+    fallback["evaluation_status"] = "resource_limited"
+    fallback["metrics_status"] = "unavailable"
+    fallback["metrics_v2_source"] = "failure_fallback"
+    fallback["final_holdout_metrics_v2"] = {
+        "metrics_status": "unavailable",
+        "metrics_v2_source": "failure_fallback",
+        "candidate_failed_before_complete_metrics": True,
+        "trade_quality": {"expectancy_per_trade_krw": 0.0},
+        "return_risk": {"max_drawdown_pct": 0.0},
+    }
+    computed = _candidate("candidate_computed", final_expectancy=-1.5, final_mdd=25.0)
+
+    result = apply_final_selection_contract(
+        contract=_final_selection(
+            ranking=[
+                {
+                    "metric": "final_holdout.metrics_v2.trade_quality.expectancy_per_trade_krw",
+                    "order": "desc",
+                    "required": True,
+                },
+                {"metric": "parameter_candidate_id", "order": "asc", "required": True},
+            ]
+        ),
+        candidates=[fallback, computed],
+        report_context=_context(),
+        production_bound=True,
+    )
+
+    assert result["gate_result"] == "PASS"
+    assert result["selected_candidate_id"] == "candidate_computed"
+    fallback_score = next(
+        item for item in result["candidate_final_scores"] if item["candidate_id"] == "candidate_fallback"
+    )
+    assert fallback_score["eligible"] is False
+    assert "final_selection_candidate_not_computed_complete" in fallback_score["eligibility_reasons"]
 
 
 def test_final_selection_rejects_candidate_without_metric_source_semantics() -> None:

@@ -11,6 +11,15 @@ FINAL_SELECTION_SCHEMA_VERSION = 1
 LEGACY_IMPLICIT_FINAL_RANK_WARNING = "legacy_implicit_final_rank_policy_v1"
 
 
+def is_computed_candidate(candidate: dict[str, Any]) -> bool:
+    return (
+        candidate.get("metrics_v2_source") == "computed"
+        and candidate.get("candidate_failed_before_complete_metrics") is False
+        and candidate.get("evaluation_status") == "completed"
+        and candidate.get("metrics_status") == "complete"
+    )
+
+
 def apply_final_selection_contract(
     *,
     contract: FinalSelectionContract | dict[str, Any] | None,
@@ -248,12 +257,20 @@ def _metric_source_semantics_reasons(candidate: dict[str, Any]) -> list[str]:
 
 def _fallback_metrics_reasons(candidate: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
+    if not is_computed_candidate(candidate):
+        reasons.append("final_selection_candidate_not_computed_complete")
     if bool(candidate.get("candidate_failed_before_complete_metrics")):
         reasons.append("final_selection_candidate_failed_before_complete_metrics")
     if candidate.get("metrics_status") == "unavailable":
         reasons.append("final_selection_metrics_unavailable")
     if candidate.get("metrics_v2_source") == "failure_fallback":
         reasons.append("final_selection_metrics_failure_fallback")
+    if candidate.get("evaluation_status") != "completed":
+        reasons.append("final_selection_evaluation_not_completed")
+    if candidate.get("metrics_status") != "complete":
+        reasons.append("final_selection_metrics_not_complete")
+    if candidate.get("metrics_v2_source") != "computed":
+        reasons.append("final_selection_metrics_not_computed")
     for split_key in ("train_metrics_v2", "validation_metrics_v2", "final_holdout_metrics_v2"):
         metrics = candidate.get(split_key)
         if not isinstance(metrics, dict):

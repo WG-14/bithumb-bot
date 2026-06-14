@@ -1222,6 +1222,201 @@ def test_tiny_portfolio_policy_smoke_records_100k_entry_notional_in_candidate_de
 
 
 @pytest.mark.research_e2e
+def test_report_includes_research_run_purpose_and_runtime_limit_resource_budget(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("BITHUMB_TEST_TIER", raising=False)
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path, minutes_per_day=24)
+    manager = _research_manager(tmp_path, monkeypatch)
+    payload = _policy_artifact_manifest(
+        experiment_id="purpose_budget_report",
+        portfolio_policy=_portfolio_policy(starting_cash=100_000.0, buy_fraction=0.99),
+    )
+    payload["research_run"]["run_purpose"] = "simulation_integrity_smoke"
+    payload["research_run"]["resource_limits"]["max_runtime_s_per_candidate_split"] = 900
+    payload["research_run"]["resource_limits"]["override_reason"] = "operator_budget_probe"
+
+    report = run_research_backtest(
+        manifest=parse_manifest(payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert report["run_purpose"] == "simulation_integrity_smoke"
+    assert report["research_run"]["run_purpose"] == "simulation_integrity_smoke"
+    assert report["candidates"][0]["run_purpose"] == "simulation_integrity_smoke"
+    assert report["candidates"][0]["scenario_results"][0]["run_purpose"] == "simulation_integrity_smoke"
+    budget = report["resource_budget"]
+    assert budget["applied_limits"]["max_runtime_s_per_candidate_split"] == 900.0
+    assert budget["override_source"] == "manifest"
+    assert budget["override_reason"] == "operator_budget_probe"
+    root = manager.data_dir() / "derived" / "research" / "purpose_budget_report"
+    candidate_result = json.loads(next((root / "candidate_results").glob("candidate_*.json")).read_text(encoding="utf-8"))
+    assert candidate_result["run_purpose"] == "simulation_integrity_smoke"
+    assert candidate_result["scenario_results"][0]["run_purpose"] == "simulation_integrity_smoke"
+
+
+def test_legacy_manifest_defaults_to_strategy_performance_diagnostic_and_resource_budget_warning() -> None:
+    payload = _manifest()
+    payload["research_run"] = {
+        "resource_limits": {
+            "max_runtime_s_per_candidate_split": 900,
+        },
+    }
+
+    manifest = parse_manifest(payload)
+
+    assert manifest.research_run.run_purpose == "strategy_performance_diagnostic"
+    assert validation_protocol._resource_budget_report(manifest)["override_source"] == "manifest"
+    assert "resource_budget_override_reason_missing" in validation_protocol._resource_budget_warnings(manifest)
+
+
+def test_simulation_integrity_smoke_rejects_full_historical_split_and_resource_budget_probe_allows_large_split(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "candles.sqlite"
+    _create_db(db_path, minutes_per_day=1001)
+    manager = _research_manager(tmp_path, monkeypatch)
+    smoke_payload = _policy_artifact_manifest(
+        experiment_id="smoke_rejects_large_split",
+        portfolio_policy=_portfolio_policy(starting_cash=100_000.0, buy_fraction=0.99),
+    )
+    smoke_payload["research_run"]["run_purpose"] = "simulation_integrity_smoke"
+
+    with pytest.raises(ResearchValidationError, match="simulation_integrity_smoke_split_too_large"):
+        run_research_backtest(
+            manifest=parse_manifest(smoke_payload),
+            db_path=db_path,
+            manager=manager,
+            generated_at="2026-05-03T00:00:00+00:00",
+        )
+
+    probe_payload = dict(smoke_payload)
+    probe_payload["experiment_id"] = "resource_budget_probe_large_split"
+    probe_payload["research_run"] = {
+        **smoke_payload["research_run"],
+        "run_purpose": "resource_budget_probe",
+    }
+    report = _run_contract_research_backtest(
+        manifest=parse_manifest(probe_payload),
+        db_path=db_path,
+        manager=manager,
+        generated_at="2026-05-03T00:00:00+00:00",
+        workload_budget_kwargs={"max_tick_events": 10_000},
+    )
+    assert report["run_purpose"] == "resource_budget_probe"
+
+
+def test_resource_integrity_summary_max_runtime_exceeded_resource_integrity_status_deployment_eligibility_status_and_top_level_integrity_statuses() -> None:
+    candidates = [
+        {
+            "parameter_candidate_id": "candidate_computed",
+            "metrics_v2_source": "computed",
+            "candidate_failed_before_complete_metrics": False,
+            "evaluation_status": "completed",
+            "metrics_status": "complete",
+            "strategy_performance_fail_reasons": ["profit_factor_failed"],
+            "scenario_results": [
+                {
+                    "simulation_integrity_fail_reasons": [PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON],
+                    "resource_integrity_fail_reasons": [],
+                    "strategy_performance_fail_reasons": ["profit_factor_failed"],
+                    "deployment_eligibility_reasons": [],
+                }
+            ],
+        },
+        {
+            "parameter_candidate_id": "candidate_timeout",
+            "metrics_v2_source": "failure_fallback",
+            "candidate_failed_before_complete_metrics": True,
+            "evaluation_status": "resource_limited",
+            "metrics_status": "unavailable",
+            "failure_reason": "candidate_resource_limit_exceeded",
+            "resource_guard": {
+                "reasons": ["max_runtime_exceeded"],
+                "split": "validation",
+                "elapsed_s": 300.123,
+            },
+            "resource_integrity_fail_reasons": ["max_runtime_exceeded"],
+            "strategy_performance_fail_reasons": [],
+            "deployment_eligibility_reasons": ["research_only_not_live_eligible"],
+            "scenario_results": [
+                {
+                    "resource_guard": {"reasons": ["max_runtime_exceeded"], "split": "validation"},
+                    "resource_integrity_fail_reasons": ["max_runtime_exceeded"],
+                    "strategy_performance_fail_reasons": [],
+                    "deployment_eligibility_reasons": [],
+                }
+            ],
+        },
+    ]
+
+    summary = validation_protocol._resource_integrity_summary(candidates)
+    top_level = validation_protocol._top_level_classification(candidates)
+
+    assert summary["computed_candidate_count"] == 1
+    assert summary["failure_fallback_candidate_count"] == 1
+    assert summary["resource_limited_candidate_count"] == 1
+    assert summary["max_runtime_exceeded_by_split"]["validation"] == 1
+    assert summary["computed_candidate_ratio"] == pytest.approx(0.5)
+    assert summary["slowest_candidate_ids"][0] == "candidate_timeout"
+    assert top_level["simulation_integrity_status"] == "FAIL"
+    assert top_level["resource_integrity_status"] == "FAIL"
+    assert top_level["strategy_performance_gate_status"] == "FAIL"
+    assert top_level["deployment_eligibility_status"] == "FAIL"
+    assert "max_runtime_exceeded" in top_level["resource_integrity_fail_reasons"]
+    assert PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON not in top_level["strategy_performance_fail_reasons"]
+    assert "profit_factor_failed" in top_level["strategy_performance_fail_reasons"]
+
+
+def test_failure_fallback_strategy_performance_not_evaluated_and_suggested_rerun_scope() -> None:
+    payload = {
+        "candidate_failed_before_complete_metrics": True,
+        "metrics_v2_source": "failure_fallback",
+        "metrics_status": "unavailable",
+        "evaluation_status": "resource_limited",
+        "gate_fail_reasons": [
+            "candidate_resource_limit_exceeded",
+            "max_runtime_exceeded",
+            "profit_factor_failed",
+            "min_trade_count_failed",
+        ],
+    }
+
+    validation_protocol._apply_fail_reason_classification(payload)
+    rerun_scope = validation_protocol._suggested_rerun_scope(
+        candidate_id="candidate_timeout",
+        scenario_id="scenario_001_base",
+        reason="candidate_resource_limit_exceeded",
+        resource_guard={
+            "reasons": ["max_runtime_exceeded"],
+            "split": "validation",
+            "candles_processed": 12345,
+            "total_candles": 64800,
+        },
+        limits=SimpleNamespace(max_runtime_s_per_candidate_split=300),
+    )
+
+    assert payload["resource_integrity_status"] == "FAIL"
+    assert payload["strategy_performance_gate_status"] == "NOT_EVALUATED"
+    assert payload["strategy_performance_fail_reasons"] == []
+    assert payload["strategy_performance_not_evaluated_reasons"] == ["candidate_failed_before_complete_metrics"]
+    assert "max_runtime_exceeded" in payload["resource_integrity_fail_reasons"]
+    assert rerun_scope == {
+        "candidate_id": "candidate_timeout",
+        "scenario_id": "scenario_001_base",
+        "failed_split": "validation",
+        "reason": "candidate_resource_limit_exceeded",
+        "resource_guard_reasons": ["max_runtime_exceeded"],
+        "candles_processed": 12345,
+        "total_candles": 64800,
+        "original_max_runtime_s_per_candidate_split": 300,
+        "recommended_rerun_mode": "narrow_candidate_single_split",
+    }
+
+
+@pytest.mark.research_e2e
 def test_resource_limited_candidate_detail_records_executed_portfolio_policy(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("BITHUMB_TEST_TIER", raising=False)
     db_path = tmp_path / "candles.sqlite"
@@ -1248,6 +1443,17 @@ def test_resource_limited_candidate_detail_records_executed_portfolio_policy(tmp
     assert base["work_unit_portfolio_policy_hash"] == report["portfolio_policy_hash"]
     assert base["position_sizing_policy"]["buy_fraction"] == 0.99
     assert base["resource_guard"]["ledger_starting_cash_krw"] == 100_000.0
+    candidate = report["candidates"][0]
+    assert candidate["suggested_rerun_scope"]["candidate_id"] == candidate["parameter_candidate_id"]
+    assert candidate["suggested_rerun_scope"]["scenario_id"] == candidate["scenario_results"][0]["scenario_id"]
+    assert candidate["suggested_rerun_scope"]["failed_split"] in {"train", "validation", "final_holdout"}
+    assert candidate["suggested_rerun_scope"]["reason"] == "candidate_resource_limit_exceeded"
+    assert candidate["suggested_rerun_scope"]["candles_processed"] > 0
+    assert candidate["suggested_rerun_scope"]["total_candles"] > 0
+    assert candidate["scenario_results"][0]["suggested_rerun_scope"] == candidate["suggested_rerun_scope"]
+    assert report["execution_observability"]["work_units"][0]["suggested_rerun_scope"] == candidate["suggested_rerun_scope"]
+    failure_artifact = json.loads(Path(candidate["failure_artifact_path"]).read_text(encoding="utf-8"))
+    assert failure_artifact["suggested_rerun_scope"] == candidate["suggested_rerun_scope"]
 
 
 @pytest.mark.research_e2e
@@ -1276,8 +1482,15 @@ def test_resource_limited_candidate_separates_resource_failure_from_policy_misma
     assert PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON not in reasons
     assert "max_trades_exceeded" in candidate["resource_integrity_fail_reasons"]
     assert "max_trades_exceeded" in candidate["scenario_results"][0]["resource_integrity_fail_reasons"]
+    assert candidate["strategy_performance_gate_status"] == "NOT_EVALUATED"
+    assert candidate["scenario_results"][0]["strategy_performance_gate_status"] == "NOT_EVALUATED"
+    assert candidate["strategy_performance_fail_reasons"] == []
     assert PORTFOLIO_POLICY_EXECUTION_MISMATCH_REASON not in candidate["strategy_performance_fail_reasons"]
     assert candidate["scenario_results"][0]["executed_portfolio_policy_hash"] == report["portfolio_policy_hash"]
+    assert report["resource_integrity_status"] == "FAIL"
+    assert "max_trades_exceeded" in report["resource_integrity_fail_reasons"]
+    assert report["strategy_performance_gate_status"] == "NOT_EVALUATED"
+    assert report["strategy_performance_fail_reasons"] == []
 
 
 def test_portfolio_policy_hash_chain_manifest_work_unit_detail_matches(tmp_path, monkeypatch) -> None:

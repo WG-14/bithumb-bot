@@ -558,6 +558,7 @@ class ResearchExecutionPolicy:
 class ResearchRunPolicy:
     report_detail: str = "summary"
     diagnostic_mode: str = "promotion_candidate"
+    run_purpose: str = "strategy_performance_diagnostic"
     artifact_policy: ResearchArtifactPolicy = field(default_factory=ResearchArtifactPolicy)
     audit_trail: ResearchAuditTrailPolicy = field(default_factory=ResearchAuditTrailPolicy)
     resource_limits: ResearchResourceLimits = field(default_factory=ResearchResourceLimits)
@@ -568,6 +569,7 @@ class ResearchRunPolicy:
         return {
             "report_detail": self.report_detail,
             "diagnostic_mode": self.diagnostic_mode,
+            "run_purpose": self.run_purpose,
             "artifact_policy": self.artifact_policy.as_dict(),
             "audit_trail": self.audit_trail.as_dict(),
             "resource_limits": self.resource_limits.as_dict(),
@@ -2661,6 +2663,7 @@ def _parse_research_run(value: Any) -> ResearchRunPolicy:
     allowed_fields = {
         "report_detail",
         "diagnostic_mode",
+        "run_purpose",
         "artifact_policy",
         "audit_trail",
         "resource_limits",
@@ -2676,6 +2679,18 @@ def _parse_research_run(value: Any) -> ResearchRunPolicy:
     diagnostic_mode = str(value.get("diagnostic_mode") or "promotion_candidate").strip().lower()
     if diagnostic_mode not in {"promotion_candidate", "exploratory"}:
         raise ManifestValidationError("research_run.diagnostic_mode must be exploratory or promotion_candidate")
+    run_purpose = str(value.get("run_purpose") or "strategy_performance_diagnostic").strip().lower()
+    if run_purpose not in {
+        "simulation_integrity_smoke",
+        "resource_budget_probe",
+        "strategy_performance_diagnostic",
+        "validation_lifecycle",
+        "promotion_evidence",
+    }:
+        raise ManifestValidationError(
+            "research_run.run_purpose must be simulation_integrity_smoke, resource_budget_probe, "
+            "strategy_performance_diagnostic, validation_lifecycle, or promotion_evidence"
+        )
     artifact_policy = _parse_research_artifact_policy(value.get("artifact_policy"))
     audit_trail = _parse_research_audit_trail(value.get("audit_trail"))
     if artifact_policy.full_decisions_external_jsonl and value.get("audit_trail") is None:
@@ -2690,6 +2705,7 @@ def _parse_research_run(value: Any) -> ResearchRunPolicy:
     policy = ResearchRunPolicy(
         report_detail=report_detail,
         diagnostic_mode=diagnostic_mode,
+        run_purpose=run_purpose,
         artifact_policy=artifact_policy,
         audit_trail=audit_trail,
         resource_limits=_parse_research_resource_limits(value.get("resource_limits")),
@@ -2772,6 +2788,7 @@ def _parse_research_resource_limits(value: Any) -> ResearchResourceLimits:
         "max_artifact_file_count",
         "max_total_memory_mb",
         "memory_admission_policy",
+        "override_reason",
     }
     unknown = sorted(set(value) - allowed_fields)
     if unknown:
