@@ -448,17 +448,18 @@ def _candidate_trade_return_series(candidate: dict[str, Any], *, split: str) -> 
                 scenario
                 for scenario in scenario_results
                 if isinstance(scenario, dict)
-                and scenario.get("scenario_role") == "base"
+                and scenario.get("scenario_role") in {None, "base"}
                 and isinstance(scenario.get(key), list)
             ]
             if len(base_scenarios) != 1:
                 return []
             scenario = base_scenarios[0]
             trades = scenario.get(key)
+            scenario_role = scenario.get("scenario_role") or "base"
             source = {
-                "return_panel_scenario_role": "base",
+                "return_panel_scenario_role": scenario_role,
                 "return_panel_scenario_id": scenario.get("scenario_id"),
-                "return_panel_series_source": f"scenario_results.base.{key}",
+                "return_panel_series_source": f"scenario_results.{scenario_role}.{key}",
             }
             if not isinstance(trades, list):
                 return []

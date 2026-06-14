@@ -677,6 +677,7 @@ def _derived_candidate_index_summary(candidate: dict[str, Any], *, include_compa
         "exploratory_result",
     )
     summary = {key: candidate[key] for key in summary_keys if key in candidate}
+    _drop_runtime_local_artifact_paths(summary)
     _compact_derived_candidate_large_blocks(summary)
     if include_compact:
         _copy_compact_diagnostics(summary, candidate)
@@ -780,6 +781,7 @@ def _derived_scenario_index_summary(scenario: Any, *, include_compact: bool = Tr
         "final_holdout_audit_trace_index",
     )
     summary = {key: scenario[key] for key in summary_keys if key in scenario}
+    _drop_runtime_local_artifact_paths(summary)
     _compact_scenario_metric_bodies(summary)
     if include_compact:
         _copy_compact_diagnostics(summary, scenario)
@@ -900,6 +902,7 @@ def summarize_candidate_result(candidate: Any, report_detail: str) -> Any:
         "exploratory_result",
     )
     summary = {key: candidate[key] for key in summary_keys if key in candidate}
+    _drop_runtime_local_artifact_paths(summary)
     _compact_candidate_metric_alias_bodies(summary)
     _copy_compact_diagnostics(summary, candidate)
     _compact_candidate_artifact_summary(summary)
@@ -1252,6 +1255,7 @@ def _scenario_result_summary(
         "final_holdout_audit_trace_index",
     )
     summary = {key: scenario[key] for key in summary_keys if key in scenario}
+    _drop_runtime_local_artifact_paths(summary)
     _compact_scenario_metric_bodies(summary)
     _copy_compact_diagnostics(summary, scenario)
     if include_closed_trade_summary:
@@ -1287,6 +1291,11 @@ def _compact_scenario_metric_bodies(summary: dict[str, Any]) -> None:
         value = summary.get(key)
         if isinstance(value, dict):
             summary[key] = {field: value[field] for field in allowed if field in value}
+
+
+def _drop_runtime_local_artifact_paths(summary: dict[str, Any]) -> None:
+    if summary.get("failure_artifact_ref"):
+        summary.pop("failure_artifact_path", None)
 
 
 def _copy_compact_diagnostics(target: dict[str, Any], source: dict[str, Any]) -> None:
