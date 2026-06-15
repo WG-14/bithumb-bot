@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from bithumb_bot.canonical_decision import canonical_payload_hash
 from bithumb_bot.strategy_policy_contract import StrategyDecisionV2
@@ -72,7 +73,13 @@ class DefaultStrategyEvaluator:
                 }
             )
         builder = plugin.research_policy_decision_builder
-        policy_decision = builder(**policy_builder_kwargs) if builder is not None else None
+        if builder is not None:
+            policy_builder_kwargs = _supported_policy_builder_kwargs(builder, policy_builder_kwargs)
+        policy_decision = (
+            builder(**policy_builder_kwargs)
+            if builder is not None
+            else None
+        )
         evaluates_exit_policy = bool(
             isinstance(event.exit_intent, dict)
             and str(event.exit_intent.get("mode") or "") == "evaluate_exit_policy"
@@ -200,6 +207,25 @@ class DefaultStrategyEvaluator:
                 else "regenerate_research_decisions_with_typed_strategy_decision"
             ),
         )
+
+
+def _supported_policy_builder_kwargs(
+    builder: Callable[..., Any],
+    kwargs: dict[str, object],
+) -> dict[str, object]:
+    signature = inspect.signature(builder)
+    parameters = signature.parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+    supported: dict[str, object] = {}
+    for key, value in kwargs.items():
+        parameter = parameters.get(key)
+        if parameter is not None and parameter.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }:
+            supported[key] = value
+    return supported
 
 
 __all__ = ["DefaultStrategyEvaluator"]

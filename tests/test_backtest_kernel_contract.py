@@ -13,6 +13,7 @@ from bithumb_bot.research.backtest_engine import BacktestRunContext
 from bithumb_bot.research.backtest_kernel import BacktestKernel, run_decision_event_backtest
 from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
 from bithumb_bot.research.decision_event import ResearchDecisionEvent
+from bithumb_bot.research.execution_planner_stage import ExecutionPlanningResult
 from bithumb_bot.research.experiment_manifest import DateRange, ExecutionTimingPolicy, legacy_research_portfolio_policy
 from bithumb_bot.research.strategy_registry import (
     ResearchStrategyPlugin,
@@ -519,10 +520,25 @@ def test_promotion_grade_backtest_final_consumer_rejects_missing_submit_plan(mon
             reason_code="unit_forced_missing_submit_plan",
         )
 
-    monkeypatch.setattr(backtest_pipeline, "_research_execution_plan_bundle", _missing_submit_plan_bundle)
+    class MissingSubmitPlanPlanner:
+        def run(self, state):  # type: ignore[no-untyped-def]
+            return state
+
+        def plan(self, request):  # type: ignore[no-untyped-def]
+            return ExecutionPlanningResult(
+                plan_bundle=_missing_submit_plan_bundle(side=str(request.action)),
+                evidence={"promotion_grade": True},
+            )
+
+    pipeline = backtest_pipeline.DefaultBacktestPipeline(
+        stages=replace(
+            backtest_pipeline.default_backtest_stage_set(),
+            execution_planner=MissingSubmitPlanPlanner(),
+        )
+    )
 
     with pytest.raises(ValueError, match="research_submit_plan_missing"):
-        run_decision_event_backtest(
+        pipeline.run(
             dataset=dataset,
             strategy_name=strategy_name,
             parameter_values={"UNIT_BUY_FRACTION": 0.5},
@@ -575,9 +591,25 @@ def test_exploratory_backtest_final_consumer_can_warn_on_missing_submit_plan(mon
             reason_code="unit_forced_missing_submit_plan",
         )
 
-    monkeypatch.setattr(backtest_pipeline, "_research_execution_plan_bundle", _missing_submit_plan_bundle)
+    class MissingSubmitPlanPlanner:
+        def run(self, state):  # type: ignore[no-untyped-def]
+            return state
 
-    result = run_decision_event_backtest(
+        def plan(self, request):  # type: ignore[no-untyped-def]
+            return ExecutionPlanningResult(
+                plan_bundle=_missing_submit_plan_bundle(side=str(request.action)),
+                evidence={"exploratory": True},
+                warnings=("research_submit_plan_missing",),
+            )
+
+    pipeline = backtest_pipeline.DefaultBacktestPipeline(
+        stages=replace(
+            backtest_pipeline.default_backtest_stage_set(),
+            execution_planner=MissingSubmitPlanPlanner(),
+        )
+    )
+
+    result = pipeline.run(
         dataset=dataset,
         strategy_name="buy_and_hold_baseline",
         parameter_values={"BUY_HOLD_BUY_INDEX": 1, "BUY_HOLD_DECISION_REASON": "kernel_contract_buy"},

@@ -1068,6 +1068,20 @@ def _runtime_execution_plan_evidence(
         submit_plan_payload = None if submit_plan is None else submit_plan.as_dict()
         final_submit_plan_payload = None if submit_plan is None else submit_plan.as_final_payload()
         summary_payload = execution_plan_bundle.summary.as_dict()
+        if submit_plan is not None:
+            final_submit_plan_payload = _runtime_replay_submit_expected_payload(
+                final_submit_plan_payload,
+                context=context,
+            )
+            submit_plan_payload = _runtime_replay_submit_expected_payload(
+                submit_plan_payload,
+                context=context,
+                final_payload=False,
+            )
+            summary_payload = _runtime_replay_submit_expected_summary_payload(
+                summary_payload,
+                submit_plan_payload=submit_plan_payload,
+            )
         execution_engine = str(summary_payload.get("execution_engine") or "")
         bundle_hash = str(execution_plan_bundle.content_hash())
         observability = _runtime_execution_observability(
@@ -1120,7 +1134,9 @@ def _runtime_execution_plan_evidence(
             "final_action": submit_plan.final_action,
             "submit_expected": bool(submit_plan.submit_expected),
             "pre_submit_proof_status": submit_plan.pre_submit_proof_status,
-            "execution_block_reason": submit_plan.block_reason,
+            "execution_block_reason": str(
+                final_submit_plan_payload.get("block_reason") or submit_plan.block_reason
+            ),
             "submit_plan_source": submit_plan.source,
             "submit_plan_authority": submit_plan.authority,
             "execution_engine": execution_engine,
@@ -1247,6 +1263,66 @@ def _runtime_execution_plan_evidence(
             "execution_submit_plan_evidence": None,
             "typed_no_submit_proof": None,
         }
+
+
+def _runtime_replay_submit_expected_payload(
+    payload: dict[str, object] | None,
+    *,
+    context: dict[str, Any],
+    final_payload: bool = True,
+) -> dict[str, object] | None:
+    if payload is None or not bool(payload.get("submit_expected")):
+        return payload
+    normalized = dict(payload)
+    if str(normalized.get("block_reason") or "") == "residual_buy_sizing_mode_telemetry":
+        normalized["block_reason"] = "none"
+    normalized.setdefault("execution_engine", "research_virtual")
+    normalized.setdefault("entry_signal_source", str(_strategy_trace(context).get("entry_signal_source") or ""))
+    normalized.setdefault("entry_sizing_source", str(_strategy_trace(context).get("entry_sizing_source") or ""))
+    normalized.setdefault("decision_ts", int(context.get("decision_ts") or context.get("ts") or 0))
+    from .execution_service import (
+        EXECUTION_SUBMIT_PLAN_AUTHORITY_LABEL,
+        EXECUTION_SUBMIT_PLAN_SCHEMA_VERSION,
+        execution_submit_plan_payload_hash,
+    )
+
+    hash_payload = {
+        key: value
+        for key, value in normalized.items()
+        if key not in {"schema_version", "authority_label", "content_hash"}
+    }
+    normalized["submit_plan_hash"] = execution_submit_plan_payload_hash(hash_payload)
+    if final_payload:
+        normalized["schema_version"] = EXECUTION_SUBMIT_PLAN_SCHEMA_VERSION
+        normalized["authority_label"] = EXECUTION_SUBMIT_PLAN_AUTHORITY_LABEL
+        normalized["content_hash"] = execution_submit_plan_payload_hash(normalized)
+    else:
+        normalized.pop("schema_version", None)
+        normalized.pop("authority_label", None)
+        normalized.pop("content_hash", None)
+    return normalized
+
+
+def _runtime_replay_submit_expected_summary_payload(
+    summary_payload: dict[str, object],
+    *,
+    submit_plan_payload: dict[str, object] | None,
+) -> dict[str, object]:
+    if submit_plan_payload is None or not bool(submit_plan_payload.get("submit_expected")):
+        return summary_payload
+    normalized = dict(summary_payload)
+    if str(normalized.get("block_reason") or "") == "residual_buy_sizing_mode_telemetry":
+        normalized["block_reason"] = "none"
+    for key in ("buy_submit_plan", "target_submit_plan", "residual_submit_plan"):
+        existing = normalized.get(key)
+        if isinstance(existing, dict) and existing.get("submit_expected"):
+            normalized[key] = dict(submit_plan_payload)
+    return normalized
+
+
+def _strategy_trace(context: dict[str, Any]) -> dict[str, object]:
+    trace = context.get("strategy_trace")
+    return dict(trace) if isinstance(trace, dict) else {}
 
 
 def _runtime_execution_observability(
