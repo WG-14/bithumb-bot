@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from bithumb_bot.strategy.daily_participation_policy import (
@@ -72,3 +74,11 @@ def test_count_basis_is_required_and_recorded() -> None:
     result = evaluate_daily_participation_policy(config=_config(count_basis="intent"), state=_state())
     assert result.count_basis == "intent"
     assert result.timestamp_field == "decision_ts"
+
+
+def test_daily_participation_policy_module_has_no_sqlite_dependency() -> None:
+    source = Path("src/bithumb_bot/strategy/daily_participation_policy.py").read_text(encoding="utf-8")
+
+    assert "sqlite3" not in source
+    assert "conn.execute" not in source
+    assert "PRAGMA table_info" not in source

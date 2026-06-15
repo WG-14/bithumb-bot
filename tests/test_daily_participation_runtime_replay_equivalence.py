@@ -4,14 +4,20 @@ import sqlite3
 
 import pytest
 
+from bithumb_bot.canonical_decision import export_runtime_replay_decisions
+from bithumb_bot.research.dataset_snapshot import Candle, DatasetSnapshot
+from bithumb_bot.research.experiment_manifest import DateRange
+from bithumb_bot.research.strategy_registry import resolve_research_strategy_plugin
+from bithumb_bot.strategy_contract_testing import _seed_replay_db
 from bithumb_bot.strategy.daily_participation_policy import (
     DailyParticipationPolicyConfig,
     DailyParticipationStateSnapshot,
     build_research_daily_count_snapshot,
-    build_runtime_daily_count_snapshot_from_sqlite,
     evaluate_daily_participation_policy,
+    kst_day,
     require_runtime_comparable_daily_count_snapshot,
 )
+from bithumb_bot.runtime.daily_participation_count_provider import build_runtime_daily_count_snapshot_from_sqlite
 
 
 def _config(**overrides):
@@ -106,3 +112,77 @@ def test_kst_day_boundary_mismatch_changes_policy_input_hash() -> None:
 
     assert first.kst_day != second.kst_day
     assert first.participation_input_hash != second.participation_input_hash
+
+
+def _runtime_dataset() -> DatasetSnapshot:
+    start = 1_704_031_200_000
+    closes = tuple(100.0 + index for index in range(20))
+    return DatasetSnapshot(
+        snapshot_id="daily_participation_runtime_replay_fixture",
+        source="unit",
+        market="KRW-BTC",
+        interval="1m",
+        split_name="validation",
+        date_range=DateRange("2024-01-01", "2024-01-01"),
+        candles=tuple(
+            Candle(ts=start + index * 60_000, open=close, high=close, low=close, close=close, volume=1.0)
+            for index, close in enumerate(closes)
+        ),
+    )
+
+
+def _runtime_params() -> dict[str, object]:
+    return {
+        "SMA_SHORT": 2,
+        "SMA_LONG": 4,
+        "DAILY_PARTICIPATION_ENABLED": True,
+        "DAILY_PARTICIPATION_TIMEZONE": "Asia/Seoul",
+        "DAILY_PARTICIPATION_COUNT_BASIS": "filled",
+        "DAILY_PARTICIPATION_WINDOW_START_HOUR_KST": 0,
+        "DAILY_PARTICIPATION_WINDOW_END_HOUR_KST": 24,
+        "DAILY_PARTICIPATION_BUY_FRACTION": 0.05,
+        "DAILY_PARTICIPATION_MAX_ORDER_KRW": 10000.0,
+    }
+
+
+def test_runtime_replay_bundle_contains_daily_participation_evidence(tmp_path) -> None:
+    dataset = _runtime_dataset()
+    db_path = tmp_path / "daily_participation_runtime.sqlite"
+    through_ts = _seed_replay_db(db_path, dataset)
+    plugin = resolve_research_strategy_plugin("daily_participation_sma")
+    strategy = plugin.runtime_replay_builder(
+        {
+            "strategy_name": "daily_participation_sma",
+            "market": dataset.market,
+            "interval": dataset.interval,
+            "strategy_parameters": _runtime_params(),
+        },
+        None,
+    )
+    conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        decisions = export_runtime_replay_decisions(
+            conn=conn,
+            strategy=strategy,
+            through_ts_list=[through_ts],
+            market=dataset.market,
+            interval=dataset.interval,
+            profile_content_hash="sha256:" + "1" * 64,
+            dataset_content_hash=dataset.content_hash(),
+            db_data_fingerprint="sha256:daily-runtime-db",
+            strategy_version=plugin.version,
+            strategy_decision_contract_version=plugin.decision_contract_version,
+        )
+    finally:
+        conn.close()
+
+    assert len(decisions) == 1
+    decision = decisions[0]
+    assert decision["strategy_name"] == "daily_participation_sma"
+    assert decision["count_basis"] == "filled"
+    assert decision["kst_day"] == kst_day(through_ts, "Asia/Seoul")
+    assert decision["daily_count_snapshot_hash"].startswith("sha256:")
+    assert decision["daily_count_snapshot_hash"] != "sha256:missing"
+    assert decision["participation_policy_hash"].startswith("sha256:")
+    assert decision["participation_decision_hash"].startswith("sha256:")

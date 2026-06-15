@@ -97,3 +97,11 @@ def test_sma_with_filter_still_rejects_daily_parameters() -> None:
     payload = _manifest("sma_with_filter")
     with pytest.raises(ManifestValidationError, match="unknown strategy parameter"):
         parse_manifest(payload)
+
+
+def test_daily_participation_sma_rejects_gate_count_basis_mismatch() -> None:
+    payload = _manifest()
+    payload["acceptance_gate"]["participation_count_basis"] = "intent"  # type: ignore[index]
+
+    with pytest.raises(ManifestValidationError, match="participation_count_basis conflicts"):
+        parse_manifest(payload)

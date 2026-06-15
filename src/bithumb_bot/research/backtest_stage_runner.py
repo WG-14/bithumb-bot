@@ -303,6 +303,12 @@ class BacktestEventProcessor:
             promotion_grade_policy_required = bool(
                 strategy_envelope.provenance.get("promotion_grade_policy_required")
             )
+            daily_participation_buy = bool(
+                self.strategy_plugin.name == "daily_participation_sma"
+                and policy_decision is not None
+                and str(getattr(policy_decision, "final_signal", "") or "").upper() == "BUY"
+            )
+            policy_drives_execution = bool(promotion_grade_policy_required or daily_participation_buy)
             try:
                 planning = self.execution_planner.plan(
                     ExecutionPlanningRequest(
@@ -318,7 +324,7 @@ class BacktestEventProcessor:
                         allow_execution_compatibility_fallback=bool(
                             strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
                         ),
-                        policy_drives_execution=promotion_grade_policy_required,
+                        policy_drives_execution=policy_drives_execution,
                         policy_decision=policy_decision,
                     )
                 )
@@ -373,10 +379,10 @@ class BacktestEventProcessor:
                         allow_execution_compatibility_fallback=bool(
                             strategy_envelope.provenance.get("allow_execution_compatibility_fallback")
                         ),
-                        policy_drives_execution=promotion_grade_policy_required,
+                        policy_drives_execution=policy_drives_execution,
                         policy_decision=policy_decision,
-                        plan_bundle=None,
-                        execution_evidence=None,
+                        plan_bundle=planning.plan_bundle,
+                        execution_evidence=planning.evidence,
                         exit_rule=risk_decision.exit_rule,
                         exit_reason=risk_decision.exit_reason,
                     )

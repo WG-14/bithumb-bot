@@ -795,6 +795,19 @@ def runtime_decision_to_canonical_event(
         ),
         "approved_profile_hash": str(context.get("approved_profile_hash") or profile_content_hash or ""),
     }
+    for key in (
+        "count_basis",
+        "kst_day",
+        "daily_count_snapshot_hash",
+        "participation_policy_hash",
+        "participation_input_hash",
+        "participation_decision_hash",
+    ):
+        value = context.get(key)
+        if str(value or "").strip():
+            payload[key] = value
+    if isinstance(context.get("daily_count_snapshot"), dict):
+        payload["daily_count_snapshot"] = dict(context["daily_count_snapshot"])
     execution_evidence = _runtime_execution_plan_evidence(
         execution_plan_bundle=execution_plan_bundle,
         context=context,
@@ -879,6 +892,13 @@ def runtime_decision_to_canonical_event(
         "authority_plane",
         "promotion_rejection_reason",
         "strategy_evaluation_provenance",
+        "count_basis",
+        "kst_day",
+        "daily_count_snapshot_hash",
+        "daily_count_snapshot",
+        "participation_policy_hash",
+        "participation_input_hash",
+        "participation_decision_hash",
     ):
         if key in payload:
             normalized[key] = payload[key]

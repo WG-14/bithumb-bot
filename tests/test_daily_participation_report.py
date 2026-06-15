@@ -58,3 +58,13 @@ def test_report_summary_can_feed_operator_daily_participation_event() -> None:
     assert event["days_with_intent"] == 3
     assert event["zero_filled_days"] == 2
     assert event["not_a_fill_guarantee"] is True
+
+
+def test_report_participation_count_basis_matches_manifest_gate() -> None:
+    candidate = _candidate()
+    candidate["validation_metrics_v2"]["participation"]["count_basis"] = "intent"  # type: ignore[index]
+
+    summary = summarize_report_candidate(candidate)
+
+    assert summary["participation_summary"]["count_basis"] == "intent"
+    assert summary["daily_participation_target"]["count_basis"] == "intent"

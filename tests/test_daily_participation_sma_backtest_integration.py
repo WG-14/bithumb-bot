@@ -77,3 +77,17 @@ def test_seed_hold_event_is_not_final_authority_for_daily_strategy() -> None:
     result = _run()
 
     assert any(decision.get("final_signal") == "BUY" for decision in result.decisions)
+
+
+def test_daily_participation_backtest_uses_participation_sizing_in_trade_ledger() -> None:
+    result = _run()
+
+    trade = next(
+        item for item in result.trades
+        if item.get("side") == "BUY" and item.get("entry_signal_source") == "daily_participation_fallback"
+    )
+
+    assert trade["entry_signal_source"] == "daily_participation_fallback"
+    assert trade["entry_sizing_source"] == "daily_participation_policy"
+    assert float(trade["price"]) * float(trade["qty"]) <= 10000.0
+    assert float(trade["price"]) * float(trade["qty"]) > 0.0

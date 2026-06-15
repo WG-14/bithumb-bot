@@ -6,6 +6,9 @@ from bithumb_bot.research.metrics_contract import (
     build_metrics_v2,
     build_participation_metrics,
 )
+from bithumb_bot.research.experiment_manifest import parse_manifest
+from bithumb_bot.research.validation_protocol import _backtest_context
+from tests.test_daily_participation_sma_plugin import _manifest as _daily_manifest
 
 
 def test_participation_metrics_count_kst_days() -> None:
@@ -96,3 +99,42 @@ def test_manifest_participation_count_basis_is_used_in_metrics_v2() -> None:
     )
 
     assert metrics.as_dict()["participation"]["count_basis"] == "intent"
+
+
+def test_acceptance_gate_participation_count_basis_flows_to_backtest_context() -> None:
+    payload = _daily_manifest()
+    payload["acceptance_gate"]["participation_count_basis"] = "intent"  # type: ignore[index]
+    payload["parameter_space"]["DAILY_PARTICIPATION_COUNT_BASIS"] = ["intent"]  # type: ignore[index]
+    manifest = parse_manifest(payload)
+
+    context = _backtest_context(
+        manifest=manifest,
+        manager=None,
+        candidate_id="candidate",
+        scenario_id="base",
+        scenario_index=0,
+        split_name="validation",
+        dataset_content_hash="sha256:dataset",
+        parameter_values={"DAILY_PARTICIPATION_COUNT_BASIS": "intent"},
+        progress_callback=None,
+    )
+
+    assert context.participation_count_basis == "intent"
+
+
+def test_acceptance_gate_participation_count_basis_defaults_to_filled_in_backtest_context() -> None:
+    manifest = parse_manifest(_daily_manifest())
+
+    context = _backtest_context(
+        manifest=manifest,
+        manager=None,
+        candidate_id="candidate",
+        scenario_id="base",
+        scenario_index=0,
+        split_name="validation",
+        dataset_content_hash="sha256:dataset",
+        parameter_values={},
+        progress_callback=None,
+    )
+
+    assert context.participation_count_basis == "filled"

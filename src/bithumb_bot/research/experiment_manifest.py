@@ -921,6 +921,11 @@ def parse_manifest(payload: dict[str, Any]) -> ExperimentManifest:
     portfolio_policy = _parse_portfolio_policy(payload.get("portfolio_policy"), deployment_tier=deployment_tier)
     risk_policy = _parse_risk_policy(payload.get("risk_policy"), deployment_tier=deployment_tier)
     acceptance_gate = _parse_acceptance_gate(_required_dict(payload, "acceptance_gate"))
+    _validate_daily_participation_count_basis_consistency(
+        strategy_name=strategy_name,
+        parameter_space=parameter_space,
+        acceptance_gate=acceptance_gate,
+    )
     if is_production_bound_target(deployment_tier) and acceptance_gate.max_single_trade_dependency_score is None:
         acceptance_gate = replace(acceptance_gate, max_single_trade_dependency_score=0.8)
     statistical_validation = _parse_statistical_validation(
@@ -3065,3 +3070,25 @@ def _optional_participation_count_basis(value: Any) -> str | None:
             + ",".join(sorted(allowed))
         )
     return normalized
+
+
+def _validate_daily_participation_count_basis_consistency(
+    *,
+    strategy_name: str,
+    parameter_space: dict[str, tuple[object, ...]],
+    acceptance_gate: AcceptanceGate,
+) -> None:
+    if str(strategy_name or "").strip().lower() != "daily_participation_sma":
+        return
+    gate_basis = acceptance_gate.participation_count_basis
+    if gate_basis is None:
+        return
+    configured_values = parameter_space.get("DAILY_PARTICIPATION_COUNT_BASIS")
+    if not configured_values:
+        return
+    configured_basis = {str(value).strip() for value in configured_values}
+    if configured_basis != {str(gate_basis)}:
+        raise ManifestValidationError(
+            "acceptance_gate.participation_count_basis conflicts with "
+            "parameter_space.DAILY_PARTICIPATION_COUNT_BASIS"
+        )
