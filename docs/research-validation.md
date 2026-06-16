@@ -18,6 +18,14 @@ diagnostics under managed research report and derived paths. The command is not
 part of the promotion custody path and its output is not approved-profile, live
 readiness, or capital allocation evidence.
 
+Parallel research execution reports both `estimated_strategy_runs` and
+`available_parallel_work_tasks`. `estimated_strategy_runs` includes split count;
+for the default `candidate_scenario` work unit, `available_parallel_work_tasks`
+is only `candidate_count * scenario_count`. Reports and workload estimates also
+include `expected_worker_utilization_pct` so a manifest with one candidate, one
+scenario, and `max_workers=8` shows the expected 12.5% worker utilization
+instead of implying that eight cores will be saturated.
+
 forward-return diagnostics output must not be used as strategy promotion evidence
 forward-return diagnostics output must not be used as approved profile evidence
 forward-return diagnostics output must not be used as live readiness evidence

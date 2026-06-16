@@ -15,6 +15,92 @@ from .process_runtime import process_policy_observability
 from .backtest_types import resolve_tick_observability_policy
 
 
+def parallel_work_task_count(*, candidate_count: int, scenario_count: int, split_count: int, work_unit: str) -> int:
+    normalized = str(work_unit or "candidate_scenario").strip().lower()
+    if normalized == "candidate_scenario_split":
+        return int(candidate_count) * int(scenario_count) * int(split_count)
+    return int(candidate_count) * int(scenario_count)
+
+
+def parallel_efficiency_payload(
+    *,
+    available_work_tasks: int,
+    requested_max_workers: int,
+    effective_max_workers: int | None = None,
+    work_unit: str = "candidate_scenario",
+    effective_worker_source: str = "runtime",
+    observed_worker_count: int | None = None,
+    worker_warning_reasons: list[str] | tuple[str, ...] | None = None,
+    worker_observation_warning_reasons: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    requested = max(1, int(requested_max_workers or 1))
+    effective = max(1, int(effective_max_workers if effective_max_workers is not None else requested))
+    available = max(0, int(available_work_tasks))
+    ratio = round(float(available) / float(effective), 6)
+    expected_utilization = round(min(1.0, ratio) * 100.0, 6)
+    limiting_factor = _parallelism_limiting_factor(
+        available_work_tasks=available,
+        effective_max_workers=effective,
+        work_unit=work_unit,
+    )
+    warning_reasons: list[str] = []
+    if available < effective:
+        warning_reasons.append("available_work_tasks_below_effective_workers")
+    if effective < requested:
+        warning_reasons.append("effective_workers_below_requested")
+    payload: dict[str, Any] = {
+        "available_work_tasks": available,
+        "available_parallel_work_tasks": available,
+        "requested_max_workers": requested,
+        "effective_max_workers": effective,
+        "effective_worker_source": effective_worker_source,
+        "parallel_task_to_worker_ratio": ratio,
+        "expected_worker_utilization_pct": expected_utilization,
+        "parallelism_limiting_factor": limiting_factor,
+        "parallel_efficiency_warning_reasons": warning_reasons,
+        "suggested_actions": _parallel_efficiency_suggested_actions(
+            available_work_tasks=available,
+            effective_max_workers=effective,
+            work_unit=work_unit,
+        ),
+        "worker_warning_reasons": sorted(set(str(item) for item in (worker_warning_reasons or ()))),
+        "worker_observation_warning_reasons": sorted(
+            set(str(item) for item in (worker_observation_warning_reasons or ()))
+        ),
+    }
+    if observed_worker_count is None:
+        payload["observed_worker_count"] = None
+        payload["observed_worker_utilization_pct"] = None
+        payload["observed_worker_utilization_unavailable_reason"] = "worker_observation_pending"
+    else:
+        observed = max(0, int(observed_worker_count))
+        payload["observed_worker_count"] = observed
+        payload["observed_worker_utilization_pct"] = round(min(1.0, observed / float(effective)) * 100.0, 6)
+    return payload
+
+
+def _parallelism_limiting_factor(*, available_work_tasks: int, effective_max_workers: int, work_unit: str) -> str:
+    if int(available_work_tasks) >= int(effective_max_workers):
+        return "available_work_tasks_match_or_exceed_effective_workers"
+    normalized = str(work_unit or "candidate_scenario").strip().lower()
+    if normalized == "candidate_scenario":
+        return "work_unit_granularity_candidate_scenario"
+    if normalized == "candidate_scenario_split":
+        return "available_split_work_tasks"
+    return f"work_unit_granularity_{normalized}"
+
+
+def _parallel_efficiency_suggested_actions(
+    *, available_work_tasks: int, effective_max_workers: int, work_unit: str
+) -> list[str]:
+    if int(available_work_tasks) >= int(effective_max_workers):
+        return []
+    actions = ["increase_candidate_count", "increase_scenario_count", "run_research_batch", "profile_single_candidate"]
+    if str(work_unit or "").strip().lower() != "candidate_scenario_split":
+        actions.insert(2, "use_candidate_scenario_split")
+    return actions
+
+
 @dataclass(frozen=True)
 class ResearchWorkUnit:
     candidate_index: int
@@ -22,6 +108,7 @@ class ResearchWorkUnit:
     scenario_index: int
     scenario_id: str
     split_name: str
+    work_unit_mode: str
     parameter_values: dict[str, Any]
     dataset_content_hash: str
     portfolio_policy_hash: str
@@ -39,6 +126,7 @@ class ResearchWorkUnit:
             "scenario_index": self.scenario_index,
             "scenario_id": self.scenario_id,
             "split_name": self.split_name,
+            "work_unit_mode": self.work_unit_mode,
             "parameter_values": dict(self.parameter_values),
             "dataset_content_hash": self.dataset_content_hash,
             "portfolio_policy_hash": self.portfolio_policy_hash,
@@ -105,6 +193,20 @@ def build_research_execution_plan(
         db_path=db_path,
         repository_version=repository_version,
     )
+    effective_worker_source = "requested_pending_runtime_resolution"
+    available_parallel_work_tasks = parallel_work_task_count(
+        candidate_count=len(candidates),
+        scenario_count=len(execution_scenarios),
+        split_count=split_count,
+        work_unit=manifest.research_run.execution.work_unit,
+    )
+    parallel_capacity = parallel_efficiency_payload(
+        available_work_tasks=available_parallel_work_tasks,
+        requested_max_workers=manifest.research_run.execution.max_workers,
+        effective_max_workers=manifest.research_run.execution.max_workers,
+        work_unit=manifest.research_run.execution.work_unit,
+        effective_worker_source=effective_worker_source,
+    )
     plan = {
         "schema_version": 1,
         "manifest_hash": manifest.manifest_hash(),
@@ -117,6 +219,11 @@ def build_research_execution_plan(
         "split_count": split_count,
         "split_names": split_names,
         "estimated_strategy_runs": strategy_run_count,
+        "available_parallel_work_tasks": available_parallel_work_tasks,
+        "parallel_task_to_worker_ratio": parallel_capacity["parallel_task_to_worker_ratio"],
+        "expected_worker_utilization_pct": parallel_capacity["expected_worker_utilization_pct"],
+        "parallelism_limiting_factor": parallel_capacity["parallelism_limiting_factor"],
+        "effective_worker_source": effective_worker_source,
         "dataset_candles": dataset_candles,
         "estimated_candles": dataset_candles,
         "estimated_candle_evaluations": (
@@ -207,6 +314,11 @@ def build_research_execution_plan(
         "split_count": plan["split_count"],
         "walk_forward_window_count": walk_forward_split_count // 2,
         "estimated_strategy_runs": plan["estimated_strategy_runs"],
+        "available_parallel_work_tasks": plan["available_parallel_work_tasks"],
+        "parallel_task_to_worker_ratio": plan["parallel_task_to_worker_ratio"],
+        "expected_worker_utilization_pct": plan["expected_worker_utilization_pct"],
+        "parallelism_limiting_factor": plan["parallelism_limiting_factor"],
+        "effective_worker_source": plan["effective_worker_source"],
         "estimated_tick_events": plan["estimated_candle_evaluations"],
         "plugin_complexity": plugin_complexity,
         "estimated_plugin_runtime_us": estimated_plugin_runtime_us,
@@ -267,6 +379,7 @@ def build_research_work_unit(
         "scenario_id": scenario_id,
         "candidate_id": candidate,
         "split_name": split_name,
+        "work_unit_mode": manifest.research_run.execution.work_unit,
     }
     payload = {
         "candidate_index": candidate_index,
@@ -274,6 +387,7 @@ def build_research_work_unit(
         "scenario_index": scenario_index,
         "scenario_id": scenario_id,
         "split_name": split_name,
+        "work_unit_mode": manifest.research_run.execution.work_unit,
         "parameter_values": params,
         "dataset_content_hash": sha256_prefixed(ordered_dataset_hashes),
         "portfolio_policy_hash": manifest.portfolio_policy_hash(),
@@ -296,6 +410,7 @@ def build_research_work_unit(
         scenario_index=scenario_index,
         scenario_id=scenario_id,
         split_name=split_name,
+        work_unit_mode=manifest.research_run.execution.work_unit,
         parameter_values=dict(params),
         dataset_content_hash=str(payload["dataset_content_hash"]),
         portfolio_policy_hash=str(payload["portfolio_policy_hash"]),

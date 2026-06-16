@@ -116,3 +116,56 @@ def test_report_flags_parent_serial_dominance() -> None:
     assert "parallel_tail_skew_detected" in payload["worker_observation_warning_reasons"]
     assert payload["work_unit_wall_seconds_distribution"]["count"] == 2
     assert payload["tail_skew_ratio"] == 3.0
+
+
+def test_report_contains_parallel_efficiency_observability() -> None:
+    manifest = parse_manifest(_manifest())
+    payload = _execution_observability_payload(
+        manifest=manifest,
+        stage_timings=[{"stage": "parallel_worker_execution", "wall_seconds": 1.0}],
+        work_unit_observability=[
+            {"worker_process_evidence": {"worker_pid": 111}, "wall_seconds": 1.0},
+        ],
+        execution_boundary={
+            "actual_worker_context_mode": "process_pool",
+            "actual_parallel_task_count": 1,
+            "available_parallel_work_tasks": 1,
+            "parallel_executor_used": True,
+            "research_max_workers_requested": 8,
+            "research_max_workers_effective": 8,
+            "effective_process_start_method": "forkserver",
+        },
+        snapshots={"train": _snapshot("train")},
+    )
+
+    efficiency = payload["parallel_efficiency"]
+    assert efficiency["requested_max_workers"] == 8
+    assert efficiency["effective_max_workers"] == 8
+    assert efficiency["available_parallel_work_tasks"] == 1
+    assert efficiency["observed_worker_count"] == 1
+    assert efficiency["expected_worker_utilization_pct"] == 12.5
+
+
+def test_observed_workers_below_effective_is_reported() -> None:
+    manifest = parse_manifest(_manifest())
+    payload = _execution_observability_payload(
+        manifest=manifest,
+        stage_timings=[{"stage": "parallel_worker_execution", "wall_seconds": 1.0}],
+        work_unit_observability=[
+            {"worker_process_evidence": {"worker_pid": 111}, "wall_seconds": 1.0},
+        ],
+        execution_boundary={
+            "actual_worker_context_mode": "process_pool",
+            "actual_parallel_task_count": 1,
+            "available_parallel_work_tasks": 1,
+            "parallel_executor_used": True,
+            "research_max_workers_requested": 8,
+            "research_max_workers_effective": 8,
+            "effective_process_start_method": "forkserver",
+        },
+        snapshots={"train": _snapshot("train")},
+    )
+
+    assert "observed_workers_below_effective" in payload["worker_observation_warning_reasons"]
+    assert "observed_workers_below_effective" in payload["parallel_efficiency"]["worker_observation_warning_reasons"]
+    assert payload["parallel_efficiency"]["observed_worker_count"] == 1

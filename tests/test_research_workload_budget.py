@@ -164,6 +164,29 @@ def test_workload_estimate_includes_canonical_observability_fields() -> None:
     assert "estimated_full_tick_canonical_enabled" in estimate
 
 
+def test_workload_estimate_includes_parallel_task_capacity() -> None:
+    manifest_payload = _manifest()
+    manifest_payload["research_run"] = {"execution": {"mode": "parallel", "max_workers": 8}}
+    manifest = parse_manifest(manifest_payload)
+    snapshots = {name: _snapshot(name) for name in ("train", "validation")}
+    quality_reports = {name: _quality_report(name) for name in snapshots}
+
+    plan = build_research_execution_plan(
+        manifest=manifest,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        db_path="/tmp/unit.sqlite",
+        repository_version="test",
+        created_at="2026-06-16T00:00:00+00:00",
+    )
+    estimate = plan.payload["workload_estimate"]
+
+    assert estimate["available_parallel_work_tasks"] == 1
+    assert estimate["expected_worker_utilization_pct"] == 12.5
+    assert estimate["parallel_task_to_worker_ratio"] == 0.125
+    assert estimate["parallelism_limiting_factor"] == "work_unit_granularity_candidate_scenario"
+
+
 def test_workload_budget_fails_canonical_hash_call_excess(tmp_path: Path) -> None:
     estimate_path = tmp_path / "estimate.json"
     estimate = {

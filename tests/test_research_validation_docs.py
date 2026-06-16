@@ -140,6 +140,16 @@ def test_research_validation_docs_describe_bound_evidence_hash_and_final_content
     assert "the final\n`content_hash` and bound evidence hash can intentionally differ." in doc
 
 
+def test_wsl_runbook_documents_parallel_efficiency() -> None:
+    doc = Path("docs/runbooks/wsl-research-backtest.md").read_text(encoding="utf-8")
+
+    assert "Parallelism Depends On Available Work Tasks" in doc
+    assert "available_parallel_work_tasks" in doc
+    assert "expected_worker_utilization_pct" in doc
+    assert "1 / 8 * 100 = 12.5%" in doc
+    assert "research-batch --manifest-glob" in doc
+
+
 def test_research_validation_docs_describe_lifecycle_status_separate_from_statistical_gate() -> None:
     doc = _experiment_registry_section()
 

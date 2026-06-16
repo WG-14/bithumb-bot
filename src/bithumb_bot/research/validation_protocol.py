@@ -60,6 +60,8 @@ from .execution_plan import (
     ResearchWorkUnit,
     build_research_execution_plan,
     build_research_work_unit,
+    parallel_efficiency_payload,
+    parallel_work_task_count,
     precompute_dataset_hashes,
     _estimated_artifact_bytes,
 )
@@ -94,6 +96,7 @@ from .metrics_gate_policy import metrics_gate_policy_from_acceptance_gate, metri
 from .metrics_contract import METRICS_SCHEMA_VERSION, ClosedTradeRecord
 from .parameter_space import candidate_id, iter_parameter_candidates
 from .promotion_gate import build_candidate_behavior_profile, build_candidate_profile
+from .profiling import run_with_cprofile
 from .report_writer import (
     summarize_candidate_result,
     write_research_report,
@@ -983,11 +986,14 @@ def _execution_boundary_observability(
         actual_execution_mode = "contract_evaluator_in_process"
         actual_worker_context_mode = "in_process_contract"
     execution_scenarios = required_execution_scenarios(manifest.execution_model.scenarios)
-    requested_task_count = (
-        len(execution_scenarios) * len(iter_parameter_candidates(manifest.parameter_space))
-        if requested_mode == "parallel"
-        else 0
-    )
+    requested_task_count = 0
+    if requested_mode == "parallel":
+        requested_task_count = parallel_work_task_count(
+            candidate_count=len(iter_parameter_candidates(manifest.parameter_space)),
+            scenario_count=len(execution_scenarios),
+            split_count=1,
+            work_unit=manifest.research_run.execution.work_unit,
+        )
     payload = {
         "requested_execution_mode": requested_mode,
         "requested_max_workers": manifest.research_run.execution.max_workers,
@@ -1046,6 +1052,23 @@ def _execution_observability_payload(
     tail_skew_ratio = _tail_skew_ratio(work_unit_wall_seconds)
     if tail_skew_ratio is not None and tail_skew_ratio >= 2.0:
         observation_warning_reasons.append("parallel_tail_skew_detected")
+    available_parallel_work_tasks = int(
+        execution_boundary.get("available_parallel_work_tasks")
+        or execution_boundary.get("actual_parallel_task_count")
+        or 0
+    )
+    parallel_efficiency = parallel_efficiency_payload(
+        available_work_tasks=available_parallel_work_tasks,
+        requested_max_workers=requested_workers,
+        effective_max_workers=effective_workers,
+        work_unit=manifest.research_run.execution.work_unit,
+        effective_worker_source=(
+            "runtime_process_policy" if execution_boundary.get("research_max_workers_effective") is not None else "manifest"
+        ),
+        observed_worker_count=observed_worker_count if parallel_executor_used else None,
+        worker_warning_reasons=worker_warning_reasons,
+        worker_observation_warning_reasons=observation_warning_reasons,
+    )
     return {
         "stage_timings": stage_timings,
         "work_units": work_unit_observability,
@@ -1063,6 +1086,7 @@ def _execution_observability_payload(
         "observed_worker_count": observed_worker_count,
         "worker_budget_warning_reasons": sorted(set(worker_warning_reasons)),
         "worker_observation_warning_reasons": sorted(set(observation_warning_reasons)),
+        "parallel_efficiency": parallel_efficiency,
         "parent_serial_stage_timings": parent_serial_stage_timings,
         "work_unit_wall_seconds_distribution": _distribution(work_unit_wall_seconds),
         "tail_skew_ratio": tail_skew_ratio,
@@ -1643,7 +1667,12 @@ def _evaluate_candidates(
     candidate_count = len(raw_candidates)
     scenario_count = len(execution_scenarios)
     split_count = len(snapshots)
-    expected_work_task_count = candidate_count * scenario_count
+    expected_work_task_count = parallel_work_task_count(
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
+        split_count=split_count,
+        work_unit=manifest.research_run.execution.work_unit,
+    )
     aggregates: dict[str, dict[str, Any]] = {}
     manifest_hash = manifest.manifest_hash()
     dataset_quality_hash = combined_dataset_quality_hash(tuple(quality_reports.values()))
@@ -1753,30 +1782,37 @@ def _evaluate_candidates(
         work_task_count=expected_work_task_count,
         split_count=split_count,
     )
+    split_work_unit_names = _work_unit_split_names(
+        manifest=manifest,
+        snapshots=snapshots,
+        include_walk_forward=include_walk_forward,
+    )
     for scenario_index, scenario in execution_scenarios:
         scenario_id = _scenario_id(scenario, scenario_index)
         for index, params in enumerate(raw_candidates):
-            work_unit = build_research_work_unit(
-                manifest=manifest,
-                dataset_hashes=dataset_hashes,
-                params=params,
-                candidate_index=index,
-                scenario=scenario,
-                scenario_index=scenario_index,
-                scenario_id=scenario_id,
-                manifest_hash=manifest_hash,
-                simulation_seed_scope_hash=simulation_seed_scope_hash,
-            )
-            work_tasks.append(
-                {
-                    "params": params,
-                    "candidate_index": index,
-                    "scenario": scenario,
-                    "scenario_index": scenario_index,
-                    "scenario_id": scenario_id,
-                    "work_unit": work_unit,
-                }
-            )
+            for split_name in split_work_unit_names:
+                work_unit = build_research_work_unit(
+                    manifest=manifest,
+                    dataset_hashes=dataset_hashes,
+                    params=params,
+                    candidate_index=index,
+                    scenario=scenario,
+                    scenario_index=scenario_index,
+                    scenario_id=scenario_id,
+                    manifest_hash=manifest_hash,
+                    simulation_seed_scope_hash=simulation_seed_scope_hash,
+                    split_name=split_name,
+                )
+                work_tasks.append(
+                    {
+                        "params": params,
+                        "candidate_index": index,
+                        "scenario": scenario,
+                        "scenario_index": scenario_index,
+                        "scenario_id": scenario_id,
+                        "work_unit": work_unit,
+                    }
+                )
     build_work_tasks_elapsed = time.perf_counter() - build_work_tasks_started
     substage_timings.append(
         _stage_timing(
@@ -1807,6 +1843,22 @@ def _evaluate_candidates(
         candidate_evaluator=candidate_evaluator,
         parallel_executor_used=parallel_executor_used,
     )
+    execution_boundary["available_parallel_work_tasks"] = len(work_tasks)
+    execution_boundary["requested_parallel_task_count"] = len(work_tasks) if parallel_executor_used else 0
+    execution_boundary["actual_parallel_task_count"] = len(work_tasks) if parallel_executor_used else 0
+    efficiency = parallel_efficiency_payload(
+        available_work_tasks=len(work_tasks),
+        requested_max_workers=manifest.research_run.execution.max_workers,
+        effective_max_workers=manifest.research_run.execution.max_workers,
+        work_unit=manifest.research_run.execution.work_unit,
+        effective_worker_source="requested_pending_runtime_resolution",
+    )
+    _emit_progress(
+        progress_callback,
+        stage="parallel_efficiency",
+        **efficiency,
+    )
+    substage_timings.append({"stage": "parallel_efficiency", "wall_seconds": 0.0, **efficiency})
     if parallel_executor_used:
         append_start_started = time.perf_counter()
         append_start_bytes_before = int(getattr(artifact_context, "total_bytes", 0) or 0)
@@ -1930,6 +1982,9 @@ def _evaluate_candidates(
                 process_runtime_observability[-1] if process_runtime_observability else None
             ),
         )
+        execution_boundary["available_parallel_work_tasks"] = len(work_tasks)
+        execution_boundary["requested_parallel_task_count"] = len(work_tasks)
+        execution_boundary["actual_parallel_task_count"] = len(work_tasks)
         substage_timings.append(
             _stage_timing("result_collection", result_collection_started, result_count=len(raw_results))
         )
@@ -2073,6 +2128,7 @@ def _evaluate_candidates(
         _normalize_failed_work_result_without_base(manifest=manifest, result=result)
         for result in work_results
     ]
+    work_results = _merge_candidate_scenario_split_results(manifest=manifest, results=work_results)
     substage_timings.append(_stage_timing("normalize_work_results", normalize_started, result_count=len(work_results)))
     if work_unit_observability is not None:
         extend_started = time.perf_counter()
@@ -2965,6 +3021,115 @@ def _evaluate_candidates(
     )
 
 
+def _work_unit_split_names(
+    *,
+    manifest: ExperimentManifest,
+    snapshots: dict[str, DatasetSnapshot],
+    include_walk_forward: bool,
+) -> list[str]:
+    work_unit = str(manifest.research_run.execution.work_unit or "candidate_scenario").strip().lower()
+    if work_unit == "candidate_scenario":
+        return ["candidate_scenario"]
+    if work_unit != "candidate_scenario_split":
+        raise ResearchValidationError(f"unsupported_research_work_unit:{work_unit}")
+    if include_walk_forward or any(name.startswith("window_") for name in snapshots):
+        raise ResearchValidationError("candidate_scenario_split_walk_forward_not_supported")
+    if "final_holdout" in snapshots:
+        raise ResearchValidationError("candidate_scenario_split_final_holdout_not_supported")
+    missing = [name for name in ("train", "validation") if name not in snapshots]
+    if missing:
+        raise ResearchValidationError(f"candidate_scenario_split_missing_required_splits:{','.join(missing)}")
+    return ["train", "validation"]
+
+
+def _merge_candidate_scenario_split_results(
+    *,
+    manifest: ExperimentManifest,
+    results: list[ResearchWorkResult],
+) -> list[ResearchWorkResult]:
+    if str(manifest.research_run.execution.work_unit or "candidate_scenario") != "candidate_scenario_split":
+        return results
+    grouped: dict[tuple[int, int], list[ResearchWorkResult]] = {}
+    passthrough: list[ResearchWorkResult] = []
+    for result in results:
+        if result.status != "completed":
+            passthrough.append(result)
+            continue
+        grouped.setdefault((result.scenario_index, result.candidate_index), []).append(result)
+    merged: list[ResearchWorkResult] = []
+    for key in sorted(grouped):
+        group = sorted(grouped[key], key=lambda item: str(item.work_unit.split_name))
+        split_names = [str(item.work_unit.split_name) for item in group]
+        if split_names != ["train", "validation"]:
+            raise ResearchValidationError(
+                "candidate_scenario_split_merge_requires_train_validation:" + ",".join(split_names)
+            )
+        train_base = dict(group[0].base_result or {})
+        validation_base = dict(group[1].base_result or {})
+        merged_base = dict(train_base)
+        for name, value in validation_base.items():
+            if name.startswith("validation_") or name in {"validation_metrics", "validation_metrics_v2"}:
+                merged_base[name] = value
+        merged_base.update(
+            {
+                "work_unit_mode": "candidate_scenario_split",
+                "split_work_unit_hashes": [item.work_unit_hash for item in group],
+                "final_holdout_metrics": None,
+                "final_holdout_metrics_v2": None,
+                "final_holdout_closed_trades": (),
+                "final_holdout_equity_curve": [],
+                "final_holdout_execution_metadata": None,
+                "final_holdout_execution_event_summary": None,
+                "final_holdout_strategy_diagnostics": None,
+                "final_holdout_regime_performance": None,
+                "final_holdout_regime_coverage": None,
+                "final_holdout_resource_usage": None,
+                "final_holdout_audit_trace_index": None,
+                "warnings": sorted(set(train_base.get("warnings") or ()) | set(validation_base.get("warnings") or ())),
+                "validation_executed_portfolio_policy": validation_base.get("validation_executed_portfolio_policy"),
+                "validation_executed_portfolio_policy_hash": validation_base.get(
+                    "validation_executed_portfolio_policy_hash"
+                ),
+                "executed_portfolio_policy": validation_base.get("validation_executed_portfolio_policy"),
+                "executed_portfolio_policy_hash": validation_base.get("validation_executed_portfolio_policy_hash"),
+                "final_holdout_executed_portfolio_policy": None,
+                "final_holdout_executed_portfolio_policy_hash": None,
+            }
+        )
+        first = group[0]
+        merged_observability = {
+            "work_unit": first.work_unit.as_dict(),
+            "status": "completed",
+            "work_unit_mode": "candidate_scenario_split",
+            "merged_split_names": split_names,
+            "split_work_unit_hashes": [item.work_unit_hash for item in group],
+            "wall_seconds": round(
+                sum(float((item.observability or {}).get("wall_seconds") or 0.0) for item in group),
+                6,
+            ),
+            "candles_processed": sum(int((item.observability or {}).get("candles_processed") or 0) for item in group),
+        }
+        merged.append(
+            ResearchWorkResult(
+                work_unit=first.work_unit,
+                work_unit_hash=sha256_prefixed(
+                    {
+                        "work_unit_mode": "candidate_scenario_split",
+                        "split_work_unit_hashes": [item.work_unit_hash for item in group],
+                    }
+                ),
+                candidate_index=first.candidate_index,
+                candidate_id=first.candidate_id,
+                scenario_index=first.scenario_index,
+                scenario_id=first.scenario_id,
+                status="completed",
+                base_result=merged_base,
+                observability=merged_observability,
+            )
+        )
+    return sort_work_results_deterministically(passthrough + merged)
+
+
 def _normalize_failed_work_result_without_base(
     *,
     manifest: ExperimentManifest,
@@ -3246,41 +3411,60 @@ def _evaluate_candidate_base_result(
         try:
             split_started = time.perf_counter()
             split_cpu_started = time.process_time()
-            result = _invoke_strategy_runner(
-                runner=runner,
-                dataset=snapshots[split_name],
-                parameter_values=params,
-                fee_rate=scenario.fee_rate,
-                slippage_bps=float(scenario.slippage_bps),
-                parameter_stability_score=None,
-                execution_model=_execution_model_from_scenario(
-                    scenario,
-                    seed_context=_seed_context(
-                        simulation_seed_scope_hash=simulation_seed_scope_hash,
-                        scenario=scenario,
-                        scenario_id=scenario_id,
-                        parameter_candidate_id=param_candidate_id,
-                        split_name=split_name,
+            runner_call = lambda: _invoke_strategy_runner(
+                    runner=runner,
+                    dataset=snapshots[split_name],
+                    parameter_values=params,
+                    fee_rate=scenario.fee_rate,
+                    slippage_bps=float(scenario.slippage_bps),
+                    parameter_stability_score=None,
+                    execution_model=_execution_model_from_scenario(
+                        scenario,
+                        seed_context=_seed_context(
+                            simulation_seed_scope_hash=simulation_seed_scope_hash,
+                            scenario=scenario,
+                            scenario_id=scenario_id,
+                            parameter_candidate_id=param_candidate_id,
+                            split_name=split_name,
+                        ),
                     ),
-                ),
-                execution_timing_policy=manifest.execution_timing,
-                portfolio_policy=manifest.portfolio_policy,
-                risk_policy=manifest.risk_policy,
-                context=context,
-            )
+                    execution_timing_policy=manifest.execution_timing,
+                    portfolio_policy=manifest.portfolio_policy,
+                    risk_policy=manifest.risk_policy,
+                    context=context,
+                )
+            profile_observability: dict[str, Any] = {}
+            if manifest.research_run.diagnostic_mode == "profiling":
+                if manager is None:
+                    raise ResearchValidationError("profiling_requires_main_process_artifact_manager")
+                result, profile_observability = run_with_cprofile(
+                    func=runner_call,
+                    manager=manager,
+                    experiment_id=manifest.experiment_id,
+                    candidate_id=param_candidate_id,
+                    scenario_id=scenario_id,
+                    split_name=split_name,
+                    candles_processed=len(snapshots[split_name].candles),
+                )
+            else:
+                result = runner_call()
             wall_seconds = time.perf_counter() - split_started
             cpu_seconds = time.process_time() - split_cpu_started
             candles = len(snapshots[split_name].candles)
-            split_observability.append(
-                {
-                    "split_name": split_name,
-                    "status": "completed",
-                    "wall_seconds": round(wall_seconds, 6),
-                    "cpu_seconds": round(cpu_seconds, 6),
-                    "candles_processed": candles,
-                    "candles_per_second": round(candles / wall_seconds, 6) if wall_seconds > 0 else None,
-                }
-            )
+            split_payload = {
+                "split_name": split_name,
+                "status": "completed",
+                "wall_seconds": round(wall_seconds, 6),
+                "cpu_seconds": round(cpu_seconds, 6),
+                "candles_processed": candles,
+                "candles_per_second": round(candles / wall_seconds, 6) if wall_seconds > 0 else None,
+            }
+            split_payload.update(profile_observability)
+            split_observability.append(split_payload)
+            if profile_observability:
+                resource_usage = dict(result.resource_usage or {})
+                resource_usage.update(profile_observability)
+                result = replace(result, resource_usage=resource_usage)
             return result
         except Exception as exc:
             split_observability.append(
@@ -3300,6 +3484,60 @@ def _evaluate_candidate_base_result(
                     setattr(exc, "audit_trace_index", audit_index)
                     setattr(exc, "failed_split", split_name)
             raise
+
+    if work_unit.work_unit_mode == "candidate_scenario_split":
+        split_name = str(work_unit.split_name)
+        if split_name not in {"train", "validation"}:
+            raise ResearchValidationError(f"candidate_scenario_split_unsupported_split:{split_name}")
+        split_run = _run(split_name)
+        executed_policy_evidence = _candidate_split_executed_portfolio_policy_evidence(
+            split_name=split_name,
+            run=split_run,
+            work_unit=work_unit,
+        )
+        work_wall_seconds = time.perf_counter() - work_started
+        work_cpu_seconds = time.process_time() - work_cpu_started
+        candles_processed = sum(int(item.get("candles_processed") or 0) for item in split_observability)
+        work_observability = {
+            "work_unit": work_unit.as_dict(),
+            "status": "completed",
+            "wall_seconds": round(work_wall_seconds, 6),
+            "cpu_seconds": round(work_cpu_seconds, 6),
+            "candles_processed": candles_processed,
+            "candles_per_second": round(candles_processed / work_wall_seconds, 6) if work_wall_seconds > 0 else None,
+            "split_results": split_observability,
+            "content_hash": sha256_prefixed(
+                {
+                    "work_unit_hash": work_unit.work_unit_hash,
+                    "status": "completed",
+                    "split_name": split_name,
+                    "candles_processed": candles_processed,
+                }
+            ),
+        }
+        if work_unit_observability is not None:
+            work_unit_observability.append(work_observability)
+        _emit_progress(
+            progress_callback,
+            stage="work_unit_complete",
+            candidate_id=param_candidate_id,
+            scenario_id=scenario_id,
+            scenario_index=scenario_index,
+            work_unit_hash=work_unit.work_unit_hash,
+            wall_seconds=round(work_wall_seconds, 3),
+            candles_processed=candles_processed,
+        )
+        base = _partial_split_base_result(
+            manifest=manifest,
+            params=params,
+            index=index,
+            candidate_id_value=param_candidate_id,
+            split_name=split_name,
+            split_run=split_run,
+            work_unit=work_unit,
+            executed_policy_evidence=executed_policy_evidence,
+        )
+        return base
 
     train = _run("train")
     validation = _run("validation")
@@ -3543,6 +3781,71 @@ def _candidate_executed_portfolio_policy_evidence(
         "ledger_initial_position_qty": primary.get("ledger_initial_position_qty"),
         "position_sizing_policy": primary.get("position_sizing_policy"),
     }
+    return payload
+
+
+def _candidate_split_executed_portfolio_policy_evidence(
+    *,
+    split_name: str,
+    run: BacktestRun,
+    work_unit: ResearchWorkUnit,
+) -> dict[str, Any]:
+    evidence = _run_portfolio_policy_evidence(run)
+    return {
+        "work_unit_portfolio_policy_hash": work_unit.portfolio_policy_hash,
+        f"{split_name}_executed_portfolio_policy": evidence.get("executed_portfolio_policy"),
+        f"{split_name}_executed_portfolio_policy_hash": evidence.get("executed_portfolio_policy_hash"),
+        "executed_portfolio_policy": evidence.get("executed_portfolio_policy"),
+        "executed_portfolio_policy_hash": evidence.get("executed_portfolio_policy_hash"),
+        "ledger_starting_cash_krw": evidence.get("ledger_starting_cash_krw"),
+        "ledger_initial_position_qty": evidence.get("ledger_initial_position_qty"),
+        "position_sizing_policy": evidence.get("position_sizing_policy"),
+    }
+
+
+def _partial_split_base_result(
+    *,
+    manifest: ExperimentManifest,
+    params: dict[str, Any],
+    index: int,
+    candidate_id_value: str,
+    split_name: str,
+    split_run: BacktestRun,
+    work_unit: ResearchWorkUnit,
+    executed_policy_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = split_run.metrics.as_dict()
+    metrics_v2 = _metrics_v2_payload(split_run)
+    payload: dict[str, Any] = {
+        "index": index,
+        "candidate_id": candidate_id_value,
+        "run_purpose": manifest.research_run.run_purpose,
+        "candidate_failed": False,
+        "candidate_failed_before_complete_metrics": False,
+        "evaluation_status": "completed",
+        "metrics_status": "partial_split",
+        "work_unit_mode": "candidate_scenario_split",
+        "work_unit_portfolio_policy_hash": work_unit.portfolio_policy_hash,
+        **executed_policy_evidence,
+        "metrics_v2_source": "computed",
+        "parameter_values": params,
+        "warnings": sorted(set(split_run.warnings)),
+        "retained_detail_summary": split_run.retained_detail_summary,
+        "walk_forward_metrics": None,
+    }
+    payload[f"{split_name}_metrics"] = metrics
+    payload[f"{split_name}_metrics_v2"] = metrics_v2
+    payload[f"{split_name}_closed_trades"] = split_run.closed_trades
+    payload[f"{split_name}_equity_curve"] = [point.as_dict() for point in split_run.equity_curve]
+    payload[f"{split_name}_execution_metadata"] = _execution_metadata(split_run.trades)
+    payload[f"{split_name}_execution_event_summary"] = (
+        split_run.execution_event_summary or execution_event_summary(split_run.trades)
+    )
+    payload[f"{split_name}_strategy_diagnostics"] = split_run.strategy_diagnostics or {}
+    payload[f"{split_name}_regime_performance"] = [row.as_dict() for row in split_run.regime_performance]
+    payload[f"{split_name}_regime_coverage"] = [row.as_dict() for row in split_run.regime_coverage]
+    payload[f"{split_name}_resource_usage"] = split_run.resource_usage
+    payload[f"{split_name}_audit_trace_index"] = split_run.audit_trace_index
     return payload
 
 

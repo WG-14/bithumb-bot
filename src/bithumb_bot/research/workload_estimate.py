@@ -8,6 +8,8 @@ from .execution_plan import (
     _plugin_complexity_metadata,
     _plugin_expected_us_per_candle,
     estimate_canonical_observability_cost,
+    parallel_efficiency_payload,
+    parallel_work_task_count,
 )
 from .experiment_manifest import ExperimentManifest, load_manifest, required_execution_scenarios
 from .parameter_space import iter_parameter_candidates
@@ -21,6 +23,12 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
     candidate_count = len(candidates)
     scenario_count = len(scenarios)
     work_unit_count = candidate_count * scenario_count
+    available_parallel_work_tasks = parallel_work_task_count(
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
+        split_count=split_count,
+        work_unit=manifest.research_run.execution.work_unit,
+    )
     expected_candles = sum(int(item["expected_candle_count"]) for item in split_ranges)
     plugin_complexity = _plugin_complexity_metadata(
         manifest.strategy_name,
@@ -61,6 +69,13 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
         diagnostic_mode=manifest.research_run.diagnostic_mode,
         audit_trail=manifest.research_run.audit_trail,
     )
+    parallel_capacity = parallel_efficiency_payload(
+        available_work_tasks=available_parallel_work_tasks,
+        requested_max_workers=max_workers,
+        effective_max_workers=max_workers,
+        work_unit=manifest.research_run.execution.work_unit,
+        effective_worker_source="requested_pending_runtime_resolution",
+    )
     return {
         "schema_version": 1,
         "manifest_hash": manifest.manifest_hash(),
@@ -70,6 +85,12 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
         "scenario_count": scenario_count,
         "split_count": split_count,
         "work_unit_count": work_unit_count,
+        "estimated_strategy_runs": candidate_count * scenario_count * split_count,
+        "available_parallel_work_tasks": available_parallel_work_tasks,
+        "parallel_task_to_worker_ratio": parallel_capacity["parallel_task_to_worker_ratio"],
+        "expected_worker_utilization_pct": parallel_capacity["expected_worker_utilization_pct"],
+        "parallelism_limiting_factor": parallel_capacity["parallelism_limiting_factor"],
+        "effective_worker_source": parallel_capacity["effective_worker_source"],
         "dataset_split_ranges": split_ranges,
         "research_execution_mode": manifest.research_run.execution.mode,
         "max_workers_requested": manifest.research_run.execution.max_workers,

@@ -33,6 +33,7 @@ from .run_summary import ResearchRunSummary, build_research_run_summary
 from .validation_pipeline import ValidationRunError, run_research_validation
 from .validation_protocol import ResearchValidationError, run_research_backtest, run_research_walk_forward
 from .forward_diagnostics_cli import cmd_research_forward_diagnostics
+from .batch_runner import run_research_batch
 
 
 RESEARCH_NOTIFICATION_POLICIES = {"best_effort", "require_delivery", "disabled"}
@@ -258,17 +259,43 @@ def cmd_research_workload_estimate(*, manifest_path: str, as_json: bool = False)
         return 1
     if as_json:
         print(json.dumps(payload, sort_keys=True, indent=2))
-    else:
-        print(
-            "[RESEARCH-WORKLOAD-ESTIMATE] "
-            f"experiment_id={payload['experiment_id']} "
-            f"candidate_count={payload['candidate_count']} "
-            f"scenario_count={payload['scenario_count']} "
-            f"split_count={payload['split_count']} "
-            f"work_unit_count={payload['work_unit_count']} "
-            f"pre_parallel_dataset_hash_call_count={payload['pre_parallel_dataset_hash_call_count']}"
-        )
+        return 0
+    print(
+        "[RESEARCH-WORKLOAD-ESTIMATE] "
+        f"experiment_id={payload['experiment_id']} "
+        f"candidate_count={payload['candidate_count']} "
+        f"scenario_count={payload['scenario_count']} "
+        f"split_count={payload['split_count']} "
+        f"work_unit_count={payload['work_unit_count']} "
+        f"available_parallel_work_tasks={payload.get('available_parallel_work_tasks')} "
+        f"pre_parallel_dataset_hash_call_count={payload['pre_parallel_dataset_hash_call_count']}"
+    )
     return 0
+
+
+def cmd_research_batch(
+    *,
+    manifest_glob: str,
+    max_concurrent_manifests: int,
+    command: str = "research-backtest",
+    fail_fast: bool = False,
+    out_path: str | None = None,
+) -> int:
+    try:
+        result = run_research_batch(
+            manifest_glob=manifest_glob,
+            max_concurrent_manifests=max_concurrent_manifests,
+            command=command,
+            fail_fast=fail_fast,
+            out_path=out_path,
+            manager=PATH_MANAGER,
+            project_root=Path.cwd(),
+        )
+    except (OSError, ValueError) as exc:
+        print(f"[RESEARCH-BATCH] error={exc}")
+        return 1
+    print(f"[RESEARCH-BATCH] summary={result.summary_path} status={result.payload['status']}")
+    return 0 if result.payload["status"] == "succeeded" or not fail_fast else 1
 
 
 def _write_artifact_budget_failure_payload(

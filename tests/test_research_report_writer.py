@@ -94,6 +94,35 @@ def test_summary_report_references_candidate_detail_artifacts(tmp_path: Path, mo
     assert persisted["artifact_paths"]["audit_trace_manifest_path"] == str(result.paths.trace_manifest_path.resolve())
 
 
+def test_report_summary_preserves_parallel_efficiency_summary(tmp_path: Path, monkeypatch) -> None:
+    manager = _research_manager(tmp_path, monkeypatch)
+    payload = _summary_report_payload(experiment_id="parallel_efficiency_summary")
+    payload.setdefault("research_run", {})["report_detail"] = "summary"
+    payload.setdefault("execution_observability", {})["parallel_efficiency"] = {
+        "requested_max_workers": 8,
+        "effective_max_workers": 8,
+        "available_parallel_work_tasks": 1,
+        "observed_worker_count": 1,
+        "expected_worker_utilization_pct": 12.5,
+        "observed_worker_utilization_pct": 12.5,
+        "worker_warning_reasons": [],
+        "worker_observation_warning_reasons": ["observed_workers_below_effective"],
+    }
+
+    result = write_research_report(
+        manager=manager,
+        experiment_id="parallel_efficiency_summary",
+        report_name="backtest",
+        payload=payload,
+    )
+    persisted = json.loads(result.paths.report_path.read_text(encoding="utf-8"))
+
+    efficiency = persisted["execution_observability"]["parallel_efficiency"]
+    assert efficiency["requested_max_workers"] == 8
+    assert efficiency["available_parallel_work_tasks"] == 1
+    assert efficiency["worker_observation_warning_reasons"] == ["observed_workers_below_effective"]
+
+
 def test_persist_final_research_report_observability_updates_persisted_payload(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     payload = {

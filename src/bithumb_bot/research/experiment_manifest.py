@@ -2711,8 +2711,10 @@ def _parse_research_run(value: Any) -> ResearchRunPolicy:
     if report_detail not in {"index", "summary", "standard", "full"}:
         raise ManifestValidationError("research_run.report_detail must be index, summary, standard, or full")
     diagnostic_mode = str(value.get("diagnostic_mode") or "promotion_candidate").strip().lower()
-    if diagnostic_mode not in {"promotion_candidate", "exploratory"}:
-        raise ManifestValidationError("research_run.diagnostic_mode must be exploratory or promotion_candidate")
+    if diagnostic_mode not in {"promotion_candidate", "exploratory", "profiling"}:
+        raise ManifestValidationError(
+            "research_run.diagnostic_mode must be exploratory, profiling, or promotion_candidate"
+        )
     run_purpose = str(value.get("run_purpose") or "strategy_performance_diagnostic").strip().lower()
     if run_purpose not in {
         "simulation_integrity_smoke",
@@ -2908,8 +2910,10 @@ def _parse_research_execution(value: Any) -> ResearchExecutionPolicy:
     if resume:
         raise ManifestValidationError("research_run.execution.resume is not supported yet")
     work_unit = str(value.get("work_unit") or "candidate_scenario").strip().lower()
-    if work_unit != "candidate_scenario":
-        raise ManifestValidationError("research_run.execution.work_unit must be candidate_scenario")
+    if work_unit not in {"candidate_scenario", "candidate_scenario_split"}:
+        raise ManifestValidationError(
+            "research_run.execution.work_unit must be candidate_scenario or candidate_scenario_split"
+        )
     deterministic_merge_order = str(
         value.get("deterministic_merge_order") or "scenario_index,candidate_index,split_name"
     ).strip()

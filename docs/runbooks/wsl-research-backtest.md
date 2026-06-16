@@ -242,6 +242,56 @@ stress suite, or final-selection evidence. Production-bound users should start
 from `examples/research/sma_filter_manifest.production.example.json`, and
 production-bound gates must stay fail-closed.
 
+## Parallelism Depends On Available Work Tasks
+
+`research_run.execution.max_workers` is a worker cap, not a guarantee that WSL
+will use that many CPU cores. The process pool can only keep workers busy when
+the manifest creates enough available work tasks.
+
+For the default `work_unit=candidate_scenario`, the actual pre-pool parallel
+task count is:
+
+```text
+available_parallel_work_tasks = candidate_count * scenario_count
+```
+
+`estimated_strategy_runs` remains:
+
+```text
+estimated_strategy_runs = candidate_count * scenario_count * split_count
+```
+
+That distinction matters. A manifest with `candidate_count=1`,
+`scenario_count=1`, `split_count=2`, and `max_workers=8` has
+`estimated_strategy_runs=2`, but only `available_parallel_work_tasks=1`.
+Expected worker utilization is therefore `1 / 8 * 100 = 12.5%`.
+
+A manifest with `candidate_count=8`, `scenario_count=1`, and `max_workers=8`
+has `available_parallel_work_tasks=8` and expected utilization of `100%`.
+
+Check the execution plan, workload estimate, progress output, and final report
+for these fields:
+
+- `max_workers`
+- `candidate_count`
+- `scenario_count`
+- `split_count`
+- `estimated_strategy_runs`
+- `available_parallel_work_tasks`
+- `expected_worker_utilization_pct`
+
+When `work_task_count < max_workers`, increasing WSL processors or memory does
+not fix the bottleneck by itself. Use one or more of these responses:
+
+- Increase candidate count.
+- Increase scenario count when the scenario matrix is meaningful.
+- Use `research_run.execution.work_unit=candidate_scenario_split` for supported
+  train/validation diagnostic runs.
+- Use `research-batch --manifest-glob ... --max-concurrent-manifests N` to run
+  multiple independent manifests concurrently.
+- Use `research_run.diagnostic_mode=profiling` to profile a slow single-candidate
+  candle-loop run before attempting optimization.
+
 Minimum fields for a normal WSL research manifest:
 
 ```text

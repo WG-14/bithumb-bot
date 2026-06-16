@@ -88,3 +88,65 @@ def test_build_research_work_unit_does_not_call_snapshot_content_hash() -> None:
     source = inspect.getsource(execution_plan.build_research_work_unit)
 
     assert ".content_hash(" not in source
+
+
+def _plan_for_payload(payload: dict[str, object], split_names=("train", "validation")) -> dict[str, object]:
+    manifest = parse_manifest(payload)
+    snapshots = {name: _snapshot(name) for name in split_names}
+    quality_reports = {name: _quality_report(name) for name in snapshots}
+    return execution_plan.build_research_execution_plan(
+        manifest=manifest,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        db_path="/tmp/unit.sqlite",
+        repository_version="test",
+        created_at="2026-06-16T00:00:00+00:00",
+    ).payload
+
+
+def test_execution_plan_distinguishes_strategy_runs_from_parallel_work_tasks() -> None:
+    payload = _manifest()
+    payload.pop("research_run", None)
+    payload["research_run"] = {"execution": {"mode": "parallel", "max_workers": 8}}
+
+    plan = _plan_for_payload(payload, split_names=("train", "validation"))
+
+    assert plan["estimated_strategy_runs"] == 2
+    assert plan["available_parallel_work_tasks"] == 1
+
+
+def test_execution_plan_reports_low_worker_utilization_for_single_candidate() -> None:
+    payload = _manifest()
+    payload["research_run"] = {"execution": {"mode": "parallel", "max_workers": 8}}
+
+    plan = _plan_for_payload(payload, split_names=("train", "validation"))
+
+    assert plan["expected_worker_utilization_pct"] == 12.5
+    assert plan["parallelism_limiting_factor"] == "work_unit_granularity_candidate_scenario"
+
+
+def test_execution_plan_reports_full_worker_utilization_for_eight_candidates() -> None:
+    payload = _manifest()
+    payload["parameter_space"]["SMA_SHORT"] = [2, 3, 4, 5, 6, 7, 8, 9]
+    payload["research_run"] = {"execution": {"mode": "parallel", "max_workers": 8}}
+
+    plan = _plan_for_payload(payload, split_names=("train", "validation"))
+
+    assert plan["available_parallel_work_tasks"] == 8
+    assert plan["expected_worker_utilization_pct"] == 100.0
+
+
+def test_split_work_unit_reports_parallel_tasks_per_split() -> None:
+    payload = _manifest()
+    payload["research_run"] = {
+        "execution": {
+            "mode": "parallel",
+            "max_workers": 8,
+            "work_unit": "candidate_scenario_split",
+        }
+    }
+
+    plan = _plan_for_payload(payload, split_names=("train", "validation"))
+
+    assert plan["estimated_strategy_runs"] == 2
+    assert plan["available_parallel_work_tasks"] == 2

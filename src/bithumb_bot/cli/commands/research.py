@@ -70,6 +70,20 @@ def _workload_estimate(args: argparse.Namespace, _context) -> int:
     return int(cmd_research_workload_estimate(manifest_path=str(args.manifest), as_json=bool(args.json)))
 
 
+def _batch(args: argparse.Namespace, _context) -> int:
+    from bithumb_bot.research.cli import cmd_research_batch
+
+    return int(
+        cmd_research_batch(
+            manifest_glob=str(args.manifest_glob),
+            max_concurrent_manifests=int(args.max_concurrent_manifests),
+            command=str(args.command),
+            fail_fast=bool(args.fail_fast),
+            out_path=str(args.out) if args.out else None,
+        )
+    )
+
+
 def _promote(args: argparse.Namespace, _context) -> int:
     from bithumb_bot.research.cli import cmd_research_promote_candidate
 
@@ -144,6 +158,7 @@ def command_specs() -> list[CommandSpec]:
         make_spec("research-validate", handler=_validate, help="run the fail-closed end-to-end research validation pipeline", description="Run readiness, backtest, required walk-forward, promotion generation, and reproduce from one fixed manifest and write a hash-bound ValidationRun artifact.", build=_build_validate, **common),
         make_spec("research-readiness", handler=_readiness, help="check manifest data readiness before research execution", description="Read-only manifest readiness report for configured DB candle coverage, top-of-book coverage, calibration, and walk-forward prerequisites.", build=_build_readiness, **common),
         make_spec("research-workload-estimate", handler=_workload_estimate, help="estimate manifest research workload without running a backtest", description="Read-only manifest cardinality and pre-pool workload estimate; does not open broker connections, write DB rows, or create research artifacts.", build=_build_workload_estimate, domain="research", read_only=True, produces_artifact=False, writes_db=False, uses_broker=False, json_output_supported=True),
+        make_spec("research-batch", handler=_batch, help="run multiple research manifests with bounded batch concurrency", description="Run manifest-backed research-backtest subprocesses with explicit per-manifest status summary under PathManager-managed report paths.", build=_build_batch, **common),
         make_spec("research-forward-diagnostics", handler=_research_forward_diagnostics, help="run diagnostic-only forward-return feature bucket analysis", description="Run DatasetSnapshot-based forward-return diagnostics for feature mining only; output is not promotion, approved-profile, live-readiness, or capital-allocation evidence.", build=_build_forward_diagnostics, **common),
         make_spec("research-walk-forward", handler=_walk_forward, help="run walk-forward validation from a research manifest", description="Run research walk-forward validation without live broker or order lifecycle coupling.", build=_build_manifest_calibration, **common),
         make_spec("research-promote-candidate", handler=_promote, help="generate an operator-reviewable promotion artifact for a passing research candidate", description="Generate a promotion artifact; this command never rewrites paper/live env files.", build=_build_promote, **common),
@@ -175,7 +190,7 @@ def _build_backtest(parser: argparse.ArgumentParser) -> None:
     _build_manifest_calibration(parser)
     parser.add_argument(
         "--diagnostic-mode",
-        choices=("promotion_candidate", "exploratory"),
+        choices=("promotion_candidate", "exploratory", "profiling"),
         help="override research_run.diagnostic_mode for this manifest-backed backtest run",
     )
 
@@ -196,6 +211,16 @@ def _build_readiness(parser: argparse.ArgumentParser) -> None:
 def _build_workload_estimate(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--json", action="store_true")
+
+
+def _build_batch(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--manifest-glob", required=True)
+    parser.add_argument("--max-concurrent-manifests", type=int, default=1)
+    parser.add_argument("--command", default="research-backtest", choices=("research-backtest",))
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--fail-fast", action="store_true")
+    mode.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument("--out")
 
 
 def _build_forward_diagnostics(parser: argparse.ArgumentParser) -> None:
