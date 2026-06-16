@@ -108,7 +108,8 @@ def build_data_plane_policy(
     else:
         headroom = budget - estimated_mb
         if headroom > 0:
-            disabled_reasons.append("worker_local_lazy_cache_not_implemented")
+            cache_budget_mb = max(1, min(headroom, max(1, estimated_mb)))
+            load_policy = "worker_local_lazy_cache"
         else:
             disabled_reasons.append("memory_headroom_unavailable")
     split_tuple = tuple(str(item) for item in split_names)

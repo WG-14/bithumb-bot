@@ -148,6 +148,7 @@ PARENT_SERIAL_TIMING_STAGES = {
     "parallel_worker_pool_start",
     "report_write",
 }
+_WORKER_LOCAL_SNAPSHOT_CACHE: dict[str, dict[str, DatasetSnapshot]] = {}
 
 
 @dataclass(frozen=True)
@@ -435,21 +436,79 @@ def _load_worker_task_snapshots(*, task: dict[str, Any], manifest: ExperimentMan
     if requested_policy == "db_reload":
         applied_policy = "db_reload"
     elif requested_policy == "worker_local_lazy_cache":
-        applied_policy = "db_reload"
-        disabled = list(data_plane_policy.get("disabled_reasons") or [])
-        if "worker_local_lazy_cache_not_implemented" not in disabled:
-            disabled.append("worker_local_lazy_cache_not_implemented")
-        data_plane_policy["disabled_reasons"] = disabled
+        cache_key = _worker_local_snapshot_cache_key(
+            data_plane_policy=data_plane_policy,
+            db_path=db_path,
+            split_names=split_names,
+        )
+        cached = _WORKER_LOCAL_SNAPSHOT_CACHE.get(cache_key)
+        if cached is not None:
+            data_plane_policy["applied_snapshot_load_policy"] = "worker_local_lazy_cache"
+            data_plane_policy["worker_local_lazy_cache_status"] = "hit"
+            task["data_plane_policy"] = data_plane_policy
+            return dict(cached)
+        snapshots = _load_worker_task_snapshots_from_db(
+            db_path=db_path,
+            manifest=manifest,
+            split_names=split_names,
+        )
+        _WORKER_LOCAL_SNAPSHOT_CACHE[cache_key] = dict(snapshots)
+        data_plane_policy["applied_snapshot_load_policy"] = "worker_local_lazy_cache"
+        data_plane_policy["worker_local_lazy_cache_status"] = "miss_stored"
+        task["data_plane_policy"] = data_plane_policy
+        return snapshots
     elif requested_policy == "memory_mapped_readonly":
-        applied_policy = "db_reload"
-        disabled = list(data_plane_policy.get("disabled_reasons") or [])
-        if "memory_mapped_readonly_not_implemented" not in disabled:
-            disabled.append("memory_mapped_readonly_not_implemented")
-        data_plane_policy["disabled_reasons"] = disabled
+        raise ResearchValidationError("worker_snapshot_load_policy_unsupported:memory_mapped_readonly")
     else:
         raise ResearchValidationError(f"worker_snapshot_load_policy_unsupported:{requested_policy}")
     data_plane_policy["applied_snapshot_load_policy"] = applied_policy
     task["data_plane_policy"] = data_plane_policy
+    return _load_worker_task_snapshots_from_db(
+        db_path=db_path,
+        manifest=manifest,
+        split_names=split_names,
+    )
+
+
+def _worker_local_snapshot_cache_key(
+    *,
+    data_plane_policy: dict[str, Any],
+    db_path: object,
+    split_names: tuple[str, ...],
+) -> str:
+    material = data_plane_policy.get("cache_key_material")
+    if not isinstance(material, dict):
+        raise ResearchValidationError("worker_local_lazy_cache_key_material_missing")
+    manifest_hash = str(material.get("manifest_hash") or "")
+    dataset_hashes = material.get("dataset_hashes")
+    policy_split_names = material.get("split_names")
+    if not manifest_hash or not isinstance(dataset_hashes, dict) or not isinstance(policy_split_names, list):
+        raise ResearchValidationError("worker_local_lazy_cache_key_material_incomplete")
+    requested_split_names = tuple(str(name) for name in split_names)
+    requested_dataset_hashes = {
+        name: str(dataset_hashes.get(name) or "")
+        for name in requested_split_names
+    }
+    if not requested_dataset_hashes or any(not value for value in requested_dataset_hashes.values()):
+        raise ResearchValidationError("worker_local_lazy_cache_dataset_hash_missing")
+    return sha256_prefixed(
+        {
+            "policy": "worker_local_lazy_cache",
+            "manifest_hash": manifest_hash,
+            "dataset_hashes": requested_dataset_hashes,
+            "policy_split_names": [str(name) for name in policy_split_names],
+            "requested_split_names": list(requested_split_names),
+            "db_path": str(db_path),
+        }
+    )
+
+
+def _load_worker_task_snapshots_from_db(
+    *,
+    db_path: object,
+    manifest: ExperimentManifest,
+    split_names: tuple[str, ...],
+) -> dict[str, DatasetSnapshot]:
     if any(name.startswith("window_") for name in split_names):
         if manifest.walk_forward is None:
             raise ResearchValidationError("parallel_worker_walk_forward_manifest_missing")

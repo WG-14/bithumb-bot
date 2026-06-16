@@ -12,7 +12,7 @@ from bithumb_bot.research.experiment_manifest import parse_manifest
 from bithumb_bot.research.execution_plan import build_research_execution_plan
 
 
-def test_data_plane_policy_does_not_claim_cache_when_loader_falls_back_to_db_reload() -> None:
+def test_data_plane_policy_chooses_cache_when_memory_headroom_exists() -> None:
     policy = build_data_plane_policy(
         manifest_hash="sha256:manifest",
         dataset_hashes={"train": "sha256:dataset"},
@@ -22,10 +22,10 @@ def test_data_plane_policy_does_not_claim_cache_when_loader_falls_back_to_db_rel
         effective_max_workers=4,
     ).as_dict()
 
-    assert policy["dataset_cache_budget_mb"] == 0
-    assert policy["worker_snapshot_load_policy"] == "db_reload"
-    assert policy["applied_snapshot_load_policy"] == "db_reload"
-    assert "worker_local_lazy_cache_not_implemented" in policy["disabled_reasons"]
+    assert policy["dataset_cache_budget_mb"] > 0
+    assert policy["worker_snapshot_load_policy"] == "worker_local_lazy_cache"
+    assert policy["applied_snapshot_load_policy"] == "worker_local_lazy_cache"
+    assert "worker_local_lazy_cache_not_implemented" not in policy["disabled_reasons"]
 
 
 def test_data_plane_policy_records_disabled_reason_when_budget_unknown() -> None:
@@ -73,6 +73,7 @@ def test_worker_context_includes_data_plane_policy(tmp_path: Path, monkeypatch) 
 def test_worker_snapshot_loader_uses_declared_data_plane_policy(monkeypatch) -> None:
     manifest = parse_manifest(_manifest())
     calls: list[tuple[str, str]] = []
+    validation_protocol._WORKER_LOCAL_SNAPSHOT_CACHE.clear()
 
     def fake_load_dataset_split(*, db_path, manifest, split_name):
         calls.append((str(db_path), str(split_name)))
@@ -83,16 +84,34 @@ def test_worker_snapshot_loader_uses_declared_data_plane_policy(monkeypatch) -> 
         "db_path": "/tmp/unit.sqlite",
         "split_names": ("train", "validation"),
         "data_plane_policy": {
-            "worker_snapshot_load_policy": "db_reload",
+            "worker_snapshot_load_policy": "worker_local_lazy_cache",
+            "cache_key_material": {
+                "manifest_hash": "sha256:manifest",
+                "dataset_hashes": {
+                    "train": "sha256:train",
+                    "validation": "sha256:validation",
+                },
+                "split_names": ["train", "validation"],
+            },
             "disabled_reasons": [],
         },
     }
 
     snapshots = validation_protocol._load_worker_task_snapshots(task=task, manifest=manifest)
+    second_task = {
+        "db_path": "/tmp/unit.sqlite",
+        "split_names": ("train", "validation"),
+        "data_plane_policy": dict(task["data_plane_policy"]),
+    }
+    second_snapshots = validation_protocol._load_worker_task_snapshots(task=second_task, manifest=manifest)
 
     assert sorted(snapshots) == ["train", "validation"]
+    assert sorted(second_snapshots) == ["train", "validation"]
     assert calls == [("/tmp/unit.sqlite", "train"), ("/tmp/unit.sqlite", "validation")]
-    assert task["data_plane_policy"]["applied_snapshot_load_policy"] == "db_reload"
+    assert task["data_plane_policy"]["applied_snapshot_load_policy"] == "worker_local_lazy_cache"
+    assert task["data_plane_policy"]["worker_local_lazy_cache_status"] == "miss_stored"
+    assert second_task["data_plane_policy"]["applied_snapshot_load_policy"] == "worker_local_lazy_cache"
+    assert second_task["data_plane_policy"]["worker_local_lazy_cache_status"] == "hit"
 
 
 def test_cache_key_includes_dataset_hash_and_split_name() -> None:

@@ -48,6 +48,14 @@ def test_parallel_efficiency_is_persisted_in_report(tmp_path, monkeypatch) -> No
                 effective_max_workers=8,
                 work_unit="candidate_scenario",
             ),
+            "resource_plan": {"schema_version": 1, "effective_max_workers": 8},
+            "memory_admission": {
+                "policy": "cap_workers",
+                "effective_max_workers": 8,
+                "max_in_flight_tasks": 16,
+            },
+            "worker_pid_set": [111, 222],
+            "worker_observation_warning_reasons": ["observed_workers_below_effective"],
         },
     }
 
@@ -64,6 +72,15 @@ def test_parallel_efficiency_is_persisted_in_report(tmp_path, monkeypatch) -> No
     assert payload["effective_max_workers"] == 8
     assert payload["expected_worker_utilization_pct"] == 12.5
     assert payload["parallelism_limiting_factor"] == "work_unit_granularity_candidate_scenario"
+    observability = persisted["execution_observability"]
+    assert observability["resource_plan"] == {"schema_version": 1, "effective_max_workers": 8}
+    assert observability["memory_admission"] == {
+        "policy": "cap_workers",
+        "effective_max_workers": 8,
+        "max_in_flight_tasks": 16,
+    }
+    assert observability["worker_pid_set"] == [111, 222]
+    assert observability["worker_observation_warning_reasons"] == ["observed_workers_below_effective"]
 
 
 def test_execution_plan_parallel_efficiency_fields_are_available() -> None:
