@@ -135,6 +135,8 @@ def test_execution_plan_reports_pre_parallel_workload_fields() -> None:
     assert estimate["pre_parallel_dataset_hash_call_count"] == 3
     assert "pre_parallel_dataset_hash_payload_bytes" in estimate
     assert estimate["pre_parallel_parent_serial_estimate_status"] == "precomputed_split_hashes"
+    assert estimate["resource_plan"]["schema_version"] == 1
+    assert estimate["data_plane_policy"]["schema_version"] == 1
 
 
 def test_workload_estimate_includes_canonical_observability_fields() -> None:
@@ -185,6 +187,8 @@ def test_workload_estimate_includes_parallel_task_capacity() -> None:
     assert estimate["expected_worker_utilization_pct"] == 12.5
     assert estimate["parallel_task_to_worker_ratio"] == 0.125
     assert estimate["parallelism_limiting_factor"] == "work_unit_granularity_candidate_scenario"
+    assert estimate["resource_plan"]["effective_max_workers"] >= 1
+    assert estimate["resource_plan"]["selection_reasons"]
 
 
 def test_workload_budget_fails_canonical_hash_call_excess(tmp_path: Path) -> None:

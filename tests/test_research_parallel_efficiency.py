@@ -4,6 +4,7 @@ import json
 
 from bithumb_bot.research.execution_plan import build_research_execution_plan, parallel_efficiency_payload
 from bithumb_bot.research.experiment_manifest import parse_manifest
+from bithumb_bot.research.resource_planner import ResourceContract, plan_research_resources
 from bithumb_bot.research.report_writer import write_research_report
 from tests.test_research_backtest_reproducibility import _manifest
 from tests.test_research_execution_plan import _manager, _quality_report, _snapshot
@@ -85,3 +86,53 @@ def test_execution_plan_parallel_efficiency_fields_are_available() -> None:
 
     assert plan["available_parallel_work_tasks"] == 1
     assert plan["expected_worker_utilization_pct"] == 12.5
+
+
+def test_work_unit_selector_prefers_split_when_candidate_scenario_tasks_below_workers() -> None:
+    manifest = parse_manifest({
+        **_manifest(),
+        "research_run": {"execution": {"mode": "parallel", "max_workers": 3}},
+    })
+    plan = plan_research_resources(
+        manifest=manifest,
+        candidate_count=1,
+        scenario_count=1,
+        split_count=3,
+        resource_contract=ResourceContract(
+            cpu_limit=3,
+            memory_limit_mb=4096,
+            swap_limit_mb=None,
+            detected_source="test",
+            env_worker_cap=None,
+            total_process_budget=None,
+        ),
+    )
+
+    assert plan.work_unit_selection.effective_work_unit_type == "candidate_scenario_split"
+    assert plan.work_unit_selection.candidate_scenario_task_count == 1
+    assert plan.work_unit_selection.candidate_scenario_split_task_count == 3
+    assert plan.work_unit_selection.selection_reason == "split_tasks_fill_effective_workers"
+
+
+def test_work_unit_selector_keeps_candidate_scenario_when_tasks_match_workers() -> None:
+    manifest_payload = _manifest()
+    manifest_payload["parameter_space"]["SMA_SHORT"] = [2, 3, 4]
+    manifest_payload["research_run"] = {"execution": {"mode": "parallel", "max_workers": 3}}
+    manifest = parse_manifest(manifest_payload)
+    plan = plan_research_resources(
+        manifest=manifest,
+        candidate_count=3,
+        scenario_count=1,
+        split_count=3,
+        resource_contract=ResourceContract(
+            cpu_limit=3,
+            memory_limit_mb=4096,
+            swap_limit_mb=None,
+            detected_source="test",
+            env_worker_cap=None,
+            total_process_budget=None,
+        ),
+    )
+
+    assert plan.work_unit_selection.effective_work_unit_type == "candidate_scenario"
+    assert plan.work_unit_selection.rejected_alternatives

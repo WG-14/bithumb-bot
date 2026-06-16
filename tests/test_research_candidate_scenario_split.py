@@ -111,6 +111,49 @@ def test_candidate_scenario_split_merges_train_and_validation_results(tmp_path, 
     assert candidate["primary_validation_metrics"]["trade_count"] == 4
 
 
+def test_candidate_scenario_split_selection_preserves_deterministic_merge_order(tmp_path, monkeypatch) -> None:
+    payload = _manifest()
+    payload["dataset"].pop("final_holdout", None)
+    payload["parameter_space"]["SMA_SHORT"] = [3, 2]
+    payload["research_run"] = {"execution": {"mode": "parallel", "max_workers": 2}}
+    plan_manifest = parse_manifest(payload)
+    snapshots = {name: _snapshot(name) for name in ("train", "validation")}
+    quality_reports = {name: _quality_report(name) for name in snapshots}
+    plan = validation_protocol.build_research_execution_plan(
+        manifest=plan_manifest,
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        db_path="/tmp/unit.sqlite",
+        repository_version="test",
+        created_at="2026-06-17T00:00:00+00:00",
+    )
+    manifest = parse_manifest({**payload, "research_run": {"execution": {"work_unit": "candidate_scenario_split"}}})
+
+    result = validation_protocol._evaluate_candidates(
+        manifest=manifest,
+        manager=_manager(tmp_path, monkeypatch),
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        include_walk_forward=False,
+        execution_calibration=None,
+        candidate_evaluator=_SplitEvaluator(),
+    )
+
+    repeat = validation_protocol._evaluate_candidates(
+        manifest=manifest,
+        manager=_manager(tmp_path / "repeat", monkeypatch),
+        snapshots=snapshots,
+        quality_reports=quality_reports,
+        include_walk_forward=False,
+        execution_calibration=None,
+        candidate_evaluator=_SplitEvaluator(),
+    )
+    assert [candidate["parameter_candidate_id"] for candidate in result.candidates] == [
+        candidate["parameter_candidate_id"] for candidate in repeat.candidates
+    ]
+    assert plan.payload["work_unit_selection"]["selection_reason"]
+
+
 def test_candidate_scenario_split_matches_candidate_scenario_metrics(tmp_path, monkeypatch) -> None:
     split_manifest = _split_manifest()
     base_payload = _manifest()

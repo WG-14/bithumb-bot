@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .data_plane import split_names
+from .data_plane import build_data_plane_policy
 from .dataset_snapshot import _expected_bucket_count, _interval_ms, _split_range
 from .execution_plan import (
     _plugin_complexity_metadata,
@@ -13,6 +14,7 @@ from .execution_plan import (
 )
 from .experiment_manifest import ExperimentManifest, load_manifest, required_execution_scenarios
 from .parameter_space import iter_parameter_candidates
+from .resource_planner import plan_research_resources
 
 
 def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, Any]:
@@ -23,11 +25,19 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
     candidate_count = len(candidates)
     scenario_count = len(scenarios)
     work_unit_count = candidate_count * scenario_count
+    resource_plan = plan_research_resources(
+        manifest=manifest,
+        candidate_count=candidate_count,
+        scenario_count=scenario_count,
+        split_count=split_count,
+    )
+    resource_plan_payload = resource_plan.as_dict()
+    work_unit_selection = resource_plan.work_unit_selection.as_dict()
     available_parallel_work_tasks = parallel_work_task_count(
         candidate_count=candidate_count,
         scenario_count=scenario_count,
         split_count=split_count,
-        work_unit=manifest.research_run.execution.work_unit,
+        work_unit=resource_plan.work_unit_type,
     )
     expected_candles = sum(int(item["expected_candle_count"]) for item in split_ranges)
     plugin_complexity = _plugin_complexity_metadata(
@@ -45,7 +55,7 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
         * _plugin_expected_us_per_candle(plugin_complexity)
     )
     pre_parallel_dataset_hash_payload_bytes = expected_candles * 128 + split_count * 2048
-    max_workers = int(manifest.research_run.execution.max_workers)
+    max_workers = int(resource_plan.effective_max_workers)
     snapshot_bytes_per_worker = expected_candles * 160
     parallel_snapshot_fanout_bytes = snapshot_bytes_per_worker * max(1, max_workers)
     event_bytes = max((int(item["expected_candle_count"]) for item in split_ranges), default=0) * int(
@@ -71,11 +81,22 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
     )
     parallel_capacity = parallel_efficiency_payload(
         available_work_tasks=available_parallel_work_tasks,
-        requested_max_workers=max_workers,
-        effective_max_workers=max_workers,
-        work_unit=manifest.research_run.execution.work_unit,
+        requested_max_workers=resource_plan.requested_max_workers,
+        effective_max_workers=resource_plan.effective_max_workers,
+        work_unit=resource_plan.work_unit_type,
         effective_worker_source="requested_pending_runtime_resolution",
     )
+    data_plane_policy = build_data_plane_policy(
+        manifest_hash=manifest.manifest_hash(),
+        dataset_hashes={
+            item["split_name"]: f"manifest_range:{item['start_ts']}:{item['end_ts']}"
+            for item in split_ranges
+        },
+        split_names=[item["split_name"] for item in split_ranges],
+        memory_budget_mb=resource_plan.memory_budget_mb,
+        estimated_total_memory_bytes=estimated_total_memory_bytes,
+        effective_max_workers=resource_plan.effective_max_workers,
+    ).as_dict()
     return {
         "schema_version": 1,
         "manifest_hash": manifest.manifest_hash(),
@@ -91,9 +112,13 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
         "expected_worker_utilization_pct": parallel_capacity["expected_worker_utilization_pct"],
         "parallelism_limiting_factor": parallel_capacity["parallelism_limiting_factor"],
         "effective_worker_source": parallel_capacity["effective_worker_source"],
+        "resource_plan": resource_plan_payload,
+        "work_unit_selection": work_unit_selection,
+        "data_plane_policy": data_plane_policy,
         "dataset_split_ranges": split_ranges,
         "research_execution_mode": manifest.research_run.execution.mode,
         "max_workers_requested": manifest.research_run.execution.max_workers,
+        "max_workers_effective": resource_plan.effective_max_workers,
         "process_start_method": manifest.research_run.execution.process_start_method,
         "pre_parallel_work_unit_count": work_unit_count,
         "pre_parallel_split_hash_count": split_count,
@@ -109,7 +134,7 @@ def build_manifest_workload_estimate(manifest: ExperimentManifest) -> dict[str, 
         "estimated_stage_trace_bytes": stage_trace_bytes,
         "estimated_behavior_evidence_bytes": 8192,
         "estimated_parent_result_bytes": parent_result_bytes,
-        "max_in_flight_tasks": max(1, max_workers * 2),
+        "max_in_flight_tasks": resource_plan.max_in_flight_tasks,
         "safe_max_workers_by_memory_budget": max(1, max_workers if not memory_budget_reasons else min(max_workers, 1)),
         "memory_budget_status": "WARN" if memory_budget_reasons else ("PASS" if memory_budget_bytes is not None else "NOT_EVALUATED"),
         "memory_budget_reasons": memory_budget_reasons,

@@ -54,6 +54,80 @@ MISSING_CLASSIFICATIONS = {
 }
 
 
+DATA_PLANE_POLICY_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class DataPlanePolicy:
+    snapshot_storage_mode: str
+    worker_snapshot_load_policy: str
+    dataset_cache_budget_mb: int
+    memory_map_enabled: bool
+    cache_key_material: dict[str, object]
+    disabled_reasons: tuple[str, ...]
+    effective_max_workers: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": DATA_PLANE_POLICY_SCHEMA_VERSION,
+            "snapshot_storage_mode": self.snapshot_storage_mode,
+            "worker_snapshot_load_policy": self.worker_snapshot_load_policy,
+            "dataset_cache_budget_mb": self.dataset_cache_budget_mb,
+            "memory_map_enabled": self.memory_map_enabled,
+            "cache_key_material": dict(self.cache_key_material),
+            "disabled_reasons": list(self.disabled_reasons),
+            "effective_max_workers": self.effective_max_workers,
+        }
+
+
+def build_data_plane_policy(
+    *,
+    manifest_hash: str,
+    dataset_hashes: dict[str, str],
+    split_names: tuple[str, ...] | list[str],
+    memory_budget_mb: int | None,
+    estimated_total_memory_bytes: int | None,
+    effective_max_workers: int,
+) -> DataPlanePolicy:
+    disabled_reasons: list[str] = []
+    budget = int(memory_budget_mb) if memory_budget_mb is not None else None
+    estimated_mb = (
+        int(estimated_total_memory_bytes) // (1024 * 1024)
+        if estimated_total_memory_bytes is not None
+        else None
+    )
+    cache_budget_mb = 0
+    load_policy = "db_reload"
+    snapshot_mode = "in_memory_parent_snapshot"
+    if budget is None:
+        disabled_reasons.append("memory_budget_unknown")
+    elif estimated_mb is None:
+        disabled_reasons.append("estimated_total_memory_unknown")
+    else:
+        headroom = budget - estimated_mb
+        if headroom > 0:
+            cache_budget_mb = max(1, headroom // 2)
+            load_policy = "worker_local_lazy_cache"
+        else:
+            disabled_reasons.append("memory_headroom_unavailable")
+    split_tuple = tuple(str(item) for item in split_names)
+    key_hashes = {name: str(dataset_hashes.get(name, "")) for name in split_tuple}
+    return DataPlanePolicy(
+        snapshot_storage_mode=snapshot_mode,
+        worker_snapshot_load_policy=load_policy,
+        dataset_cache_budget_mb=cache_budget_mb,
+        memory_map_enabled=False,
+        cache_key_material={
+            "manifest_hash": manifest_hash,
+            "split_names": list(split_tuple),
+            "dataset_hashes": key_hashes,
+            "dataset_hash": sha256_prefixed(key_hashes),
+        },
+        disabled_reasons=tuple(disabled_reasons),
+        effective_max_workers=max(1, int(effective_max_workers)),
+    )
+
+
 @dataclass(frozen=True)
 class RangeCoverage:
     expected_buckets: int

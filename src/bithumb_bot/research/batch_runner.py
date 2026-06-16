@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import os
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ from bithumb_bot.storage_io import write_json_atomic, write_text_atomic
 
 from .experiment_manifest import load_manifest
 from .report_writer import research_paths
+from .resource_planner import detect_resource_contract
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ def run_research_batch(
     batch_root = summary_path.parent / f"{summary_path.stem}_logs"
     _ensure_allowed(manager, batch_root)
     started = time.perf_counter()
+    batch_resource_budget = allocate_batch_child_process_budget(max_concurrent_manifests=max_concurrent)
     statuses: list[dict[str, Any]] = []
     failed = False
 
@@ -64,6 +67,7 @@ def run_research_batch(
             manager=manager,
             project_root=project_root,
             log_dir=batch_root,
+            child_env=batch_resource_budget["child_env"],
         )
 
     remaining = iter(manifests)
@@ -97,6 +101,7 @@ def run_research_batch(
         "max_concurrent_manifests": max_concurrent,
         "fail_fast": bool(fail_fast),
         "process_model": "subprocess",
+        "batch_resource_budget": batch_resource_budget,
         "status": "failed" if any(item["status"] != "succeeded" for item in statuses) else "succeeded",
         "elapsed_s": round(time.perf_counter() - started, 6),
         "manifest_count": len(manifests),
@@ -114,6 +119,7 @@ def _run_one_manifest(
     manager: PathManager,
     project_root: Path,
     log_dir: Path,
+    child_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     report_path = research_paths(manager, manifest.experiment_id, "backtest").report_path
@@ -132,6 +138,7 @@ def _run_one_manifest(
     completed = subprocess.run(
         cmd,
         cwd=str(project_root),
+        env={**os.environ, **(child_env or {})},
         text=True,
         capture_output=True,
         check=False,
@@ -149,6 +156,32 @@ def _run_one_manifest(
         "report_path": str(report_path.resolve()),
         "log_path": str(log_path.resolve()),
         "failure_reason": None if completed.returncode == 0 else "subprocess_exit_nonzero",
+    }
+
+
+def allocate_batch_child_process_budget(*, max_concurrent_manifests: int) -> dict[str, Any]:
+    max_concurrent = max(1, int(max_concurrent_manifests))
+    contract = detect_resource_contract()
+    total_budget = contract.total_process_budget or contract.cpu_limit
+    fallback_reasons = list(contract.fallback_reasons)
+    child_budget: int | None = None
+    if total_budget is not None:
+        child_budget = max(1, int(total_budget) // max_concurrent)
+    elif max_concurrent > 1:
+        fallback_reasons.append("total_process_budget_unknown_for_concurrent_batch")
+    child_env: dict[str, str] = {"BITHUMB_RESOURCE_PLAN_SOURCE": "research_batch"}
+    if total_budget is not None:
+        child_env["BITHUMB_TOTAL_PROCESS_BUDGET"] = str(int(total_budget))
+    if child_budget is not None:
+        child_env["BITHUMB_RESEARCH_MAX_WORKERS"] = str(child_budget)
+        child_env["BITHUMB_BATCH_CHILD_WORKER_BUDGET"] = str(child_budget)
+    return {
+        "schema_version": 1,
+        "total_process_budget": total_budget,
+        "max_concurrent_manifests": max_concurrent,
+        "child_process_budget": child_budget,
+        "child_env": child_env,
+        "fallback_reasons": sorted(set(fallback_reasons)),
     }
 
 

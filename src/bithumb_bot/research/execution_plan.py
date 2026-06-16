@@ -12,6 +12,7 @@ from .experiment_manifest import ExecutionScenario, ExperimentManifest, required
 from .hashing import sha256_prefixed
 from .parameter_space import candidate_id, iter_parameter_candidates
 from .process_runtime import process_policy_observability
+from .resource_planner import plan_research_resources
 from .backtest_types import resolve_tick_observability_policy
 
 
@@ -194,17 +195,25 @@ def build_research_execution_plan(
         repository_version=repository_version,
     )
     effective_worker_source = "requested_pending_runtime_resolution"
+    resource_plan = plan_research_resources(
+        manifest=manifest,
+        candidate_count=len(candidates),
+        scenario_count=len(execution_scenarios),
+        split_count=split_count,
+    )
+    resource_plan_payload = resource_plan.as_dict()
+    work_unit_selection = resource_plan.work_unit_selection.as_dict()
     available_parallel_work_tasks = parallel_work_task_count(
         candidate_count=len(candidates),
         scenario_count=len(execution_scenarios),
         split_count=split_count,
-        work_unit=manifest.research_run.execution.work_unit,
+        work_unit=resource_plan.work_unit_type,
     )
     parallel_capacity = parallel_efficiency_payload(
         available_work_tasks=available_parallel_work_tasks,
-        requested_max_workers=manifest.research_run.execution.max_workers,
-        effective_max_workers=manifest.research_run.execution.max_workers,
-        work_unit=manifest.research_run.execution.work_unit,
+        requested_max_workers=resource_plan.requested_max_workers,
+        effective_max_workers=resource_plan.effective_max_workers,
+        work_unit=resource_plan.work_unit_type,
         effective_worker_source=effective_worker_source,
     )
     plan = {
@@ -233,10 +242,14 @@ def build_research_execution_plan(
         ),
         "plugin_complexity": plugin_complexity,
         "estimated_plugin_runtime_us": estimated_plugin_runtime_us,
-        "execution_mode": manifest.research_run.execution.mode,
-        "max_workers": manifest.research_run.execution.max_workers,
+        "execution_mode": resource_plan.execution_mode,
+        "max_workers": resource_plan.effective_max_workers,
+        "requested_max_workers": resource_plan.requested_max_workers,
         "process_start_method": manifest.research_run.execution.process_start_method,
-        "work_unit_type": manifest.research_run.execution.work_unit,
+        "work_unit_type": resource_plan.work_unit_type,
+        "requested_work_unit_type": manifest.research_run.execution.work_unit,
+        "resource_plan": resource_plan_payload,
+        "work_unit_selection": work_unit_selection,
         "deterministic_merge_order": manifest.research_run.execution.deterministic_merge_order,
         "resume_enabled": manifest.research_run.execution.resume,
         "created_at": created_at,
@@ -302,11 +315,22 @@ def build_research_execution_plan(
         split_names=split_names,
         candidate_count=len(candidates),
         scenario_count=len(execution_scenarios),
-        max_workers=int(manifest.research_run.execution.max_workers),
+        max_workers=int(resource_plan.effective_max_workers),
         execution_mode=manifest.research_run.execution.mode,
         plugin_complexity=plugin_complexity,
         resource_limits=manifest.research_run.resource_limits,
     )
+    from .data_plane import build_data_plane_policy
+
+    data_plane_policy = build_data_plane_policy(
+        manifest_hash=manifest.manifest_hash(),
+        dataset_hashes=dataset_hashes,
+        split_names=split_names,
+        memory_budget_mb=resource_plan.memory_budget_mb,
+        estimated_total_memory_bytes=memory_estimate.get("estimated_total_memory_bytes"),
+        effective_max_workers=resource_plan.effective_max_workers,
+    ).as_dict()
+    plan["data_plane_policy"] = data_plane_policy
     plan["workload_estimate"] = {
         "schema_version": 1,
         "candidate_count": plan["candidate_count"],
@@ -319,6 +343,9 @@ def build_research_execution_plan(
         "expected_worker_utilization_pct": plan["expected_worker_utilization_pct"],
         "parallelism_limiting_factor": plan["parallelism_limiting_factor"],
         "effective_worker_source": plan["effective_worker_source"],
+        "resource_plan": resource_plan_payload,
+        "work_unit_selection": work_unit_selection,
+        "data_plane_policy": data_plane_policy,
         "estimated_tick_events": plan["estimated_candle_evaluations"],
         "plugin_complexity": plugin_complexity,
         "estimated_plugin_runtime_us": estimated_plugin_runtime_us,

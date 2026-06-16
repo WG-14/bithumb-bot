@@ -123,6 +123,12 @@ def test_execution_plan_reports_low_worker_utilization_for_single_candidate() ->
 
     assert plan["expected_worker_utilization_pct"] == 12.5
     assert plan["parallelism_limiting_factor"] == "work_unit_granularity_candidate_scenario"
+    assert plan["resource_plan"]["schema_version"] == 1
+    assert plan["resource_plan"]["effective_max_workers"] >= 1
+    assert plan["resource_plan"]["selection_reasons"]
+    assert plan["work_unit_selection"]["candidate_scenario_task_count"] == 1
+    assert plan["work_unit_selection"]["candidate_scenario_split_task_count"] == 2
+    assert plan["work_unit_selection"]["selection_reason"]
 
 
 def test_execution_plan_reports_full_worker_utilization_for_eight_candidates() -> None:
@@ -150,3 +156,20 @@ def test_split_work_unit_reports_parallel_tasks_per_split() -> None:
 
     assert plan["estimated_strategy_runs"] == 2
     assert plan["available_parallel_work_tasks"] == 2
+
+
+def test_execution_plan_contains_resource_and_work_unit_contracts() -> None:
+    payload = _manifest()
+    payload["research_run"] = {"execution": {"mode": "parallel", "max_workers": 3}}
+
+    plan = _plan_for_payload(payload, split_names=("train", "validation", "final_holdout"))
+
+    assert plan["resource_plan"]["schema_version"] == 1
+    assert "effective_max_workers" in plan["resource_plan"]
+    assert plan["resource_plan"]["selection_reasons"]
+    assert plan["work_unit_selection"]["effective_work_unit_type"] in {
+        "candidate_scenario",
+        "candidate_scenario_split",
+    }
+    assert plan["data_plane_policy"]["schema_version"] == 1
+    assert plan["workload_estimate"]["resource_plan"]["schema_version"] == 1

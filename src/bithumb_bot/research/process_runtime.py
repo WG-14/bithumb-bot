@@ -161,6 +161,9 @@ def _resolve_worker_budget(requested_workers: int) -> tuple[int, dict[str, objec
     env_cap_raw = os.environ.get("BITHUMB_RESEARCH_MAX_WORKERS")
     if env_cap_raw:
         caps.append(_positive_int(env_cap_raw, "BITHUMB_RESEARCH_MAX_WORKERS"))
+    batch_child_cap_raw = os.environ.get("BITHUMB_BATCH_CHILD_WORKER_BUDGET")
+    if batch_child_cap_raw:
+        caps.append(_positive_int(batch_child_cap_raw, "BITHUMB_BATCH_CHILD_WORKER_BUDGET"))
     total_budget_raw = os.environ.get("BITHUMB_TOTAL_PROCESS_BUDGET")
     outer_worker_count = _outer_worker_count()
     if total_budget_raw:
@@ -181,6 +184,7 @@ def _process_budget_metadata(
     outer_worker_count = _outer_worker_count()
     total_budget_raw = os.environ.get("BITHUMB_TOTAL_PROCESS_BUDGET")
     research_cap_raw = os.environ.get("BITHUMB_RESEARCH_MAX_WORKERS")
+    batch_child_cap_raw = os.environ.get("BITHUMB_BATCH_CHILD_WORKER_BUDGET")
     return {
         "schema_version": 1,
         "outer_parallel_context": _outer_parallel_context(),
@@ -189,6 +193,7 @@ def _process_budget_metadata(
         "research_max_workers_requested": requested_workers,
         "research_max_workers_effective": effective_workers if effective_workers is not None else None,
         "research_max_workers_env_cap": int(research_cap_raw) if _is_positive_int(research_cap_raw) else None,
+        "batch_child_worker_budget": int(batch_child_cap_raw) if _is_positive_int(batch_child_cap_raw) else None,
         "total_process_budget": int(total_budget_raw) if _is_positive_int(total_budget_raw) else None,
     }
 
