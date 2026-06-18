@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, Mapping
 
 from bithumb_bot.core.sma_policy import (
     EntryExecutionIntent,
@@ -16,6 +16,7 @@ from bithumb_bot.research.dataset_snapshot import DatasetSnapshot
 from bithumb_bot.research.execution_model import ExecutionModel
 from bithumb_bot.research.experiment_manifest import ExecutionTimingPolicy, PortfolioPolicy
 from bithumb_bot.research.strategy_registry import ResearchStrategyPlugin
+from bithumb_bot.research.strategy_registry import RuntimeParameterAdapter
 from bithumb_bot.research.strategy_spec import (
     SMA_WITH_FILTER_SPEC,
     StrategyParameterSchema,
@@ -33,13 +34,20 @@ from bithumb_bot.runtime.daily_participation_count_provider import build_runtime
 from bithumb_bot.strategy.exit_rules import ExitPolicyConfig
 from bithumb_bot.strategy.sma_decision_assembler import evaluate_sma_final_decision
 from bithumb_bot.strategy_authoring import (
-    ReplayCompatibleStrategyExtension,
-    build_replay_compatible_strategy_plugin,
+    PromotionGradeStrategyExtension,
+    build_live_eligible_strategy_plugin,
     research_plugin_from_event_builder,
 )
+from bithumb_bot.strategy_plugins.sma_with_filter_contract import (
+    SMA_DECISION_EVIDENCE_CONTRACT,
+    sma_runtime_data_requirements,
+)
 from bithumb_bot.strategy_plugins.sma_with_filter_assembly import MaterializationMode
+from bithumb_bot.strategy_plugins.sma_with_filter_assembly import SmaWithFilterPolicyAssembly
 from bithumb_bot.strategy_plugins.sma_with_filter_projector import SmaWithFilterSnapshotProjector
 from bithumb_bot.strategy_plugins.sma_with_filter_events import SmaWithFilterDecisionAdapter
+from bithumb_bot.runtime_adapters.daily_participation_sma import DailyParticipationSmaRuntimeDecisionAdapter
+from bithumb_bot.runtime_adapters.sma_with_filter import build_sma_with_filter_runtime_feature_snapshot
 
 
 DAILY_PARTICIPATION_PARAMETERS: tuple[str, ...] = (
@@ -125,6 +133,84 @@ def materialize_daily_participation_sma_parameters(
     return values
 
 
+def runtime_parameters_from_env(env: dict[str, str]) -> dict[str, Any]:
+    from bithumb_bot.research import sma_with_filter_plugin as base_runtime
+
+    values = base_runtime.runtime_parameters_from_env(env)
+
+    def _value(key: str, default: str) -> str:
+        return str(env.get(key, default)).strip() or default
+
+    values.update(
+        {
+            "DAILY_PARTICIPATION_ENABLED": _value("DAILY_PARTICIPATION_ENABLED", "false").lower()
+            in {"1", "true", "yes", "on"},
+            "DAILY_PARTICIPATION_TIMEZONE": _value("DAILY_PARTICIPATION_TIMEZONE", "Asia/Seoul"),
+            "DAILY_PARTICIPATION_COUNT_BASIS": _value("DAILY_PARTICIPATION_COUNT_BASIS", "filled"),
+            "DAILY_PARTICIPATION_WINDOW_START_HOUR_KST": int(
+                _value("DAILY_PARTICIPATION_WINDOW_START_HOUR_KST", "0")
+            ),
+            "DAILY_PARTICIPATION_WINDOW_END_HOUR_KST": int(
+                _value("DAILY_PARTICIPATION_WINDOW_END_HOUR_KST", "24")
+            ),
+            "DAILY_PARTICIPATION_BUY_FRACTION": float(_value("DAILY_PARTICIPATION_BUY_FRACTION", "0.05")),
+            "DAILY_PARTICIPATION_MAX_ORDER_KRW": float(_value("DAILY_PARTICIPATION_MAX_ORDER_KRW", "10000")),
+        }
+    )
+    return values
+
+
+def runtime_parameters_from_settings(cfg: object) -> dict[str, Any]:
+    from bithumb_bot.research import sma_with_filter_plugin as base_runtime
+
+    values = base_runtime.runtime_parameters_from_settings(cfg)
+    values.update(
+        {
+            "DAILY_PARTICIPATION_ENABLED": bool(getattr(cfg, "DAILY_PARTICIPATION_ENABLED", False)),
+            "DAILY_PARTICIPATION_TIMEZONE": str(getattr(cfg, "DAILY_PARTICIPATION_TIMEZONE", "Asia/Seoul")),
+            "DAILY_PARTICIPATION_COUNT_BASIS": str(getattr(cfg, "DAILY_PARTICIPATION_COUNT_BASIS", "filled")),
+            "DAILY_PARTICIPATION_WINDOW_START_HOUR_KST": int(
+                getattr(cfg, "DAILY_PARTICIPATION_WINDOW_START_HOUR_KST", 0)
+            ),
+            "DAILY_PARTICIPATION_WINDOW_END_HOUR_KST": int(
+                getattr(cfg, "DAILY_PARTICIPATION_WINDOW_END_HOUR_KST", 24)
+            ),
+            "DAILY_PARTICIPATION_BUY_FRACTION": float(getattr(cfg, "DAILY_PARTICIPATION_BUY_FRACTION", 0.05)),
+            "DAILY_PARTICIPATION_MAX_ORDER_KRW": float(getattr(cfg, "DAILY_PARTICIPATION_MAX_ORDER_KRW", 10000.0)),
+        }
+    )
+    return values
+
+
+class DailyParticipationSmaPolicyAssembly:
+    contract_version = "daily_participation_sma_policy_assembly.v1"
+
+    def __init__(self) -> None:
+        self.base = SmaWithFilterPolicyAssembly()
+
+    def materialize_parameters(
+        self,
+        parameters: dict[str, Any],
+        materialization_mode: MaterializationMode = MaterializationMode.RUNTIME_REPLAY,
+    ) -> dict[str, Any]:
+        values = materialize_strategy_parameters(
+            "daily_participation_sma",
+            dict(parameters),
+            fee_rate=0.0,
+            slippage_bps=0.0,
+        )
+        daily_participation_config_from_parameters(values)
+        return values
+
+
+def policy_assembly_factory() -> DailyParticipationSmaPolicyAssembly:
+    return DailyParticipationSmaPolicyAssembly()
+
+
+def runtime_decision_adapter_factory() -> DailyParticipationSmaRuntimeDecisionAdapter:
+    return DailyParticipationSmaRuntimeDecisionAdapter()
+
+
 def evaluate_daily_participation_sma_decision(
     *,
     market: MarketWindow,
@@ -172,6 +258,7 @@ def evaluate_daily_participation_sma_decision(
         {
             "strategy_family": "daily_participation_sma",
             "base_strategy": "sma_with_filter",
+            "strategy_instance_id": str(count_snapshot.strategy_instance_id or ""),
             "entry_signal_source": entry_signal_source,
             "entry_sizing_source": entry_sizing_source,
             "base_entry_signal": base_entry_signal,
@@ -280,6 +367,9 @@ def research_policy_decision_builder(
         decision_ts=int(event.decision_ts),
         decision_records=tuple(decision_records),
         trade_records=tuple(trade_records),
+        pair=str(dataset.market),
+        strategy_instance_id="daily_participation_sma:research_promotion",
+        strategy_name="daily_participation_sma",
     )
     mode = (
         materialization_mode
@@ -394,6 +484,8 @@ class DailyParticipationRuntimeReplayStrategy:
             config=self.participation_config,
             decision_ts=decision_ts,
             pair=pair,
+            strategy_instance_id=str(self.profile.get("strategy_instance_id") or "daily_participation_sma:runtime_replay"),
+            strategy_name="daily_participation_sma",
         )
         require_runtime_comparable_daily_count_snapshot(count_snapshot)
         return _daily_runtime_result_from_base(
@@ -469,6 +561,7 @@ def _daily_runtime_result_from_base(
     policy_input_hash = _stable_hash(
         {
             "base_policy_input_hash": base_decision.policy_input_hash,
+            "strategy_instance_id": str(count_snapshot.strategy_instance_id or ""),
             "entry_signal_source": entry_signal_source,
             "entry_sizing_source": entry_sizing_source,
             "daily_count_snapshot_hash": participation.daily_count_snapshot_hash,
@@ -483,6 +576,7 @@ def _daily_runtime_result_from_base(
     policy_decision_hash = _stable_hash(
         {
             "strategy_name": "daily_participation_sma",
+            "strategy_instance_id": str(count_snapshot.strategy_instance_id or ""),
             "final_signal": final_signal,
             "final_reason": final_reason,
             "entry_signal_source": entry_signal_source,
@@ -506,6 +600,7 @@ def _daily_runtime_result_from_base(
     replay_fingerprint.update(
         {
             "strategy_name": "daily_participation_sma",
+            "strategy_instance_id": str(count_snapshot.strategy_instance_id or ""),
             "count_basis": participation.count_basis,
             "kst_day": participation.kst_day,
             "daily_count_snapshot_hash": participation.daily_count_snapshot_hash,
@@ -523,6 +618,7 @@ def _daily_runtime_result_from_base(
     base_context.update(
         {
             "strategy": "daily_participation_sma",
+            "strategy_instance_id": str(count_snapshot.strategy_instance_id or ""),
             "pure_policy_hash": daily_decision.policy_hash,
             "policy_input_hash": daily_decision.policy_input_hash,
             "policy_decision_hash": daily_decision.policy_decision_hash,
@@ -549,8 +645,30 @@ def runtime_feature_snapshot_builder(*, conn: Any, request: Any, feature_snapsho
     strategy_name = str(getattr(request, "strategy_name", "") or "").strip().lower()
     if strategy_name != "daily_participation_sma":
         return feature_snapshot
-    profile_params = getattr(request, "strategy_parameters", None)
-    params = dict(profile_params) if isinstance(profile_params, dict) else {}
+    profile_params = getattr(request, "parameters", None) or getattr(request, "strategy_parameters", None)
+    params = dict(profile_params) if isinstance(profile_params, Mapping) else {}
+    base_params = {
+        key: value
+        for key, value in dict(params).items()
+        if key in SMA_WITH_FILTER_SPEC.accepted_parameter_names
+    }
+    try:
+        base_request = replace(
+            request,
+            strategy_name="sma_with_filter",
+            parameters=base_params,
+            parameters_raw=base_params,
+            parameters_materialized=base_params,
+        )
+    except TypeError:
+        base_request = request
+    feature_snapshot = build_sma_with_filter_runtime_feature_snapshot(
+        conn=conn,
+        request=base_request,
+        feature_snapshot=feature_snapshot,
+    )
+    if feature_snapshot is None:
+        return None
     try:
         config = daily_participation_config_from_parameters(materialize_strategy_parameters(
             "daily_participation_sma",
@@ -567,6 +685,8 @@ def runtime_feature_snapshot_builder(*, conn: Any, request: Any, feature_snapsho
         config=config,
         decision_ts=decision_ts,
         pair=str(getattr(request, "pair", "") or feature_snapshot.payload.get("pair") or ""),
+        strategy_instance_id=str(getattr(request, "strategy_instance_id", "") or ""),
+        strategy_name="daily_participation_sma",
     )
     if count_snapshot.snapshot_hash == "sha256:missing":
         return None
@@ -670,20 +790,55 @@ _RESEARCH_PLUGIN = research_plugin_from_event_builder(
     research_parameter_materializer=materialize_daily_participation_sma_parameters,
 )
 
-_REPLAY_EXTENSION = ReplayCompatibleStrategyExtension(
+_PROMOTION_EXTENSION = PromotionGradeStrategyExtension(
     runtime_replay_builder=build_runtime_replay_strategy,
+    runtime_parameter_adapter=RuntimeParameterAdapter(
+        from_env=runtime_parameters_from_env,
+        from_settings=runtime_parameters_from_settings,
+        env_keys=(
+            "SMA_SHORT",
+            "SMA_LONG",
+            "SMA_FILTER_GAP_MIN_RATIO",
+            "SMA_FILTER_VOL_WINDOW",
+            "SMA_FILTER_VOL_MIN_RANGE_RATIO",
+            "SMA_FILTER_OVEREXT_LOOKBACK",
+            "SMA_FILTER_OVEREXT_MAX_RETURN_RATIO",
+            "SMA_MARKET_REGIME_ENABLED",
+            "SMA_COST_EDGE_ENABLED",
+            "SMA_COST_EDGE_MIN_RATIO",
+            "ENTRY_EDGE_BUFFER_RATIO",
+            "STRATEGY_MIN_EXPECTED_EDGE_RATIO",
+            "STRATEGY_ENTRY_SLIPPAGE_BPS",
+            "LIVE_FEE_RATE_ESTIMATE",
+            "STRATEGY_EXIT_RULES",
+            "STRATEGY_EXIT_STOP_LOSS_RATIO",
+            "STRATEGY_EXIT_MAX_HOLDING_MIN",
+            "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO",
+            "STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO",
+            "DAILY_PARTICIPATION_ENABLED",
+            "DAILY_PARTICIPATION_TIMEZONE",
+            "DAILY_PARTICIPATION_COUNT_BASIS",
+            "DAILY_PARTICIPATION_WINDOW_START_HOUR_KST",
+            "DAILY_PARTICIPATION_WINDOW_END_HOUR_KST",
+            "DAILY_PARTICIPATION_BUY_FRACTION",
+            "DAILY_PARTICIPATION_MAX_ORDER_KRW",
+        ),
+    ),
     research_policy_decision_builder=research_policy_decision_builder,
     exit_policy_materializer=exit_policy_materializer,
-    parameter_materializer=materialize_daily_participation_sma_parameters,
-    fail_closed_reason="daily_participation_sma_live_runtime_not_enabled",
+    runtime_decision_adapter_factory=runtime_decision_adapter_factory,
+    runtime_feature_snapshot_builder=runtime_feature_snapshot_builder,
+    policy_assembly_factory=policy_assembly_factory,
+    live_dry_run_allowed=True,
+    live_real_order_allowed=True,
+    approved_profile_required=True,
+    fail_closed_reason="daily_participation_sma_capability_missing",
+    decision_evidence_contract=SMA_DECISION_EVIDENCE_CONTRACT,
+    runtime_data_requirement_builder=sma_runtime_data_requirements,
 )
 
-DAILY_PARTICIPATION_SMA_PLUGIN = replace(
-    build_replay_compatible_strategy_plugin(
-        research=_RESEARCH_PLUGIN,
-        extension=_REPLAY_EXTENSION,
-        runner=run_daily_participation_sma_backtest,
-    ).to_research_strategy_plugin(),
+DAILY_PARTICIPATION_SMA_PLUGIN = build_live_eligible_strategy_plugin(
+    research=_RESEARCH_PLUGIN,
+    extension=_PROMOTION_EXTENSION,
     runner=run_daily_participation_sma_backtest,
-    runtime_feature_snapshot_builder=runtime_feature_snapshot_builder,
-)
+).to_research_strategy_plugin()

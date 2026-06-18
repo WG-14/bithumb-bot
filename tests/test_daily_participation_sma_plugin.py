@@ -61,14 +61,18 @@ def test_daily_participation_sma_has_own_strategy_spec() -> None:
     assert strategy_spec_for_name("daily_participation_sma") is DAILY_PARTICIPATION_SMA_SPEC
 
 
-def test_daily_participation_sma_starts_research_paper_candidate_only() -> None:
+def test_daily_participation_sma_is_promotion_grade_live_eligible() -> None:
     plugin = resolve_research_strategy_plugin("daily_participation_sma")
 
     assert plugin.runtime_capabilities is not None
-    assert plugin.runtime_capabilities.live_dry_run_allowed is False
-    assert plugin.runtime_capabilities.live_real_order_allowed is False
-    assert plugin.runtime_capabilities.promotion_runtime_decisions_supported is False
+    assert plugin.contract_payload()["authoring_level"] == "level_3_promotion_grade"
+    assert plugin.runtime_capabilities.live_dry_run_allowed is True
+    assert plugin.runtime_capabilities.live_real_order_allowed is True
+    assert plugin.runtime_capabilities.approved_profile_required is True
+    assert plugin.runtime_capabilities.promotion_runtime_decisions_supported is True
     assert plugin.runtime_capabilities.runtime_replay_supported is True
+    assert plugin.runtime_decision_adapter_factory is not None
+    assert plugin.policy_assembly_factory is not None
 
 
 def test_base_sma_spec_is_not_mutated() -> None:
@@ -88,9 +92,10 @@ def test_daily_participation_sma_runtime_capability_matches_declared_scope() -> 
     plugin = resolve_research_strategy_plugin("daily_participation_sma")
 
     assert plugin.runtime_capabilities.runtime_replay_supported is True
-    assert plugin.runtime_capabilities.live_dry_run_allowed is False
-    assert plugin.runtime_capabilities.live_real_order_allowed is False
-    assert plugin.runtime_capabilities.fail_closed_reason == "daily_participation_sma_live_runtime_not_enabled"
+    assert plugin.runtime_capabilities.runtime_decision_supported is True
+    assert plugin.runtime_capabilities.live_dry_run_allowed is True
+    assert plugin.runtime_capabilities.live_real_order_allowed is True
+    assert plugin.runtime_capabilities.fail_closed_reason == "daily_participation_sma_capability_missing"
 
 
 def test_sma_with_filter_still_rejects_daily_parameters() -> None:

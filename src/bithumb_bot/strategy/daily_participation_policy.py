@@ -6,6 +6,13 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from bithumb_bot.core.sma_policy import _stable_hash
+from bithumb_bot.strategy.daily_participation_events import (
+    ParticipationEvent,
+    SOURCE_CONTRACT_VERSION,
+    normalize_research_participation_events,
+    participation_event_set_hash,
+    source_contract_hash,
+)
 
 
 DailyParticipationCountBasis = Literal[
@@ -199,6 +206,12 @@ class DailyParticipationCountSnapshot:
     source: str
     rows: tuple[dict[str, object], ...]
     fail_closed_reason: str = ""
+    pair: str = ""
+    strategy_instance_id: str = ""
+    event_set_hash: str = ""
+    source_contract_hash: str = ""
+    query_contract_hash: str = ""
+    source_contract_version: str = SOURCE_CONTRACT_VERSION
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -206,9 +219,21 @@ class DailyParticipationCountSnapshot:
             "count_basis": self.count_basis,
             "timezone": self.timezone,
             "kst_day": self.kst_day,
+            "scope": {
+                "pair": self.pair,
+                "strategy_instance_id": self.strategy_instance_id,
+                "count_basis": self.count_basis,
+                "kst_day": self.kst_day,
+            },
+            "pair": self.pair,
+            "strategy_instance_id": self.strategy_instance_id,
             "count_for_kst_day": int(self.count_for_kst_day),
             "timestamp_field": self.timestamp_field,
             "source": self.source,
+            "source_contract_version": self.source_contract_version,
+            "event_set_hash": self.event_set_hash,
+            "source_contract_hash": self.source_contract_hash,
+            "query_contract_hash": self.query_contract_hash,
             "rows": [dict(row) for row in self.rows],
             "fail_closed_reason": self.fail_closed_reason,
         }
@@ -217,14 +242,21 @@ class DailyParticipationCountSnapshot:
     def snapshot_hash(self) -> str:
         if self.fail_closed_reason:
             return "sha256:missing"
+        if not (self.event_set_hash and self.source_contract_hash and self.query_contract_hash):
+            return "sha256:missing"
         return _stable_hash(
             {
                 "schema_version": 1,
                 "count_basis": self.count_basis,
                 "timezone": self.timezone,
                 "kst_day": self.kst_day,
+                "pair": self.pair,
+                "strategy_instance_id": self.strategy_instance_id,
                 "count_for_kst_day": int(self.count_for_kst_day),
                 "timestamp_field": self.timestamp_field,
+                "event_set_hash": self.event_set_hash,
+                "source_contract_hash": self.source_contract_hash,
+                "query_contract_hash": self.query_contract_hash,
             }
         )
 
@@ -246,47 +278,56 @@ def build_research_daily_count_snapshot(
     decision_ts: int,
     decision_records: tuple[dict[str, Any], ...] = (),
     trade_records: tuple[dict[str, Any], ...] = (),
+    pair: str = "",
+    strategy_instance_id: str = "daily_participation_sma:research",
+    strategy_name: str = "daily_participation_sma",
 ) -> DailyParticipationCountSnapshot:
     day = kst_day(decision_ts, config.timezone)
-    rows: list[dict[str, object]] = []
+    source = "research_backtest_ledger_and_decision_records"
+    source_version = SOURCE_CONTRACT_VERSION
+    records: tuple[dict[str, Any], ...]
     if config.count_basis in {"intent", "submit_expected"}:
-        for record in decision_records:
-            if str(record.get("final_signal") or record.get("signal") or "").upper() != "BUY":
-                continue
-            ts = _coerce_int(record.get("decision_ts") or record.get("ts") or record.get("candle_ts"))
-            if ts is None or ts >= int(decision_ts) or kst_day(ts, config.timezone) != day:
-                continue
-            rows.append({"basis": config.count_basis, "ts": ts, "entry_signal_source": _entry_source_from_record(record)})
-    elif config.count_basis in {"submitted", "filled"}:
-        for trade in trade_records:
-            if str(trade.get("side") or "").upper() != "BUY":
-                continue
-            if config.count_basis == "filled" and not bool(trade.get("is_execution_filled")):
-                continue
-            ts = _coerce_int(
-                trade.get("submit_ts_assumption")
-                if config.count_basis == "submitted"
-                else trade.get("fill_ts") or trade.get("portfolio_effective_ts") or trade.get("ts")
-            )
-            if ts is None or ts >= int(decision_ts) or kst_day(ts, config.timezone) != day:
-                continue
-            rows.append({"basis": config.count_basis, "ts": ts, "entry_signal_source": _entry_source_from_record(trade)})
-    elif config.count_basis == "closed_trade":
-        for trade in trade_records:
-            if str(trade.get("side") or "").upper() != "SELL":
-                continue
-            ts = _coerce_int(trade.get("portfolio_effective_ts") or trade.get("fill_ts") or trade.get("ts"))
-            if ts is None or ts >= int(decision_ts) or kst_day(ts, config.timezone) != day:
-                continue
-            rows.append({"basis": config.count_basis, "ts": ts, "entry_signal_source": _entry_source_from_record(trade)})
+        records = tuple(decision_records)
+    else:
+        records = tuple(trade_records)
+    events = tuple(
+        event
+        for event in normalize_research_participation_events(
+            count_basis=config.count_basis,
+            records=records,
+            strategy_instance_id=strategy_instance_id,
+            strategy_name=strategy_name,
+            pair=pair,
+            source=source,
+            source_contract_version=source_version,
+        )
+        if event.event_ts < int(decision_ts) and kst_day(event.event_ts, config.timezone) == day
+    )
+    rows = [_event_row(event) for event in events]
     return DailyParticipationCountSnapshot(
         count_basis=config.count_basis,
         timezone=config.timezone,
         kst_day=day,
         count_for_kst_day=len(rows),
         timestamp_field=TIMESTAMP_FIELD_BY_BASIS[config.count_basis],
-        source="research_backtest_ledger_and_decision_records",
+        source=source,
         rows=tuple(rows),
+        pair=pair,
+        strategy_instance_id=strategy_instance_id,
+        event_set_hash=participation_event_set_hash(events),
+        source_contract_hash=source_contract_hash(source=source, source_contract_version=source_version),
+        query_contract_hash=_stable_hash(
+            {
+                "schema_version": 1,
+                "query_contract": "daily_participation_research_count.v1",
+                "count_basis": config.count_basis,
+                "pair": pair,
+                "strategy_instance_id": strategy_instance_id,
+                "strategy_name": strategy_name,
+                "kst_day": day,
+            }
+        ),
+        source_contract_version=source_version,
     )
 
 
@@ -297,6 +338,21 @@ def require_runtime_comparable_daily_count_snapshot(snapshot: DailyParticipation
     reason = snapshot.fail_closed_reason if isinstance(snapshot, DailyParticipationStateSnapshot) else snapshot.fail_closed_reason
     if str(snapshot_hash or "") == "sha256:missing" or reason:
         raise ValueError(reason or "daily_count_snapshot_hash_missing")
+    if isinstance(snapshot, DailyParticipationCountSnapshot):
+        missing_identity = [
+            key
+            for key in ("event_set_hash", "source_contract_hash", "query_contract_hash")
+            if not str(getattr(snapshot, key) or "").strip()
+        ]
+        if missing_identity:
+            raise ValueError("daily_count_snapshot_event_identity_missing:" + ",".join(missing_identity))
+
+
+def _event_row(event: ParticipationEvent) -> dict[str, object]:
+    payload = event.as_dict()
+    payload["basis"] = event.count_basis
+    payload["ts"] = int(event.event_ts)
+    return payload
 
 
 def _entry_source_from_record(record: dict[str, Any]) -> str:
@@ -310,4 +366,3 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-

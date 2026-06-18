@@ -2343,11 +2343,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             exchange_order_id TEXT,
             status TEXT NOT NULL,
             side TEXT NOT NULL,
+            pair TEXT,
             order_type TEXT,
             price REAL,
             qty_req REAL NOT NULL,
             qty_filled REAL NOT NULL DEFAULT 0,
             strategy_name TEXT,
+            strategy_instance_id TEXT,
             entry_decision_id INTEGER,
             exit_decision_id INTEGER,
             decision_reason TEXT,
@@ -2370,8 +2372,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "orders", "submit_attempt_id", "submit_attempt_id TEXT")
+    _ensure_column(conn, "orders", "pair", "pair TEXT")
     _ensure_column(conn, "orders", "order_type", "order_type TEXT")
     _ensure_column(conn, "orders", "strategy_name", "strategy_name TEXT")
+    _ensure_column(conn, "orders", "strategy_instance_id", "strategy_instance_id TEXT")
     _ensure_column(conn, "orders", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "orders", "exit_decision_id", "exit_decision_id INTEGER")
     _ensure_column(conn, "orders", "decision_reason", "decision_reason TEXT")

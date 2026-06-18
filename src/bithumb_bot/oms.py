@@ -699,6 +699,7 @@ def create_order(
     qty_req: float,
     price: float | None,
     strategy_name: str | None = None,
+    strategy_instance_id: str | None = None,
     entry_decision_id: int | None = None,
     exit_decision_id: int | None = None,
     decision_reason: str | None = None,
@@ -726,12 +727,12 @@ def create_order(
             """
             INSERT INTO orders(
                 client_order_id, submit_attempt_id, exchange_order_id, status, side, order_type, price, qty_req, qty_filled,
-                strategy_name, entry_decision_id, exit_decision_id, decision_reason, exit_rule_name,
+                pair, strategy_name, strategy_instance_id, entry_decision_id, exit_decision_id, decision_reason, exit_rule_name,
                 internal_lot_size, effective_min_trade_qty, qty_step, min_notional_krw, intended_lot_count,
                 executable_lot_count, final_intended_qty, final_submitted_qty, decision_reason_code, local_intent_state,
                 created_ts, updated_ts, last_error
             )
-            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 client_order_id,
@@ -741,7 +742,9 @@ def create_order(
                 order_type,
                 price,
                 float(qty_req),
+                symbol or settings.PAIR,
                 strategy_name,
+                strategy_instance_id,
                 (int(entry_decision_id) if entry_decision_id is not None else None),
                 (int(exit_decision_id) if exit_decision_id is not None else None),
                 decision_reason,

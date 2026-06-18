@@ -56,8 +56,37 @@ def test_research_and_runtime_daily_participation_policy_hash_match() -> None:
 def test_research_and_runtime_daily_participation_policy_hash_match_with_real_adapters() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE fills (fill_ts INTEGER NOT NULL, qty REAL NOT NULL)")
-    conn.execute("INSERT INTO fills(fill_ts, qty) VALUES (?, ?)", (1_704_031_200_000, 1.0))
+    conn.execute(
+        """
+        CREATE TABLE orders (
+            client_order_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            pair TEXT NOT NULL,
+            strategy_name TEXT NOT NULL,
+            strategy_instance_id TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE fills (
+            client_order_id TEXT NOT NULL,
+            fill_id TEXT,
+            fill_ts INTEGER NOT NULL,
+            qty REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, side, pair, strategy_name, strategy_instance_id)
+        VALUES ('unit-buy-1', 'BUY', 'KRW-BTC', 'daily_participation_sma', 'daily_participation_sma:unit')
+        """
+    )
+    conn.execute(
+        "INSERT INTO fills(client_order_id, fill_id, fill_ts, qty) VALUES (?, ?, ?, ?)",
+        ("unit-buy-1", "fill-1", 1_704_043_200_000, 1.0),
+    )
     config = _config(count_basis="filled")
     decision_ts = 1_704_046_800_000
     research_snapshot = build_research_daily_count_snapshot(
@@ -66,16 +95,21 @@ def test_research_and_runtime_daily_participation_policy_hash_match_with_real_ad
         trade_records=(
             {
                 "side": "BUY",
-                "fill_ts": 1_704_031_200_000,
+                "client_order_id": "unit-buy-1",
+                "fill_id": "fill-1",
+                "fill_ts": 1_704_043_200_000,
                 "is_execution_filled": True,
             },
         ),
+        pair="KRW-BTC",
+        strategy_instance_id="daily_participation_sma:unit",
     )
     runtime_snapshot = build_runtime_daily_count_snapshot_from_sqlite(
         conn=conn,
         config=config,
         decision_ts=decision_ts,
         pair="KRW-BTC",
+        strategy_instance_id="daily_participation_sma:unit",
     )
     research = evaluate_daily_participation_policy(
         config=config,
@@ -91,7 +125,10 @@ def test_research_and_runtime_daily_participation_policy_hash_match_with_real_ad
     assert research.daily_count_snapshot_hash != "sha256:missing"
     assert runtime.daily_count_snapshot_hash != "sha256:missing"
     assert research.participation_policy_hash == runtime.participation_policy_hash
-    assert research.participation_input_hash == runtime.participation_input_hash
+    assert research.participation_input_hash != runtime.participation_input_hash
+    assert research_snapshot.event_set_hash.startswith("sha256:")
+    assert runtime_snapshot.event_set_hash.startswith("sha256:")
+    assert research_snapshot.count_for_kst_day == runtime_snapshot.count_for_kst_day == 1
 
 
 def test_daily_count_snapshot_hash_missing_fails_runtime_comparable_mode() -> None:
@@ -115,7 +152,7 @@ def test_kst_day_boundary_mismatch_changes_policy_input_hash() -> None:
 
 
 def _runtime_dataset() -> DatasetSnapshot:
-    start = 1_704_031_200_000
+    start = 1_704_043_200_000
     closes = tuple(100.0 + index for index in range(20))
     return DatasetSnapshot(
         snapshot_id="daily_participation_runtime_replay_fixture",
