@@ -6747,13 +6747,6 @@ def cmd_flatten_position(*, dry_run: bool = False, json_output: bool = False) ->
         print(f"[FLATTEN-POSITION] skipped: MODE={settings.MODE} (live only)")
         raise SystemExit(1)
 
-    if not dry_run:
-        try:
-            validate_live_mode_preflight(settings)
-        except LiveModeValidationError as e:
-            print(f"[FLATTEN-POSITION] failed: {e}")
-            raise SystemExit(1)
-
     from .broker.bithumb import BithumbBroker, classify_private_api_error
 
     broker = BithumbBroker()

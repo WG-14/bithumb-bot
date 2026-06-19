@@ -8326,48 +8326,94 @@ def test_flatten_position_blocks_on_invalid_best_quote(monkeypatch, tmp_path, ca
     assert "failed: RuntimeError: orderbook top invalid quote" in out
 
 
-def test_flatten_position_blocks_on_live_preflight_failure(monkeypatch, tmp_path, capsys):
+def test_flatten_position_operator_clean_closeout_does_not_call_strategy_live_preflight(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
     _set_tmp_db(tmp_path, monkeypatch)
+    _stub_flatten_submit_rules(monkeypatch)
+    _configure_residual_closeout_settings(monkeypatch)
     monkeypatch.setenv("MODE", "live")
+    monkeypatch.setenv("STRATEGY_NAME", "daily_participation_sma")
+    monkeypatch.delenv("APPROVED_STRATEGY_PROFILE_PATH", raising=False)
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "STRATEGY_NAME", "daily_participation_sma")
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+    configure_bithumb_test_auth(settings)
 
-    def _raise_preflight(_cfg):
-        raise app_module.LiveModeValidationError("preflight boom")
+    def _raise_strategy_preflight(_cfg):
+        raise AssertionError("flatten-position must not call validate_live_mode_preflight")
 
-    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", _raise_preflight)
+    def _raise_strategy_capability(_cfg):
+        raise AssertionError("flatten-position must not call strategy capability validation")
 
-    class _BrokerFactory:
-        def __call__(self):
-            raise AssertionError("broker should not be constructed when preflight fails")
+    monkeypatch.setattr(
+        "bithumb_bot.operator_commands.validate_live_mode_preflight",
+        _raise_strategy_preflight,
+    )
+    monkeypatch.setattr(config, "validate_runtime_strategy_set_selection", _raise_strategy_capability)
 
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
+    residual_qty = 0.00049913
+    _seed_dust_only_residual(residual_qty)
+    broker = _FlattenBrokerSuccess()
+    broker.balance = BrokerBalance(
+        cash_available=0.0,
+        cash_locked=0.0,
+        asset_available=residual_qty,
+        asset_locked=0.0,
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=94_480_000.0, ask_price=94_490_000.0),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=94_480_000.0, ask_price=94_490_000.0),
+    )
 
-    with pytest.raises(SystemExit) as exc:
-        cmd_flatten_position(dry_run=False)
+    cmd_flatten_position(dry_run=False)
 
-    assert exc.value.code == 1
     out = capsys.readouterr().out
-    assert "failed: live mode preflight" not in out
-    assert "failed: preflight boom" in out
+    assert "submitted" in out
+    assert len(broker.calls) == 1
+    assert broker.calls[0]["side"] == "SELL"
+    assert abs(float(broker.calls[0]["qty"]) - residual_qty) < 1e-12
 
 
 def test_flatten_position_blocks_when_live_unarmed(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path, monkeypatch)
+    _stub_flatten_submit_rules(monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.00000001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
 
-    def _armed_gate(_cfg):
-        raise app_module.LiveModeValidationError("LIVE_REAL_ORDER_ARMED=true is required")
+    residual_qty = 0.00049913
+    _seed_dust_only_residual(residual_qty)
 
-    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", _armed_gate)
+    class _NoSubmitBroker(_FlattenBrokerSuccess):
+        def __init__(self):
+            super().__init__()
+            self.balance = BrokerBalance(
+                cash_available=0.0,
+                cash_locked=0.0,
+                asset_available=residual_qty,
+                asset_locked=0.0,
+            )
 
-    class _BrokerFactory:
-        def __call__(self):
-            raise AssertionError("broker should not be constructed when live mode is unarmed")
+        def place_order(self, **_kwargs):
+            raise AssertionError("place_order must not be called when live mode is unarmed")
 
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
+    broker = _NoSubmitBroker()
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=94_480_000.0, ask_price=94_490_000.0),
+    )
 
     with pytest.raises(SystemExit) as exc:
         cmd_flatten_position(dry_run=False)

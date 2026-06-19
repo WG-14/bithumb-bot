@@ -20,7 +20,7 @@ from tests.support.operator_commands import (
     test_flatten_position_submit_failure_persisted,
     test_flatten_position_validation_failure_blocks_submission,
     test_flatten_position_blocks_on_invalid_best_quote,
-    test_flatten_position_blocks_on_live_preflight_failure,
+    test_flatten_position_operator_clean_closeout_does_not_call_strategy_live_preflight,
     test_flatten_position_blocks_when_live_unarmed,
     test_flatten_position_blocks_when_unapplied_principal_pending,
 )
