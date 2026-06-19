@@ -6927,13 +6927,16 @@ def test_main_pre_dispatch_blocks_live_run_without_startup_contract(monkeypatch,
 def test_main_pre_dispatch_blocks_live_write_command_without_preflight(monkeypatch, capsys):
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(config.settings, "MODE", "live")
-    calls = {"preflight": 0}
+    calls = {"operator_basic_guard": 0}
 
-    def _raise_preflight(_cfg):
-        calls["preflight"] += 1
-        raise config.LiveModeValidationError("central preflight failed")
+    def _raise_operator_guard(_cfg):
+        calls["operator_basic_guard"] += 1
+        raise config.LiveModeValidationError("operator basic guard failed")
 
-    monkeypatch.setattr("bithumb_bot.config.validate_live_mode_preflight", _raise_preflight)
+    monkeypatch.setattr(
+        "bithumb_bot.operator_smoke_preflight.validate_live_operator_basic_guard",
+        _raise_operator_guard,
+    )
     monkeypatch.setattr("bithumb_bot.config.log_live_execution_contract", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "bithumb_bot.operator_commands.cmd_panic_stop",
@@ -6945,7 +6948,7 @@ def test_main_pre_dispatch_blocks_live_write_command_without_preflight(monkeypat
 
     out = capsys.readouterr().out
     assert exc.value.code == 1
-    assert calls == {"preflight": 1}
+    assert calls == {"operator_basic_guard": 1}
     assert "[LIVE-COMMAND-GUARD]" in out
 
 
