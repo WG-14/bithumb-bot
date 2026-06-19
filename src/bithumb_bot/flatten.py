@@ -5,6 +5,7 @@ import inspect
 import json
 import time
 import uuid
+from decimal import Decimal, ROUND_FLOOR
 from types import SimpleNamespace
 
 from . import runtime_state
@@ -33,6 +34,8 @@ from .broker.order_submit import plan_place_order
 
 
 BROKER_CONFIRMED_RESIDUAL_CLOSEOUT = "broker_confirmed_residual_closeout"
+FULL_CLOSEOUT_WOULD_LEAVE_RESIDUAL = "full_closeout_would_leave_residual"
+MANUAL_EXCHANGE_CLOSEOUT_OR_RULE_UPDATE = "manual_exchange_closeout_or_rule_update"
 _BROKER_OPEN_STATUSES = {
     "NEW",
     "PARTIAL",
@@ -44,6 +47,7 @@ _BROKER_OPEN_STATUSES = {
     "WAIT",
     "WATCH",
 }
+_QTY_EPS = 1e-12
 
 
 def _resolve_flatten_sell_authority(
@@ -81,6 +85,179 @@ def _normalize_flatten_qty(*, qty: float, market_price: float) -> float:
             f"order notional below minimum (SELL): {(normalized_qty * float(market_price)):.2f} < {min_notional:.2f}"
         )
     return normalized_qty
+
+
+def _decimal_from_float(value: float) -> Decimal:
+    parsed = Decimal(str(float(value)))
+    if not parsed.is_finite():
+        raise ValueError(f"invalid non-finite qty: {value}")
+    return parsed
+
+
+def _floor_qty_to_max_decimals(*, qty: float) -> float:
+    max_qty_decimals = max(0, int(settings.LIVE_ORDER_MAX_QTY_DECIMALS))
+    parsed = max(Decimal("0"), _decimal_from_float(qty))
+    if max_qty_decimals > 0:
+        parsed = parsed.quantize(Decimal("1").scaleb(-max_qty_decimals), rounding=ROUND_FLOOR)
+    return max(0.0, float(parsed))
+
+
+def _qty_matches_configured_step(*, qty: float) -> bool:
+    qty_step = max(0.0, float(settings.LIVE_ORDER_QTY_STEP))
+    if qty_step <= 0.0:
+        return True
+    parsed_qty = _decimal_from_float(qty)
+    parsed_step = _decimal_from_float(qty_step)
+    if parsed_step <= 0:
+        return True
+    stepped = (parsed_qty / parsed_step).to_integral_value(rounding=ROUND_FLOOR) * parsed_step
+    return abs(float(parsed_qty - stepped)) <= _QTY_EPS
+
+
+def _validate_flatten_qty_limits(*, qty: float, market_price: float) -> None:
+    normalized_qty = max(0.0, float(qty))
+    if normalized_qty <= 0:
+        raise ValueError(f"invalid order qty: {normalized_qty}")
+    min_qty = max(0.0, float(settings.LIVE_MIN_ORDER_QTY))
+    if min_qty > 0 and normalized_qty + _QTY_EPS < min_qty:
+        raise ValueError(f"order qty below minimum: {normalized_qty:.12f} < {min_qty:.12f}")
+    min_notional = max(0.0, float(settings.MIN_ORDER_NOTIONAL_KRW))
+    if min_notional > 0 and (normalized_qty * float(market_price)) + _QTY_EPS < min_notional:
+        raise ValueError(
+            f"order notional below minimum (SELL): {(normalized_qty * float(market_price)):.2f} < {min_notional:.2f}"
+        )
+
+
+def _clean_account_closeout_metrics(
+    *,
+    raw_total_asset_qty: float,
+    planned_sell_qty: float,
+    market_price: float,
+) -> dict[str, object]:
+    raw_qty = max(0.0, float(raw_total_asset_qty))
+    planned_qty = max(0.0, float(planned_sell_qty))
+    residual_qty = max(0.0, raw_qty - planned_qty)
+    if residual_qty <= _QTY_EPS:
+        residual_qty = 0.0
+    else:
+        residual_qty = round(residual_qty, 12)
+    return {
+        "raw_total_asset_qty": float(raw_qty),
+        "planned_sell_qty": float(planned_qty),
+        "estimated_residual_qty": float(residual_qty),
+        "estimated_residual_notional_krw": float(residual_qty * float(market_price)),
+        "clean_account_after_sell": bool(residual_qty <= _QTY_EPS),
+    }
+
+
+def _plan_exact_clean_closeout_qty(
+    *,
+    raw_total_asset_qty: float,
+    market_price: float,
+) -> tuple[float, dict[str, object]]:
+    raw_qty = max(0.0, float(raw_total_asset_qty))
+    step_planned_qty = _normalize_flatten_qty(qty=raw_qty, market_price=market_price)
+    exact_qty = _floor_qty_to_max_decimals(qty=raw_qty)
+    step_metrics = _clean_account_closeout_metrics(
+        raw_total_asset_qty=raw_qty,
+        planned_sell_qty=step_planned_qty,
+        market_price=market_price,
+    )
+    exact_metrics = _clean_account_closeout_metrics(
+        raw_total_asset_qty=raw_qty,
+        planned_sell_qty=exact_qty,
+        market_price=market_price,
+    )
+    if (
+        not bool(exact_metrics["clean_account_after_sell"])
+        or not _qty_matches_configured_step(qty=exact_qty)
+    ):
+        metrics = {
+            **step_metrics,
+            "closeout_allowed": False,
+            "closeout_reason_code": FULL_CLOSEOUT_WOULD_LEAVE_RESIDUAL,
+            "recommended_action": MANUAL_EXCHANGE_CLOSEOUT_OR_RULE_UPDATE,
+            "max_decimal_closeout_qty": float(exact_qty),
+            "configured_qty_step": float(settings.LIVE_ORDER_QTY_STEP),
+            "configured_max_qty_decimals": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        }
+        raise ValueError(json.dumps(metrics, sort_keys=True, separators=(",", ":")))
+    _validate_flatten_qty_limits(qty=exact_qty, market_price=market_price)
+    return exact_qty, {
+        **exact_metrics,
+        "step_floor_planned_sell_qty": float(step_planned_qty),
+        "closeout_allowed": True,
+        "closeout_reason_code": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+        "recommended_action": None,
+        "configured_qty_step": float(settings.LIVE_ORDER_QTY_STEP),
+        "configured_max_qty_decimals": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    }
+
+
+def _block_full_closeout_would_leave_residual(
+    *,
+    raw_total_asset_qty: float,
+    planned_sell_qty: float,
+    market_price: float,
+) -> None:
+    metrics = _clean_account_closeout_metrics(
+        raw_total_asset_qty=raw_total_asset_qty,
+        planned_sell_qty=planned_sell_qty,
+        market_price=market_price,
+    )
+    metrics.update(
+        {
+            "closeout_allowed": False,
+            "closeout_reason_code": FULL_CLOSEOUT_WOULD_LEAVE_RESIDUAL,
+            "recommended_action": MANUAL_EXCHANGE_CLOSEOUT_OR_RULE_UPDATE,
+            "configured_qty_step": float(settings.LIVE_ORDER_QTY_STEP),
+            "configured_max_qty_decimals": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        }
+    )
+    raise ValueError(json.dumps(metrics, sort_keys=True, separators=(",", ":")))
+
+
+def _plan_operator_clean_account_qty(
+    *,
+    default_planned_qty: float,
+    raw_total_asset_qty: float,
+    market_price: float,
+    broker,
+) -> tuple[float, dict[str, object]]:
+    metrics = _clean_account_closeout_metrics(
+        raw_total_asset_qty=raw_total_asset_qty,
+        planned_sell_qty=default_planned_qty,
+        market_price=market_price,
+    )
+    if bool(metrics["clean_account_after_sell"]):
+        return float(default_planned_qty), {
+            **metrics,
+            "closeout_allowed": True,
+            "closeout_reason_code": "operator_flatten",
+            "recommended_action": None,
+            "configured_qty_step": float(settings.LIVE_ORDER_QTY_STEP),
+            "configured_max_qty_decimals": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        }
+
+    balance = broker.get_balance()
+    broker_asset_available = max(0.0, float(balance.asset_available))
+    raw_qty = max(0.0, float(raw_total_asset_qty))
+    tolerance = max(_QTY_EPS, float(settings.LIVE_MIN_ORDER_QTY or 0.0) * 1e-6)
+    if abs(broker_asset_available - raw_qty) > tolerance:
+        _block_full_closeout_would_leave_residual(
+            raw_total_asset_qty=raw_qty,
+            planned_sell_qty=default_planned_qty,
+            market_price=market_price,
+        )
+    exact_qty, exact_metrics = _plan_exact_clean_closeout_qty(
+        raw_total_asset_qty=broker_asset_available,
+        market_price=market_price,
+    )
+    return float(exact_qty), {
+        **exact_metrics,
+        "broker_asset_available": float(broker_asset_available),
+        "closeout_reason_code": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+    }
 
 
 def _validate_flatten_pretrade(*, broker, qty: float) -> None:
@@ -495,8 +672,8 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
                         f"broker_asset_available={broker_asset_available:.12f} "
                         f"raw_total_asset_qty={float(canonical_exposure.raw_total_asset_qty):.12f}"
                     )
-                normalized_qty = _normalize_flatten_qty(
-                    qty=broker_asset_available,
+                normalized_qty, clean_closeout_metrics = _plan_exact_clean_closeout_qty(
+                    raw_total_asset_qty=broker_asset_available,
                     market_price=market_price,
                 )
                 _validate_flatten_db_schema()
@@ -519,6 +696,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
                         "status": "dry_run" if dry_run else "started",
                         "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
                         "qty": float(normalized_qty),
+                        **clean_closeout_metrics,
                         "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
                         "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
                         "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -540,6 +718,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
                         "status": "dry_run",
                         "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
                         "qty": float(normalized_qty),
+                        **clean_closeout_metrics,
                         "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
                         "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
                         "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -617,6 +796,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
                         "status": "failed",
                         "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
                         "qty": float(normalized_qty),
+                        **clean_closeout_metrics,
                         "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
                         "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
                         "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -634,6 +814,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
                     "status": "submitted",
                     "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
                     "qty": normalized_qty,
+                    **clean_closeout_metrics,
                     "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
                     "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
                     "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -651,11 +832,23 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
             except LookupError:
                 pass
             except ValueError as exc:
+                blocked_metrics: dict[str, object] = {}
+                try:
+                    parsed = json.loads(str(exc))
+                    if isinstance(parsed, dict):
+                        blocked_metrics = parsed
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    blocked_metrics = {}
+                reason = str(blocked_metrics.get("closeout_reason_code") or exc)
                 summary = {
                     "status": "blocked",
-                    "reason": str(exc),
-                    "closeout_reason_code": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                    "reason": reason,
+                    "closeout_reason_code": str(
+                        blocked_metrics.get("closeout_reason_code") or BROKER_CONFIRMED_RESIDUAL_CLOSEOUT
+                    ),
+                    "recommended_action": blocked_metrics.get("recommended_action"),
                     "qty": 0.0,
+                    **blocked_metrics,
                     "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
                     "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
                     "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -696,11 +889,71 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         ),
         lot_definition=snapshot.lot_snapshot.lot_definition,
     )
+    operator_planned_qty = float(exit_sizing.executable_qty)
+    clean_closeout_metrics: dict[str, object] = {}
+    if trigger == "operator":
+        try:
+            quote = fetch_orderbook_top(settings.PAIR)
+            bid, _ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)
+            market_price = float(bid)
+            default_planned_qty = _normalize_flatten_qty(qty=float(exit_sizing.executable_qty), market_price=market_price)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            summary = {
+                "status": "failed",
+                "qty": 0.0,
+                "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
+                "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
+                "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
+                "terminal_state": terminal_state,
+                "side": "SELL",
+                "symbol": settings.PAIR,
+                "error": err,
+                "trigger": trigger,
+            }
+            runtime_state.record_flatten_position_result(status="failed", summary=summary)
+            return summary
+        try:
+            operator_planned_qty, clean_closeout_metrics = _plan_operator_clean_account_qty(
+                default_planned_qty=default_planned_qty,
+                raw_total_asset_qty=float(canonical_exposure.raw_total_asset_qty),
+                market_price=market_price,
+                broker=broker,
+            )
+        except ValueError as exc:
+            blocked_metrics: dict[str, object] = {}
+            try:
+                parsed = json.loads(str(exc))
+                if isinstance(parsed, dict):
+                    blocked_metrics = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                blocked_metrics = {}
+            reason = str(blocked_metrics.get("closeout_reason_code") or exc)
+            summary = {
+                "status": "blocked",
+                "reason": reason,
+                "qty": 0.0,
+                **blocked_metrics,
+                "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
+                "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
+                "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
+                "terminal_state": terminal_state,
+                "execution_flat": False,
+                "closeout_allowed": False,
+                "sellable_executable_lot_count": int(sellable_executable_lot_count),
+                "dry_run": int(bool(dry_run)),
+                "side": "SELL",
+                "symbol": settings.PAIR,
+                "trigger": trigger,
+            }
+            runtime_state.record_flatten_position_result(status="blocked", summary=summary)
+            return summary
 
     runtime_state.record_flatten_position_result(
         status="started",
         summary={
-            "qty": float(canonical_exposure.open_exposure_qty),
+            "qty": float(operator_planned_qty),
+            **clean_closeout_metrics,
             "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
             "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
             "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -717,7 +970,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
             reason_code=EMERGENCY_FLATTEN_STARTED,
             side="SELL",
             symbol=settings.PAIR,
-            qty=qty,
+            qty=operator_planned_qty,
             dry_run=1 if dry_run else 0,
             trigger=trigger,
         )
@@ -726,7 +979,8 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     if dry_run:
         summary = {
             "status": "dry_run",
-            "qty": float(exit_sizing.executable_qty),
+            "qty": float(operator_planned_qty),
+            **clean_closeout_metrics,
             "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
             "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
             "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -740,14 +994,14 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         return summary
 
     client_order_id = f"flatten_{int(time.time() * 1000)}"
-    normalized_qty = float(exit_sizing.executable_qty)
+    normalized_qty = float(operator_planned_qty)
     submit_attempt_id: str | None = None
     try:
         quote = fetch_orderbook_top(settings.PAIR)
         bid, _ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)
         market_price = float(bid)
-
-        normalized_qty = _normalize_flatten_qty(qty=normalized_qty, market_price=market_price)
+        if trigger != "operator":
+            normalized_qty = _normalize_flatten_qty(qty=normalized_qty, market_price=market_price)
         _validate_flatten_pretrade(broker=broker, qty=normalized_qty)
         submit_attempt_id, payload_hash, _submit_ts = _stage_flatten_submit_intent(
             client_order_id=client_order_id,
@@ -803,6 +1057,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         summary = {
             "status": "failed",
             "qty": float(normalized_qty),
+            **clean_closeout_metrics,
             "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
             "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
             "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -829,6 +1084,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     summary = {
         "status": "submitted",
         "qty": normalized_qty,
+        **clean_closeout_metrics,
         "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
         "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
         "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
@@ -847,7 +1103,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
             reason_code=EMERGENCY_FLATTEN_SUCCEEDED,
             side="SELL",
             symbol=settings.PAIR,
-            qty=qty,
+            qty=normalized_qty,
             client_order_id=client_order_id,
             exchange_order_id=str(order.exchange_order_id or "-"),
             status=str(order.status or "-"),

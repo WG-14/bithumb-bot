@@ -6757,6 +6757,24 @@ def cmd_flatten_position(*, dry_run: bool = False) -> None:
         return
 
     print(f"[FLATTEN-POSITION] target=BTC side=SELL qty={qty:.8f} dry_run={1 if dry_run else 0}")
+    if any(
+        key in summary
+        for key in (
+            "raw_total_asset_qty",
+            "planned_sell_qty",
+            "estimated_residual_qty",
+            "estimated_residual_notional_krw",
+            "clean_account_after_sell",
+        )
+    ):
+        print(
+            "  "
+            f"raw_total_asset_qty={float(summary.get('raw_total_asset_qty') or 0.0):.10f} "
+            f"planned_sell_qty={float(summary.get('planned_sell_qty') or qty):.10f} "
+            f"estimated_residual_qty={float(summary.get('estimated_residual_qty') or 0.0):.10f} "
+            f"estimated_residual_notional_krw={float(summary.get('estimated_residual_notional_krw') or 0.0):.2f} "
+            f"clean_account_after_sell={1 if bool(summary.get('clean_account_after_sell')) else 0}"
+        )
     if status == "dry_run":
         print("[FLATTEN-POSITION] dry-run: submit skipped")
         return
@@ -6766,7 +6784,8 @@ def cmd_flatten_position(*, dry_run: bool = False) -> None:
             "[FLATTEN-POSITION] blocked "
             f"reason={str(summary.get('reason') or 'unknown')} "
             f"recovery_stage={str(summary.get('recovery_stage') or 'unknown')} "
-            f"recommended_command={str(summary.get('recommended_command') or 'uv run python bot.py recovery-report')}"
+            f"recommended_command={str(summary.get('recommended_command') or 'uv run python bot.py recovery-report')} "
+            f"recommended_action={str(summary.get('recommended_action') or 'none')}"
         )
         raise SystemExit(1)
 

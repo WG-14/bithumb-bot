@@ -7514,7 +7514,59 @@ def test_flatten_position_dry_run_shows_broker_confirmed_residual_sell_candidate
     assert state.last_flatten_position_summary is not None
     assert '"reason": "broker_confirmed_residual_closeout"' in state.last_flatten_position_summary
     assert '"qty": 0.00049913' in state.last_flatten_position_summary
+    assert '"planned_sell_qty": 0.00049913' in state.last_flatten_position_summary
+    assert '"estimated_residual_qty": 0.0' in state.last_flatten_position_summary
+    assert '"clean_account_after_sell": true' in state.last_flatten_position_summary
     assert '"closeout_allowed": true' in state.last_flatten_position_summary
+
+
+def test_flatten_position_dry_run_blocks_step_floor_residual_closeout(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    _set_tmp_db(tmp_path, monkeypatch)
+    _configure_residual_closeout_settings(monkeypatch)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
+
+    residual_qty = 0.00049913
+    _seed_dust_only_residual(residual_qty)
+    broker = _FlattenBrokerSuccess()
+    broker.balance = BrokerBalance(
+        cash_available=0.0,
+        cash_locked=0.0,
+        asset_available=residual_qty,
+        asset_locked=0.0,
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=94_480_000.0, ask_price=94_490_000.0),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=True)
+    out = capsys.readouterr().out
+
+    assert exc.value.code == 1
+    assert "blocked" in out
+    assert "reason=full_closeout_would_leave_residual" in out
+    assert "recommended_action=manual_exchange_closeout_or_rule_update" in out
+    assert "planned_sell_qty=0.0004000000" in out
+    assert "estimated_residual_qty=0.0000991300" in out
+    assert "clean_account_after_sell=0" in out
+    assert broker.calls == []
+    state = runtime_state.snapshot()
+    assert state.last_flatten_position_status == "blocked"
+    assert state.last_flatten_position_summary is not None
+    assert '"reason": "full_closeout_would_leave_residual"' in state.last_flatten_position_summary
+    assert '"planned_sell_qty": 0.0004' in state.last_flatten_position_summary
+    assert '"estimated_residual_qty": 9.913e-05' in state.last_flatten_position_summary or '"estimated_residual_qty": 0.00009913' in state.last_flatten_position_summary
+    assert '"clean_account_after_sell": false' in state.last_flatten_position_summary
 
 
 def test_flatten_position_broker_confirmed_residual_below_min_qty_blocks(
@@ -7658,6 +7710,57 @@ def test_flatten_position_broker_confirmed_residual_actual_submit_requires_check
 
     assert any(row["submission_reason_code"] == "broker_confirmed_residual_closeout" for row in event_rows)
     assert any("broker_confirmed_residual_closeout" in str(row["submit_evidence"]) for row in event_rows)
+    state = runtime_state.snapshot()
+    assert state.last_flatten_position_status == "submitted"
+    assert state.last_flatten_position_summary is not None
+    assert '"planned_sell_qty": 0.00049913' in state.last_flatten_position_summary
+    assert '"clean_account_after_sell": true' in state.last_flatten_position_summary
+
+
+def test_flatten_position_actual_submit_refuses_step_floor_residual_closeout(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    _set_tmp_db(tmp_path, monkeypatch)
+    _stub_flatten_submit_rules(monkeypatch)
+    _configure_residual_closeout_settings(monkeypatch)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    configure_bithumb_test_auth(settings)
+    monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
+
+    residual_qty = 0.00049913
+    _seed_dust_only_residual(residual_qty)
+    broker = _FlattenBrokerSuccess()
+    broker.balance = BrokerBalance(
+        cash_available=0.0,
+        cash_locked=0.0,
+        asset_available=residual_qty,
+        asset_locked=0.0,
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=94_480_000.0, ask_price=94_490_000.0),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
+    out = capsys.readouterr().out
+
+    assert exc.value.code == 1
+    assert "reason=full_closeout_would_leave_residual" in out
+    assert broker.calls == []
+    conn = ensure_db()
+    try:
+        sell_orders = conn.execute("SELECT COUNT(*) AS n FROM orders WHERE side='SELL'").fetchone()
+    finally:
+        conn.close()
+    assert sell_orders is not None
+    assert int(sell_orders["n"]) == 0
 
 
 def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_path, capsys):
@@ -7667,8 +7770,8 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
     object.__setattr__(settings, "MODE", "live")
     prev_step = settings.LIVE_ORDER_QTY_STEP
     prev_max_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.000001)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.00000001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
     monkeypatch.setattr("bithumb_bot.operator_commands.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
@@ -7702,6 +7805,12 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
         conn.close()
 
     broker = _FlattenBrokerSuccess()
+    broker.balance = BrokerBalance(
+        cash_available=0.0,
+        cash_locked=0.0,
+        asset_available=0.12345678,
+        asset_locked=0.0,
+    )
 
     class _BrokerFactory:
         def __call__(self):
@@ -7721,7 +7830,7 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
         assert "submitted" in out
         assert len(broker.calls) == 1
         assert broker.calls[0]["side"] == "SELL"
-        assert abs(float(broker.calls[0]["qty"]) - 0.123456) < 1e-12
+        assert abs(float(broker.calls[0]["qty"]) - 0.12345678) < 1e-12
         conn = ensure_db()
         try:
             flatten_order = conn.execute(
@@ -7738,7 +7847,7 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
             assert flatten_order["status"] == "NEW"
             assert flatten_order["side"] == "SELL"
             assert flatten_order["strategy_name"] == "operator_flatten"
-            assert abs(float(flatten_order["qty_req"]) - 0.123456) < 1e-12
+            assert abs(float(flatten_order["qty_req"]) - 0.12345678) < 1e-12
             event_rows = conn.execute(
                 """
                 SELECT event_type, submit_phase, broker_response_summary, exchange_order_id_obtained
