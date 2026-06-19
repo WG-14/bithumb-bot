@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from bithumb_bot.approved_profile import ApprovedProfileError, validate_approved_profile
+from bithumb_bot.execution_authority import execution_authority_from_payload, require_authority_operation
 from bithumb_bot.storage_io import write_json_atomic
 from bithumb_bot.operator_smoke_authority import (
     OperatorSmokeAuthorityError,
@@ -126,3 +127,16 @@ def test_operator_smoke_authority_rejects_promotion_evidence_true() -> None:
 
     with pytest.raises(OperatorSmokeAuthorityError, match="promotion_evidence_must_be_false"):
         verify_operator_smoke_authority(payload, now=datetime.now(timezone.utc))
+
+
+def test_smoke_buy_rejects_approved_profile_as_operator_authority() -> None:
+    authority = execution_authority_from_payload(
+        {
+            "artifact_type": "approved_profile",
+            "profile_content_hash": "sha256:" + "a" * 64,
+            "market": "KRW-BTC",
+        }
+    )
+
+    with pytest.raises(ValueError, match="operation_not_allowed"):
+        require_authority_operation(authority, "operator_smoke_buy")

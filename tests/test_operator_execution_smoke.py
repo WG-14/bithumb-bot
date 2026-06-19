@@ -32,6 +32,7 @@ from bithumb_bot.runtime.daily_participation_claims import (
     ensure_daily_participation_claims_schema,
     pending_daily_participation_claim_count,
 )
+import bithumb_bot.operator_smoke_preflight as smoke_preflight
 
 
 def _live_settings(db_path: Path, **overrides):
@@ -75,6 +76,54 @@ class _SmokeBroker:
             asset_available=0.0,
             asset_locked=0.0,
         )
+
+
+class _FakeSmokeAuthority:
+    def __init__(self) -> None:
+        self.payload = build_operator_smoke_authority_payload(
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            db_path="/tmp/fake-smoke.sqlite",
+            account_key="operator-key",
+            code_commit_sha="abc123",
+        )
+        self.verified = False
+        self.consumed = False
+
+    def verify(self, **_kwargs) -> None:
+        self.verified = True
+
+    def consume(self, **_kwargs) -> None:
+        self.consumed = True
+
+
+def _readiness_snapshot(
+    *,
+    broker_qty_known: bool = True,
+    broker_qty: float = 0.0,
+    portfolio_qty: float = 0.0,
+    projected_qty: float = 0.0,
+    projection_converged: bool = True,
+    recovery_required_count: int = 0,
+    fee_pending_count: int = 0,
+    active_fee_accounting_blocker: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        broker_position_evidence={
+            "broker_qty_known": broker_qty_known,
+            "broker_qty": broker_qty,
+            "balance_source_stale": False,
+            "missing_evidence_fields": [] if broker_qty_known else ["broker_asset_qty"],
+        },
+        projection_convergence={
+            "converged": projection_converged,
+            "portfolio_qty": portfolio_qty,
+            "projected_total_qty": projected_qty,
+            "reason": "converged" if projection_converged else "projection_non_converged",
+        },
+        recovery_required_count=recovery_required_count,
+        fee_pending_count=fee_pending_count,
+        active_fee_accounting_blocker=active_fee_accounting_blocker,
+    )
 
 
 def _authority_path(tmp_path: Path, *, db_path: Path, commit: str = "abc123", market: str = "KRW-BTC") -> Path:
@@ -378,3 +427,102 @@ def test_smoke_buy_dispatch_to_submit_without_approved_profile(
     assert request.strategy_name == "operator_execution_smoke"
     assert request.decision_reason == "operator_smoke"
     assert request.submit_plan.intent.market == "KRW-BTC"
+
+
+def test_execute_smoke_buy_rejects_broker_local_mismatch_before_authority_consume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import bithumb_bot.operator_smoke as smoke
+
+    db_path = _live_roots(monkeypatch, tmp_path)
+    conn = ensure_db(str(db_path))
+    fake_authority = _FakeSmokeAuthority()
+    submitted: list[object] = []
+    monkeypatch.setattr(smoke, "settings", _live_settings(db_path))
+    monkeypatch.setattr(smoke_preflight, "validate_market_preflight", lambda _cfg: None)
+    monkeypatch.setattr(
+        smoke_preflight,
+        "compute_runtime_readiness_snapshot",
+        lambda _conn: _readiness_snapshot(broker_qty=0.01, portfolio_qty=0.0, projected_qty=0.0),
+    )
+    monkeypatch.setattr(smoke, "load_operator_smoke_authority", lambda _path: fake_authority)
+    monkeypatch.setattr(smoke, "submit_live_order_and_confirm", lambda **kwargs: submitted.append(kwargs))
+    try:
+        with pytest.raises(Exception, match="broker_local_mismatch"):
+            execute_smoke_buy(
+                conn=conn,
+                broker=_SmokeBroker(),
+                krw=50_000,
+                market="KRW-BTC",
+                confirm=SMOKE_BUY_CONFIRMATION_TOKEN,
+                authority_path=str(_authority_path(tmp_path, db_path=db_path)),
+                reference_price=100_000_000.0,
+                now_ms=1_800_000_000_000,
+            )
+    finally:
+        conn.close()
+
+    assert submitted == []
+    assert fake_authority.consumed is False
+
+
+def test_execute_smoke_buy_allows_flat_broker_local_match(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import bithumb_bot.operator_smoke as smoke
+
+    db_path = _live_roots(monkeypatch, tmp_path)
+    conn = ensure_db(str(db_path))
+    fake_authority = _FakeSmokeAuthority()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(smoke, "settings", _live_settings(db_path))
+    monkeypatch.setattr(smoke, "runtime_code_provenance", lambda: {"commit_sha": "abc123"})
+    monkeypatch.setattr(smoke_preflight, "validate_market_preflight", lambda _cfg: None)
+    monkeypatch.setattr(
+        smoke_preflight,
+        "compute_runtime_readiness_snapshot",
+        lambda _conn: _readiness_snapshot(),
+    )
+    monkeypatch.setattr(smoke, "load_operator_smoke_authority", lambda _path: fake_authority)
+    monkeypatch.setattr(
+        smoke,
+        "resolve_execution_order_rules",
+        lambda market: SimpleNamespace(as_order_rules=lambda: {"min_notional_krw": 5_000, "min_qty": 0.0, "qty_step": 0.0}),
+    )
+    monkeypatch.setattr(
+        smoke,
+        "build_live_submit_plan",
+        lambda **kwargs: SimpleNamespace(
+            intent=SimpleNamespace(market=kwargs["market"]),
+            submitted_qty=kwargs["qty"],
+            rules=kwargs["effective_rules"],
+            submit_qty_authority="unit",
+            exchange_order_type="market",
+            internal_lot_qty=kwargs["qty"],
+            qty_split=SimpleNamespace(lot_count=1),
+        ),
+    )
+
+    def _submit(**kwargs):
+        captured["request"] = kwargs["request"]
+        return object()
+
+    monkeypatch.setattr(smoke, "submit_live_order_and_confirm", _submit)
+    try:
+        result = execute_smoke_buy(
+            conn=conn,
+            broker=_SmokeBroker(),
+            krw=50_000,
+            market="KRW-BTC",
+            confirm=SMOKE_BUY_CONFIRMATION_TOKEN,
+            authority_path=str(_authority_path(tmp_path, db_path=db_path)),
+            reference_price=100_000_000.0,
+            now_ms=1_800_000_000_000,
+        )
+    finally:
+        conn.close()
+
+    assert result["status"] == "submitted"
+    assert captured["request"].strategy_name == "operator_execution_smoke"
+    assert fake_authority.verified is True
+    assert fake_authority.consumed is True

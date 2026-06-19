@@ -12,6 +12,7 @@ from .broker.live_submission_execution import submit_live_order_and_confirm
 from .broker.live_submit_orchestrator import StandardSubmitPipelineRequest
 from .broker.live_submit_planning import build_live_submit_plan
 from .config import runtime_code_provenance, settings
+from .execution_authority import execution_authority_from_payload, require_authority_operation
 from .execution_order_rules import resolve_execution_order_rules
 from .oms import OPEN_ORDER_STATUSES, build_client_order_id, build_order_intent_key, payload_fingerprint
 from .operator_smoke_authority import (
@@ -140,6 +141,8 @@ def execute_smoke_buy(
     )
     code_commit_sha = str(runtime_code_provenance().get("commit_sha") or "unavailable")
     authority = load_operator_smoke_authority(authority_path)
+    command_authority = execution_authority_from_payload(authority.payload)
+    require_authority_operation(command_authority, "operator_smoke_buy")
     authority.verify(
         now=datetime.now(timezone.utc),
         side="BUY",

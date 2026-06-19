@@ -11,6 +11,7 @@ from bithumb_bot.h74_observation import (
     verify_h74_observation_authority,
 )
 from bithumb_bot.config import LiveModeValidationError, settings, validate_live_strategy_selection
+from bithumb_bot.execution_authority import execution_authority_from_payload
 from bithumb_bot.research.strategy_spec import runtime_bound_behavior_parameter_names
 from dataclasses import replace
 import json
@@ -143,3 +144,11 @@ def test_h74_observation_authority_does_not_replace_approved_profile(tmp_path, m
 
     with pytest.raises(LiveModeValidationError, match="approved_profile_required_for_strategy:daily_participation_sma"):
         validate_live_strategy_selection(cfg)
+
+
+def test_live_observation_authority_path_does_not_grant_strategy_run_operation() -> None:
+    authority = execution_authority_from_payload(build_h74_observation_authority_payload())
+
+    assert authority.allows("h74_live_observation_50k")
+    assert not authority.allows("strategy_run")
+    assert authority.risk_authority is False

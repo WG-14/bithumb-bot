@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 from .h74_observation import H74_OBSERVATION_AUTHORITY_ARTIFACT_TYPE
@@ -97,6 +99,50 @@ def execution_authority_from_payload(payload: Mapping[str, Any]) -> ExecutionAut
             identity_hash=_identity_hash(payload),
         )
     raise ValueError(f"unknown_execution_authority_type:{artifact_type or 'missing'}")
+
+
+def resolve_execution_authority(
+    command_intent: str,
+    settings: object,
+    args_or_payload: Mapping[str, Any] | str | Path | object,
+) -> ExecutionAuthority:
+    del settings
+    payload: Mapping[str, Any] | None = None
+    if isinstance(args_or_payload, Mapping):
+        payload = args_or_payload
+    elif isinstance(args_or_payload, (str, Path)):
+        with Path(args_or_payload).expanduser().open("r", encoding="utf-8") as handle:
+            decoded = json.load(handle)
+        if not isinstance(decoded, Mapping):
+            raise ValueError("execution_authority_payload_not_object")
+        payload = decoded
+    else:
+        candidate = getattr(args_or_payload, "payload", None)
+        if isinstance(candidate, Mapping):
+            payload = candidate
+    if payload is None:
+        raise ValueError("execution_authority_payload_missing")
+    authority = execution_authority_from_payload(payload)
+    intent = str(command_intent or "").strip()
+    operation = {
+        "smoke-buy": "operator_smoke_buy",
+        "operator_smoke_buy": "operator_smoke_buy",
+        "h74-observation": "h74_live_observation_50k",
+        "h74_live_observation_50k": "h74_live_observation_50k",
+        "strategy-run": "strategy_run",
+        "strategy_run": "strategy_run",
+    }.get(intent, intent)
+    if operation:
+        require_authority_operation(authority, operation)
+    return authority
+
+
+def require_authority_operation(authority: ExecutionAuthority, operation: str) -> None:
+    if not authority.allows(operation):
+        raise ValueError(
+            "execution_authority_operation_not_allowed:"
+            f"authority_type={authority.authority_type}:operation={operation}"
+        )
 
 
 def validate_live_observation_authority_complete_for_runtime(authority: ExecutionAuthority) -> None:

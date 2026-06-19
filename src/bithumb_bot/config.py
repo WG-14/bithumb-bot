@@ -526,9 +526,15 @@ def validate_live_strategy_selection(cfg: Settings) -> None:
     observation_authority_path = os.getenv("LIVE_OBSERVATION_AUTHORITY_PATH", "").strip()
     if observation_authority_path:
         from .h74_observation import H74_STRATEGY_NAME, verify_h74_observation_authority_file
+        from .execution_authority import execution_authority_from_payload
 
         if strategy_name == H74_STRATEGY_NAME:
             try:
+                with Path(observation_authority_path).expanduser().open("r", encoding="utf-8") as handle:
+                    observation_authority_payload = json.load(handle)
+                observation_authority = execution_authority_from_payload(observation_authority_payload)
+                if observation_authority.allows("strategy_run"):
+                    raise ValueError("live_observation_authority_must_not_allow_strategy_run")
                 verify_h74_observation_authority_file(observation_authority_path, settings_obj=cfg)
             except Exception as exc:
                 raise LiveModeValidationError(

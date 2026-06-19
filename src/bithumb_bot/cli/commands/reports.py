@@ -193,6 +193,14 @@ def _h74_observation_report(args: argparse.Namespace, _context) -> int:
             db_path=str(args.db) if args.db else None,
             days=int(args.days),
             as_json=bool(args.json),
+            authority=args.authority,
+            authority_hash=args.authority_hash,
+            from_date=args.from_date,
+            to_date=args.to_date,
+            strategy_instance_id=args.strategy_instance_id,
+            pair=args.pair,
+            interval=args.interval,
+            participation_policy_hash=args.participation_policy_hash,
         )
     )
 
@@ -244,6 +252,14 @@ def _build_strategy_report(parser: argparse.ArgumentParser) -> None:
 def _build_h74_observation_report(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--db")
+    parser.add_argument("--authority", help="h74 live observation authority artifact path")
+    parser.add_argument("--authority-hash", help="authority hash to scope report rows")
+    parser.add_argument("--from", dest="from_date", help="KST start date, inclusive (YYYY-MM-DD)")
+    parser.add_argument("--to", dest="to_date", help="KST end date, exclusive (YYYY-MM-DD)")
+    parser.add_argument("--strategy-instance-id")
+    parser.add_argument("--participation-policy-hash")
+    parser.add_argument("--pair", default="KRW-BTC")
+    parser.add_argument("--interval", default="1m")
     parser.add_argument("--json", action="store_true")
 
 

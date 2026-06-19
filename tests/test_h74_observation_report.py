@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from bithumb_bot.h74_observation_report import build_h74_observation_report
+from bithumb_bot.runtime.daily_participation_claims import ensure_daily_participation_claims_schema
 
 
 def _conn() -> sqlite3.Connection:
@@ -44,7 +45,8 @@ def _window_conn() -> sqlite3.Connection:
             exit_rule_name TEXT,
             decision_reason TEXT,
             last_error TEXT,
-            created_ts INTEGER
+            created_ts INTEGER,
+            authority_hash TEXT
         )
         """
     )
@@ -77,10 +79,11 @@ def _insert_order(
     exit_rule: str = "",
     reason: str = "",
     error: str = "",
+    authority_hash: str = "sha256:auth-a",
 ) -> None:
     conn.execute(
-        "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (cid, strategy, instance, pair, side, status, exit_rule, reason, error, _ts(created)),
+        "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, strategy, instance, pair, side, status, exit_rule, reason, error, _ts(created), authority_hash),
     )
 
 
@@ -172,6 +175,102 @@ def test_h74_observation_report_filters_to_requested_7_day_window() -> None:
     assert report["daily_buy_filled_count"] == 1
 
 
+def _insert_claim(
+    conn: sqlite3.Connection,
+    *,
+    instance: str = "h74:one",
+    pair: str = "KRW-BTC",
+    kst_day: str = "2026-06-18",
+    policy_hash: str = "sha256:policy-a",
+    status: str = "submitted",
+    created: str = "2026-06-18T00:00:00Z",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO daily_participation_claims(
+            strategy_instance_id, pair, kst_day, participation_policy_hash,
+            status, retry_allowed, created_ts, updated_ts
+        )
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+        """,
+        (instance, pair, kst_day, policy_hash, status, _ts(created), _ts(created)),
+    )
+
+
+def test_h74_observation_report_filters_claims_to_requested_7_day_window() -> None:
+    conn = _window_conn()
+    ensure_daily_participation_claims_schema(conn)
+    _insert_claim(conn, kst_day="2026-06-09", created="2026-06-09T00:00:00Z")
+    _insert_claim(conn, kst_day="2026-06-18", created="2026-06-18T00:00:00Z")
+
+    report = build_h74_observation_report(
+        conn=conn,
+        observation_start=datetime(2026, 6, 11, 15, tzinfo=timezone.utc),
+        observation_end=datetime(2026, 6, 18, 15, tzinfo=timezone.utc),
+        strategy_instance_id="h74:one",
+        participation_policy_hash="sha256:policy-a",
+    )
+
+    assert report["claim_pending_count"] == 1
+
+
+def test_h74_observation_report_scopes_claims_to_strategy_instance_pair_and_policy() -> None:
+    conn = _window_conn()
+    ensure_daily_participation_claims_schema(conn)
+    _insert_claim(conn, instance="h74:one", pair="KRW-BTC", policy_hash="sha256:policy-a")
+    _insert_claim(conn, instance="h74:two", pair="KRW-BTC", policy_hash="sha256:policy-a")
+    _insert_claim(conn, instance="h74:one", pair="KRW-ETH", policy_hash="sha256:policy-a")
+    _insert_claim(conn, instance="h74:one", pair="KRW-BTC", policy_hash="sha256:policy-b")
+
+    report = build_h74_observation_report(
+        conn=conn,
+        observation_start=datetime(2026, 6, 11, 15, tzinfo=timezone.utc),
+        observation_end=datetime(2026, 6, 18, 15, tzinfo=timezone.utc),
+        strategy_instance_id="h74:one",
+        participation_policy_hash="sha256:policy-a",
+        pair="KRW-BTC",
+    )
+
+    assert report["claim_pending_count"] == 1
+
+
+def test_h74_observation_report_scopes_to_authority_hash_when_column_exists() -> None:
+    conn = _window_conn()
+    conn.execute(
+        """
+        CREATE TABLE daily_participation_claims (
+            strategy_instance_id TEXT,
+            pair TEXT,
+            kst_day TEXT,
+            participation_policy_hash TEXT,
+            authority_hash TEXT,
+            status TEXT,
+            created_ts INTEGER,
+            updated_ts INTEGER
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO daily_participation_claims VALUES (?,?,?,?,?,?,?,?)",
+        ("h74:one", "KRW-BTC", "2026-06-18", "sha256:policy-a", "sha256:auth-a", "submitted", _ts("2026-06-18T00:00:00Z"), _ts("2026-06-18T00:00:00Z")),
+    )
+    conn.execute(
+        "INSERT INTO daily_participation_claims VALUES (?,?,?,?,?,?,?,?)",
+        ("h74:one", "KRW-BTC", "2026-06-18", "sha256:policy-a", "sha256:auth-b", "submitted", _ts("2026-06-18T00:00:00Z"), _ts("2026-06-18T00:00:00Z")),
+    )
+
+    report = build_h74_observation_report(
+        conn=conn,
+        observation_start=datetime(2026, 6, 11, 15, tzinfo=timezone.utc),
+        observation_end=datetime(2026, 6, 18, 15, tzinfo=timezone.utc),
+        authority_hash="sha256:auth-a",
+        strategy_instance_id="h74:one",
+        participation_policy_hash="sha256:policy-a",
+    )
+
+    assert report["claim_pending_count"] == 1
+
+
 def test_h74_observation_report_scopes_to_strategy_instance_and_authority_hash() -> None:
     conn = _window_conn()
     _insert_order(conn, "one", created="2026-06-18T00:00:00Z", instance="h74:one")
@@ -187,6 +286,31 @@ def test_h74_observation_report_scopes_to_strategy_instance_and_authority_hash()
     )
 
     assert report["daily_buy_intent_count"] == 1
+
+
+def test_h74_observation_report_cli_accepts_authority_scope() -> None:
+    from bithumb_bot.cli.parser import build_parser
+    from bithumb_bot.cli.registry import command_registry
+
+    parser = build_parser(command_registry())
+    args = parser.parse_args(
+        [
+            "h74-observation-report",
+            "--days",
+            "7",
+            "--json",
+            "--authority-hash",
+            "sha256:auth-a",
+            "--from",
+            "2026-06-12",
+            "--to",
+            "2026-06-19",
+        ]
+    )
+
+    assert args.authority_hash == "sha256:auth-a"
+    assert args.from_date == "2026-06-12"
+    assert args.to_date == "2026-06-19"
 
 
 def test_h74_observation_report_detects_same_kst_day_duplicate_buy() -> None:
@@ -247,3 +371,52 @@ def test_h74_observation_report_complete_false_before_7_days_elapsed() -> None:
     report = build_h74_observation_report(days=6, now=datetime(2026, 6, 19, tzinfo=timezone.utc))
 
     assert report["complete"] is False
+
+
+def test_h74_observation_report_complete_requires_7_distinct_kst_days() -> None:
+    conn = _window_conn()
+    days = [
+        "2026-06-12T00:00:00Z",
+        "2026-06-13T00:00:00Z",
+        "2026-06-14T00:00:00Z",
+        "2026-06-15T00:00:00Z",
+        "2026-06-16T00:00:00Z",
+        "2026-06-17T00:00:00Z",
+        "2026-06-17T01:00:00Z",
+    ]
+    for index, created in enumerate(days):
+        cid = f"b{index}"
+        _insert_order(conn, cid, created=created, instance="h74:one")
+        _insert_fill(conn, cid, fill_ts=created)
+
+    report = build_h74_observation_report(
+        conn=conn,
+        observation_start=datetime(2026, 6, 11, 15, tzinfo=timezone.utc),
+        observation_end=datetime(2026, 6, 18, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        authority_hash="sha256:auth-a",
+        strategy_instance_id="h74:one",
+    )
+
+    assert report["daily_buy_filled_count"] == 7
+    assert len(report["covered_kst_days"]) == 6
+    assert report["complete"] is False
+
+
+def test_h74_observation_report_rejects_unscoped_pair_rows_in_strict_h74_scope() -> None:
+    conn = _window_conn()
+    _insert_order(conn, "target", created="2026-06-18T00:00:00Z", pair="KRW-BTC")
+    _insert_fill(conn, "target", fill_ts="2026-06-18T00:01:00Z")
+    _insert_order(conn, "null_pair", created="2026-06-18T00:00:00Z", pair=None)
+    _insert_fill(conn, "null_pair", fill_ts="2026-06-18T00:01:00Z")
+    _insert_order(conn, "empty_pair", created="2026-06-18T00:00:00Z", pair="")
+    _insert_fill(conn, "empty_pair", fill_ts="2026-06-18T00:01:00Z")
+
+    report = build_h74_observation_report(
+        conn=conn,
+        days=7,
+        now=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        pair="KRW-BTC",
+    )
+
+    assert report["daily_buy_intent_count"] == 1
