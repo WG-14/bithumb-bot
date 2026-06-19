@@ -239,7 +239,9 @@ def cmd_smoke_buy(
 
     conn = ensure_db()
     try:
-        broker = build_broker_with_auth_diagnostics()
+        broker, _auth_diag = build_broker_with_auth_diagnostics(
+            caller="operator_commands.cmd_smoke_buy"
+        )
         execute_smoke_buy(
             conn=conn,
             broker=broker,

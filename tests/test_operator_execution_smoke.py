@@ -200,6 +200,42 @@ def test_smoke_buy_does_not_satisfy_approved_profile_required() -> None:
         validate_approved_profile(payload)
 
 
+def test_cmd_smoke_buy_constructs_broker_with_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    import bithumb_bot.operator_smoke as smoke
+
+    class _Conn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _Conn()
+    captured: dict[str, object] = {}
+
+    def _build_broker(*, caller: str):
+        captured["caller"] = caller
+        return _SmokeBroker(), {"caller": caller}
+
+    def _execute_smoke_buy(**kwargs) -> None:
+        captured["broker"] = kwargs["broker"]
+
+    monkeypatch.setattr(operator_commands, "ensure_db", lambda: conn)
+    monkeypatch.setattr(operator_commands, "build_broker_with_auth_diagnostics", _build_broker)
+    monkeypatch.setattr(smoke, "execute_smoke_buy", _execute_smoke_buy)
+
+    operator_commands.cmd_smoke_buy(
+        krw=50_000,
+        market="KRW-BTC",
+        confirm=SMOKE_BUY_CONFIRMATION_TOKEN,
+        authority_path="/tmp/operator-smoke-authority.json",
+        reference_price=100_000_000.0,
+    )
+
+    assert captured["caller"] == "operator_commands.cmd_smoke_buy"
+    assert isinstance(captured["broker"], _SmokeBroker)
+    assert conn.closed is True
+
+
 def test_smoke_buy_not_counted_as_daily_participation_event(tmp_path: Path) -> None:
     import sqlite3
 
@@ -373,11 +409,17 @@ def test_smoke_buy_dispatch_to_submit_without_approved_profile(
     conn = ensure_db(str(db_path))
     cfg = _live_settings(db_path, APPROVED_STRATEGY_PROFILE_PATH="")
     captured: dict[str, object] = {}
+    broker_factory_call: dict[str, object] = {}
     monkeypatch.setattr(smoke, "settings", cfg)
     monkeypatch.setattr(smoke, "runtime_code_provenance", lambda: {"commit_sha": "abc123"})
     monkeypatch.setattr(smoke, "validate_operator_smoke_preflight", lambda **_kwargs: None)
     monkeypatch.setattr(operator_commands, "ensure_db", lambda: conn)
-    monkeypatch.setattr(operator_commands, "build_broker_with_auth_diagnostics", lambda: _SmokeBroker())
+
+    def _build_broker(*, caller: str):
+        broker_factory_call["caller"] = caller
+        return _SmokeBroker(), {"caller": caller}
+
+    monkeypatch.setattr(operator_commands, "build_broker_with_auth_diagnostics", _build_broker)
     monkeypatch.setattr(
         smoke,
         "resolve_execution_order_rules",
@@ -427,6 +469,7 @@ def test_smoke_buy_dispatch_to_submit_without_approved_profile(
     assert request.strategy_name == "operator_execution_smoke"
     assert request.decision_reason == "operator_smoke"
     assert request.submit_plan.intent.market == "KRW-BTC"
+    assert broker_factory_call["caller"] == "operator_commands.cmd_smoke_buy"
 
 
 def test_execute_smoke_buy_rejects_broker_local_mismatch_before_authority_consume(
