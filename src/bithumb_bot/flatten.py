@@ -5,6 +5,7 @@ import inspect
 import json
 import time
 import uuid
+from types import SimpleNamespace
 
 from . import runtime_state
 from . import db_core
@@ -31,6 +32,20 @@ from .execution_models import OrderIntent
 from .broker.order_submit import plan_place_order
 
 
+BROKER_CONFIRMED_RESIDUAL_CLOSEOUT = "broker_confirmed_residual_closeout"
+_BROKER_OPEN_STATUSES = {
+    "NEW",
+    "PARTIAL",
+    "PENDING_SUBMIT",
+    "SUBMIT_UNKNOWN",
+    "ACCOUNTING_PENDING",
+    "CANCEL_REQUESTED",
+    "OPEN",
+    "WAIT",
+    "WATCH",
+}
+
+
 def _resolve_flatten_sell_authority(
     *,
     position_state,
@@ -50,11 +65,11 @@ def _normalize_flatten_qty(*, qty: float, market_price: float) -> float:
     normalized_qty = max(0.0, float(qty))
     qty_step = max(0.0, float(settings.LIVE_ORDER_QTY_STEP))
     if qty_step > 0:
-        normalized_qty = math.floor((normalized_qty / qty_step) + 1e-12) * qty_step
+        normalized_qty = math.floor((normalized_qty / qty_step) + 1e-9) * qty_step
     max_qty_decimals = max(0, int(settings.LIVE_ORDER_MAX_QTY_DECIMALS))
     if max_qty_decimals > 0:
         scale = 10**max_qty_decimals
-        normalized_qty = math.floor((normalized_qty * scale) + 1e-12) / scale
+        normalized_qty = math.floor((normalized_qty * scale) + 1e-9) / scale
     if normalized_qty <= 0:
         raise ValueError(f"invalid order qty: {normalized_qty}")
     min_qty = max(0.0, float(settings.LIVE_MIN_ORDER_QTY))
@@ -78,6 +93,65 @@ def _validate_flatten_pretrade(*, broker, qty: float) -> None:
         )
 
 
+def _validate_flatten_db_schema() -> None:
+    diagnostics = db_core.diagnose_db_path(settings.DB_PATH)
+    if str(diagnostics.get("status") or "") != "PASS":
+        errors = diagnostics.get("validation_errors") or []
+        detail = "; ".join(str(item) for item in errors) if isinstance(errors, list) else str(errors)
+        raise ValueError(f"db schema validation failed: {detail or 'status not PASS'}")
+
+
+def _broker_open_orders(broker) -> list[object]:
+    get_recent_orders_for_recovery = getattr(broker, "get_recent_orders_for_recovery", None)
+    if callable(get_recent_orders_for_recovery):
+        return list(get_recent_orders_for_recovery(limit=100, market=settings.PAIR))
+    get_open_orders = getattr(broker, "get_open_orders", None)
+    if callable(get_open_orders):
+        return list(get_open_orders(exchange_order_ids=(), client_order_ids=()))
+    raise ValueError("broker open-order verification unavailable")
+
+
+def _assert_no_broker_open_orders(broker) -> int:
+    open_orders = [
+        order
+        for order in _broker_open_orders(broker)
+        if str(getattr(order, "status", "") or "").strip().upper() in _BROKER_OPEN_STATUSES
+    ]
+    if open_orders:
+        raise ValueError(f"broker unresolved/open orders present: count={len(open_orders)}")
+    return 0
+
+
+def _is_residual_closeout_state(*, terminal_state: str, canonical_exposure) -> bool:
+    if str(terminal_state) == "dust_only":
+        return True
+    return bool(
+        getattr(canonical_exposure, "has_dust_only_remainder", False)
+        and getattr(canonical_exposure, "effective_flat", False)
+    )
+
+
+def _residual_quantities_match(*, broker_asset_available: float, canonical_exposure) -> bool:
+    raw_total_asset_qty = max(0.0, float(getattr(canonical_exposure, "raw_total_asset_qty", 0.0) or 0.0))
+    tracked_dust_qty = max(0.0, float(getattr(canonical_exposure, "dust_tracking_qty", 0.0) or 0.0))
+    expected_qty = raw_total_asset_qty if raw_total_asset_qty > 0.0 else tracked_dust_qty
+    tolerance = max(1e-12, float(settings.LIVE_MIN_ORDER_QTY or 0.0) * 1e-6)
+    return expected_qty > 0.0 and abs(float(broker_asset_available) - expected_qty) <= tolerance
+
+
+def _build_residual_exit_sizing(*, qty: float, snapshot) -> object:
+    lot_definition = snapshot.lot_snapshot.lot_definition
+    internal_lot_size = float(getattr(lot_definition, "internal_lot_size", 0.0) or 0.0)
+    effective_min_trade_qty = float(getattr(lot_definition, "min_qty", 0.0) or settings.LIVE_MIN_ORDER_QTY)
+    return SimpleNamespace(
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        intended_lot_count=0,
+        executable_lot_count=0,
+        executable_qty=float(qty),
+    )
+
+
 def _flatten_submit_evidence(
     *,
     client_order_id: str,
@@ -89,12 +163,14 @@ def _flatten_submit_evidence(
     status: str,
     exchange_order_id: str | None = None,
     error: str | None = None,
+    reason_code: str = "operator_flatten",
 ) -> str:
     return json.dumps(
         {
             "client_order_id": client_order_id,
             "submit_attempt_id": submit_attempt_id,
             "submit_path": "operator_flatten",
+            "reason_code": reason_code,
             "trigger": trigger,
             "symbol": settings.PAIR,
             "side": "SELL",
@@ -120,6 +196,7 @@ def _stage_flatten_submit_intent(
     market_price: float,
     lot_snapshot,
     exit_sizing,
+    reason_code: str = "operator_flatten",
 ) -> tuple[str, str, int]:
     submit_attempt_id = f"{client_order_id}:submit:{uuid.uuid4().hex[:8]}"
     ts = int(time.time() * 1000)
@@ -133,6 +210,7 @@ def _stage_flatten_submit_intent(
             "price": None,
             "trigger": trigger,
             "submit_path": "operator_flatten",
+            "reason_code": reason_code,
         }
     )
     evidence = _flatten_submit_evidence(
@@ -143,6 +221,7 @@ def _stage_flatten_submit_intent(
         market_price=market_price,
         phase="pre_submit",
         status="PENDING_SUBMIT",
+        reason_code=reason_code,
     )
     conn = db_core.ensure_db()
     try:
@@ -165,7 +244,7 @@ def _stage_flatten_submit_intent(
             executable_lot_count=int(exit_sizing.executable_lot_count),
             final_intended_qty=float(exit_sizing.executable_qty),
             final_submitted_qty=float(qty),
-            decision_reason_code="operator_flatten",
+            decision_reason_code=reason_code,
             local_intent_state="PENDING_SUBMIT",
             ts_ms=ts,
             status="PENDING_SUBMIT",
@@ -191,7 +270,7 @@ def _stage_flatten_submit_intent(
             submit_ts=ts,
             payload_fingerprint=payload_hash,
             broker_response_summary="operator_flatten_pre_submit_journaled",
-            submission_reason_code="operator_flatten_pre_submit_journaled",
+            submission_reason_code=reason_code,
             exception_class=None,
             timeout_flag=False,
             submit_evidence=evidence,
@@ -213,7 +292,7 @@ def _stage_flatten_submit_intent(
             executable_lot_count=int(exit_sizing.executable_lot_count),
             final_intended_qty=float(exit_sizing.executable_qty),
             final_submitted_qty=float(qty),
-            decision_reason_code="operator_flatten",
+            decision_reason_code=reason_code,
         )
         conn.commit()
     except Exception:
@@ -234,6 +313,7 @@ def _record_flatten_submit_ack(
     qty: float,
     market_price: float,
     order,
+    reason_code: str = "operator_flatten",
 ) -> None:
     exchange_order_id = str(getattr(order, "exchange_order_id", "") or "")
     order_status = str(getattr(order, "status", "") or "NEW")
@@ -247,6 +327,7 @@ def _record_flatten_submit_ack(
         phase="broker_ack",
         status=order_status,
         exchange_order_id=exchange_order_id or None,
+        reason_code=reason_code,
     )
     conn = db_core.ensure_db()
     try:
@@ -263,7 +344,7 @@ def _record_flatten_submit_ack(
             submit_ts=ts,
             payload_fingerprint=payload_hash,
             broker_response_summary=f"operator_flatten_ack status={order_status} exchange_order_id={exchange_order_id or '-'}",
-            submission_reason_code="operator_flatten_ack",
+            submission_reason_code=reason_code,
             exception_class=None,
             timeout_flag=False,
             submit_evidence=evidence,
@@ -387,11 +468,207 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
 
     qty = snapshot.portfolio_asset_qty
     position_state = snapshot.position_state
-    canonical_exposure, sellable_executable_lot_count, exit_allowed, exit_block_reason = _resolve_flatten_sell_authority(
-        position_state=position_state,
-    )
+    (
+        canonical_exposure,
+        sellable_executable_lot_count,
+        exit_allowed,
+        exit_block_reason,
+    ) = _resolve_flatten_sell_authority(position_state=position_state)
     terminal_state = str(position_state.normalized_exposure.terminal_state)
     if (not exit_allowed) or sellable_executable_lot_count < 1:
+        if trigger == "operator" and _is_residual_closeout_state(
+            terminal_state=terminal_state,
+            canonical_exposure=canonical_exposure,
+        ):
+            try:
+                quote = fetch_orderbook_top(settings.PAIR)
+                bid, _ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)
+                market_price = float(bid)
+                balance = broker.get_balance()
+                broker_asset_available = max(0.0, float(balance.asset_available))
+                if not _residual_quantities_match(
+                    broker_asset_available=broker_asset_available,
+                    canonical_exposure=canonical_exposure,
+                ):
+                    raise LookupError(
+                        "broker residual does not match local dust evidence: "
+                        f"broker_asset_available={broker_asset_available:.12f} "
+                        f"raw_total_asset_qty={float(canonical_exposure.raw_total_asset_qty):.12f}"
+                    )
+                normalized_qty = _normalize_flatten_qty(
+                    qty=broker_asset_available,
+                    market_price=market_price,
+                )
+                _validate_flatten_db_schema()
+                broker_open_order_count = _assert_no_broker_open_orders(broker)
+                if not dry_run:
+                    if settings.MODE != "live":
+                        raise ValueError("MODE=live is required for residual closeout")
+                    if bool(settings.LIVE_DRY_RUN):
+                        raise ValueError("LIVE_DRY_RUN=false is required for residual closeout submit")
+                    if not bool(settings.LIVE_REAL_ORDER_ARMED):
+                        raise ValueError("LIVE_REAL_ORDER_ARMED=true is required for residual closeout submit")
+                    if bool(settings.KILL_SWITCH):
+                        raise ValueError("KILL_SWITCH=false is required for residual closeout submit")
+                    _validate_flatten_pretrade(broker=broker, qty=normalized_qty)
+
+                exit_sizing = _build_residual_exit_sizing(qty=normalized_qty, snapshot=snapshot)
+                runtime_state.record_flatten_position_result(
+                    status="started" if not dry_run else "dry_run",
+                    summary={
+                        "status": "dry_run" if dry_run else "started",
+                        "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                        "qty": float(normalized_qty),
+                        "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
+                        "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
+                        "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
+                        "broker_asset_available": float(broker_asset_available),
+                        "reference_bid": float(market_price),
+                        "terminal_state": terminal_state,
+                        "execution_flat": True,
+                        "closeout_allowed": True,
+                        "broker_open_order_count": int(broker_open_order_count),
+                        "sellable_executable_lot_count": int(sellable_executable_lot_count),
+                        "dry_run": int(bool(dry_run)),
+                        "side": "SELL",
+                        "symbol": settings.PAIR,
+                        "trigger": trigger,
+                    },
+                )
+                if dry_run:
+                    return {
+                        "status": "dry_run",
+                        "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                        "qty": float(normalized_qty),
+                        "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
+                        "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
+                        "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
+                        "broker_asset_available": float(broker_asset_available),
+                        "reference_bid": float(market_price),
+                        "terminal_state": terminal_state,
+                        "execution_flat": True,
+                        "closeout_allowed": True,
+                        "sellable_executable_lot_count": int(sellable_executable_lot_count),
+                        "dry_run": 1,
+                        "side": "SELL",
+                        "symbol": settings.PAIR,
+                        "trigger": trigger,
+                    }
+
+                client_order_id = f"flatten_{int(time.time() * 1000)}"
+                submit_attempt_id: str | None = None
+                try:
+                    submit_attempt_id, payload_hash, _submit_ts = _stage_flatten_submit_intent(
+                        client_order_id=client_order_id,
+                        trigger=trigger,
+                        qty=normalized_qty,
+                        market_price=market_price,
+                        lot_snapshot=snapshot.lot_snapshot,
+                        exit_sizing=exit_sizing,
+                        reason_code=BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                    )
+                    place_order_kwargs = {
+                        "client_order_id": client_order_id,
+                        "side": "SELL",
+                        "qty": normalized_qty,
+                        "price": None,
+                    }
+                    place_order_params = inspect.signature(broker.place_order).parameters
+                    if "submit_plan" in place_order_params:
+                        submit_plan = plan_place_order(
+                            broker,
+                            intent=OrderIntent(
+                                client_order_id=client_order_id,
+                                market=settings.PAIR,
+                                side="SELL",
+                                normalized_side="ask",
+                                qty=float(normalized_qty),
+                                price=None,
+                                created_ts=int(time.time() * 1000),
+                                market_price_hint=market_price,
+                                trace_id=client_order_id,
+                            ),
+                            skip_qty_revalidation=True,
+                        )
+                        place_order_kwargs["submit_plan"] = submit_plan
+                    order = broker.place_order(**place_order_kwargs)
+                    _record_flatten_submit_ack(
+                        client_order_id=client_order_id,
+                        submit_attempt_id=submit_attempt_id,
+                        payload_hash=payload_hash,
+                        trigger=trigger,
+                        qty=normalized_qty,
+                        market_price=market_price,
+                        order=order,
+                        reason_code=BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                    )
+                except Exception as exc:
+                    err = f"{type(exc).__name__}: {exc}"
+                    if submit_attempt_id is not None:
+                        _mark_flatten_submit_unknown(
+                            client_order_id=client_order_id,
+                            submit_attempt_id=submit_attempt_id,
+                            reason=(
+                                "operator residual closeout submit outcome unknown after "
+                                f"pre-submit journal: {err}"
+                            ),
+                        )
+                    summary = {
+                        "status": "failed",
+                        "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                        "qty": float(normalized_qty),
+                        "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
+                        "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
+                        "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
+                        "broker_asset_available": float(broker_asset_available),
+                        "terminal_state": terminal_state,
+                        "side": "SELL",
+                        "symbol": settings.PAIR,
+                        "error": err,
+                        "trigger": trigger,
+                    }
+                    runtime_state.record_flatten_position_result(status="failed", summary=summary)
+                    return summary
+
+                summary = {
+                    "status": "submitted",
+                    "reason": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                    "qty": normalized_qty,
+                    "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
+                    "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
+                    "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
+                    "broker_asset_available": float(broker_asset_available),
+                    "terminal_state": terminal_state,
+                    "side": "SELL",
+                    "symbol": settings.PAIR,
+                    "client_order_id": client_order_id,
+                    "exchange_order_id": str(order.exchange_order_id or "-"),
+                    "order_status": str(order.status or "-"),
+                    "trigger": trigger,
+                }
+                runtime_state.record_flatten_position_result(status="submitted", summary=summary)
+                return summary
+            except LookupError:
+                pass
+            except ValueError as exc:
+                summary = {
+                    "status": "blocked",
+                    "reason": str(exc),
+                    "closeout_reason_code": BROKER_CONFIRMED_RESIDUAL_CLOSEOUT,
+                    "qty": 0.0,
+                    "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
+                    "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
+                    "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
+                    "terminal_state": terminal_state,
+                    "execution_flat": True,
+                    "closeout_allowed": False,
+                    "sellable_executable_lot_count": int(sellable_executable_lot_count),
+                    "dry_run": int(bool(dry_run)),
+                    "trigger": trigger,
+                }
+                runtime_state.record_flatten_position_result(status="blocked", summary=summary)
+                return summary
+
         summary = {
             "status": "no_position",
             "reason": str(exit_block_reason),
