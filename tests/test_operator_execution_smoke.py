@@ -138,6 +138,28 @@ def _readiness_snapshot(
     )
 
 
+def _planner_rule_dict() -> dict[str, object]:
+    return {
+        "market": "KRW-BTC",
+        "min_qty": 0.0001,
+        "qty_step": 0.0001,
+        "min_notional_krw": 5_000.0,
+        "bid_min_total_krw": 5_000.0,
+        "ask_min_total_krw": 5_000.0,
+        "bid_price_unit": 1.0,
+        "ask_price_unit": 1.0,
+        "order_types": ["limit", "price", "market"],
+        "bid_types": ["limit", "price", "market"],
+        "ask_types": ["limit", "price", "market"],
+        "order_sides": ["bid", "ask"],
+        "bid_fee": 0.0025,
+        "ask_fee": 0.0025,
+        "maker_bid_fee": 0.0020,
+        "maker_ask_fee": 0.0020,
+        "max_qty_decimals": 8,
+    }
+
+
 def _authority_path(tmp_path: Path, *, db_path: Path, commit: str = "abc123", market: str = "KRW-BTC") -> Path:
     path = tmp_path / f"smoke-authority-{market}.json"
     payload = build_operator_smoke_authority_payload(
@@ -159,9 +181,7 @@ def _patch_smoke_buy_submit_dependencies(
     monkeypatch.setattr(
         smoke,
         "resolve_execution_order_rules",
-        lambda market: SimpleNamespace(
-            as_order_rules=lambda: {"min_notional_krw": 5_000, "min_qty": 0.0, "qty_step": 0.0}
-        ),
+        lambda market: SimpleNamespace(as_order_rules=_planner_rule_dict),
     )
     monkeypatch.setattr(
         smoke,
@@ -356,7 +376,7 @@ def test_execute_smoke_buy_does_not_call_validate_live_mode_preflight(
     monkeypatch.setattr(
         smoke,
         "resolve_execution_order_rules",
-        lambda market: SimpleNamespace(as_order_rules=lambda: {"min_notional_krw": 5_000, "min_qty": 0.0, "qty_step": 0.0}),
+        lambda market: SimpleNamespace(as_order_rules=_planner_rule_dict),
     )
     monkeypatch.setattr(
         smoke,
@@ -561,7 +581,7 @@ def test_smoke_buy_dispatch_to_submit_without_approved_profile(
     monkeypatch.setattr(
         smoke,
         "resolve_execution_order_rules",
-        lambda market: SimpleNamespace(as_order_rules=lambda: {"min_notional_krw": 5_000, "min_qty": 0.0, "qty_step": 0.0}),
+        lambda market: SimpleNamespace(as_order_rules=_planner_rule_dict),
     )
     monkeypatch.setattr(
         smoke,
@@ -668,7 +688,7 @@ def test_execute_smoke_buy_allows_flat_broker_local_match(
     monkeypatch.setattr(
         smoke,
         "resolve_execution_order_rules",
-        lambda market: SimpleNamespace(as_order_rules=lambda: {"min_notional_krw": 5_000, "min_qty": 0.0, "qty_step": 0.0}),
+        lambda market: SimpleNamespace(as_order_rules=_planner_rule_dict),
     )
     monkeypatch.setattr(
         smoke,
@@ -707,3 +727,105 @@ def test_execute_smoke_buy_allows_flat_broker_local_match(
     assert captured["request"].strategy_name == "operator_execution_smoke"
     assert fake_authority.verified is True
     assert fake_authority.consumed is True
+
+
+def test_execute_smoke_buy_passes_planner_complete_smoke_rules_to_submit_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import bithumb_bot.operator_smoke as smoke
+
+    db_path = _live_roots(monkeypatch, tmp_path)
+    conn = ensure_db(str(db_path))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(smoke, "settings", _live_settings(db_path))
+    monkeypatch.setattr(smoke, "runtime_code_provenance", lambda: {"commit_sha": "abc123"})
+    monkeypatch.setattr(smoke, "validate_operator_smoke_preflight", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        smoke,
+        "resolve_execution_order_rules",
+        lambda market: SimpleNamespace(as_order_rules=_planner_rule_dict),
+    )
+
+    def _build_live_submit_plan(**kwargs):
+        captured["effective_rules"] = kwargs["effective_rules"]
+        return SimpleNamespace(
+            intent=SimpleNamespace(market=kwargs["market"]),
+            submitted_qty=kwargs["qty"],
+            rules=kwargs["effective_rules"],
+            submit_qty_authority="unit",
+            exchange_order_type="price",
+            internal_lot_qty=kwargs["qty"],
+            qty_split=SimpleNamespace(lot_count=1),
+        )
+
+    monkeypatch.setattr(smoke, "build_live_submit_plan", _build_live_submit_plan)
+    monkeypatch.setattr(smoke, "submit_live_order_and_confirm", lambda **_kwargs: object())
+    try:
+        execute_smoke_buy(
+            conn=conn,
+            broker=_SmokeBroker(),
+            krw=50_000,
+            market="KRW-BTC",
+            confirm=SMOKE_BUY_CONFIRMATION_TOKEN,
+            authority_path=str(_authority_path(tmp_path, db_path=db_path)),
+            reference_price=100_000_000.0,
+            now_ms=1_800_000_000_000,
+        )
+    finally:
+        conn.close()
+
+    rules = captured["effective_rules"]
+    for field in (
+        "bid_price_unit",
+        "ask_price_unit",
+        "ask_min_total_krw",
+        "max_qty_decimals",
+        "order_types",
+        "bid_types",
+        "ask_types",
+        "order_sides",
+    ):
+        assert hasattr(rules, field)
+    assert rules.bid_price_unit == 1.0
+    assert rules.ask_price_unit == 1.0
+
+
+def test_execute_smoke_buy_builds_submit_plan_without_bid_price_unit_attribute_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import bithumb_bot.operator_smoke as smoke
+
+    db_path = _live_roots(monkeypatch, tmp_path)
+    conn = ensure_db(str(db_path))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(smoke, "settings", _live_settings(db_path))
+    monkeypatch.setattr(smoke, "runtime_code_provenance", lambda: {"commit_sha": "abc123"})
+    monkeypatch.setattr(smoke, "validate_operator_smoke_preflight", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        smoke,
+        "resolve_execution_order_rules",
+        lambda market: SimpleNamespace(as_order_rules=_planner_rule_dict),
+    )
+
+    def _submit(**kwargs):
+        captured["request"] = kwargs["request"]
+        return object()
+
+    monkeypatch.setattr(smoke, "submit_live_order_and_confirm", _submit)
+    try:
+        execute_smoke_buy(
+            conn=conn,
+            broker=_SmokeBroker(),
+            krw=50_000,
+            market="KRW-BTC",
+            confirm=SMOKE_BUY_CONFIRMATION_TOKEN,
+            authority_path=str(_authority_path(tmp_path, db_path=db_path)),
+            reference_price=100_000_000.0,
+            now_ms=1_800_000_000_000,
+        )
+    finally:
+        conn.close()
+
+    submit_plan = captured["request"].submit_plan
+    assert submit_plan.submit_price_tick_policy.price_unit == 1.0
+    assert submit_plan.exchange_order_type == "price"

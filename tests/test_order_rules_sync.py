@@ -6,6 +6,7 @@ from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot import config as config_module
 from bithumb_bot.config import settings
+from bithumb_bot.execution_order_rules import ExecutionOrderRules, resolve_execution_order_rules
 from bithumb_bot.db_core import (
     ensure_db,
     fetch_latest_order_rule_snapshot,
@@ -506,6 +507,115 @@ def test_get_effective_order_rules_marks_price_unit_source_missing_when_absent(m
     assert resolved.source["maker_ask_fee"] == "chance_doc"
     assert resolved.source["bid_price_unit"] == "missing"
     assert resolved.source["ask_price_unit"] == "missing"
+
+
+def test_execution_order_rules_as_order_rules_exposes_planner_required_fields() -> None:
+    rules = ExecutionOrderRules(
+        market="KRW-BTC",
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5_000.0,
+        bid_min_total_krw=5_000.0,
+        ask_min_total_krw=5_000.0,
+        bid_price_unit=10.0,
+        ask_price_unit=1.0,
+        order_types=("limit", "price", "market"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_fee=0.0025,
+        ask_fee=0.0025,
+        maker_bid_fee=0.0020,
+        maker_ask_fee=0.0020,
+        max_qty_decimals=8,
+        source="effective_order_rules:merged",
+        source_mode="merged",
+        field_sources={
+            "bid_price_unit": "chance_doc",
+            "ask_price_unit": "chance_doc",
+            "max_qty_decimals": "local_fallback",
+        },
+    )
+
+    planner_rules = rules.as_order_rules()
+
+    for field in (
+        "bid_price_unit",
+        "ask_price_unit",
+        "ask_min_total_krw",
+        "bid_min_total_krw",
+        "max_qty_decimals",
+        "order_types",
+        "bid_types",
+        "ask_types",
+        "order_sides",
+        "bid_fee",
+        "ask_fee",
+        "maker_bid_fee",
+        "maker_ask_fee",
+        "min_qty",
+        "qty_step",
+        "min_notional_krw",
+    ):
+        assert field in planner_rules
+    assert planner_rules["bid_price_unit"] == 10.0
+    assert planner_rules["ask_price_unit"] == 1.0
+    assert planner_rules["order_rule_authority_source"] == "effective_order_rules:merged"
+    assert planner_rules["order_rule_bid_price_unit_source"] == "chance_doc"
+    assert planner_rules["order_rule_max_qty_decimals_source"] == "local_fallback"
+
+
+def test_resolve_execution_order_rules_copies_effective_planner_rule_shape(monkeypatch):
+    order_rules._cached_rules.clear()
+
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: order_rules.ExchangeDerivedConstraints(
+            market_id="KRW-BTC",
+            bid_min_total_krw=5000.0,
+            ask_min_total_krw=5000.0,
+            bid_price_unit=10.0,
+            ask_price_unit=1.0,
+            order_types=("limit", "price", "market"),
+            bid_types=("price",),
+            ask_types=("limit", "market"),
+            order_sides=("bid", "ask"),
+            bid_fee=0.0025,
+            ask_fee=0.0025,
+            maker_bid_fee=0.0020,
+            maker_ask_fee=0.0020,
+        ),
+    )
+
+    planner_rules = resolve_execution_order_rules(market="KRW-BTC").as_order_rules()
+
+    assert planner_rules["bid_price_unit"] == 10.0
+    assert planner_rules["ask_price_unit"] == 1.0
+    assert planner_rules["ask_min_total_krw"] == 5000.0
+    assert planner_rules["max_qty_decimals"] == 8
+    assert planner_rules["order_types"] == ["limit", "price", "market"]
+    assert planner_rules["bid_types"] == ["price"]
+    assert planner_rules["ask_types"] == ["limit", "market"]
+    assert planner_rules["order_sides"] == ["bid", "ask"]
+    assert planner_rules["order_rule_bid_price_unit_source"] == "chance_doc"
+    assert planner_rules["order_rule_max_qty_decimals_source"] == "local_fallback"
+
+
+def test_execution_order_rules_missing_bid_price_unit_still_emits_planner_field() -> None:
+    planner_rules = ExecutionOrderRules(
+        market="KRW-BTC",
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5_000.0,
+    ).as_order_rules()
+
+    assert "bid_price_unit" in planner_rules
+    assert planner_rules["bid_price_unit"] == 0.0
 
 
 def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fails(monkeypatch):
