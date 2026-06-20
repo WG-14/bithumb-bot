@@ -11,10 +11,14 @@ from bithumb_bot.execution_service import LiveSignalExecutionService
 from bithumb_bot.live_pipeline_smoke import (
     LivePipelineSmokeError,
     LivePipelineSmokeExecutionService,
+    _validate_smoke_roundtrip_notional_buffer,
     _readiness_from_broker,
     run_live_pipeline_smoke,
     validate_live_pipeline_smoke_request,
 )
+from bithumb_bot.live_pipeline_smoke_preflight import LivePipelineSmokePreflightError
+from bithumb_bot.live_pipeline_smoke_preflight import LivePipelineSmokeReadiness, validate_live_pipeline_smoke_step_readiness
+from bithumb_bot.execution_order_rules import ExecutionOrderRules
 from bithumb_bot.live_pipeline_smoke_authority import (
     LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
     build_live_pipeline_smoke_authority_payload,
@@ -62,7 +66,7 @@ def _restore_settings(old):
         object.__setattr__(settings, name, value)
 
 
-def _authority(tmp_path, db_path):
+def _authority(tmp_path, db_path, *, max_notional_krw: float = 20_000.0):
     path = tmp_path / "authority.json"
     payload = build_live_pipeline_smoke_authority_payload(
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
@@ -70,6 +74,7 @@ def _authority(tmp_path, db_path):
         db_path=str(db_path),
         account_key="account",
         code_commit_sha="unavailable",
+        max_notional_krw=max_notional_krw,
     )
     write_json_atomic(path, payload)
     return path
@@ -105,7 +110,7 @@ def test_fake_broker_executes_five_round_trips(monkeypatch, tmp_path) -> None:
             broker=broker,
             cycles=5,
             max_orders=10,
-            max_notional_krw=10_000.0,
+            max_notional_krw=20_000.0,
             yes=True,
             authority_path=str(authority),
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
@@ -171,7 +176,7 @@ def test_real_live_service_executes_five_round_trips_with_fake_executor(monkeypa
             broker=broker,
             cycles=5,
             max_orders=10,
-            max_notional_krw=10_000.0,
+            max_notional_krw=20_000.0,
             yes=True,
             authority_path=str(authority),
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
@@ -224,7 +229,7 @@ def test_failure_after_step_prevents_next_step(monkeypatch, tmp_path) -> None:
             broker=broker,
             cycles=5,
             max_orders=10,
-            max_notional_krw=10_000.0,
+            max_notional_krw=20_000.0,
             yes=True,
             authority_path=str(authority),
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
@@ -261,7 +266,7 @@ def test_execute_none_does_not_increment_orders_submitted(monkeypatch, tmp_path)
             broker=broker,
             cycles=5,
             max_orders=10,
-            max_notional_krw=10_000.0,
+            max_notional_krw=20_000.0,
             yes=True,
             authority_path=str(authority),
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
@@ -302,3 +307,47 @@ def test_apply_regression_bounds_rejected(kwargs) -> None:
     base.update(kwargs)
     with pytest.raises(LivePipelineSmokeError):
         validate_live_pipeline_smoke_request(**base)
+
+
+def test_fake_broker_roundtrip_min_qty_rejects_low_notional() -> None:
+    rules = ExecutionOrderRules(
+        market="KRW-BTC",
+        min_qty=0.0001,
+        qty_step=0.00000001,
+        min_notional_krw=5_000.0,
+        source="unit",
+    )
+    with pytest.raises(
+        LivePipelineSmokePreflightError,
+        match="live_pipeline_smoke_max_notional_below_sellable_roundtrip_minimum",
+    ):
+        _validate_smoke_roundtrip_notional_buffer(
+            rules=rules,
+            reference_price=96_933_000,
+            max_notional_krw=10_000,
+        )
+
+
+def test_fake_broker_fee_pending_allows_authorized_sell_closeout_readiness() -> None:
+    readiness = LivePipelineSmokeReadiness(
+        broker_qty=0.0002,
+        portfolio_qty=0.0002,
+        projected_total_qty=0.0002,
+        open_order_count=0,
+        submit_unknown_count=0,
+        recovery_required_count=0,
+        fee_pending_count=1,
+        active_fee_accounting_blocker=True,
+        broker_qty_known=True,
+        balance_source_stale=False,
+        projection_converged=True,
+    )
+
+    validate_live_pipeline_smoke_step_readiness(
+        readiness,
+        expected_side="SELL",
+        requested_qty=0.0002,
+        terminal_flat_authority=True,
+    )
+    with pytest.raises(LivePipelineSmokePreflightError):
+        validate_live_pipeline_smoke_step_readiness(readiness, expected_side="BUY")

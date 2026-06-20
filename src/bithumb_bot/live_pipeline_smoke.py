@@ -14,6 +14,8 @@ from .db_core import ensure_db, record_strategy_decision
 from .decision_equivalence import sha256_prefixed
 from .execution_order_rules import ExecutionOrderRules, resolve_execution_order_rules
 from .execution_service import ExecutionDecisionSummary, ExecutionSubmitPlan, build_signal_execution_service
+from .order_settlement import OrderSettlementCoordinator, SettlementBarrierConfig
+from .quantity_contracts import build_quantity_semantics
 from .live_pipeline_smoke_authority import (
     LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
     LIVE_PIPELINE_SMOKE_CYCLES,
@@ -250,6 +252,88 @@ def _validate_smoke_order_rules(
     min_notional = max(float(rules.min_notional_krw), float(side_min_total or 0.0))
     if float(notional_krw) + 1e-9 < min_notional:
         raise LivePipelineSmokePreflightError("live_pipeline_smoke_notional_below_min_notional")
+
+
+def _validate_smoke_roundtrip_notional_buffer(
+    *,
+    rules: ExecutionOrderRules,
+    reference_price: float,
+    max_notional_krw: float,
+    safety_buffer: float = 1.05,
+) -> None:
+    if rules.min_qty is None or rules.min_notional_krw is None:
+        raise LivePipelineSmokePreflightError("live_pipeline_smoke_order_rules_missing_required_fields")
+    reference = _positive_finite(reference_price)
+    if reference is None:
+        raise LivePipelineSmokePreflightError("live_pipeline_smoke_market_reference_unavailable")
+    min_qty_notional = float(reference) * float(rules.min_qty) * float(safety_buffer)
+    required_roundtrip_notional = max(float(rules.min_notional_krw), min_qty_notional)
+    if float(max_notional_krw) + 1e-9 < required_roundtrip_notional:
+        raise LivePipelineSmokePreflightError(
+            "live_pipeline_smoke_max_notional_below_sellable_roundtrip_minimum"
+        )
+
+
+_SMOKE_REPAIR_TABLES = (
+    "manual_flat_accounting_repairs",
+    "fee_pending_accounting_repairs",
+    "fee_gap_accounting_repairs",
+    "position_authority_repairs",
+    "external_position_adjustments",
+)
+
+
+def _table_count(conn: Any, table_name: str) -> int:
+    row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {table_name}").fetchone()
+    return int(row["cnt"] if hasattr(row, "keys") else row[0])
+
+
+def _repair_event_counters(conn: Any) -> dict[str, int]:
+    return {table: _table_count(conn, table) for table in _SMOKE_REPAIR_TABLES}
+
+
+def _repair_event_delta(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:
+    return {
+        key: max(0, int(after.get(key, 0)) - int(before.get(key, 0)))
+        for key in _SMOKE_REPAIR_TABLES
+    }
+
+
+def _repair_event_delta_total(delta: Mapping[str, int]) -> int:
+    return sum(int(value or 0) for value in delta.values())
+
+
+def _settlement_observation_from_readiness(
+    *,
+    readiness: LivePipelineSmokeReadiness,
+    trade: Mapping[str, Any],
+    side: str,
+    quantity_semantics: Mapping[str, object],
+) -> dict[str, Any]:
+    fee_pending = int(readiness.fee_pending_count or 0) > 0 or bool(readiness.active_fee_accounting_blocker)
+    fee_state = "pending" if fee_pending else "finalized"
+    filled_qty = float(trade.get("filled_qty") or trade.get("submit_qty") or 0.0)
+    return {
+        "order_state": "FILLED",
+        "order_terminal": True,
+        "fill_count": 1 if filled_qty > 0.0 else 0,
+        "fill_set_complete": filled_qty > 0.0,
+        "paid_fee_present": not fee_pending,
+        "order_level_paid_fee_present": not fee_pending,
+        "complete_fill_set_available": filled_qty > 0.0,
+        "fee_state": fee_state,
+        "principal_applied": filled_qty > 0.0,
+        "accounting_finalized": not fee_pending,
+        "projection_applied": bool(readiness.projection_converged),
+        "projected_total_qty": float(readiness.projected_total_qty),
+        "portfolio_qty": float(readiness.portfolio_qty),
+        "broker_qty": float(readiness.broker_qty),
+        "broker_local_converged": bool(readiness.converged),
+        "manual_intervention_required": False,
+        "quantity_semantics": dict(quantity_semantics),
+        "side": str(side).upper(),
+        "reason_code": "settlement_waiting" if fee_pending else "settlement_evidence_complete",
+    }
 
 
 def _smoke_risk_policy_hash() -> str:
@@ -515,6 +599,10 @@ def run_live_pipeline_smoke(
     buy_submitted = 0
     sell_submitted = 0
     market_reference_sources: set[str] = set()
+    repair_counters_before = _repair_event_counters(conn)
+    settlement_coordinator = OrderSettlementCoordinator(
+        SettlementBarrierConfig(max_attempts=5, poll_intervals_ms=(0, 0, 0, 0, 0), deadline_ms=5000)
+    )
 
     for step in range(max_orders):
         try:
@@ -522,7 +610,12 @@ def run_live_pipeline_smoke(
             side = provider.next_side(current)
             if side == "STOP":
                 break
-            validate_live_pipeline_smoke_step_readiness(current, expected_side=side)
+            validate_live_pipeline_smoke_step_readiness(
+                current,
+                expected_side=side,
+                requested_qty=(float(current.broker_qty) if side == "SELL" else None),
+                terminal_flat_authority=(side == "SELL"),
+            )
             ts = int(time.time() * 1000) + step
             market_reference = _resolve_market_reference(conn, market=market, now_ms=ts)
         except Exception as exc:
@@ -548,6 +641,12 @@ def run_live_pipeline_smoke(
         notional = float(max_notional_krw) if side == "BUY" else max(0.0, float(current_exposure))
         try:
             order_rules = resolve_execution_order_rules(market=market)
+            if side == "BUY":
+                _validate_smoke_roundtrip_notional_buffer(
+                    rules=order_rules,
+                    reference_price=float(market_reference.price),
+                    max_notional_krw=float(max_notional_krw),
+                )
             _validate_smoke_order_rules(
                 rules=order_rules,
                 market=market,
@@ -608,6 +707,36 @@ def run_live_pipeline_smoke(
                 )
             )
 
+        quantity_semantics = build_quantity_semantics(
+            broker_position_qty=(float(current.broker_qty) if side == "SELL" else float(qty)),
+            exchange_min_qty=float(order_rules.min_qty or 0.0),
+            strategy_internal_lot_size=(
+                float(getattr(settings, "LIVE_INTERNAL_LOT_SIZE", 0.0) or 0.0) or None
+            ),
+            target_delta_closeout_authorized=(side == "SELL"),
+            terminal_closeout_covered_qty=(float(current.broker_qty) if side == "SELL" else float(qty)),
+        ).as_dict()
+
+        def _settle_trade(_trade: Mapping[str, Any]):
+            client_order_id = str(_trade.get("client_order_id") or "")
+            exchange_order_id = str(_trade.get("exchange_order_id") or "") or None
+
+            def _observe(_attempt_index: int) -> Mapping[str, Any]:
+                observed = readiness()
+                return _settlement_observation_from_readiness(
+                    readiness=observed,
+                    trade=_trade,
+                    side=side,
+                    quantity_semantics=quantity_semantics,
+                )
+
+            return settlement_coordinator.settle(
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                observe=_observe,
+                reconcile=reconcile,
+            )
+
         result = coordinator.execute_cycle(
             candle_ts=ts,
             decision_id=decision_id,
@@ -620,7 +749,8 @@ def run_live_pipeline_smoke(
             execution_plan_bundle=None,
             execution_service=None,
             submit_invoker=_submit_invoker,
-            post_trade_reconcile=reconcile,
+            post_trade_reconcile=None,
+            settlement_coordinator=_settle_trade,
             input_hash=None,
         )
         trade = dict(result.trade or {}) if isinstance(result.trade, Mapping) else {}
@@ -643,9 +773,24 @@ def run_live_pipeline_smoke(
                 round_index=(step // 2) + 1,
                 orders_submitted=orders_submitted,
             )
+        settlement_result = dict(result.settlement_result or {})
+        if not settlement_result or not bool(settlement_result.get("settled")):
+            return _failure_payload(
+                run_id=smoke_run_id,
+                reason=str(settlement_result.get("reason_code") or "live_pipeline_smoke_order_not_settled"),
+                step=step,
+                round_index=(step // 2) + 1,
+                orders_submitted=orders_submitted + 1,
+            )
         after = readiness()
         try:
-            validate_live_pipeline_smoke_step_readiness(after, expected_side=("SELL" if side == "BUY" else "BUY"))
+            next_side = "SELL" if side == "BUY" else "BUY"
+            validate_live_pipeline_smoke_step_readiness(
+                after,
+                expected_side=next_side,
+                requested_qty=(float(after.broker_qty) if next_side == "SELL" else None),
+                terminal_flat_authority=(next_side == "SELL"),
+            )
         except LivePipelineSmokePreflightError as exc:
             return _failure_payload(
                 run_id=smoke_run_id,
@@ -660,15 +805,26 @@ def run_live_pipeline_smoke(
             "exchange_order_id": trade.get("exchange_order_id"),
             "submitted": True,
             "post_trade_reconciled": bool(result.post_trade_reconciled),
+            "settlement_status": settlement_result.get("reason_code"),
+            "settlement_result": settlement_result,
+            "fee_state": settlement_result.get("fee_state"),
+            "projection_converged_after_settlement": bool(after.projection_converged),
             "broker_qty_after": float(after.broker_qty),
+            "portfolio_qty_after": float(after.portfolio_qty),
+            "projected_total_qty_after": float(after.projected_total_qty),
+            "repair_events_created_during_step": _repair_event_delta_total(
+                _repair_event_delta(repair_counters_before, _repair_event_counters(conn))
+            ),
+            "manual_intervention_required": bool(settlement_result.get("operator_action_required")),
+            "quantity_semantics": quantity_semantics,
             "filled_qty": filled_qty,
             "market_reference_source": market_reference.source,
             "market_reference_price": float(market_reference.price),
         }
-        if not result.post_trade_reconciled:
+        if not bool(settlement_result.get("settled")):
             return _failure_payload(
                 run_id=smoke_run_id,
-                reason="live_pipeline_smoke_post_trade_reconcile_failed",
+                reason="live_pipeline_smoke_order_not_settled",
                 step=step,
                 round_index=(step // 2) + 1,
                 orders_submitted=orders_submitted + 1,
@@ -687,10 +843,26 @@ def run_live_pipeline_smoke(
             flat_round["sell"] = evidence
             rounds.append(flat_round)
             flat_round = {}
-        provider.mark_step_complete()
+        if bool(settlement_result.get("settled")):
+            provider.mark_step_complete()
 
     final = readiness()
-    if orders_submitted != max_orders or buy_submitted != cycles or sell_submitted != cycles or not final.flat:
+    repair_counters_after = _repair_event_counters(conn)
+    repair_delta = _repair_event_delta(repair_counters_before, repair_counters_after)
+    repair_events_created = _repair_event_delta_total(repair_delta)
+    final_flat = bool(
+        final.flat
+        and abs(float(final.broker_qty)) <= 1e-12
+        and abs(float(final.portfolio_qty)) <= 1e-12
+        and abs(float(final.projected_total_qty)) <= 1e-12
+    )
+    if (
+        orders_submitted != max_orders
+        or buy_submitted != cycles
+        or sell_submitted != cycles
+        or not final_flat
+        or repair_events_created != 0
+    ):
         return _failure_payload(
             run_id=smoke_run_id,
             reason="live_pipeline_smoke_final_completion_criteria_failed",
@@ -707,6 +879,8 @@ def run_live_pipeline_smoke(
         "orders_submitted": int(orders_submitted),
         "buy_submitted": int(buy_submitted),
         "sell_submitted": int(sell_submitted),
+        "repair_events_created_during_run": int(repair_events_created),
+        "repair_event_delta": repair_delta,
         "rounds": rounds,
         "final": {
             "broker_qty": float(final.broker_qty),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import json
 
 from bithumb_bot import runtime_state
 from bithumb_bot.cli.main import main as app_main
@@ -22,6 +23,8 @@ from bithumb_bot.execution import (
     apply_fill_principal_with_pending_fee,
     record_order_if_missing,
 )
+from bithumb_bot.lifecycle import summarize_position_lots
+from bithumb_bot.position_authority_state import build_lot_projection_convergence
 from bithumb_bot.fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
@@ -29,6 +32,55 @@ from bithumb_bot.fee_pending_repair import (
 from bithumb_bot.repair_plan import build_recovery_policy_from_report, build_repair_plan_preview_from_report
 from bithumb_bot.reporting import fetch_cash_drift_report
 from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
+
+
+def _record_terminal_closeout_evidence(
+    conn,
+    *,
+    client_order_id: str,
+    ts_ms: int,
+    submitted_qty: float,
+    authority_type: str,
+    open_exposure_qty: float = 0.0,
+    dust_tracking_qty: float = 0.0,
+) -> None:
+    evidence = {
+        "source": authority_type,
+        "authority": authority_type,
+        "authority_type": authority_type,
+        "command_intent": authority_type,
+        "decision_reason_code": "target_delta_rebalance"
+        if authority_type == "target_delta"
+        else authority_type,
+        "final_submitted_qty": submitted_qty,
+        "order_qty": submitted_qty,
+        "normalized_qty": submitted_qty,
+        "sell_open_exposure_qty": open_exposure_qty,
+        "sell_dust_tracking_qty": dust_tracking_qty,
+        "raw_total_asset_qty": submitted_qty,
+        "observed_position_qty": submitted_qty,
+        "clean_account_after_sell": True,
+    }
+    conn.execute(
+        """
+        INSERT INTO order_events(
+            client_order_id, event_type, event_ts, order_status, qty, side,
+            submit_evidence, final_submitted_qty, decision_reason_code, submission_reason_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            client_order_id,
+            "submit_attempt_recorded",
+            int(ts_ms),
+            "FILLED",
+            float(submitted_qty),
+            "SELL",
+            json.dumps(evidence, sort_keys=True),
+            float(submitted_qty),
+            str(evidence["decision_reason_code"]),
+            str(evidence["decision_reason_code"]),
+        ),
+    )
 
 
 @pytest.fixture
@@ -207,6 +259,205 @@ def test_external_adjustment_idempotency_keeps_projection_deterministic(projecti
     assert after == before
     assert after["external_cash_adjustment_count"] == 1
     assert after["external_cash_adjustment_total"] == pytest.approx(77.0)
+
+
+def _seed_sub_lot_dust_position(conn, *, buy_qty: float, lot_size: float, price: float, base_ts: int) -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id="dust_only_buy",
+        side="BUY",
+        qty_req=buy_qty,
+        price=price,
+        ts_ms=base_ts,
+        status="FILLED",
+        internal_lot_size=lot_size,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.00000001,
+        min_notional_krw=5000.0,
+        intended_lot_count=0,
+        executable_lot_count=0,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="dust_only_buy",
+        side="BUY",
+        fill_id="dust_only_buy_fill",
+        fill_ts=base_ts,
+        price=price,
+        qty=buy_qty,
+        fee=10.0,
+        strategy_name="target_delta",
+        entry_decision_id=101,
+    )
+
+
+def _apply_sub_lot_sell(
+    conn,
+    *,
+    client_order_id: str,
+    qty: float,
+    lot_size: float,
+    price: float,
+    base_ts: int,
+    authority_type: str | None,
+    asset_after: float,
+) -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        side="SELL",
+        qty_req=qty,
+        price=price,
+        ts_ms=base_ts + 1_000,
+        status="FILLED",
+        internal_lot_size=lot_size,
+        effective_min_trade_qty=0.0001,
+        qty_step=0.00000001,
+        min_notional_krw=5000.0,
+        intended_lot_count=0,
+        executable_lot_count=0,
+        final_submitted_qty=qty,
+        decision_reason_code=("target_delta_rebalance" if authority_type == "target_delta" else authority_type),
+    )
+    if authority_type is not None:
+        _record_terminal_closeout_evidence(
+            conn,
+            client_order_id=client_order_id,
+            ts_ms=base_ts + 1_000,
+            submitted_qty=qty,
+            authority_type=authority_type,
+            open_exposure_qty=0.0,
+            dust_tracking_qty=qty,
+        )
+    apply_fill_and_trade(
+        conn,
+        client_order_id=client_order_id,
+        side="SELL",
+        fill_id=f"{client_order_id}_fill",
+        fill_ts=base_ts + 1_000,
+        price=price,
+        qty=qty,
+        fee=10.0,
+        strategy_name="target_delta" if authority_type == "target_delta" else "sma_with_filter",
+        exit_decision_id=102,
+        exit_reason="target_delta_rebalance" if authority_type == "target_delta" else "ordinary_sell",
+        exit_rule_name="target_delta" if authority_type == "target_delta" else "signal_exit",
+    )
+    if asset_after != 0.0:
+        conn.execute(
+            "UPDATE trades SET asset_after=? WHERE client_order_id=? AND side='SELL'",
+            (float(asset_after), client_order_id),
+        )
+
+
+def test_target_delta_terminal_sell_consumes_all_dust_when_no_executable_lots(projection_db):
+    conn = ensure_db(str(projection_db))
+    buy_qty = 0.00019998
+    lot_size = 0.0004
+    price = 96_933_000.0
+    base_ts = 1_777_428_420_000
+    try:
+        _seed_sub_lot_dust_position(conn, buy_qty=buy_qty, lot_size=lot_size, price=price, base_ts=base_ts)
+        before = summarize_position_lots(conn, pair=str(settings.PAIR))
+        assert before.raw_open_exposure_qty == pytest.approx(0.0)
+        assert before.dust_tracking_qty == pytest.approx(buy_qty)
+
+        _apply_sub_lot_sell(
+            conn,
+            client_order_id="target_delta_dust_only_sell",
+            qty=buy_qty,
+            lot_size=lot_size,
+            price=price,
+            base_ts=base_ts,
+            authority_type="target_delta",
+            asset_after=0.0,
+        )
+
+        after = summarize_position_lots(conn, pair=str(settings.PAIR))
+        convergence = build_lot_projection_convergence(conn, pair=str(settings.PAIR))
+        repair_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    assert after.raw_total_asset_qty == pytest.approx(0.0)
+    assert after.dust_tracking_qty == pytest.approx(0.0)
+    assert convergence["projected_total_qty"] == pytest.approx(0.0)
+    assert repair_count == 0
+
+
+def test_operator_clean_closeout_consumes_all_dust_when_no_executable_lots(projection_db):
+    conn = ensure_db(str(projection_db))
+    buy_qty = 0.00019998
+    lot_size = 0.0004
+    price = 96_933_000.0
+    base_ts = 1_777_428_420_000
+    try:
+        _seed_sub_lot_dust_position(conn, buy_qty=buy_qty, lot_size=lot_size, price=price, base_ts=base_ts)
+        _apply_sub_lot_sell(
+            conn,
+            client_order_id="operator_dust_only_sell",
+            qty=buy_qty,
+            lot_size=lot_size,
+            price=price,
+            base_ts=base_ts,
+            authority_type="operator_clean_account_closeout",
+            asset_after=0.0,
+        )
+        after = summarize_position_lots(conn, pair=str(settings.PAIR))
+    finally:
+        conn.close()
+
+    assert after.dust_tracking_qty == pytest.approx(0.0)
+
+
+def test_ordinary_sell_without_terminal_authority_does_not_delete_all_dust(projection_db):
+    conn = ensure_db(str(projection_db))
+    buy_qty = 0.00019998
+    lot_size = 0.0004
+    price = 96_933_000.0
+    base_ts = 1_777_428_420_000
+    try:
+        _seed_sub_lot_dust_position(conn, buy_qty=buy_qty, lot_size=lot_size, price=price, base_ts=base_ts)
+        _apply_sub_lot_sell(
+            conn,
+            client_order_id="ordinary_dust_only_sell",
+            qty=buy_qty,
+            lot_size=lot_size,
+            price=price,
+            base_ts=base_ts,
+            authority_type=None,
+            asset_after=0.0,
+        )
+        after = summarize_position_lots(conn, pair=str(settings.PAIR))
+    finally:
+        conn.close()
+
+    assert after.dust_tracking_qty == pytest.approx(buy_qty)
+
+
+def test_terminal_sell_with_asset_after_nonzero_does_not_delete_dust(projection_db):
+    conn = ensure_db(str(projection_db))
+    buy_qty = 0.00019998
+    lot_size = 0.0004
+    price = 96_933_000.0
+    base_ts = 1_777_428_420_000
+    try:
+        _seed_sub_lot_dust_position(conn, buy_qty=buy_qty, lot_size=lot_size, price=price, base_ts=base_ts)
+        _apply_sub_lot_sell(
+            conn,
+            client_order_id="nonzero_after_dust_only_sell",
+            qty=buy_qty - 0.00000001,
+            lot_size=lot_size,
+            price=price,
+            base_ts=base_ts,
+            authority_type="target_delta",
+            asset_after=0.00000001,
+        )
+        after = summarize_position_lots(conn, pair=str(settings.PAIR))
+    finally:
+        conn.close()
+
+    assert after.dust_tracking_qty == pytest.approx(buy_qty)
 
 
 def test_audit_allows_sell_snapshot_with_residual_holdings_when_projection_converges(

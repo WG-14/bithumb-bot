@@ -7,6 +7,7 @@ from .config import LiveModeValidationError, Settings, validate_market_preflight
 from .db_core import assert_current_schema
 from .oms import OPEN_ORDER_STATUSES
 from .operator_smoke_preflight import validate_operator_smoke_cli_guard
+from .risk_direction_gates import evaluate_risk_direction_gates
 from .runtime_readiness import compute_runtime_readiness_snapshot
 
 
@@ -172,6 +173,8 @@ def validate_live_pipeline_smoke_step_readiness(
     readiness: LivePipelineSmokeReadiness,
     *,
     expected_side: str,
+    requested_qty: float | None = None,
+    terminal_flat_authority: bool = False,
 ) -> None:
     if readiness.open_order_count > 0:
         raise LivePipelineSmokePreflightError("live_pipeline_smoke_step_open_order")
@@ -179,13 +182,27 @@ def validate_live_pipeline_smoke_step_readiness(
         raise LivePipelineSmokePreflightError("live_pipeline_smoke_step_submit_unknown")
     if readiness.recovery_required_count > 0:
         raise LivePipelineSmokePreflightError("live_pipeline_smoke_step_recovery_required")
-    if readiness.fee_pending_count > 0:
-        raise LivePipelineSmokePreflightError("live_pipeline_smoke_step_fee_pending")
-    if readiness.active_fee_accounting_blocker:
-        raise LivePipelineSmokePreflightError("live_pipeline_smoke_step_active_fee_accounting_blocker")
     if not readiness.converged:
         raise LivePipelineSmokePreflightError("live_pipeline_smoke_step_projection_mismatch")
     side = str(expected_side or "").upper()
+    direction_gate = evaluate_risk_direction_gates(
+        fee_pending=bool(readiness.fee_pending_count > 0 or readiness.active_fee_accounting_blocker),
+        side=side,
+        broker_qty=float(readiness.broker_qty) if readiness.broker_qty_known else None,
+        requested_qty=(
+            float(requested_qty)
+            if requested_qty is not None
+            else (float(readiness.broker_qty) if side == "SELL" else None)
+        ),
+        terminal_flat_authority=bool(terminal_flat_authority),
+        risk_reducing_authority=False,
+        open_order_count=int(readiness.open_order_count),
+        submit_unknown_count=int(readiness.submit_unknown_count),
+        recovery_required_count=int(readiness.recovery_required_count),
+    )
+    if readiness.fee_pending_count > 0 or readiness.active_fee_accounting_blocker:
+        if side == "BUY" or not direction_gate.terminal_flat_closeout_allowed:
+            raise LivePipelineSmokePreflightError(str(direction_gate.reason_code))
     if side == "BUY" and not readiness.flat:
         raise LivePipelineSmokePreflightError("live_pipeline_smoke_buy_requires_flat")
     if side == "SELL" and not readiness.in_position:

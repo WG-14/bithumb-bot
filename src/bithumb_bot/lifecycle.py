@@ -1465,6 +1465,13 @@ def apply_fill_lifecycle(
 
     remaining_lots = int(qty_to_executable_lot_count(qty=float(qty), lot_rules=lot_rules))
     if remaining_lots <= 0:
+        _close_terminal_flat_dust_tracking_lots(
+            conn,
+            pair=str(pair),
+            authority=quantity_authority,
+            open_exposure_qty_before=float(lot_snapshot_before_sell.raw_open_exposure_qty),
+            dust_tracking_qty_before=float(lot_snapshot_before_sell.dust_tracking_qty),
+        )
         return
 
     total_exit_qty = lot_count_to_qty(lot_count=remaining_lots, lot_size=float(lot_rules.lot_size))

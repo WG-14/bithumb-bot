@@ -13,6 +13,7 @@ from ..execution_service import (
     primary_execution_submit_plan,
 )
 from .lifecycle_artifacts import StateTransitionResult
+from ..order_settlement import OrderSettlementResult
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class ExecutionCycleResult:
     mark_processed_allowed: bool
     halt_transition: Mapping[str, Any] | None = None
     trade: Mapping[str, Any] | None = None
+    settlement_result: Mapping[str, Any] | None = None
     notification_event_hashes: tuple[str, ...] = ()
     input_hash: str | None = None
     evidence_hash: str | None = None
@@ -44,6 +46,7 @@ class ExecutionCycleResult:
             "mark_processed_allowed": bool(self.mark_processed_allowed),
             "halt_transition": dict(self.halt_transition or {}),
             "trade_present": self.trade is not None,
+            "settlement_result": dict(self.settlement_result or {}),
             "notification_event_hashes": list(self.notification_event_hashes),
             "input_hash": self.input_hash
             or sha256_prefixed({"candle_ts": self.candle_ts, "decision_id": self.decision_id}),
@@ -54,6 +57,7 @@ class ExecutionCycleResult:
                     "submit_expected": bool(self.submit_expected),
                     "submitted": bool(self.submitted),
                     "post_trade_reconciled": bool(self.post_trade_reconciled),
+                    "settled": bool((self.settlement_result or {}).get("settled")),
                 }
             ),
         }
@@ -90,6 +94,8 @@ class ExecutionCoordinator:
         execution_service: Any | None = None,
         submit_invoker: Callable[[], Any] | None = None,
         post_trade_reconcile: Callable[[], Any] | None = None,
+        settlement_coordinator: Callable[[Mapping[str, Any]], OrderSettlementResult | Mapping[str, Any]]
+        | None = None,
         input_hash: str | None = None,
         execution_plan_bundle_hash: str | None = None,
     ) -> ExecutionCycleResult:
@@ -248,6 +254,29 @@ class ExecutionCoordinator:
                 execution_plan_bundle_hash=execution_plan_bundle_hash,
                 submitted=True,
             )
+        settlement_payload: Mapping[str, Any] | None = None
+        if settlement_coordinator is not None and isinstance(trade, Mapping):
+            try:
+                settlement = settlement_coordinator(trade)
+            except Exception as exc:
+                return self._halted_result(
+                    candle_ts=candle_ts,
+                    decision_id=decision_id,
+                    planning_status="order_settlement_failed",
+                    reason_code="ORDER_SETTLEMENT_FAILED",
+                    error=f"settlement failed ({type(exc).__name__}): {exc}",
+                    input_hash=input_hash,
+                    execution_plan_bundle_hash=execution_plan_bundle_hash,
+                    submitted=True,
+                )
+            settlement_payload = (
+                settlement.as_dict()
+                if callable(getattr(settlement, "as_dict", None))
+                else dict(settlement)
+            )
+        mark_processed_allowed = True
+        if settlement_payload is not None:
+            mark_processed_allowed = bool(settlement_payload.get("settled"))
         return ExecutionCycleResult(
             candle_ts=candle_ts,
             decision_id=decision_id,
@@ -255,9 +284,10 @@ class ExecutionCoordinator:
             submit_expected=True,
             submitted=True,
             post_trade_reconciled=post_trade_reconcile is not None,
-            mark_processed_allowed=True,
+            mark_processed_allowed=mark_processed_allowed,
             input_hash=input_hash,
             trade=trade if isinstance(trade, Mapping) else None,
+            settlement_result=settlement_payload,
         )
 
     def _halted_result(
