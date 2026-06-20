@@ -822,15 +822,21 @@ def test_execution_coordinator_owns_submit_checkpoint_and_post_trade_reconcile()
     class _Summary:
         submit_expected = True
 
+    reconcile_calls: list[str] = []
+
+    def _record_reconcile_attempt() -> None:
+        reconcile_calls.append("reconciled")
+
     result = coordinator.execute_cycle(
         candle_ts=1,
         decision_id=1,
         execution_decision_summary=_Summary(),
         submit_invoker=lambda: None,
-        post_trade_reconcile=lambda: None,
+        post_trade_reconcile=_record_reconcile_attempt,
     )
     assert result.submitted is True
     assert result.post_trade_reconciled is True
+    assert reconcile_calls == ["reconciled"]
 
 
 def test_runtime_cycle_pipeline_passes_settlement_coordinator_in_live_mode(monkeypatch) -> None:

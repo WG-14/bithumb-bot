@@ -39,6 +39,10 @@ class _Broker:
         return []
 
 
+def _record_reconcile_attempt(attempts: list[str]) -> None:
+    attempts.append("reconcile")
+
+
 def _patch_settings(monkeypatch, db_path):
     old = {}
     for name, value in {
@@ -105,6 +109,7 @@ def test_fake_broker_executes_five_round_trips(monkeypatch, tmp_path) -> None:
         monkeypatch.setattr("bithumb_bot.live_pipeline_smoke.validate_live_pipeline_smoke_start_preflight", lambda **_kwargs: None)
 
         service = LivePipelineSmokeExecutionService(broker=broker)
+        reconcile_attempts: list[str] = []
         payload = run_live_pipeline_smoke(
             conn=conn,
             broker=broker,
@@ -116,7 +121,7 @@ def test_fake_broker_executes_five_round_trips(monkeypatch, tmp_path) -> None:
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
             execution_service=service,
             readiness_provider=lambda: _readiness_from_broker(broker),
-            post_trade_reconcile=lambda: None,
+            post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_attempts),
             run_id="lps_test",
         )
 
@@ -128,6 +133,7 @@ def test_fake_broker_executes_five_round_trips(monkeypatch, tmp_path) -> None:
         assert payload["final"]["broker_qty"] == 0.0
         assert conn.execute("SELECT COUNT(*) FROM strategy_decisions WHERE strategy_name='operator_live_pipeline_smoke'").fetchone()[0] == 10
         assert len(service.submissions) == 10
+        assert reconcile_attempts == ["reconcile"] * 10
     finally:
         _restore_settings(old)
 
@@ -170,6 +176,7 @@ def test_real_live_service_executes_five_round_trips_with_fake_executor(monkeypa
             executor=_executor,
             harmless_dust_recorder=lambda **_kwargs: False,
         )
+        reconcile_attempts: list[str] = []
 
         payload = run_live_pipeline_smoke(
             conn=conn,
@@ -182,7 +189,7 @@ def test_real_live_service_executes_five_round_trips_with_fake_executor(monkeypa
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
             execution_service=service,
             readiness_provider=lambda: _readiness_from_broker(broker),
-            post_trade_reconcile=lambda: None,
+            post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_attempts),
             run_id="lps_real_service_test",
         )
 
@@ -194,6 +201,7 @@ def test_real_live_service_executes_five_round_trips_with_fake_executor(monkeypa
         assert payload["final"]["portfolio_qty"] == 0.0
         assert payload["final"]["projected_total_qty"] == 0.0
         assert len(calls) == 10
+        assert reconcile_attempts == ["reconcile"] * 10
         assert [call["signal"] for call in calls].count("BUY") == 5
         assert [call["signal"] for call in calls].count("SELL") == 5
         assert payload["execution_mode_metadata"]["market_reference_source"] == "orderbook_top_mid"
@@ -224,6 +232,7 @@ def test_failure_after_step_prevents_next_step(monkeypatch, tmp_path) -> None:
         monkeypatch.setattr("bithumb_bot.live_pipeline_smoke.validate_live_pipeline_smoke_start_preflight", lambda **_kwargs: None)
 
         service = LivePipelineSmokeExecutionService(broker=broker, fail_at_step=1)
+        reconcile_attempts: list[str] = []
         payload = run_live_pipeline_smoke(
             conn=conn,
             broker=broker,
@@ -235,13 +244,14 @@ def test_failure_after_step_prevents_next_step(monkeypatch, tmp_path) -> None:
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
             execution_service=service,
             readiness_provider=lambda: _readiness_from_broker(broker),
-            post_trade_reconcile=lambda: None,
+            post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_attempts),
             run_id="lps_test",
         )
 
         assert payload["status"] == "failed"
         assert payload["orders_submitted"] == 1
         assert len(service.submissions) == 1
+        assert reconcile_attempts == ["reconcile"]
     finally:
         _restore_settings(old)
 
@@ -261,6 +271,7 @@ def test_execute_none_does_not_increment_orders_submitted(monkeypatch, tmp_path)
             def execute(self, _request):
                 return None
 
+        reconcile_attempts: list[str] = []
         payload = run_live_pipeline_smoke(
             conn=conn,
             broker=broker,
@@ -272,13 +283,14 @@ def test_execute_none_does_not_increment_orders_submitted(monkeypatch, tmp_path)
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
             execution_service=_NoneService(),
             readiness_provider=lambda: _readiness_from_broker(broker),
-            post_trade_reconcile=lambda: None,
+            post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_attempts),
             run_id="lps_test",
         )
 
         assert payload["status"] == "failed"
         assert payload["orders_submitted"] == 0
         assert broker.qty == 0.0
+        assert reconcile_attempts == []
     finally:
         _restore_settings(old)
 

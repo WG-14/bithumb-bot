@@ -404,7 +404,7 @@ def test_recorded_all_dust_terminal_close_projects_flat_through_live_application
         conn.close()
 
 
-def test_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_lots_with_non_vacuous_lot_assertions(tmp_path, monkeypatch) -> None:
+def assert_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_lots(tmp_path, monkeypatch) -> None:
     conn = _configure_live_fixture(tmp_path, monkeypatch)
     broker = _ScriptedBithumbBroker()
     try:
@@ -444,9 +444,16 @@ def test_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_l
             assert after_sell.open_lot_count == 0
 
         assert _table_count(conn, "orders") == 10
+        assert conn.execute("SELECT COUNT(*) FROM orders WHERE side='BUY'").fetchone()[0] == 5
+        assert conn.execute("SELECT COUNT(*) FROM orders WHERE side='SELL'").fetchone()[0] == 5
         assert _table_count(conn, "order_events") >= 30
         assert _table_count(conn, "fills") == 10
         assert _table_count(conn, "broker_fill_observations") == 10
+        assert conn.execute(
+            "SELECT COUNT(*) FROM broker_fill_observations "
+            "WHERE accounting_status='accounting_complete' "
+            "AND fee_source='order_level_paid_fee'"
+        ).fetchone()[0] == 10
         assert _table_count(conn, "trades") == 10
         assert _table_count(conn, "portfolio") == 1
         assert conn.execute("SELECT COUNT(*) FROM open_position_lots WHERE qty_open > 1e-12").fetchone()[0] == 0
@@ -455,6 +462,20 @@ def test_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_l
         assert _table_count(conn, "position_authority_repairs") == 0
         assert broker.submit_calls == 10
         assert broker.cancel_calls == 0
+        assert len(broker.private_calls) == 20
+        assert {
+            str(params.get("uuid") or params.get("client_order_id"))
+            for _endpoint, params in broker.private_calls
+        } == (
+            {f"ex-roundtrip-buy-{index}" for index in range(5)}
+            | {f"ex-roundtrip-sell-{index}" for index in range(5)}
+        )
         assert all(endpoint == "/v1/order" for endpoint, _params in broker.private_calls)
     finally:
         conn.close()
+
+
+def test_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_lots_with_non_vacuous_lot_assertions(
+    tmp_path, monkeypatch
+) -> None:
+    assert_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_lots(tmp_path, monkeypatch)

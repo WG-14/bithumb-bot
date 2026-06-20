@@ -15,6 +15,9 @@ from tests.test_live_pipeline_smoke_runner_fake_broker import (
     _restore_settings,
     _readiness_from_broker,
 )
+from tests.test_live_settlement_integration_fixtures import (
+    assert_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_lots,
+)
 
 
 def _record_reconcile_attempt(attempts: list[str] | None = None):
@@ -191,6 +194,10 @@ def test_live_pipeline_smoke_records_settlement_evidence_for_each_step(monkeypat
     finally:
         conn.close()
         _restore_settings(old)
+
+
+def test_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_lots(monkeypatch, tmp_path) -> None:
+    assert_recorded_smoke_five_round_trips_touches_orders_fills_trades_portfolio_lots(tmp_path, monkeypatch)
 
 
 def test_smoke_result_failed_when_fee_pending_repair_event_created(monkeypatch, tmp_path) -> None:

@@ -19,6 +19,10 @@ def _trade() -> dict[str, object]:
     }
 
 
+def _record_reconcile_attempt(attempts: list[str]) -> None:
+    attempts.append("reconciled")
+
+
 def _evidence(*, fee_state: str = "finalized", projection: bool = True, broker_converged: bool = True):
     finalized = fee_state == "finalized"
     return {
@@ -50,24 +54,27 @@ def _evidence(*, fee_state: str = "finalized", projection: bool = True, broker_c
 def test_live_runtime_checkpoint_requires_settlement_result_settled() -> None:
     coordinator = ExecutionCoordinator("lot_native")
 
+    missing_reconcile_calls: list[str] = []
     missing = coordinator.execute_cycle(
         candle_ts=1,
         decision_id=1,
         execution_decision_summary=_Summary(),
         submit_invoker=_trade,
-        post_trade_reconcile=lambda: None,
+        post_trade_reconcile=lambda: _record_reconcile_attempt(missing_reconcile_calls),
         settlement_required=True,
     )
     assert missing.submitted is True
     assert missing.settlement_result is None
     assert missing.mark_processed_allowed is False
+    assert missing_reconcile_calls == ["reconciled"]
 
+    not_settled_reconcile_calls: list[str] = []
     not_settled = coordinator.execute_cycle(
         candle_ts=1,
         decision_id=1,
         execution_decision_summary=_Summary(),
         submit_invoker=_trade,
-        post_trade_reconcile=lambda: None,
+        post_trade_reconcile=lambda: _record_reconcile_attempt(not_settled_reconcile_calls),
         settlement_required=True,
         settlement_coordinator=lambda _trade_payload: {
             "settled": False,
@@ -76,13 +83,15 @@ def test_live_runtime_checkpoint_requires_settlement_result_settled() -> None:
         },
     )
     assert not_settled.mark_processed_allowed is False
+    assert not_settled_reconcile_calls == ["reconciled"]
 
+    settled_reconcile_calls: list[str] = []
     settled = coordinator.execute_cycle(
         candle_ts=1,
         decision_id=1,
         execution_decision_summary=_Summary(),
         submit_invoker=_trade,
-        post_trade_reconcile=lambda: None,
+        post_trade_reconcile=lambda: _record_reconcile_attempt(settled_reconcile_calls),
         settlement_required=True,
         settlement_coordinator=lambda _trade_payload: {
             "settled": True,
@@ -91,6 +100,7 @@ def test_live_runtime_checkpoint_requires_settlement_result_settled() -> None:
         },
     )
     assert settled.mark_processed_allowed is True
+    assert settled_reconcile_calls == ["reconciled"]
 
 
 def test_live_runtime_does_not_mark_processed_when_fee_pending_after_reconcile_callback_success() -> None:
@@ -132,17 +142,19 @@ def test_live_runtime_waits_for_delayed_order_level_paid_fee_before_checkpoint()
             observe=lambda attempt: _evidence(fee_state=states[min(attempt, len(states) - 1)]),
         )
 
+    reconcile_calls: list[str] = []
     result = ExecutionCoordinator("lot_native").execute_cycle(
         candle_ts=1,
         decision_id=1,
         execution_decision_summary=_Summary(),
         submit_invoker=_trade,
-        post_trade_reconcile=lambda: None,
+        post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_calls),
         settlement_required=True,
         settlement_coordinator=_settle,
     )
 
     assert result.mark_processed_allowed is True
+    assert reconcile_calls == ["reconciled"]
     assert result.settlement_result is not None
     evidence = result.settlement_result["evidence"]
     assert len(evidence["attempts"]) == 2
@@ -169,4 +181,3 @@ def test_live_runtime_rejects_projection_or_broker_non_convergence_for_checkpoin
             },
         )
         assert result.mark_processed_allowed is False
-
