@@ -41,6 +41,9 @@ def _rebuild_position_authority(args: argparse.Namespace, _context) -> None:
         note=str(args.note) if args.note is not None else None,
         full_projection_rebuild=bool(args.full_projection_rebuild),
         flat_stale_projection_repair=bool(args.flat_stale_projection_repair),
+        historical_fragmentation_projection_repair=bool(
+            getattr(args, "historical_fragmentation_projection_repair", False)
+        ),
         enrich_legacy_operator_closeout_evidence=bool(args.enrich_legacy_operator_closeout_evidence),
         as_json=bool(args.json),
     )
@@ -172,6 +175,7 @@ def _build_fee_pending(parser: argparse.ArgumentParser) -> None:
 def _build_rebuild_position_authority(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--full-projection-rebuild", action="store_true")
     parser.add_argument("--flat-stale-projection-repair", action="store_true")
+    parser.add_argument("--historical-fragmentation-projection-repair", action="store_true")
     parser.add_argument("--enrich-legacy-operator-closeout-evidence", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--yes", action="store_true")

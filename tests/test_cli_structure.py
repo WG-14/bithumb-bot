@@ -362,6 +362,14 @@ def test_rebuild_position_authority_json_flag_matches_command_spec() -> None:
     assert args.cmd == "rebuild-position-authority"
     assert args.flat_stale_projection_repair is True
     assert args.json is True
+    historical_args = parser.parse_args([
+        "rebuild-position-authority",
+        "--historical-fragmentation-projection-repair",
+        "--json",
+    ])
+    assert historical_args.cmd == "rebuild-position-authority"
+    assert historical_args.historical_fragmentation_projection_repair is True
+    assert historical_args.json is True
 
 
 def test_legacy_operator_closeout_evidence_enrichment_cli_supports_json_preview() -> None:

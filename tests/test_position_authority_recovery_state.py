@@ -49,9 +49,11 @@ from bithumb_bot.position_authority_repair import (
     _replace_with_portfolio_anchored_projection,
     apply_legacy_operator_closeout_evidence_enrichment,
     apply_flat_stale_lot_projection_repair,
+    apply_historical_fragmentation_projection_drift_repair,
     apply_position_authority_rebuild,
     build_legacy_operator_closeout_evidence_enrichment_preview,
     build_flat_stale_lot_projection_repair_preview,
+    build_historical_fragmentation_projection_drift_repair_preview,
     build_position_authority_rebuild_preview,
 )
 from bithumb_bot.position_authority_state import build_position_authority_assessment
@@ -552,6 +554,37 @@ def _materialize_flat_stale_projection_fixture(
     conn.commit()
     _record_portfolio_projection_broker_evidence(broker_qty=broker_qty)
     return stale_ids
+
+
+def _materialize_historical_fragmentation_flat_projection_fixture(
+    conn,
+    *,
+    broker_qty: float = 0.0,
+    portfolio_qty: float = 0.0,
+    dust_quantities: list[float] | None = None,
+) -> list[int]:
+    conn.execute("DELETE FROM open_position_lots WHERE pair=?", (settings.PAIR,))
+    _insert_stale_dust_projection_rows(
+        conn,
+        dust_quantities=dust_quantities or [0.00009999, 0.00019998, 0.00029997],
+    )
+    replay = compute_accounting_replay(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=float(replay.get("replay_cash") or settings.START_CASH_KRW),
+        cash_locked=0.0,
+        asset_available=portfolio_qty,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    _record_portfolio_projection_broker_evidence(broker_qty=broker_qty)
+    return [
+        int(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM open_position_lots WHERE pair=? ORDER BY id ASC",
+            (settings.PAIR,),
+        ).fetchall()
+    ]
 
 
 def _insert_live_incident_stale_dust_projection(conn) -> None:
@@ -4733,6 +4766,29 @@ def test_flat_stale_lot_projection_unsafe_without_terminal_sell_evidence(recover
     assert "missing_terminal_flat_sell_evidence" in preview["blockers"]
 
 
+def test_flat_stale_lot_projection_unsafe_when_terminal_asset_after_not_flat(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_flat_stale_projection_fixture(conn)
+        conn.execute(
+            """
+            UPDATE trades
+            SET asset_after=0.00000001
+            WHERE client_order_id='live_1777367760000_sell_ae50365f'
+            """
+        )
+        conn.commit()
+        preview = build_flat_stale_lot_projection_repair_preview(conn)
+        with pytest.raises(RuntimeError):
+            apply_flat_stale_lot_projection_repair(conn)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "missing_terminal_flat_sell_evidence" in preview["blockers"]
+    assert "terminal_asset_after_not_flat" in preview["blockers"]
+
+
 def test_flat_stale_lot_projection_repair_is_idempotent(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:
@@ -4820,6 +4876,359 @@ def test_rebuild_position_authority_json_distinguishes_not_simulated_from_zero(r
 
     assert payload["replay_projected_total_qty"] == {"state": "not_simulated", "value": None}
     assert payload["post_publish_projected_total_qty"] == pytest.approx(0.0)
+
+
+def test_historical_fragmentation_projection_repair_preview_is_safe_for_flat_dust_only_rows(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        stale_ids = _materialize_historical_fragmentation_flat_projection_fixture(conn)
+        preview = build_historical_fragmentation_projection_drift_repair_preview(conn)
+    finally:
+        conn.close()
+
+    assert preview["needed"] is True
+    assert preview["safe_to_apply"] is True
+    assert preview["final_safe_to_apply"] is True
+    assert preview["repair_mode"] == "historical_fragmentation_projection_drift_repair"
+    assert preview["broker_qty_known"] is True
+    assert preview["broker_qty"] == pytest.approx(0.0)
+    assert preview["portfolio_qty"] == pytest.approx(0.0)
+    assert preview["accounting_replay_qty"] == pytest.approx(0.0)
+    assert preview["accounting_projection_ok"] is True
+    assert preview["active_fee_accounting_issue_count"] == 0
+    assert preview["unresolved_open_order_count"] == 0
+    assert preview["pending_submit_count"] == 0
+    assert preview["submit_unknown_count"] == 0
+    assert preview["recovery_required_count"] == 0
+    assert preview["remote_open_order_count"] == 0
+    assert preview["stale_dust_rows_to_clear"] == stale_ids
+    assert preview["stale_lot_qty_total"] == pytest.approx(preview["projected_total_qty_before"])
+    assert preview["projected_total_qty_after_preview"] == pytest.approx(0.0)
+    assert preview["expected_post_projection_converged"] is True
+    assert preview["recommended_command"] == (
+        "uv run bithumb-bot rebuild-position-authority "
+        "--historical-fragmentation-projection-repair --apply --yes"
+    )
+
+
+def test_historical_fragmentation_projection_repair_apply_clears_projection_and_records_audit(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        stale_ids = _materialize_historical_fragmentation_flat_projection_fixture(conn)
+        before = build_lot_projection_convergence(conn, pair=settings.PAIR)
+        result = apply_historical_fragmentation_projection_drift_repair(conn, note="historical fragmentation")
+        conn.commit()
+        after = build_lot_projection_convergence(conn, pair=settings.PAIR)
+        repair = conn.execute(
+            "SELECT reason, repair_basis FROM position_authority_repairs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        publication_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM position_authority_projection_publications"
+        ).fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    assert before["converged"] is False
+    assert before["projected_total_qty"] > 0.0
+    assert result["repair"]["created"] is True
+    assert result["projection_publication"]["created"] is True
+    assert result["repair_basis"]["deleted_stale_lot_ids"] == stale_ids
+    assert result["repair_basis"]["stale_lot_qty_total"] == pytest.approx(before["projected_total_qty"])
+    assert result["repair_basis"]["broker_qty"] == pytest.approx(0.0)
+    assert result["repair_basis"]["portfolio_qty"] == pytest.approx(0.0)
+    assert result["repair_basis"]["accounting_replay_qty"] == pytest.approx(0.0)
+    assert result["post_repair_projection_convergence"]["converged"] is True
+    assert after["projected_total_qty"] == pytest.approx(0.0)
+    assert after["portfolio_qty"] == pytest.approx(0.0)
+    assert after["converged"] is True
+    assert repair["reason"] == "historical_fragmentation_projection_drift_repair"
+    basis = json.loads(repair["repair_basis"])
+    assert basis["stale_lot_row_ids"] == stale_ids
+    assert publication_count == 1
+
+
+def test_historical_fragmentation_projection_repair_clears_recovery_report_blocker(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_historical_fragmentation_flat_projection_fixture(conn)
+    finally:
+        conn.close()
+
+    before = _load_recovery_report()
+    assert before["lot_projection_converged"] is False
+
+    conn = ensure_db(str(recovery_db))
+    try:
+        apply_historical_fragmentation_projection_drift_repair(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    after = _load_recovery_report()
+    assert after["lot_projection_converged"] is True
+    assert after["runtime_readiness"]["projection_converged"] is True
+    assert "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED" not in (
+        after["runtime_readiness"].get("resume_blockers") or []
+    )
+    assert after["runtime_readiness"].get("projection_non_convergence_reason") in {None, "none"}
+
+
+def test_historical_fragmentation_projection_repair_is_idempotent(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_historical_fragmentation_flat_projection_fixture(conn)
+        first = apply_historical_fragmentation_projection_drift_repair(conn)
+        conn.commit()
+        second_preview = build_historical_fragmentation_projection_drift_repair_preview(conn)
+        second = apply_historical_fragmentation_projection_drift_repair(conn)
+        repair_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    assert first["repair"]["created"] is True
+    assert second_preview["needed"] is False
+    assert second["noop"] is True
+    assert repair_count == 1
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_blocker"),
+    [
+        (
+            lambda conn: runtime_state.record_reconcile_result(
+                success=True,
+                reason_code="RECONCILE_OK",
+                metadata={"remote_open_order_found": 0},
+                now_epoch_sec=2.0,
+            ),
+            "broker_qty_unknown",
+        ),
+        (
+            lambda conn: _record_portfolio_projection_broker_evidence(broker_qty=0.0001),
+            "broker_not_flat",
+        ),
+        (
+            lambda conn: set_portfolio_breakdown(
+                conn,
+                cash_available=100000.0,
+                cash_locked=0.0,
+                asset_available=0.0001,
+                asset_locked=0.0,
+            ),
+            "portfolio_not_flat",
+        ),
+        (
+            lambda conn: record_external_position_adjustment(
+                conn,
+                event_ts=1_776_745_550_001,
+                asset_qty_delta=0.0001,
+                cash_delta=0.0,
+                source="test_projection_alignment",
+                reason="historical_fragmentation_nonzero_replay",
+                adjustment_basis={"fixture": "nonzero_replay"},
+                adjustment_key="historical-fragmentation-nonzero-replay",
+            ),
+            "accounting_replay_not_flat",
+        ),
+        (
+            lambda conn: conn.execute(
+                """
+                UPDATE open_position_lots
+                SET position_state='open_exposure',
+                    executable_lot_count=1,
+                    dust_tracking_lot_count=0,
+                    internal_lot_size=qty_open
+                WHERE id=(SELECT MIN(id) FROM open_position_lots)
+                """
+            ),
+            "non_dust_tracking_lot_rows_present",
+        ),
+        (
+            lambda conn: conn.execute(
+                """
+                UPDATE open_position_lots
+                SET executable_lot_count=1, position_semantic_basis='legacy'
+                WHERE id=(SELECT MIN(id) FROM open_position_lots)
+                """
+            ),
+            "executable_lot_rows_present",
+        ),
+        (
+            lambda conn: record_order_if_missing(
+                conn,
+                client_order_id="historical-open-blocker",
+                side="SELL",
+                qty_req=0.0001,
+                price=PRICE,
+                ts_ms=1_777_367_900_000,
+                status="NEW",
+                internal_lot_size=LOT_SIZE,
+                intended_lot_count=1,
+                executable_lot_count=1,
+            ),
+            "open_orders_present",
+        ),
+        (
+            lambda conn: record_order_if_missing(
+                conn,
+                client_order_id="historical-pending-blocker",
+                side="SELL",
+                qty_req=0.0001,
+                price=PRICE,
+                ts_ms=1_777_367_900_000,
+                status="PENDING_SUBMIT",
+                internal_lot_size=LOT_SIZE,
+                intended_lot_count=1,
+                executable_lot_count=1,
+            ),
+            "pending_submit_present",
+        ),
+        (
+            lambda conn: record_order_if_missing(
+                conn,
+                client_order_id="historical-unknown-blocker",
+                side="SELL",
+                qty_req=0.0001,
+                price=PRICE,
+                ts_ms=1_777_367_900_000,
+                status="SUBMIT_UNKNOWN",
+                internal_lot_size=LOT_SIZE,
+                intended_lot_count=1,
+                executable_lot_count=1,
+            ),
+            "submit_unknown_present",
+        ),
+        (
+            lambda conn: record_order_if_missing(
+                conn,
+                client_order_id="historical-recovery-blocker",
+                side="SELL",
+                qty_req=0.0001,
+                price=PRICE,
+                ts_ms=1_777_367_900_000,
+                status="RECOVERY_REQUIRED",
+                internal_lot_size=LOT_SIZE,
+                intended_lot_count=1,
+                executable_lot_count=1,
+            ),
+            "recovery_required_orders_present",
+        ),
+        (
+            lambda conn: runtime_state.record_reconcile_result(
+                success=True,
+                reason_code="RECONCILE_OK",
+                metadata={
+                    "balance_observed_ts_ms": 1_776_745_500_000,
+                    "balance_asset_ts_ms": 1_776_745_500_000,
+                    "broker_asset_qty": 0.0,
+                    "broker_asset_available": 0.0,
+                    "broker_asset_locked": 0.0,
+                    "remote_open_order_found": 1,
+                },
+                now_epoch_sec=2.0,
+            ),
+            "remote_open_orders_present",
+        ),
+    ],
+)
+def test_historical_fragmentation_projection_repair_refuses_unsafe_conditions(
+    recovery_db,
+    mutate,
+    expected_blocker,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_historical_fragmentation_flat_projection_fixture(conn)
+        mutate(conn)
+        conn.commit()
+        preview = build_historical_fragmentation_projection_drift_repair_preview(conn)
+        count_before = conn.execute("SELECT COUNT(*) AS cnt FROM open_position_lots").fetchone()["cnt"]
+        with pytest.raises(RuntimeError):
+            apply_historical_fragmentation_projection_drift_repair(conn)
+        count_after = conn.execute("SELECT COUNT(*) AS cnt FROM open_position_lots").fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert expected_blocker in preview["blockers"]
+    assert count_after == count_before
+
+
+def test_historical_fragmentation_projection_repair_refuses_active_fee_issue(
+    recovery_db,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_historical_fragmentation_flat_projection_fixture(conn)
+        monkeypatch.setattr(
+            position_authority_repair,
+            "summarize_fill_accounting_incident_projection",
+            lambda _conn: {"active_issue_count": 1},
+        )
+        preview = build_historical_fragmentation_projection_drift_repair_preview(conn)
+        with pytest.raises(RuntimeError):
+            apply_historical_fragmentation_projection_drift_repair(conn)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "active_fee_accounting_issues=1" in preview["blockers"]
+
+
+def test_historical_fragmentation_projection_repair_cli_json_preview_and_apply(recovery_db, capsys):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_historical_fragmentation_flat_projection_fixture(conn)
+    finally:
+        conn.close()
+
+    capsys.readouterr()
+    app_main(["rebuild-position-authority", "--historical-fragmentation-projection-repair", "--json"])
+    preview_payload = json.loads(capsys.readouterr().out.strip())
+    assert preview_payload["repair_mode"] == "historical_fragmentation_projection_drift_repair"
+    assert preview_payload["safe_to_apply"] is True
+    assert preview_payload["stale_lot_row_count"] == 3
+
+    app_main([
+        "rebuild-position-authority",
+        "--historical-fragmentation-projection-repair",
+        "--apply",
+        "--yes",
+        "--json",
+    ])
+    apply_payload = json.loads(capsys.readouterr().out.strip())
+    assert apply_payload["ok"] is True
+    assert apply_payload["result"]["post_repair_projection_convergence"]["converged"] is True
+    assert apply_payload["result"]["post_repair_projection_convergence"]["projected_total_qty"] == pytest.approx(0.0)
+
+
+def test_full_projection_rebuild_json_preview_reports_missing_lot_size_instead_of_crashing(
+    recovery_db,
+    capsys,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_portfolio_projection_divergence(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=PORTFOLIO_DIVERGENCE_QTY)
+        conn.execute("UPDATE fills SET internal_lot_size=NULL")
+        conn.execute("UPDATE orders SET internal_lot_size=NULL")
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=PORTFOLIO_DIVERGENCE_QTY)
+    finally:
+        conn.close()
+
+    capsys.readouterr()
+    app_main(["rebuild-position-authority", "--full-projection-rebuild", "--json"])
+    payload = json.loads(capsys.readouterr().out.strip())
+
+    assert payload["repair_mode"] == "full_projection_rebuild"
+    assert payload["safe_to_apply"] is False
+    assert payload["final_safe_to_apply"] is False
+    assert "authoritative_internal_lot_size_missing" in payload["why_unsafe"]
+    assert payload["full_projection_rebuild_post_state_preview"]["error"] == (
+        "full projection rebuild requires authoritative internal lot size"
+    )
 
 
 def test_diagnose_fill_trade_linkage_reports_matchable_and_unmatchable_rows(

@@ -35,16 +35,24 @@ from .position_authority_state import (
     build_position_authority_assessment,
 )
 from .runtime_readiness import build_broker_position_evidence, compute_runtime_readiness_snapshot
+from . import runtime_state
 
 
 _EPS = 1e-12
 FULL_PROJECTION_REBUILD_REASON = "full_projection_materialized_rebuild"
 FLAT_STALE_LOT_PROJECTION_REPAIR_REASON = "flat_stale_lot_projection_repair"
+HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT_REPAIR_REASON = (
+    "historical_fragmentation_projection_drift_repair"
+)
 LEGACY_OPERATOR_CLOSEOUT_EVIDENCE_ENRICHMENT_REASON = (
     "legacy_operator_residual_closeout_terminal_flat"
 )
 FLAT_STALE_LOT_PROJECTION_REPAIR_COMMAND = (
     "uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair --apply --yes"
+)
+HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT_REPAIR_COMMAND = (
+    "uv run bithumb-bot rebuild-position-authority "
+    "--historical-fragmentation-projection-repair --apply --yes"
 )
 LEGACY_OPERATOR_CLOSEOUT_EVIDENCE_ENRICHMENT_COMMAND = (
     "uv run bithumb-bot rebuild-position-authority --flat-stale-projection-repair "
@@ -163,6 +171,7 @@ def _build_full_projection_rebuild_gate_report(
     snapshot,
     authority_assessment: dict[str, Any],
     portfolio_qty: float,
+    explicit_full_projection_rebuild: bool = False,
 ) -> dict[str, Any]:
     broker_evidence = build_broker_position_evidence(snapshot.reconcile_metadata, pair=settings.PAIR)
     broker_qty = float(broker_evidence.get("broker_qty") or 0.0)
@@ -221,7 +230,7 @@ def _build_full_projection_rebuild_gate_report(
             f"replay_qty={replay_qty:.12f},"
             f"portfolio_qty={portfolio_qty:.12f}"
         )
-    if not bool(authority_assessment.get("needs_full_projection_rebuild")):
+    if not explicit_full_projection_rebuild and not bool(authority_assessment.get("needs_full_projection_rebuild")):
         reasons.append("full_projection_rebuild_not_required")
     return {
         "broker_qty": broker_qty,
@@ -550,6 +559,171 @@ def build_flat_stale_lot_projection_repair_preview(conn: sqlite3.Connection) -> 
         ],
         "expected_after": "open_position_lots projection converges to broker/portfolio flat state",
         "preconditions": "broker_qty=0, portfolio_qty=0, latest SELL filled, stale dust_tracking projection present",
+    }
+
+
+def build_historical_fragmentation_projection_drift_repair_preview(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    snapshot = compute_runtime_readiness_snapshot(conn)
+    readiness = snapshot.as_dict()
+    projection = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    broker_evidence = build_broker_position_evidence(snapshot.reconcile_metadata, pair=settings.PAIR)
+    broker_qty = normalize_asset_qty(float(broker_evidence.get("broker_qty") or 0.0))
+    broker_qty_known = bool(broker_evidence.get("broker_qty_known"))
+    portfolio_qty = _portfolio_asset_qty(conn)
+    projected_total_qty = normalize_asset_qty(float(projection.get("projected_total_qty") or 0.0))
+    stale_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT id, pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                   qty_open, executable_lot_count, dust_tracking_lot_count, internal_lot_size,
+                   lot_min_qty, lot_qty_step, lot_min_notional_krw, lot_max_qty_decimals,
+                   lot_rule_source_mode, position_semantic_basis, position_state, entry_fee_total,
+                   strategy_name, entry_decision_id, entry_decision_linkage
+            FROM open_position_lots
+            WHERE pair=? AND qty_open > 1e-12
+            ORDER BY id ASC
+            """,
+            (settings.PAIR,),
+        ).fetchall()
+    ]
+    stale_total_qty = normalize_asset_qty(sum(float(row.get("qty_open") or 0.0) for row in stale_rows))
+    stale_ids = [int(row["id"]) for row in stale_rows]
+    gate_counts = _query_runtime_gate_counts(conn)
+    remote_open_order_count = int(snapshot.reconcile_metadata.get("remote_open_order_found", 0) or 0)
+    try:
+        accounting_replay = compute_accounting_replay(conn)
+        replay_qty = normalize_asset_qty(float(accounting_replay.get("replay_qty") or 0.0))
+        accounting_projection_ok = bool(abs(replay_qty - portfolio_qty) <= _EPS)
+    except RuntimeError as exc:
+        accounting_replay = {"error": str(exc)}
+        replay_qty = 0.0
+        accounting_projection_ok = False
+    active_fee_accounting_issue_count = int(
+        summarize_fill_accounting_incident_projection(conn).get("active_issue_count") or 0
+    )
+    broker_portfolio_converged = bool(broker_qty_known and abs(broker_qty - portfolio_qty) <= _EPS)
+    reconcile_status = str(getattr(runtime_state.snapshot(), "last_reconcile_status", "") or "").lower()
+    reconcile_reason = str(getattr(runtime_state.snapshot(), "last_reconcile_reason_code", "") or "")
+    reconcile_ok = bool(
+        reconcile_status == "ok"
+        or (
+            broker_qty_known
+            and abs(broker_qty) <= _EPS
+            and abs(portfolio_qty) <= _EPS
+            and broker_portfolio_converged
+        )
+    )
+
+    blockers: list[str] = []
+    if not broker_qty_known:
+        blockers.append("broker_qty_unknown")
+    if abs(broker_qty) > _EPS:
+        blockers.append("broker_not_flat")
+    if abs(portfolio_qty) > _EPS:
+        blockers.append("portfolio_not_flat")
+    if not broker_portfolio_converged:
+        blockers.append("broker_portfolio_not_converged")
+    if abs(replay_qty) > _EPS:
+        blockers.append("accounting_replay_not_flat")
+    if not accounting_projection_ok:
+        blockers.append("accounting_projection_mismatch")
+    if active_fee_accounting_issue_count > 0:
+        blockers.append(f"active_fee_accounting_issues={active_fee_accounting_issue_count}")
+    if int(gate_counts["unresolved_open_order_count"]) > 0:
+        blockers.append("open_orders_present")
+    if int(gate_counts["pending_submit_count"]) > 0:
+        blockers.append("pending_submit_present")
+    if int(gate_counts["submit_unknown_count"]) > 0:
+        blockers.append("submit_unknown_present")
+    if int(gate_counts["recovery_required_count"]) > 0:
+        blockers.append("recovery_required_orders_present")
+    if remote_open_order_count > 0:
+        blockers.append("remote_open_orders_present")
+    if not stale_rows:
+        blockers.append("stale_lot_rows_missing")
+    if projected_total_qty <= _EPS:
+        blockers.append("stale_lot_projection_not_present")
+    if any(str(row.get("position_state") or "") != DUST_TRACKING_STATE for row in stale_rows):
+        blockers.append("non_dust_tracking_lot_rows_present")
+    if any(int(row.get("executable_lot_count") or 0) != 0 for row in stale_rows):
+        blockers.append("executable_lot_rows_present")
+    if abs(stale_total_qty - projected_total_qty) > _EPS:
+        blockers.append("stale_lot_total_projection_mismatch")
+    if not reconcile_ok:
+        blockers.append("latest_reconcile_not_ok")
+
+    blockers = list(dict.fromkeys(blockers))
+    needed = bool(projected_total_qty > _EPS and stale_rows and abs(portfolio_qty) <= _EPS)
+    safe = bool(needed and not blockers)
+    return {
+        "needed": needed,
+        "safe_to_apply": safe,
+        "final_safe_to_apply": safe,
+        "repair_mode": "historical_fragmentation_projection_drift_repair",
+        "reason": (
+            "historical_fragmentation_projection_drift_detected"
+            if needed
+            else "historical_fragmentation_projection_drift_not_present"
+        ),
+        "blockers": blockers,
+        "broker_qty": broker_qty,
+        "broker_qty_known": broker_qty_known,
+        "portfolio_qty": portfolio_qty,
+        "broker_portfolio_converged": broker_portfolio_converged,
+        "accounting_projection_ok": accounting_projection_ok,
+        "accounting_replay": accounting_replay,
+        "accounting_replay_qty": replay_qty,
+        "active_fee_accounting_issue_count": active_fee_accounting_issue_count,
+        "unresolved_open_order_count": int(gate_counts["unresolved_open_order_count"]),
+        "pending_submit_count": int(gate_counts["pending_submit_count"]),
+        "submit_unknown_count": int(gate_counts["submit_unknown_count"]),
+        "recovery_required_count": int(gate_counts["recovery_required_count"]),
+        "remote_open_order_count": remote_open_order_count,
+        "projected_total_qty_before": projected_total_qty,
+        "stale_lot_row_count": len(stale_rows),
+        "stale_lot_qty_total": stale_total_qty,
+        "stale_dust_rows_to_clear": stale_ids,
+        "stale_lot_rows": stale_rows,
+        "projected_total_qty_after_preview": 0.0 if safe else projected_total_qty,
+        "expected_post_projection_converged": bool(safe),
+        "recommended_command": (
+            HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT_REPAIR_COMMAND if safe else None
+        ),
+        "preview_command": (
+            "uv run bithumb-bot rebuild-position-authority "
+            "--historical-fragmentation-projection-repair"
+        ),
+        "touched_tables": [
+            "open_position_lots",
+            "position_authority_repairs",
+            "position_authority_projection_publications",
+        ],
+        "expected_after": "open_position_lots historical dust projection is cleared while broker/portfolio/accounting remain flat",
+        "preconditions": {
+            "broker_qty_known": True,
+            "broker_qty": 0.0,
+            "portfolio_qty": 0.0,
+            "accounting_replay_qty": 0.0,
+            "no_unresolved_orders": True,
+            "all_nonzero_lot_rows_are_dust_tracking": True,
+            "all_executable_lot_counts_zero": True,
+        },
+        "why_safe": (
+            "broker, portfolio, accounting replay, reconcile evidence, and dust-only stale rows prove flat projection drift"
+            if safe
+            else None
+        ),
+        "why_unsafe": blockers,
+        "latest_reconcile_status": reconcile_status or None,
+        "latest_reconcile_reason_code": reconcile_reason or None,
+        "latest_reconcile_ok": reconcile_ok,
+        "missing_evidence_fields": list(broker_evidence.get("missing_evidence_fields") or []),
+        "balance_snapshot_available_for_position_rebuild": broker_evidence.get(
+            "balance_snapshot_available_for_position_rebuild"
+        ),
     }
 
 
@@ -1502,7 +1676,136 @@ def build_position_authority_rebuild_preview(
     *,
     full_projection_rebuild: bool = False,
     flat_stale_projection_repair: bool = False,
+    historical_fragmentation_projection_repair: bool = False,
 ) -> dict[str, Any]:
+    if historical_fragmentation_projection_repair:
+        fragmentation_preview = build_historical_fragmentation_projection_drift_repair_preview(conn)
+        return {
+            "needs_rebuild": bool(fragmentation_preview.get("needed")),
+            "safe_to_apply": bool(fragmentation_preview.get("safe_to_apply")),
+            "final_safe_to_apply": bool(fragmentation_preview.get("final_safe_to_apply")),
+            "pre_gate_passed": bool(fragmentation_preview.get("safe_to_apply")),
+            "action_state": (
+                "safe_to_apply_now"
+                if bool(fragmentation_preview.get("safe_to_apply"))
+                else "blocked_pending_evidence"
+            ),
+            "eligibility_reason": (
+                "historical fragmentation projection drift repair applicable"
+                if bool(fragmentation_preview.get("safe_to_apply"))
+                else ", ".join(str(item) for item in fragmentation_preview.get("blockers") or [])
+                or str(fragmentation_preview.get("reason") or "historical fragmentation projection repair not applicable")
+            ),
+            "recovery_stage": str(fragmentation_preview.get("readiness_recovery_stage") or "UNKNOWN"),
+            "repair_mode": "historical_fragmentation_projection_drift_repair",
+            "next_required_action": (
+                "apply_historical_fragmentation_projection_repair"
+                if bool(fragmentation_preview.get("safe_to_apply"))
+                else "review_position_authority_evidence"
+            ),
+            "operator_next_action": (
+                "apply_historical_fragmentation_projection_repair"
+                if bool(fragmentation_preview.get("safe_to_apply"))
+                else "review_position_authority_evidence"
+            ),
+            "preview_command": str(fragmentation_preview.get("preview_command") or ""),
+            "recommended_command": fragmentation_preview.get("recommended_command"),
+            "position_authority_assessment": build_position_authority_assessment(conn, pair=settings.PAIR),
+            "portfolio_qty": float(fragmentation_preview.get("portfolio_qty") or 0.0),
+            "current_broker_qty": float(fragmentation_preview.get("broker_qty") or 0.0),
+            "current_portfolio_qty": float(fragmentation_preview.get("portfolio_qty") or 0.0),
+            "materialized_lot_projection_qty": float(fragmentation_preview.get("projected_total_qty_before") or 0.0),
+            "terminal_flat_sell_detected": False,
+            "authority_type": "broker_portfolio_accounting_flat_historical_fragmentation",
+            "stale_dust_rows_to_clear": list(fragmentation_preview.get("stale_dust_rows_to_clear") or []),
+            "safe_to_apply_terminal_flat_projection_repair": False,
+            "accounted_buy_qty": 0.0,
+            "accounted_sell_qty": 0.0,
+            "accounted_net_qty": float(fragmentation_preview.get("accounting_replay_qty") or 0.0),
+            "accounted_buy_fill_count": 0,
+            "sell_trade_count": 0,
+            "existing_lot_rows": int(fragmentation_preview.get("stale_lot_row_count") or 0),
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": int(fragmentation_preview.get("stale_lot_row_count") or 0),
+            "authority_gap_reason": str(fragmentation_preview.get("reason") or "none"),
+            "projection_converged": False,
+            "projected_total_qty": float(fragmentation_preview.get("projected_total_qty_before") or 0.0),
+            "projected_qty_excess": float(fragmentation_preview.get("projected_total_qty_before") or 0.0),
+            "lot_row_count": int(fragmentation_preview.get("stale_lot_row_count") or 0),
+            "other_active_qty": 0.0,
+            "portfolio_projection_publication_present": False,
+            "portfolio_projection_repair_event_status": "none",
+            "target_lot_provenance_kind": "historical_fragmentation_stale_dust_tracking_projection",
+            "target_lot_source_modes": sorted(
+                {
+                    str(row.get("lot_rule_source_mode") or "")
+                    for row in fragmentation_preview.get("stale_lot_rows") or []
+                    if str(row.get("lot_rule_source_mode") or "")
+                }
+            ),
+            "target_lot_fill_qty_invariant_applies": False,
+            "semantic_contract_check_applicable": False,
+            "semantic_contract_check_skipped_reason": "verified_historical_fragmentation_flat_projection_reset",
+            "semantic_contract_check_passed": bool(fragmentation_preview.get("safe_to_apply")),
+            "portfolio_anchor_missing_evidence": [],
+            "manual_projection_missing_evidence": [],
+            "manual_db_update_unsafe": bool(not fragmentation_preview.get("safe_to_apply")),
+            "sell_after_target_buy_qty": 0.0,
+            "target_lifecycle_matched_qty": 0.0,
+            "effective_closed_qty": 0.0,
+            "expected_residual_qty": 0.0,
+            "target_residual_qty_delta": 0.0,
+            "residual_qty_tolerance": _EPS,
+            "sell_after_qty_authority_mode": "not_required_for_historical_fragmentation_flat_repair",
+            "lifecycle_matched_qty_accepted": False,
+            "lifecycle_matched_qty_acceptance_reason": "not_required_for_verified_flat_projection_drift",
+            "needs_full_projection_rebuild": False,
+            "broker_qty": float(fragmentation_preview.get("broker_qty") or 0.0),
+            "broker_qty_known": bool(fragmentation_preview.get("broker_qty_known")),
+            "broker_qty_value_source": None,
+            "broker_qty_evidence_source": None,
+            "broker_qty_evidence_observed_ts_ms": None,
+            "balance_source": None,
+            "balance_source_stale": None,
+            "balance_snapshot_available_for_health": None,
+            "balance_snapshot_available_for_position_rebuild": fragmentation_preview.get(
+                "balance_snapshot_available_for_position_rebuild"
+            ),
+            "missing_evidence_fields": list(fragmentation_preview.get("missing_evidence_fields") or []),
+            "position_rebuild_blockers": [],
+            "base_currency": None,
+            "quote_currency": None,
+            "asset_available": None,
+            "asset_locked": None,
+            "cash_available": None,
+            "cash_locked": None,
+            "remote_open_order_count": int(fragmentation_preview.get("remote_open_order_count") or 0),
+            "broker_portfolio_converged": bool(fragmentation_preview.get("broker_portfolio_converged")),
+            "accounting_projection_ok": bool(fragmentation_preview.get("accounting_projection_ok")),
+            "unresolved_open_order_count": int(fragmentation_preview.get("unresolved_open_order_count") or 0),
+            "pending_submit_count": int(fragmentation_preview.get("pending_submit_count") or 0),
+            "submit_unknown_count": int(fragmentation_preview.get("submit_unknown_count") or 0),
+            "recovery_required_count": int(fragmentation_preview.get("recovery_required_count") or 0),
+            "unresolved_fee_pending": bool(
+                int(fragmentation_preview.get("active_fee_accounting_issue_count") or 0) > 0
+            ),
+            "full_projection_rebuild_gate_report": None,
+            "repair_kind": "historical_fragmentation_projection_drift_repair",
+            "truth_source": "broker_portfolio_accounting_flat_historical_fragmentation",
+            "pre_projected_total_qty": float(fragmentation_preview.get("projected_total_qty_before") or 0.0),
+            "replay_projected_total_qty": None,
+            "post_publish_projected_total_qty": float(fragmentation_preview.get("projected_total_qty_after_preview") or 0.0),
+            "projection_converged_before": False,
+            "projection_converged_after_replay": None,
+            "projection_converged_after_publish": bool(fragmentation_preview.get("expected_post_projection_converged")),
+            "replay_projection_converged": None,
+            "post_publish_projection_converged": bool(fragmentation_preview.get("expected_post_projection_converged")),
+            "source_mode_of_new_rows": [],
+            "rollback_path": "preview only; no DB changes committed",
+            "why_safe": fragmentation_preview.get("why_safe"),
+            "why_unsafe": list(fragmentation_preview.get("blockers") or []),
+            "historical_fragmentation_projection_repair_preview": fragmentation_preview,
+        }
     if flat_stale_projection_repair:
         flat_preview = build_flat_stale_lot_projection_repair_preview(conn)
         return {
@@ -1711,17 +2014,36 @@ def build_position_authority_rebuild_preview(
             snapshot=snapshot,
             authority_assessment=authority_assessment,
             portfolio_qty=portfolio_qty,
+            explicit_full_projection_rebuild=bool(full_projection_rebuild),
         )
         reasons = list(full_projection_gate_report["reasons"])
         if not reasons:
-            full_projection_post_state_preview = _build_full_projection_rebuild_post_state_preview(
-                conn,
-                preview={
-                    "portfolio_qty": portfolio_qty,
-                    "broker_qty": broker_qty,
-                },
-                gate_report=full_projection_gate_report,
-            )
+            try:
+                full_projection_post_state_preview = _build_full_projection_rebuild_post_state_preview(
+                    conn,
+                    preview={
+                        "portfolio_qty": portfolio_qty,
+                        "broker_qty": broker_qty,
+                    },
+                    gate_report=full_projection_gate_report,
+                )
+            except RuntimeError as exc:
+                blocker = (
+                    "authoritative_internal_lot_size_missing"
+                    if "authoritative internal lot size" in str(exc)
+                    else str(exc)
+                )
+                full_projection_post_state_preview = {
+                    "repair_kind": "full_projection_rebuild",
+                    "truth_source": "broker_portfolio_anchor",
+                    "pre_gate_passed": True,
+                    "final_gate_failures": [blocker],
+                    "why_safe": None,
+                    "why_unsafe": [blocker],
+                    "final_safe_to_apply": False,
+                    "error": str(exc),
+                    "rollback_path": "preview failed before DB mutation",
+                }
             if not bool(full_projection_post_state_preview.get("final_safe_to_apply")):
                 reasons = list(full_projection_post_state_preview.get("final_gate_failures") or [])
     elif repair_mode in {"correction", "residual_normalization", "portfolio_projection_repair", "rebuild"} and not reasons:
@@ -2287,6 +2609,172 @@ def apply_flat_stale_lot_projection_repair(
     }
 
 
+def apply_historical_fragmentation_projection_drift_repair(
+    conn: sqlite3.Connection,
+    *,
+    note: str | None = None,
+) -> dict[str, Any]:
+    preview = build_historical_fragmentation_projection_drift_repair_preview(conn)
+    if not bool(preview.get("safe_to_apply")):
+        if (
+            not bool(preview.get("needed"))
+            and float(preview.get("projected_total_qty_before") or 0.0) <= _EPS
+            and int(preview.get("stale_lot_row_count") or 0) == 0
+        ):
+            return {
+                "preview": preview,
+                "noop": True,
+                "lot_snapshot_before": summarize_position_lots(conn, pair=settings.PAIR).as_dict(),
+                "lot_snapshot_after": summarize_position_lots(conn, pair=settings.PAIR).as_dict(),
+                "post_repair_projection_convergence": build_lot_projection_convergence(conn, pair=settings.PAIR),
+            }
+        raise RuntimeError(
+            "historical fragmentation projection drift repair is not safe to apply: "
+            f"{'|'.join(str(item) for item in preview.get('blockers') or []) or preview.get('reason') or 'unknown'}"
+        )
+
+    savepoint = "historical_fragmentation_projection_drift_repair"
+    before = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+    convergence_before = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    readiness_before = compute_runtime_readiness_snapshot(conn).as_dict()
+    stale_rows = list(preview.get("stale_lot_rows") or [])
+    event_ts = int(time.time() * 1000)
+    repair_basis: dict[str, Any] = {
+        "event_type": HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT_REPAIR_REASON,
+        "repair_mode": "historical_fragmentation_projection_drift_repair",
+        "operator_command": HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT_REPAIR_COMMAND,
+        "operator_timestamp_ms": event_ts,
+        "preview": preview,
+        "stale_lot_row_ids": list(preview.get("stale_dust_rows_to_clear") or []),
+        "stale_lot_qty_total": float(preview.get("stale_lot_qty_total") or 0.0),
+        "projected_total_qty_before": float(preview.get("projected_total_qty_before") or 0.0),
+        "projected_total_qty_after_preview": float(preview.get("projected_total_qty_after_preview") or 0.0),
+        "broker_qty": float(preview.get("broker_qty") or 0.0),
+        "broker_qty_known": bool(preview.get("broker_qty_known")),
+        "portfolio_qty": float(preview.get("portfolio_qty") or 0.0),
+        "accounting_replay_qty": float(preview.get("accounting_replay_qty") or 0.0),
+        "accounting_replay": preview.get("accounting_replay"),
+        "gate_evidence": {
+            "broker_portfolio_converged": bool(preview.get("broker_portfolio_converged")),
+            "accounting_projection_ok": bool(preview.get("accounting_projection_ok")),
+            "active_fee_accounting_issue_count": int(preview.get("active_fee_accounting_issue_count") or 0),
+            "unresolved_open_order_count": int(preview.get("unresolved_open_order_count") or 0),
+            "pending_submit_count": int(preview.get("pending_submit_count") or 0),
+            "submit_unknown_count": int(preview.get("submit_unknown_count") or 0),
+            "recovery_required_count": int(preview.get("recovery_required_count") or 0),
+            "remote_open_order_count": int(preview.get("remote_open_order_count") or 0),
+            "latest_reconcile_status": preview.get("latest_reconcile_status"),
+            "latest_reconcile_reason_code": preview.get("latest_reconcile_reason_code"),
+            "latest_reconcile_ok": bool(preview.get("latest_reconcile_ok")),
+        },
+        "open_position_lots_before_repair": stale_rows,
+        "lot_snapshot_before": before,
+        "projection_convergence_before": convergence_before,
+        "runtime_readiness_before": readiness_before,
+        "untouched_runtime_surfaces": [
+            "broker_state",
+            "orders",
+            "fills",
+            "trades",
+            "portfolio_cash",
+            "portfolio_asset",
+        ],
+    }
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        ids = [int(row["id"]) for row in stale_rows]
+        placeholders = ",".join("?" for _ in ids)
+        deleted = conn.execute(
+            f"DELETE FROM open_position_lots WHERE pair=? AND id IN ({placeholders})",
+            (settings.PAIR, *ids),
+        ).rowcount
+        if int(deleted or 0) != len(ids):
+            raise RuntimeError(
+                "historical fragmentation projection drift repair postcondition failed: stale row set changed"
+            )
+        repair_basis["deleted_stale_lot_ids"] = ids
+        after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+        repair_basis["lot_snapshot_after"] = after
+        convergence_after = _assert_post_repair_projection_converged(
+            conn,
+            repair_basis=repair_basis,
+            repair_mode="historical_fragmentation_projection_drift_repair",
+        )
+        post_replay = compute_accounting_replay(conn)
+        post_portfolio_qty = _portfolio_asset_qty(conn)
+        post_fee_issue_count = int(
+            summarize_fill_accounting_incident_projection(conn).get("active_issue_count") or 0
+        )
+        post_gate_counts = _query_runtime_gate_counts(conn)
+        repair_basis["accounting_replay_after"] = post_replay
+        repair_basis["post_gate_counts"] = post_gate_counts
+        if (
+            abs(float(convergence_after.get("projected_total_qty") or 0.0)) > _EPS
+            or abs(post_portfolio_qty) > _EPS
+            or abs(float(preview.get("broker_qty") or 0.0)) > _EPS
+            or abs(normalize_asset_qty(float(post_replay.get("replay_qty") or 0.0))) > _EPS
+            or post_fee_issue_count > 0
+            or any(int(post_gate_counts[key]) > 0 for key in post_gate_counts)
+        ):
+            raise RuntimeError(
+                "historical fragmentation projection drift repair postcondition failed: "
+                f"projected_total_qty={float(convergence_after.get('projected_total_qty') or 0.0):.12f},"
+                f"portfolio_qty={post_portfolio_qty:.12f},"
+                f"broker_qty={float(preview.get('broker_qty') or 0.0):.12f},"
+                f"accounting_replay_qty={float(post_replay.get('replay_qty') or 0.0):.12f},"
+                f"fee_issue_count={post_fee_issue_count}"
+            )
+        post_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+        repair_basis["position_authority_assessment_after"] = post_assessment
+        if any(
+            bool(post_assessment.get(key))
+            for key in (
+                "needs_full_projection_rebuild",
+                "needs_correction",
+                "needs_portfolio_projection_repair",
+                "needs_residual_normalization",
+            )
+        ):
+            raise RuntimeError(
+                "historical fragmentation projection drift repair postcondition failed: "
+                f"blockers={'|'.join(str(item) for item in post_assessment.get('blockers') or []) or 'none'}"
+            )
+        target_trade_id = max((int(row.get("entry_trade_id") or 0) for row in stale_rows), default=0)
+        publication = record_position_authority_projection_publication(
+            conn,
+            event_ts=event_ts,
+            pair=settings.PAIR,
+            target_trade_id=target_trade_id,
+            source="manual_historical_fragmentation_projection_drift_repair_publish",
+            publish_basis=repair_basis,
+            note=note,
+        )
+        repair_basis["projection_publication"] = publication
+        repair = record_position_authority_repair(
+            conn,
+            event_ts=event_ts,
+            source="manual_historical_fragmentation_projection_drift_repair",
+            reason=HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT_REPAIR_REASON,
+            repair_basis=repair_basis,
+            note=note,
+        )
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    return {
+        "preview": preview,
+        "repair": repair,
+        "projection_publication": publication,
+        "repair_basis": repair_basis,
+        "lot_snapshot_before": before,
+        "lot_snapshot_after": after,
+        "post_repair_projection_convergence": convergence_after,
+        "post_repair_assessment": post_assessment,
+    }
+
+
 def _load_position_authority_history_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     repair_summary = conn.execute(
         """
@@ -2561,10 +3049,16 @@ def apply_position_authority_rebuild(
     note: str | None = None,
     full_projection_rebuild: bool = False,
     flat_stale_projection_repair: bool = False,
+    historical_fragmentation_projection_repair: bool = False,
 ) -> dict[str, Any]:
+    if historical_fragmentation_projection_repair:
+        return apply_historical_fragmentation_projection_drift_repair(conn, note=note)
     if flat_stale_projection_repair:
         return apply_flat_stale_lot_projection_repair(conn, note=note)
-    preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=full_projection_rebuild)
+    preview = build_position_authority_rebuild_preview(
+        conn,
+        full_projection_rebuild=full_projection_rebuild,
+    )
     if full_projection_rebuild:
         return _apply_full_projection_rebuild(conn, note=note)
     if str(preview.get("repair_mode") or "") == "full_projection_rebuild":

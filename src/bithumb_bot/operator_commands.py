@@ -6037,6 +6037,7 @@ def cmd_rebuild_position_authority(
     note: str | None = None,
     full_projection_rebuild: bool = False,
     flat_stale_projection_repair: bool = False,
+    historical_fragmentation_projection_repair: bool = False,
     enrich_legacy_operator_closeout_evidence: bool = False,
     as_json: bool = False,
 ) -> None:
@@ -6058,9 +6059,25 @@ def cmd_rebuild_position_authority(
             result.setdefault("terminal_flat_sell_detected", flat_preview.get("terminal_flat_sell_detected"))
             result.setdefault("stale_lot_row_count", flat_preview.get("stale_lot_row_count"))
             result.setdefault("stale_lot_qty_total", flat_preview.get("stale_lot_qty_total"))
+        fragmentation_preview = result.get("historical_fragmentation_projection_repair_preview")
+        if isinstance(fragmentation_preview, dict):
+            result.setdefault("needed", fragmentation_preview.get("needed"))
+            result.setdefault("blockers", list(fragmentation_preview.get("blockers") or []))
+            result.setdefault("projected_total_qty", fragmentation_preview.get("projected_total_qty_before"))
+            result.setdefault("stale_lot_row_count", fragmentation_preview.get("stale_lot_row_count"))
+            result.setdefault("stale_lot_qty_total", fragmentation_preview.get("stale_lot_qty_total"))
+            result.setdefault("stale_dust_rows_to_clear", fragmentation_preview.get("stale_dust_rows_to_clear"))
         result.setdefault("needed", result.get("needs_rebuild"))
         result.setdefault("blockers", list(result.get("why_unsafe") or []))
-        result.setdefault("why_unsafe", list(result.get("blockers") or []))
+        blockers = list(result.get("blockers") or [])
+        if not blockers:
+            blockers = list(result.get("why_unsafe") or [])
+        if not blockers and isinstance(result.get("eligibility_reason"), str):
+            reason = str(result.get("eligibility_reason") or "")
+            if reason and reason not in {"", "None"}:
+                blockers = [item.strip() for item in reason.split(",") if item.strip()]
+        result["blockers"] = blockers
+        result["why_unsafe"] = list(result.get("why_unsafe") or blockers)
         result.setdefault("authority_type", result.get("authority_type"))
         result.setdefault("broker_qty", result.get("broker_qty"))
         result.setdefault("portfolio_qty", result.get("portfolio_qty"))
@@ -6073,10 +6090,13 @@ def cmd_rebuild_position_authority(
     selected_modes = [
         bool(full_projection_rebuild),
         bool(flat_stale_projection_repair),
+        bool(historical_fragmentation_projection_repair),
         bool(enrich_legacy_operator_closeout_evidence),
     ]
     if sum(1 for selected in selected_modes if selected) > 1 and not (
-        flat_stale_projection_repair and enrich_legacy_operator_closeout_evidence and sum(1 for selected in selected_modes if selected) == 2
+        flat_stale_projection_repair
+        and enrich_legacy_operator_closeout_evidence
+        and sum(1 for selected in selected_modes if selected) == 2
     ):
         if as_json:
             print(json.dumps({"ok": False, "error": "choose_one_repair_mode_flag"}, ensure_ascii=False, sort_keys=True))
@@ -6167,6 +6187,8 @@ def cmd_rebuild_position_authority(
         preview_kwargs = {"full_projection_rebuild": bool(full_projection_rebuild)}
         if flat_stale_projection_repair:
             preview_kwargs["flat_stale_projection_repair"] = True
+        if historical_fragmentation_projection_repair:
+            preview_kwargs["historical_fragmentation_projection_repair"] = True
         preview = build_position_authority_rebuild_preview(conn, **preview_kwargs)
         repair_summary = get_position_authority_repair_summary(conn)
         if as_json:
@@ -6185,6 +6207,8 @@ def cmd_rebuild_position_authority(
             }
             if flat_stale_projection_repair:
                 apply_kwargs["flat_stale_projection_repair"] = True
+            if historical_fragmentation_projection_repair:
+                apply_kwargs["historical_fragmentation_projection_repair"] = True
             result = apply_position_authority_rebuild(conn, **apply_kwargs)
             if not bool(result.get("noop")):
                 conn.commit()
@@ -6263,7 +6287,11 @@ def cmd_rebuild_position_authority(
                 f"{'|'.join(str(item) for item in (preview.get('portfolio_anchor_missing_evidence') or []) + (preview.get('manual_projection_missing_evidence') or [])) or 'none'} "
                 f"manual_db_update_unsafe={1 if bool(preview.get('manual_db_update_unsafe')) else 0}"
             )
-        if preview.get("repair_mode") in {"full_projection_rebuild", "flat_stale_projection_repair"}:
+        if preview.get("repair_mode") in {
+            "full_projection_rebuild",
+            "flat_stale_projection_repair",
+            "historical_fragmentation_projection_drift_repair",
+        }:
             print(
                 "  "
                 f"projection_converged={1 if bool(preview.get('projection_converged')) else 0} "
@@ -6347,6 +6375,22 @@ def cmd_rebuild_position_authority(
                     f"{'|'.join(str(item) for item in (flat_preview.get('blockers') or [])) or 'none'}"
                 )
                 post_state_preview = {"final_gate_failures": flat_preview.get("blockers") or []}
+            if preview.get("repair_mode") == "historical_fragmentation_projection_drift_repair":
+                fragmentation_preview = preview.get("historical_fragmentation_projection_repair_preview") or {}
+                print(
+                    "  "
+                    f"repair_mode=historical_fragmentation_projection_drift_repair "
+                    f"stale_lot_row_count={int(fragmentation_preview.get('stale_lot_row_count') or 0)} "
+                    f"stale_lot_qty_total={float(fragmentation_preview.get('stale_lot_qty_total') or 0.0):.12f} "
+                    f"active_fee_accounting_issue_count={int(fragmentation_preview.get('active_fee_accounting_issue_count') or 0)} "
+                    f"accounting_replay_qty={float(fragmentation_preview.get('accounting_replay_qty') or 0.0):.12f}"
+                )
+                print(
+                    "  "
+                    "historical_fragmentation_projection_blockers="
+                    f"{'|'.join(str(item) for item in (fragmentation_preview.get('blockers') or [])) or 'none'}"
+                )
+                post_state_preview = {"final_gate_failures": fragmentation_preview.get("blockers") or []}
             print(
                 "  "
                 "final_gate_failures="
@@ -6373,6 +6417,8 @@ def cmd_rebuild_position_authority(
         }
         if flat_stale_projection_repair:
             apply_kwargs["flat_stale_projection_repair"] = True
+        if historical_fragmentation_projection_repair:
+            apply_kwargs["historical_fragmentation_projection_repair"] = True
         result = apply_position_authority_rebuild(conn, **apply_kwargs)
         if bool(result.get("noop")):
             after = result["lot_snapshot_after"]
@@ -6399,7 +6445,11 @@ def cmd_rebuild_position_authority(
         metadata={},
     )
     print("[REBUILD-POSITION-AUTHORITY] applied")
-    if preview.get("repair_mode") in {"full_projection_rebuild", "flat_stale_projection_repair"}:
+    if preview.get("repair_mode") in {
+        "full_projection_rebuild",
+        "flat_stale_projection_repair",
+        "historical_fragmentation_projection_drift_repair",
+    }:
         publication = result.get("projection_publication") or {}
         before = result.get("lot_snapshot_before") or {}
         convergence = result.get("post_repair_projection_convergence") or {}
@@ -6434,6 +6484,15 @@ def cmd_rebuild_position_authority(
                 f"stale_lot_qty_total={float(flat_preview.get('stale_lot_qty_total') or 0.0):.12f} "
                 f"latest_sell_client_order_id={flat_preview.get('latest_sell_client_order_id') or 'none'} "
                 f"latest_sell_trade_id={flat_preview.get('latest_sell_trade_id') or 'none'} "
+                f"projection_converged_after={1 if bool(convergence.get('converged')) else 0}"
+            )
+        if preview.get("repair_mode") == "historical_fragmentation_projection_drift_repair":
+            fragmentation_preview = preview.get("historical_fragmentation_projection_repair_preview") or {}
+            print(
+                "  "
+                f"repair_mode=historical_fragmentation_projection_drift_repair "
+                f"stale_lot_row_count={int(fragmentation_preview.get('stale_lot_row_count') or 0)} "
+                f"stale_lot_qty_total={float(fragmentation_preview.get('stale_lot_qty_total') or 0.0):.12f} "
                 f"projection_converged_after={1 if bool(convergence.get('converged')) else 0}"
             )
         print(f"  trading_auto_cleared={1 if auto_cleared else 0}")
