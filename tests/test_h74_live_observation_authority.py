@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,12 @@ from bithumb_bot.h74_observation import (
     verify_h74_observation_authority,
     verify_h74_source_observation_authority,
 )
-from bithumb_bot.config import LiveModeValidationError, settings, validate_live_strategy_selection
+from bithumb_bot.config import (
+    LiveModeValidationError,
+    settings,
+    validate_live_strategy_selection,
+    validate_runtime_strategy_set_selection,
+)
 from bithumb_bot.execution_authority import execution_authority_from_payload
 from bithumb_bot.research.strategy_spec import runtime_bound_behavior_parameter_names
 from bithumb_bot.runtime_strategy_set import (
@@ -52,6 +58,37 @@ def _source_authority() -> dict:
         validation_run_hash="sha256:validation",
         code_commit_sha="test-commit",
     )
+
+
+def _source_parameters() -> dict[str, object]:
+    return {
+        name: H74_SOURCE_OBSERVATION_PARAMETERS[name]
+        for name in runtime_bound_behavior_parameter_names("daily_participation_sma")
+    }
+
+
+def _h74_source_cfg(authority_path: Path | str, **overrides) -> object:
+    cfg = replace(
+        settings,
+        MODE="live",
+        LIVE_DRY_RUN=True,
+        LIVE_REAL_ORDER_ARMED=False,
+        STRATEGY_NAME="daily_participation_sma",
+        PAIR="KRW-BTC",
+        INTERVAL="1m",
+        STRATEGY_EXIT_RULES="max_holding_time",
+        STRATEGY_EXIT_MAX_HOLDING_MIN=74,
+        MAX_ORDER_KRW=100_000,
+        MAX_DAILY_ORDER_COUNT=2,
+        APPROVED_STRATEGY_PROFILE_PATH="",
+        STRATEGY_APPROVED_PROFILE_PATH="",
+        H74_SOURCE_OBSERVATION_AUTHORITY_PATH=str(authority_path),
+        **overrides,
+    )
+    for key, value in H74_SOURCE_OBSERVATION_PARAMETERS.items():
+        if key.isupper():
+            object.__setattr__(cfg, key, value)
+    return cfg
 
 
 def test_h74_observation_authority_hash_binds_50k_parameters() -> None:
@@ -357,30 +394,89 @@ def test_h74_source_observation_allows_live_dry_run_materialization(tmp_path, mo
     path = tmp_path / "source-authority.json"
     path.write_text(json.dumps(authority), encoding="utf-8")
     monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
-    cfg = replace(
-        settings,
-        MODE="live",
-        LIVE_DRY_RUN=True,
-        LIVE_REAL_ORDER_ARMED=False,
-        STRATEGY_NAME="daily_participation_sma",
-        PAIR="KRW-BTC",
-        INTERVAL="1m",
-        STRATEGY_EXIT_RULES="max_holding_time",
-        STRATEGY_EXIT_MAX_HOLDING_MIN=74,
-        MAX_ORDER_KRW=100_000,
-        MAX_DAILY_ORDER_COUNT=2,
-        APPROVED_STRATEGY_PROFILE_PATH="",
-        STRATEGY_APPROVED_PROFILE_PATH="",
-        H74_SOURCE_OBSERVATION_AUTHORITY_PATH=str(path),
-    )
-    for key, value in H74_SOURCE_OBSERVATION_PARAMETERS.items():
-        if key.isupper():
-            object.__setattr__(cfg, key, value)
+    cfg = _h74_source_cfg(path)
 
     validate_live_strategy_selection(cfg)
     runtime = h74_source_runtime_values_from_settings(cfg)
     assert runtime["max_daily_total_order_count"] == 2
     assert runtime["exit_closeout_not_blocked_by_entry_cap"] is True
+
+
+def test_h74_source_observation_runtime_strategy_set_selection_passes_without_approved_profile(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority = _source_authority()
+    path = tmp_path / "source-authority.json"
+    path.write_text(json.dumps(authority), encoding="utf-8")
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
+    runtime_strategy_set_json = json.dumps(
+        {
+            "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": "1m"},
+            "strategies": [
+                {
+                    "strategy_name": "daily_participation_sma",
+                    "strategy_instance_id": "h74-source-observation",
+                    "pair": "KRW-BTC",
+                    "interval": "1m",
+                    "desired_exposure_krw": 100_000,
+                    "parameters": _source_parameters(),
+                }
+            ],
+        }
+    )
+    cfg = _h74_source_cfg(path, RUNTIME_STRATEGY_SET_JSON=runtime_strategy_set_json)
+
+    validate_runtime_strategy_set_selection(cfg)
+
+
+def test_h74_source_observation_selection_rejects_expired_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority = build_h74_source_observation_authority_payload(
+        source_candidate_artifact_hash="sha256:source-candidate",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        code_commit_sha="test-commit",
+    )
+    path = tmp_path / "source-authority.json"
+    path.write_text(json.dumps(authority), encoding="utf-8")
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
+    cfg = _h74_source_cfg(path)
+
+    with pytest.raises(LiveModeValidationError, match="h74_source_observation_authority_expired"):
+        validate_live_strategy_selection(cfg)
+
+
+def test_h74_source_observation_selection_rejects_runtime_mismatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority = _source_authority()
+    path = tmp_path / "source-authority.json"
+    path.write_text(json.dumps(authority), encoding="utf-8")
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
+    cfg = _h74_source_cfg(path)
+    object.__setattr__(cfg, "SMA_FILTER_GAP_MIN_RATIO", 0.0012)
+
+    with pytest.raises(LiveModeValidationError, match="SMA_FILTER_GAP_MIN_RATIO"):
+        validate_live_strategy_selection(cfg)
+
+
+def test_h74_source_observation_selection_rejects_invalid_risk_policy_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority = _source_authority()
+    authority["risk_policy"]["max_daily_order_count"] = 3
+    _rehash_source_risk_policy(authority)
+    path = tmp_path / "source-authority.json"
+    path.write_text(json.dumps(authority), encoding="utf-8")
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
+    cfg = _h74_source_cfg(path)
+
+    with pytest.raises(LiveModeValidationError, match="daily_order_count_too_high"):
+        validate_live_strategy_selection(cfg)
 
 
 def test_h74_source_observation_live_dry_run_materializes_risk_profile(
@@ -410,10 +506,6 @@ def test_h74_source_observation_live_dry_run_materializes_risk_profile(
     for key, value in H74_SOURCE_OBSERVATION_PARAMETERS.items():
         if key.isupper():
             object.__setattr__(cfg, key, value)
-    parameters = {
-        name: H74_SOURCE_OBSERVATION_PARAMETERS[name]
-        for name in runtime_bound_behavior_parameter_names("daily_participation_sma")
-    }
     strategy_set = RuntimeStrategySet(
         source="RUNTIME_STRATEGY_SET_JSON",
         strategies=(
@@ -421,7 +513,7 @@ def test_h74_source_observation_live_dry_run_materializes_risk_profile(
                 "daily_participation_sma",
                 pair="KRW-BTC",
                 interval="1m",
-                parameters=parameters,
+                parameters=_source_parameters(),
             ),
         ),
     )

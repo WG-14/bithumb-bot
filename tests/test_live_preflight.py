@@ -20,7 +20,10 @@ from bithumb_bot.research.strategy_registry import (
     resolve_research_strategy_plugin,
     runtime_strategy_parameters_from_settings,
 )
-from bithumb_bot.research.strategy_spec import materialized_strategy_parameters_hash
+from bithumb_bot.research.strategy_spec import (
+    materialized_strategy_parameters_hash,
+    runtime_bound_behavior_parameter_names,
+)
 from bithumb_bot.strategy_config import _sma_int
 from bithumb_bot.runtime_strategy_set import RuntimeDecisionRequestBuilder, RuntimeStrategySpec
 from bithumb_bot.risk_contract import RiskPolicy
@@ -28,6 +31,10 @@ from bithumb_bot.storage_io import write_json_atomic
 from bithumb_bot.broker import order_rules
 from bithumb_bot import operator_notification_service
 from bithumb_bot.markets import MarketInfo, MarketRegistry
+from bithumb_bot.h74_observation import (
+    H74_SOURCE_OBSERVATION_PARAMETERS,
+    build_h74_source_observation_authority_payload,
+)
 from tests.support.live_auth import TEST_BITHUMB_API_KEY, TEST_BITHUMB_API_SECRET
 
 _REAL_GET_EFFECTIVE_ORDER_RULES = order_rules.get_effective_order_rules
@@ -506,6 +513,58 @@ def _set_live_multi_strategy_json(
     return left_profile, right_profile
 
 
+def _h74_source_parameters() -> dict[str, object]:
+    return {
+        name: H74_SOURCE_OBSERVATION_PARAMETERS[name]
+        for name in runtime_bound_behavior_parameter_names("daily_participation_sma")
+    }
+
+
+def _set_h74_source_runtime_values() -> None:
+    for key, value in H74_SOURCE_OBSERVATION_PARAMETERS.items():
+        if key.isupper():
+            object.__setattr__(settings, key, value)
+
+
+def _h74_source_runtime_strategy_set_json() -> str:
+    return json.dumps(
+        {
+            "market_scope": {"mode": "single_pair", "pair": "KRW-BTC", "interval": "1m"},
+            "strategies": [
+                {
+                    "strategy_name": "daily_participation_sma",
+                    "strategy_instance_id": "h74-source-observation",
+                    "pair": "KRW-BTC",
+                    "interval": "1m",
+                    "desired_exposure_krw": 100_000,
+                    "parameters": _h74_source_parameters(),
+                }
+            ],
+        }
+    )
+
+
+def _write_h74_source_smoke_success(path: Path) -> None:
+    write_json_atomic(
+        path,
+        {
+            "status": "passed",
+            "execution_mode": "live_pipeline_smoke",
+            "orders_expected": 10,
+            "orders_submitted": 10,
+            "manual_intervention_required": False,
+            "final": {
+                "broker_qty": 0.0,
+                "portfolio_qty": 0.0,
+                "projected_total_qty": 0.0,
+                "open_order_count": 0,
+                "submit_unknown_count": 0,
+                "recovery_required_count": 0,
+            },
+        },
+    )
+
+
 
 def test_live_preflight_skips_paper_mode() -> None:
     object.__setattr__(settings, "MODE", "paper")
@@ -910,6 +969,84 @@ def test_live_dry_run_preflight_requires_approved_live_dry_run_profile(monkeypat
         config.validate_live_mode_preflight(settings)
 
     assert "approved_profile_required_for_strategy:sma_with_filter" in str(exc.value)
+
+
+def test_live_dry_run_preflight_accepts_h74_source_runtime_strategy_set_without_approved_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    authority = build_h74_source_observation_authority_payload(
+        source_candidate_artifact_hash="sha256:source-candidate",
+        backtest_report_hash="sha256:backtest",
+        validation_run_hash="sha256:validation",
+        code_commit_sha="test-commit",
+    )
+    authority_path = tmp_path / "h74-source-authority.json"
+    write_json_atomic(authority_path, authority)
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(authority_path))
+    monkeypatch.delenv("APPROVED_STRATEGY_PROFILE_PATH", raising=False)
+    monkeypatch.delenv("STRATEGY_APPROVED_PROFILE_PATH", raising=False)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "STRATEGY_NAME", "daily_participation_sma")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "INTERVAL", "1m")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100_000)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 2)
+    object.__setattr__(settings, "STRATEGY_EXIT_RULES", "max_holding_time")
+    object.__setattr__(settings, "STRATEGY_EXIT_MAX_HOLDING_MIN", 74)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+    object.__setattr__(settings, "STRATEGY_APPROVED_PROFILE_PATH", "")
+    object.__setattr__(settings, "H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(authority_path))
+    object.__setattr__(settings, "RUNTIME_STRATEGY_SET_JSON", _h74_source_runtime_strategy_set_json())
+    object.__setattr__(settings, "ACTIVE_STRATEGIES", "")
+    _set_h74_source_runtime_values()
+
+    config.validate_live_mode_preflight(settings)
+
+
+def test_live_real_order_preflight_accepts_h74_source_runtime_strategy_set_with_smoke_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    authority = build_h74_source_observation_authority_payload(
+        source_candidate_artifact_hash="sha256:source-candidate",
+        backtest_report_hash="sha256:backtest",
+        validation_run_hash="sha256:validation",
+        code_commit_sha="test-commit",
+    )
+    authority_path = tmp_path / "h74-source-authority.json"
+    smoke_path = tmp_path / "h74-source-smoke.json"
+    write_json_atomic(authority_path, authority)
+    _write_h74_source_smoke_success(smoke_path)
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(authority_path))
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_LIVE_PIPELINE_SMOKE_EVIDENCE_PATH", str(smoke_path))
+    monkeypatch.delenv("APPROVED_STRATEGY_PROFILE_PATH", raising=False)
+    monkeypatch.delenv("STRATEGY_APPROVED_PROFILE_PATH", raising=False)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "STRATEGY_NAME", "daily_participation_sma")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "INTERVAL", "1m")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100_000)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 2)
+    object.__setattr__(settings, "STRATEGY_EXIT_RULES", "max_holding_time")
+    object.__setattr__(settings, "STRATEGY_EXIT_MAX_HOLDING_MIN", 74)
+    object.__setattr__(settings, "APPROVED_STRATEGY_PROFILE_PATH", "")
+    object.__setattr__(settings, "STRATEGY_APPROVED_PROFILE_PATH", "")
+    object.__setattr__(settings, "H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(authority_path))
+    object.__setattr__(
+        settings,
+        "H74_SOURCE_OBSERVATION_LIVE_PIPELINE_SMOKE_EVIDENCE_PATH",
+        str(smoke_path),
+    )
+    object.__setattr__(settings, "RUNTIME_STRATEGY_SET_JSON", _h74_source_runtime_strategy_set_json())
+    object.__setattr__(settings, "ACTIVE_STRATEGIES", "")
+    _set_h74_source_runtime_values()
+
+    config.validate_live_mode_preflight(settings)
 
 
 def test_live_dry_run_preflight_rejects_small_live_profile(monkeypatch: pytest.MonkeyPatch) -> None:

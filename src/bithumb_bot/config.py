@@ -84,6 +84,12 @@ LEGACY_V1_ORDER_SCAN_ENV_KEYS = (
 LOG = logging.getLogger(__name__)
 _MARKET_TOKEN_RE = re.compile(r"^[A-Z0-9]+$")
 _CANONICAL_MARKET_RE = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
+H74_SOURCE_OBSERVATION_APPROVED_PROFILE_BLOCK_REASON = "h74_source_observation_authority_used"
+H74_SOURCE_OBSERVATION_CONTRACT_SCOPE = "h74_source_live_observation_only"
+H74_SOURCE_OBSERVATION_CAPABILITY_MARKER = (
+    "h74_source_observation_authority_verified:"
+    f"{H74_SOURCE_OBSERVATION_CONTRACT_SCOPE}:production_approval_false"
+)
 
 
 def parse_bool_env(key: str, default: str = "false") -> bool:
@@ -408,6 +414,69 @@ def _runtime_selection_kind(strategy_set: object) -> Literal["single_strategy", 
     return "multi_strategy" if bool(getattr(strategy_set, "multi_strategy_enabled", False)) else "single_strategy"
 
 
+@dataclass(frozen=True)
+class H74SourceObservationAuthoritySelection:
+    verified: bool
+    path: str = ""
+    diagnostics: dict[str, object] | None = None
+
+
+def _approved_strategy_profile_path_from_cfg(cfg: Settings) -> str:
+    return (
+        str(getattr(cfg, "APPROVED_STRATEGY_PROFILE_PATH", "") or "").strip()
+        or str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+    )
+
+
+def _h74_source_observation_authority_selection(
+    cfg: Settings,
+    *,
+    strategy_name: str,
+    approved_profile_path: str,
+) -> H74SourceObservationAuthoritySelection:
+    if str(getattr(cfg, "MODE", "") or "").strip().lower() != "live":
+        return H74SourceObservationAuthoritySelection(verified=False)
+    if approved_profile_path:
+        return H74SourceObservationAuthoritySelection(verified=False)
+    authority_path = (
+        str(getattr(cfg, "H74_SOURCE_OBSERVATION_AUTHORITY_PATH", "") or "").strip()
+        or os.getenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", "").strip()
+    )
+    if not authority_path:
+        return H74SourceObservationAuthoritySelection(verified=False)
+
+    from .h74_observation import (
+        H74_SOURCE_OBSERVATION_RISK_POLICY_SOURCE,
+        H74_STRATEGY_NAME,
+        verify_h74_source_observation_authority_file,
+    )
+
+    if str(strategy_name or "").strip().lower() != H74_STRATEGY_NAME:
+        return H74SourceObservationAuthoritySelection(verified=False)
+
+    try:
+        verify_h74_source_observation_authority_file(authority_path, settings_obj=cfg)
+    except Exception as exc:
+        raise LiveModeValidationError(
+            "h74_source_observation_authority_validation_failed: "
+            f"path={authority_path!r}; reason={type(exc).__name__}:{exc}"
+        ) from exc
+
+    return H74SourceObservationAuthoritySelection(
+        verified=True,
+        path=authority_path,
+        diagnostics={
+            "h74_observation_authority_verified": True,
+            "h74_source_observation_authority_verified": True,
+            "approved_profile_verification_ok": False,
+            "approved_profile_block_reason": H74_SOURCE_OBSERVATION_APPROVED_PROFILE_BLOCK_REASON,
+            "approved_profile_contract_scope": H74_SOURCE_OBSERVATION_CONTRACT_SCOPE,
+            "production_approval": False,
+            "risk_profile_source": H74_SOURCE_OBSERVATION_RISK_POLICY_SOURCE,
+        },
+    )
+
+
 def validate_runtime_profile_bindings_for_live_startup(
     cfg: Settings,
     *,
@@ -556,23 +625,12 @@ def validate_live_strategy_selection(cfg: Settings) -> None:
                     "live_observation_authority_validation_failed: "
                     f"path={observation_authority_path!r}; reason={type(exc).__name__}:{exc}"
                 ) from exc
-    h74_source_authority_verified = False
-    h74_source_authority_path = (
-        str(getattr(cfg, "H74_SOURCE_OBSERVATION_AUTHORITY_PATH", "") or "").strip()
-        or os.getenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", "").strip()
+    approved_profile_path = _approved_strategy_profile_path_from_cfg(cfg)
+    h74_source_authority = _h74_source_observation_authority_selection(
+        cfg,
+        strategy_name=strategy_name,
+        approved_profile_path=approved_profile_path,
     )
-    if h74_source_authority_path:
-        from .h74_observation import H74_STRATEGY_NAME, verify_h74_source_observation_authority_file
-
-        if strategy_name == H74_STRATEGY_NAME:
-            try:
-                verify_h74_source_observation_authority_file(h74_source_authority_path, settings_obj=cfg)
-                h74_source_authority_verified = True
-            except Exception as exc:
-                raise LiveModeValidationError(
-                    "h74_source_observation_authority_validation_failed: "
-                    f"path={h74_source_authority_path!r}; reason={type(exc).__name__}:{exc}"
-                ) from exc
     from .research.strategy_registry import strategy_runtime_capability_issues
 
     issues = strategy_runtime_capability_issues(
@@ -580,9 +638,8 @@ def validate_live_strategy_selection(cfg: Settings) -> None:
         live_dry_run=bool(cfg.LIVE_DRY_RUN),
         live_real_order_armed=bool(cfg.LIVE_REAL_ORDER_ARMED),
         approved_profile_path=(
-            str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
-            or str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
-            or ("h74_source_observation_authority_verified" if h74_source_authority_verified else "")
+            approved_profile_path
+            or (H74_SOURCE_OBSERVATION_CAPABILITY_MARKER if h74_source_authority.verified else "")
         ),
         require_promotion_runtime=True,
         require_runtime_replay=True,
@@ -658,6 +715,29 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
             issues.append(f"{spec.strategy_name}:strategy_plugin_not_registered:{exc}")
             continue
 
+        approved_profile_path = (
+            str(spec.approved_profile_path or "").strip()
+            or (
+                ""
+                if strategy_set.multi_strategy_enabled
+                else str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip()
+            )
+            or (
+                ""
+                if strategy_set.multi_strategy_enabled
+                else str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip()
+            )
+        )
+        try:
+            h74_source_authority = _h74_source_observation_authority_selection(
+                cfg,
+                strategy_name=spec.strategy_name,
+                approved_profile_path=approved_profile_path,
+            )
+        except LiveModeValidationError as exc:
+            issues.append(f"{spec.strategy_name}:{exc}")
+            h74_source_authority = H74SourceObservationAuthoritySelection(verified=False)
+
         issues.extend(
             f"{spec.strategy_name}:{issue}"
             for issue in strategy_runtime_capability_issues(
@@ -665,9 +745,8 @@ def validate_runtime_strategy_set_selection(cfg: Settings) -> None:
                 live_dry_run=bool(cfg.LIVE_DRY_RUN),
                 live_real_order_armed=bool(cfg.LIVE_REAL_ORDER_ARMED),
                 approved_profile_path=(
-                    str(spec.approved_profile_path or "").strip()
-                    or ("" if strategy_set.multi_strategy_enabled else str(cfg.APPROVED_STRATEGY_PROFILE_PATH or "").strip())
-                    or ("" if strategy_set.multi_strategy_enabled else str(getattr(cfg, "STRATEGY_APPROVED_PROFILE_PATH", "") or "").strip())
+                    approved_profile_path
+                    or (H74_SOURCE_OBSERVATION_CAPABILITY_MARKER if h74_source_authority.verified else "")
                 ),
                 require_promotion_runtime=True,
                 require_runtime_replay=live_like,
