@@ -550,7 +550,7 @@ def _startup_gate_allows_process_auto_recovery(*, state: object, startup_gate_re
         metadata = json.loads(str(getattr(state, "last_reconcile_metadata", None) or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         metadata = {}
-    conn = ensure_db()
+    conn = ensure_db(ensure_schema_ready=False)
     try:
         readiness_snapshot = compute_runtime_readiness_snapshot(conn)
     finally:

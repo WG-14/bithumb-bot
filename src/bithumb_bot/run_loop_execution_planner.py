@@ -875,13 +875,31 @@ class ExecutionPlanner:
         )
         submit_plan = _primary_submit_plan(planning.execution_decision_summary)
         context = dict(planning.context)
-        batch = _build_execution_plan_batch_for_runtime_pair(
-            conn,
-            context=context,
-            submit_plan=submit_plan,
-            updated_ts=int(updated_ts),
-            read_only=bool(self.read_only_planning),
-        )
+        context["planner_subphase"] = "lock_intent_build"
+        try:
+            batch = _build_execution_plan_batch_for_runtime_pair(
+                conn,
+                context=context,
+                submit_plan=submit_plan,
+                updated_ts=int(updated_ts),
+                read_only=bool(self.read_only_planning),
+            )
+        except Exception as exc:
+            planning = self._fail_closed_context(
+                decision_context=context,
+                reason_code="execution_plan_batch_unavailable",
+                exc=exc,
+            )
+            return ExecutionPlanBundle(
+                summary=None,
+                submit_plan=None,
+                persistence_context=dict(planning.context),
+                readiness_payload=planning.readiness_payload,
+                target_policy_metadata=planning.target_policy_metadata,
+                planning_error=planning.planning_error,
+                status=_plan_status(planning),
+                execution_plan_batch=None,
+            )
         context.update(
             {
                 "decision_authority_source": "DecisionEnvelope.strategy_decision",
@@ -938,12 +956,30 @@ class ExecutionPlanner:
         )
         submit_plan = _primary_submit_plan(planning.execution_decision_summary)
         context = dict(planning.context)
-        batch = _build_execution_plan_batch_for_runtime_pair(
-            conn,
-            context=context,
-            submit_plan=submit_plan,
-            updated_ts=int(updated_ts),
-        )
+        context["planner_subphase"] = "lock_intent_build"
+        try:
+            batch = _build_execution_plan_batch_for_runtime_pair(
+                conn,
+                context=context,
+                submit_plan=submit_plan,
+                updated_ts=int(updated_ts),
+            )
+        except Exception as exc:
+            planning = self._fail_closed_context(
+                decision_context=context,
+                reason_code="execution_plan_batch_unavailable",
+                exc=exc,
+            )
+            return ExecutionPlanBundle(
+                summary=None,
+                submit_plan=None,
+                persistence_context=dict(planning.context),
+                readiness_payload=planning.readiness_payload,
+                target_policy_metadata=planning.target_policy_metadata,
+                planning_error=planning.planning_error,
+                status=_plan_status(planning),
+                execution_plan_batch=None,
+            )
         context.update(
             {
                 "decision_authority_source": "PortfolioAllocator.portfolio_target",
@@ -1060,11 +1096,13 @@ class ExecutionPlanner:
             context.update(_runtime_strategy_set_context_fields(strategy_set))
             context.update(_runtime_result_bundle_context_fields(runtime_result_bundle))
             context["runtime_pair"] = runtime_pair
+            context["planner_subphase"] = "readiness_snapshot"
             readiness_payload = self.readiness_snapshot_builder(conn).as_dict()
             strategy_performance_gate = None
             pre_allocation_target_resolution_applied = False
             reference_price = context.get("market_price", context.get("last_close", context.get("close")))
             if runtime_result_bundle is None:
+                context["planner_subphase"] = "target_state_resolution"
                 target_resolution = self.target_state_resolver(
                     conn,
                     readiness_payload=readiness_payload,
@@ -1078,6 +1116,7 @@ class ExecutionPlanner:
                 target_policy_metadata = dict(target_resolution.get("target_policy_metadata", {}))
             else:
                 try:
+                    context["planner_subphase"] = "target_state_resolution"
                     previous_target_exposure_krw = load_previous_target_exposure_for_run_loop(
                         conn,
                         settings_obj=self.settings_obj,
@@ -1091,6 +1130,7 @@ class ExecutionPlanner:
                     and len(runtime_result_bundle.results) == 1
                     and str(planning_input.final_signal or "").upper() in {"BUY", "SELL", "HOLD"}
                 ):
+                    context["planner_subphase"] = "target_state_resolution"
                     target_resolution = self.target_state_resolver(
                         conn,
                         readiness_payload=readiness_payload,
@@ -1307,6 +1347,7 @@ class ExecutionPlanner:
                             }
                         )
                     else:
+                        context["planner_subphase"] = "virtual_target_state_load"
                         previous_virtual_state = load_strategy_virtual_target_state(
                             conn,
                             strategy_instance_id=strategy_instance_id,
@@ -1426,6 +1467,7 @@ class ExecutionPlanner:
                         )
                     if risk_profile is not None:
                         enforced = risk_profile.enforcement_mode == "enforced"
+                        context["planner_subphase"] = "strategy_risk_snapshot"
                         if risk_profile.policy.policy_status == "disabled_explicit":
                             from .risk_contract import RiskSnapshot
 
@@ -1678,6 +1720,7 @@ class ExecutionPlanner:
                 ):
                     resolved_previous_target_exposure = previous_target_exposure_krw
                 else:
+                    context["planner_subphase"] = "target_state_resolution"
                     target_resolution = self.target_state_resolver(
                         conn,
                         readiness_payload=readiness_payload,
@@ -1710,6 +1753,7 @@ class ExecutionPlanner:
             else:
                 context["authoritative_execution_signal"] = planning_input.final_signal
             readiness_payload = {**readiness_payload, **target_policy_metadata}
+            context["planner_subphase"] = "execution_plan_batch_build"
             authority = ExecutionAuthorityEnvelope(
                 planning_input=planning_input,
                 readiness=ExecutionReadinessPlanningInput.from_payload(

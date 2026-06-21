@@ -295,6 +295,7 @@ class RuntimeCycleArtifact:
     max_retry_count: int | None = None
     transaction_elapsed_ms: float | None = None
     lock_wait_elapsed_ms: float | None = None
+    last_lock_error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload = {
@@ -359,6 +360,7 @@ class RuntimeCycleArtifact:
             "max_retry_count": self.max_retry_count,
             "transaction_elapsed_ms": self.transaction_elapsed_ms,
             "lock_wait_elapsed_ms": self.lock_wait_elapsed_ms,
+            "last_lock_error": self.last_lock_error,
         }
         payload["input_hash"] = _stable_hash(
             {

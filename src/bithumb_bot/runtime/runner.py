@@ -437,7 +437,7 @@ def _persist_run_start_runtime_strategy_set_manifest(
     manifest_payload: dict[str, object],
     created_ts: int,
 ) -> dict[str, object]:
-    conn = ensure_db()
+    conn = ensure_db(ensure_schema_ready=False)
     try:
         refs = record_runtime_strategy_set_manifest(
             conn,
@@ -676,7 +676,7 @@ _select_latest_closed_candle = partial(
 
 def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     open_count, _ = _get_open_order_snapshot(now_ms)
-    conn = ensure_db()
+    conn = ensure_db(ensure_schema_ready=False)
     try:
         try:
             snapshot = compute_runtime_readiness_snapshot(conn)
@@ -713,7 +713,7 @@ def _startup_gate_allows_process_auto_recovery(*, state, startup_gate_reason: st
         reconcile_metadata = json.loads(str(getattr(state, "last_reconcile_metadata", None) or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         reconcile_metadata = {}
-    conn = ensure_db()
+    conn = ensure_db(ensure_schema_ready=False)
     try:
         readiness_snapshot = compute_runtime_readiness_snapshot(conn)
     finally:

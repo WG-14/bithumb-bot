@@ -24,13 +24,37 @@ def _planning_bundle() -> SimpleNamespace:
     return SimpleNamespace(execution_plan_batch=object(), planning_error=None)
 
 
-def _context() -> dict[str, object]:
-    return {
+def _context(*, include_locks: bool = False) -> dict[str, object]:
+    context: dict[str, object] = {
         "ts": 1,
         "last_close": 100.0,
         "execution_decision": {},
         "portfolio_allocation_decision": {"allocation_decision_hash": "alloc-hash"},
     }
+    if include_locks:
+        context["lock_intents"] = [
+            {
+                "lock_kind": "budget",
+                "pair": "KRW-BTC",
+                "currency": "KRW",
+                "amount": 10000.0,
+                "reason": "unit_budget_lock",
+                "created_ts": 1,
+                "idempotency_key": "budget-lock-key",
+                "evidence": {"scope": "retry-test"},
+            },
+            {
+                "lock_kind": "order",
+                "pair": "KRW-BTC",
+                "currency": "BTC",
+                "amount": 0.001,
+                "reason": "unit_order_lock",
+                "created_ts": 1,
+                "idempotency_key": "order-lock-key",
+                "evidence": {"scope": "retry-test"},
+            },
+        ]
+    return context
 
 
 def _simple_uow(*, retry_count: int = 1, retry_backoff_ms: int = 1) -> DecisionPersistenceUnitOfWork:
@@ -70,6 +94,15 @@ def _simple_uow(*, retry_count: int = 1, retry_backoff_ms: int = 1) -> DecisionP
         }
 
     def batch_fn(conn, **_kwargs):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO execution_plan_batch(
+                batch_hash, batch_id, runtime_strategy_set_manifest_hash,
+                allocation_decision_hash, budget_lock_hash, status, batch_json, created_ts
+            )
+            VALUES ('batch-hash', 'batch-id', 'manifest', 'alloc-hash', 'lock', 'ALLOW', '{}', 1)
+            """
+        )
         return {"execution_plan_batch_hash": "batch-hash", "execution_plan_batch_id": "batch-id"}
 
     def execution_fn(conn, **_kwargs):
@@ -106,12 +139,12 @@ def _simple_uow(*, retry_count: int = 1, retry_backoff_ms: int = 1) -> DecisionP
     )
 
 
-def _persist(uow: DecisionPersistenceUnitOfWork, conn):
+def _persist(uow: DecisionPersistenceUnitOfWork, conn, *, include_locks: bool = False):
     return uow.persist(
         conn,
         typed_bundle=_bundle(),
         planning_bundle=_planning_bundle(),
-        context=_context(),
+        context=_context(include_locks=include_locks),
         strategy_name="s",
         signal="HOLD",
         reason="ok",
@@ -161,5 +194,85 @@ def test_decision_persistence_retry_success_does_not_duplicate_rows(tmp_path) ->
     assert result.retry_count == 1
     assert _count(conn, "runtime_strategy_decision_bundle") == 1
     assert _count(conn, "portfolio_allocation_decision") == 1
+    assert _count(conn, "execution_plan_batch") == 1
     assert _count(conn, "execution_plan") == 1
+    conn.close()
+
+
+def test_decision_persistence_rolls_back_failed_attempt_before_retry(tmp_path) -> None:
+    db_path = tmp_path / "late-lock-rollback.sqlite"
+    conn = ensure_db(str(db_path))
+    attempts = {"n": 0}
+    uow = _simple_uow(retry_count=1, retry_backoff_ms=0)
+    original = uow.record_runtime_strategy_decision_bundle_fn
+
+    def insert_then_lock(conn, **kwargs):
+        refs = original(conn, **kwargs)
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return refs
+
+    uow.record_runtime_strategy_decision_bundle_fn = insert_then_lock
+
+    result = _persist(uow, conn)
+
+    assert result.retry_count == 1
+    assert _count(conn, "runtime_strategy_decision_bundle") == 1
+    assert _count(conn, "portfolio_allocation_decision") == 1
+    assert _count(conn, "execution_plan_batch") == 1
+    assert _count(conn, "execution_plan") == 1
+    conn.close()
+
+
+def test_decision_persistence_retry_success_does_not_duplicate_lock_rows(tmp_path) -> None:
+    db_path = tmp_path / "late-lock-no-duplicate-locks.sqlite"
+    conn = ensure_db(str(db_path))
+    attempts = {"n": 0}
+    uow = _simple_uow(retry_count=1, retry_backoff_ms=0)
+    original = uow.record_portfolio_allocation_decision_fn
+
+    def allocation_then_lock(conn, **kwargs):
+        refs = original(conn, **kwargs)
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return refs
+
+    uow.record_portfolio_allocation_decision_fn = allocation_then_lock
+
+    result = _persist(uow, conn, include_locks=True)
+
+    assert result.retry_count == 1
+    assert _count(conn, "runtime_strategy_decision_bundle") == 1
+    assert _count(conn, "portfolio_allocation_decision") == 1
+    assert _count(conn, "execution_plan_batch") == 1
+    assert _count(conn, "execution_plan") == 1
+    assert _count(conn, "budget_locks") == 1
+    assert _count(conn, "order_locks") == 1
+    conn.close()
+
+
+def test_decision_persistence_exhausted_lock_retry_reports_retry_count_and_subphase(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "late-lock-exhausted.sqlite"))
+    uow = _simple_uow(retry_count=2, retry_backoff_ms=0)
+    original = uow.record_portfolio_allocation_decision_fn
+
+    def allocation_then_lock(conn, **kwargs):
+        refs = original(conn, **kwargs)
+        raise sqlite3.OperationalError("database is locked")
+
+    uow.record_portfolio_allocation_decision_fn = allocation_then_lock
+
+    with pytest.raises(DecisionPersistenceError) as excinfo:
+        _persist(uow, conn)
+
+    metadata = dict(excinfo.value.metadata)
+    assert metadata["retry_count"] == 2
+    assert metadata["max_retry_count"] == 2
+    assert metadata["db_subphase"] == "portfolio_allocation"
+    assert metadata["sql_group"] == "portfolio_allocation_insert"
+    assert metadata["last_lock_error"]
+    assert _count(conn, "runtime_strategy_decision_bundle") == 0
+    assert _count(conn, "portfolio_allocation_decision") == 0
     conn.close()

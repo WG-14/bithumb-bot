@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from bithumb_bot.db_core import ensure_db
 from bithumb_bot.runtime import cycle_pipeline
 from bithumb_bot.runtime.cycle_pipeline import RuntimeCyclePipeline
 from bithumb_bot.runtime.decision_coordinator import DecisionCycleResult
 from bithumb_bot.runtime.lifecycle_artifacts import RuntimeCycleArtifact
+import bithumb_bot.db_core as db_core
 
 
 class _PreflightProvider:
@@ -54,11 +56,36 @@ def _decision_result() -> DecisionCycleResult:
     )
 
 
+def _success_decision_result() -> DecisionCycleResult:
+    return DecisionCycleResult(
+        candle_ts=1,
+        strategy_name="s",
+        signal="HOLD",
+        reason="ok",
+        decision_id=1,
+        decision_context={},
+        execution_decision_summary=None,
+        execution_plan_bundle=None,
+        strategy_decision_hash="sha256:decision",
+        execution_plan_bundle_hash=None,
+        persistence_status="persisted",
+        mark_processed_candidate=True,
+        market_price=100.0,
+    )
+
+
 def _runner(*, threshold: int = 3):
     execution = SimpleNamespace(called=False)
 
     def execute_cycle(**_kwargs):
         execution.called = True
+        return SimpleNamespace(
+            mark_processed_allowed=False,
+            submitted=False,
+            trade=None,
+            halt_transition=None,
+            as_dict=lambda: {"decision_hash": "sha256:execution"},
+        )
 
     container = SimpleNamespace(
         interval_parser=lambda _interval: 60,
@@ -122,4 +149,61 @@ def test_consecutive_decision_persistence_failures_enter_halt_after_threshold(mo
     assert artifact.cycle_id == "halt:decision_persistence_blocked"
     assert halted[-1]["reason_code"] == "DECISION_PERSISTENCE_BLOCKED"
     assert halted[-1]["unresolved"] is True
+    assert runner.execution.called is False
+
+
+def test_successful_cycle_resets_decision_persistence_failure_counter(monkeypatch) -> None:
+    monkeypatch.setattr(cycle_pipeline, "RuntimeDataCyclePreflightProvider", _PreflightProvider)
+    halted = []
+    monkeypatch.setattr(cycle_pipeline.runtime_state, "disable_trading_until", lambda *args, **kwargs: halted.append(kwargs))
+    runner = _runner(threshold=2)
+
+    RuntimeCyclePipeline(runner).run_once()
+    assert runner.decision_persistence_failure_count == 1
+
+    runner.container.decision_coordinator = SimpleNamespace(decide_cycle=lambda **_kwargs: _success_decision_result())
+    RuntimeCyclePipeline(runner).run_once()
+    assert runner.decision_persistence_failure_count == 0
+
+    runner.container.decision_coordinator = SimpleNamespace(decide_cycle=lambda **_kwargs: _decision_result())
+    artifact = RuntimeCyclePipeline(runner).run_once()
+
+    assert artifact.cycle_id == "skip:decision_persistence_failed_retryable"
+    assert halted == []
+
+
+def test_halt_after_threshold_persists_bot_health_halt_state(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "halt-policy.sqlite"
+    monkeypatch.setattr(db_core, "settings", SimpleNamespace(DB_PATH=str(db_path), MODE="paper"))
+    conn = ensure_db(str(db_path))
+    conn.close()
+    monkeypatch.setattr(cycle_pipeline, "RuntimeDataCyclePreflightProvider", _PreflightProvider)
+    runner = _runner(threshold=3)
+
+    RuntimeCyclePipeline(runner).run_once()
+    RuntimeCyclePipeline(runner).run_once()
+    artifact = RuntimeCyclePipeline(runner).run_once()
+
+    conn = ensure_db(str(db_path), ensure_schema_ready=False)
+    row = conn.execute(
+        "SELECT trading_enabled, halt_reason_code, halt_state_unresolved FROM bot_health WHERE id=1"
+    ).fetchone()
+    conn.close()
+
+    assert artifact.cycle_id == "halt:decision_persistence_blocked"
+    assert row is not None
+    assert int(row["trading_enabled"]) == 0
+    assert row["halt_reason_code"] == "DECISION_PERSISTENCE_BLOCKED"
+    assert int(row["halt_state_unresolved"]) == 1
+
+
+def test_halt_after_persistence_failures_prevents_execution_call(monkeypatch) -> None:
+    monkeypatch.setattr(cycle_pipeline, "RuntimeDataCyclePreflightProvider", _PreflightProvider)
+    halted = []
+    monkeypatch.setattr(cycle_pipeline.runtime_state, "disable_trading_until", lambda *args, **kwargs: halted.append(kwargs))
+    runner = _runner(threshold=1)
+
+    artifact = RuntimeCyclePipeline(runner).run_once()
+
+    assert artifact.cycle_id == "halt:decision_persistence_blocked"
     assert runner.execution.called is False

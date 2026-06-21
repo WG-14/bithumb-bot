@@ -79,6 +79,8 @@ class RuntimeCycleArtifactAssembler:
             max_retry_count=decision_result.persistence_max_retry_count,
             transaction_elapsed_ms=decision_result.transaction_elapsed_ms,
             lock_wait_elapsed_ms=decision_result.lock_wait_elapsed_ms,
+            last_lock_error=str((decision_result.persistence_failure_metadata or {}).get("last_lock_error") or "")
+            or None,
         )
 
 

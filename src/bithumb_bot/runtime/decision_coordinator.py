@@ -38,6 +38,10 @@ from .decision_persistence import DecisionPersistenceUnitOfWork
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
+def runtime_schema_ready_db_factory():
+    return ensure_db(ensure_schema_ready=False)
+
+
 def _artifact_hash(value: object) -> str | None:
     content_hash = getattr(value, "content_hash", None)
     if callable(content_hash):
@@ -350,7 +354,7 @@ class DecisionCycleResult:
 @dataclass(frozen=True)
 class DecisionCoordinator:
     settings_obj: object = settings
-    db_factory: Callable[[], object] = ensure_db
+    db_factory: Callable[[], object] = runtime_schema_ready_db_factory
     decision_gateway_factory: Callable[[], RuntimeDecisionGateway] = RuntimeDecisionGateway
     planner_factory: Callable[..., object] = run_loop_execution_planner
     target_state_resolver: Callable[..., object] = resolve_target_position_state_for_run_loop
@@ -481,9 +485,7 @@ class DecisionCoordinator:
                 context["runtime_data_cycle_preflight_hash"] = runtime_data_cycle_preflight_hash
             if runtime_data_availability_report_hash:
                 context["runtime_data_availability_report_hash"] = runtime_data_availability_report_hash
-            if getattr(planning_bundle, "planning_error", None) and not isinstance(
-                context.get("portfolio_allocation_decision"), dict
-            ):
+            if getattr(planning_bundle, "planning_error", None):
                 planning_exc = RuntimeError(str(planning_bundle.planning_error))
                 planning_exc.metadata = {
                     "failure_subphase": getattr(planning_bundle, "failure_subphase", None)

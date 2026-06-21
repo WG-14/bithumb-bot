@@ -248,7 +248,7 @@ def _persist_state(state: RuntimeState) -> None:
 
     This path is shared by runtime loop, healthcheck, and systemd backup windows.
     """
-    conn = ensure_db()
+    conn = ensure_db(ensure_schema_ready=False)
     try:
         def _write() -> None:
             conn.execute(
@@ -392,7 +392,7 @@ def _persist_state(state: RuntimeState) -> None:
 
 
 def _read_persisted_state() -> RuntimeState | None:
-    conn = ensure_db()
+    conn = ensure_db(ensure_schema_ready=False)
     try:
         def _read():
             return conn.execute(
@@ -587,7 +587,7 @@ def refresh_open_order_health(now_epoch_sec: float | None = None) -> None:
 
         now_sec = time.time()
 
-    conn = ensure_db()
+    conn = ensure_db(ensure_schema_ready=False)
     try:
         placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
         unresolved_row = conn.execute(

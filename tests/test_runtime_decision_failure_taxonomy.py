@@ -151,6 +151,131 @@ def test_planning_error_prevents_portfolio_allocation_missing_rewrap() -> None:
     assert "portfolio_allocation_decision_missing" not in str(result.failure_detail)
 
 
+def test_target_state_resolution_lock_reports_target_state_resolution_subphase() -> None:
+    coordinator = _coordinator(
+        planner_factory=lambda **_kwargs: SimpleNamespace(
+            plan_runtime_strategy_results=lambda *_args, **_kwargs: SimpleNamespace(
+                persistence_context={
+                    "execution_decision": {},
+                    "failure_phase": "planner",
+                    "failure_subphase": "target_state_resolution",
+                    "failure_reason_code": "planner_sqlite_lock",
+                    "exception_type": "OperationalError",
+                    "exception_message": "database is locked",
+                },
+                execution_plan_batch=None,
+                summary=None,
+                planning_error="OperationalError: database is locked",
+                failure_phase="planner",
+                failure_subphase="target_state_resolution",
+                failure_reason_code="planner_sqlite_lock",
+                exception_type="OperationalError",
+                exception_message="database is locked",
+            )
+        )
+    )
+
+    result = coordinator.decide_cycle(runtime_strategy_set=object(), candle_ts=123, updated_ts=456)
+
+    assert result.failure_phase == "planner"
+    assert result.failure_subphase == "target_state_resolution"
+    assert result.failure_reason_code == "planner_sqlite_lock"
+
+
+def test_virtual_target_state_load_lock_reports_virtual_target_state_load_subphase() -> None:
+    coordinator = _coordinator(
+        planner_factory=lambda **_kwargs: SimpleNamespace(
+            plan_runtime_strategy_results=lambda *_args, **_kwargs: SimpleNamespace(
+                persistence_context={
+                    "execution_decision": {},
+                    "failure_phase": "planner",
+                    "failure_subphase": "virtual_target_state_load",
+                    "failure_reason_code": "planner_sqlite_lock",
+                    "exception_type": "OperationalError",
+                    "exception_message": "database is locked",
+                },
+                execution_plan_batch=None,
+                summary=None,
+                planning_error="OperationalError: database is locked",
+                failure_phase="planner",
+                failure_subphase="virtual_target_state_load",
+                failure_reason_code="planner_sqlite_lock",
+                exception_type="OperationalError",
+                exception_message="database is locked",
+            )
+        )
+    )
+
+    result = coordinator.decide_cycle(runtime_strategy_set=object(), candle_ts=123, updated_ts=456)
+
+    assert result.failure_phase == "planner"
+    assert result.failure_subphase == "virtual_target_state_load"
+    assert result.failure_reason_code == "planner_sqlite_lock"
+
+
+def test_allocation_payload_missing_after_successful_planning_is_contract_error() -> None:
+    coordinator = _coordinator(
+        planner_factory=lambda **_kwargs: SimpleNamespace(
+            plan_runtime_strategy_results=lambda *_args, **_kwargs: SimpleNamespace(
+                persistence_context={
+                    "execution_decision": {},
+                    "ts": 123,
+                    "last_close": 10.0,
+                },
+                execution_plan_batch=object(),
+                summary=object(),
+                planning_error=None,
+            )
+        )
+    )
+
+    result = coordinator.decide_cycle(runtime_strategy_set=object(), candle_ts=123, updated_ts=456)
+
+    assert result.failure_phase == "decision persistence"
+    assert (
+        result.failure_reason_code
+        == "portfolio_allocation_decision_missing_after_successful_planning"
+    )
+    assert result.persistence_status == "failed"
+    assert result.failure_reason_code != "decision_persistence_sqlite_lock"
+
+
+def test_failure_artifact_contains_phase_subphase_exception_type() -> None:
+    result = _coordinator(
+        planner_factory=lambda **_kwargs: SimpleNamespace(
+            plan_runtime_strategy_results=lambda *_args, **_kwargs: SimpleNamespace(
+                persistence_context={
+                    "execution_decision": {},
+                    "failure_phase": "planner",
+                    "failure_subphase": "execution_plan_batch_build",
+                    "failure_reason_code": "execution_planning_failed",
+                    "exception_type": "ValueError",
+                    "exception_message": "bad plan",
+                },
+                execution_plan_batch=None,
+                summary=None,
+                planning_error="ValueError: bad plan",
+                failure_phase="planner",
+                failure_subphase="execution_plan_batch_build",
+                failure_reason_code="execution_planning_failed",
+                exception_type="ValueError",
+                exception_message="bad plan",
+            )
+        )
+    ).decide_cycle(runtime_strategy_set=object(), candle_ts=123, updated_ts=456)
+
+    artifact = RuntimeCycleArtifactAssembler().from_cycle_results(
+        cycle_id="skip:decision_persistence_failed_retryable",
+        startup_state="READY",
+        decision_result=result,
+    ).as_dict()
+
+    assert artifact["failure_phase"] == "planner"
+    assert artifact["failure_subphase"] == "execution_plan_batch_build"
+    assert artifact["failure_reason_code"] == "execution_planning_failed"
+    assert result.persistence_failure_metadata["exception_type"] == "ValueError"
+
+
 def test_record_execution_plan_failure_has_persistence_reason_code() -> None:
     coordinator = _coordinator(
         record_execution_plan_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db"))

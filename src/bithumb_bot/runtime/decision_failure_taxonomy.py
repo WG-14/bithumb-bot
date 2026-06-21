@@ -73,7 +73,12 @@ def classify_decision_cycle_failure(exc: BaseException, phase: str) -> DecisionC
         if "database is locked" in exception_message.lower():
             reason_code = "planner_sqlite_lock"
             next_action = "inspect_execution_planner_db_read"
-    if reason_code == "portfolio_allocation_decision_missing_after_successful_planning":
+    contract_error = (
+        reason_code == "portfolio_allocation_decision_missing_after_successful_planning"
+        or "portfolio_allocation_decision_missing_after_successful_planning" in exception_message
+    )
+    if contract_error:
+        reason_code = "portfolio_allocation_decision_missing_after_successful_planning"
         next_action = "inspect_planner_persistence_contract"
     if metadata.get("last_lock_error") or "database is locked" in exception_message.lower():
         metadata.setdefault("db_subphase", subphase or normalized_phase)
@@ -82,7 +87,7 @@ def classify_decision_cycle_failure(exc: BaseException, phase: str) -> DecisionC
         if normalized_phase == "decision persistence":
             reason_code = "decision_persistence_sqlite_lock"
             next_action = "inspect_decision_persistence_lock_contention"
-    elif normalized_phase == "decision persistence":
+    elif normalized_phase == "decision persistence" and not contract_error:
         subphase_text = str(subphase or "")
         phase_by_subphase = {
             "runtime_strategy_bundle": "bundle persistence",

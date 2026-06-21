@@ -39,7 +39,9 @@ class RuntimeStateStore:
         return transition
 
     def project_halt_state(self) -> dict[str, object]:
-        projector = self.halt_projector or HaltStateProjector(db_factory=ensure_db)
+        projector = self.halt_projector or HaltStateProjector(
+            db_factory=lambda: ensure_db(ensure_schema_ready=False)
+        )
         state = self.snapshot()
         return projector.project_from_db(metadata_raw=getattr(state, "last_reconcile_metadata", None))
 
