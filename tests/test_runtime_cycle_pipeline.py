@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from bithumb_bot.runtime.cycle_artifact_assembler import RuntimeCycleArtifactAssembler
 from bithumb_bot.runtime.cycle_pipeline import RuntimeCyclePipeline
-from bithumb_bot.runtime.decision_coordinator import DecisionCycleResult
+from bithumb_bot.runtime.decision_coordinator import DecisionCoordinator, DecisionCycleResult
 from bithumb_bot.runtime.execution_coordinator import ExecutionCycleResult
 from bithumb_bot.runtime.lifecycle_artifacts import RuntimeCycleArtifact
 from bithumb_bot.runtime.runner import Runner
@@ -83,3 +83,61 @@ def test_runner_run_one_cycle_calls_pipeline_once() -> None:
     assert calls == ["run_once"]
     assert artifact is not None
     assert artifact.cycle_id == "unit"
+
+
+def test_decision_coordinator_passes_cycle_broker_to_planner_provider() -> None:
+    broker = object()
+    seen: dict[str, object] = {}
+    typed_bundle = SimpleNamespace(
+        candle_ts=1,
+        market_price=100.0,
+        strategy_set=SimpleNamespace(multi_strategy_enabled=False),
+        results=(
+            SimpleNamespace(
+                decision=SimpleNamespace(
+                    strategy_name="unit",
+                    final_signal="HOLD",
+                    final_reason="unit",
+                )
+            ),
+        ),
+    )
+
+    class _Gateway:
+        def decide_bundle(self, *_args, **_kwargs):
+            return typed_bundle
+
+    class _Planner:
+        def plan_runtime_strategy_results(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                summary=None,
+                persistence_context={},
+                planning_error=None,
+                execution_plan_batch=None,
+                submit_plan=None,
+            )
+
+    def _planner_factory(*, broker_provider, **_kwargs):
+        seen["broker"] = broker_provider()
+        return _Planner()
+
+    class _Persistence:
+        def persist(self, *_args, context, **_kwargs):
+            return SimpleNamespace(context=context, decision_id=1, metadata=lambda: {})
+
+    coordinator = DecisionCoordinator(
+        db_factory=lambda: SimpleNamespace(close=lambda: None),
+        decision_gateway_factory=_Gateway,
+        planner_factory=_planner_factory,
+        decision_persistence_uow_factory=_Persistence,
+    )
+
+    result = coordinator.decide_cycle(
+        runtime_strategy_set=object(),
+        candle_ts=1,
+        updated_ts=1,
+        broker=broker,
+    )
+
+    assert seen["broker"] is broker
+    assert result.persistence_status == "persisted"

@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from bithumb_bot import runtime_state
+from bithumb_bot.broker.balance_source import BalanceSnapshot
+from bithumb_bot.broker.base import BrokerBalance
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 from bithumb_bot.strategy_policy_contract import (
@@ -42,6 +45,81 @@ from bithumb_bot.runtime_strategy_set import (
 )
 from dataclasses import replace
 import json
+
+
+class _BalanceSnapshotBroker:
+    def __init__(
+        self,
+        *,
+        cash_available: float = 1_000_000.0,
+        cash_locked: float = 0.0,
+        asset_available: float = 0.0,
+        asset_locked: float = 0.0,
+        observed_ts_ms: int = 1_704_046_800_000,
+        fail: bool = False,
+    ) -> None:
+        self.cash_available = float(cash_available)
+        self.cash_locked = float(cash_locked)
+        self.asset_available = float(asset_available)
+        self.asset_locked = float(asset_locked)
+        self.observed_ts_ms = int(observed_ts_ms)
+        self.fail = bool(fail)
+        self.snapshot_calls = 0
+
+    def get_balance_snapshot(self) -> BalanceSnapshot:
+        self.snapshot_calls += 1
+        if self.fail:
+            raise RuntimeError("broker snapshot unavailable")
+        return BalanceSnapshot(
+            source_id="accounts_v1_rest_snapshot",
+            observed_ts_ms=self.observed_ts_ms,
+            asset_ts_ms=self.observed_ts_ms,
+            balance=BrokerBalance(
+                cash_available=self.cash_available,
+                cash_locked=self.cash_locked,
+                asset_available=self.asset_available,
+                asset_locked=self.asset_locked,
+            ),
+        )
+
+
+def _force_live_strategy_risk_settings(*, db_path: Path) -> dict[str, object]:
+    original = {
+        "DB_PATH": settings.DB_PATH,
+        "MODE": settings.MODE,
+        "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
+        "START_CASH_KRW": settings.START_CASH_KRW,
+        "PAIR": settings.PAIR,
+    }
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50_000.0)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    return original
+
+
+def _restore_settings(original: dict[str, object]) -> None:
+    for key, value in original.items():
+        object.__setattr__(settings, key, value)
+
+
+def _record_verified_flat_reconcile(*, observed_ts_ms: int = 1_704_046_800_000) -> None:
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_source": "accounts_v1_rest_snapshot",
+            "balance_observed_ts_ms": int(observed_ts_ms),
+            "broker_cash_available": 1_000_000.0,
+            "broker_cash_locked": 0.0,
+            "broker_asset_available": 0.0,
+            "broker_asset_locked": 0.0,
+            "broker_asset_qty": 0.0,
+            "dust_residual_present": 0,
+        },
+        now_epoch_sec=1_704_046_800.0,
+    )
 
 
 def _rehash_authority(payload: dict) -> dict:
@@ -684,60 +762,143 @@ def test_h74_source_flat_first_entry_live_observation_reaches_execution_planning
     tmp_path,
     monkeypatch,
 ) -> None:
+    original_settings = _force_live_strategy_risk_settings(
+        db_path=tmp_path / "runtime-state-live.sqlite"
+    )
     authority = _source_authority()
     path = tmp_path / "source-authority.json"
     path.write_text(json.dumps(authority), encoding="utf-8")
     monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
-    cfg = _h74_source_cfg(path)
-    conn = ensure_db(str(tmp_path / "h74-flat-first-entry.sqlite"))
-    set_portfolio_breakdown(
-        conn,
-        cash_available=1_000_000.0,
-        cash_locked=0.0,
-        asset_available=0.0,
-        asset_locked=0.0,
-    )
-    strategy_set = RuntimeStrategySet(
-        source="RUNTIME_STRATEGY_SET_JSON",
-        strategies=(
-            RuntimeStrategySpec(
-                "daily_participation_sma",
-                strategy_instance_id="h74-source-observation",
-                pair="KRW-BTC",
-                interval="1m",
-                desired_exposure_krw=100_000.0,
-                parameters=_source_parameters(),
+    conn = None
+    try:
+        _record_verified_flat_reconcile()
+        cfg = _h74_source_cfg(path)
+        conn = ensure_db(str(tmp_path / "h74-flat-first-entry.sqlite"))
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        strategy_set = RuntimeStrategySet(
+            source="RUNTIME_STRATEGY_SET_JSON",
+            strategies=(
+                RuntimeStrategySpec(
+                    "daily_participation_sma",
+                    strategy_instance_id="h74-source-observation",
+                    pair="KRW-BTC",
+                    interval="1m",
+                    desired_exposure_krw=100_000.0,
+                    parameters=_source_parameters(),
+                ),
             ),
-        ),
-        market_scope=RuntimeMarketScope(mode="single_pair", pair="KRW-BTC", interval="1m"),
-    )
-    authority_context = ProfileAuthorityContext.for_strategy_set(strategy_set, settings_obj=cfg)
-    bundle = _h74_runtime_bundle(
-        candle_ts=1_704_046_800_000,
-        authority_context=authority_context,
-    )
-    planner = ExecutionPlanner(
-        settings_obj=cfg,
-        readiness_snapshot_builder=lambda _conn: _Readiness(),
-        target_state_resolver=lambda *_args, **_kwargs: {
-            "previous_target_exposure_krw": 0.0,
-            "target_policy_metadata": {},
-        },
-    )
+            market_scope=RuntimeMarketScope(mode="single_pair", pair="KRW-BTC", interval="1m"),
+        )
+        authority_context = ProfileAuthorityContext.for_strategy_set(strategy_set, settings_obj=cfg)
+        bundle = _h74_runtime_bundle(
+            candle_ts=1_704_046_800_000,
+            authority_context=authority_context,
+        )
+        broker = _BalanceSnapshotBroker()
+        planner = ExecutionPlanner(
+            settings_obj=cfg,
+            readiness_snapshot_builder=lambda _conn: _Readiness(),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+            broker_provider=lambda: broker,
+        )
 
-    plan = planner.plan_runtime_strategy_results(conn, bundle, updated_ts=1_704_046_800_000)
+        plan = planner.plan_runtime_strategy_results(conn, bundle, updated_ts=1_704_046_800_000)
 
-    preference = plan.persistence_context["strategy_preferences"][0]
-    risk_decision = preference["strategy_risk_decision"]
-    risk_evidence = risk_decision["evidence"]
-    assert risk_decision["status"] != "BLOCK"
-    assert risk_decision["reason_code"] != "STRATEGY_RISK_STATE_INCOMPLETE"
-    assert "missing_required_risk_state" not in risk_evidence
-    assert preference["strategy_risk_status"] == "ALLOW"
-    assert plan.submit_plan is not None
-    assert plan.submit_plan.side == "BUY"
-    assert plan.persistence_context["allocation_selected_signal"] == "BUY"
-    conn.close()
+        preference = plan.persistence_context["strategy_preferences"][0]
+        risk_decision = preference["strategy_risk_decision"]
+        risk_evidence = risk_decision["evidence"]
+        assert broker.snapshot_calls == 1
+        assert risk_decision["status"] == "ALLOW"
+        assert risk_decision["status"] != "REQUIRE_RECONCILE"
+        assert risk_decision["reason_code"] != "RISK_STATE_MISMATCH"
+        assert risk_decision["reason_code"] != "STRATEGY_RISK_STATE_INCOMPLETE"
+        assert "missing_required_risk_state" not in risk_evidence
+        assert preference["strategy_risk_status"] == "ALLOW"
+        assert plan.submit_plan is not None
+        assert plan.submit_plan.side == "BUY"
+        assert plan.persistence_context["allocation_selected_signal"] == "BUY"
+    finally:
+        if conn is not None:
+            conn.close()
+        _restore_settings(original_settings)
+
+
+def test_h74_source_live_strategy_risk_fails_closed_when_broker_snapshot_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    original_settings = _force_live_strategy_risk_settings(
+        db_path=tmp_path / "runtime-state-live.sqlite"
+    )
+    authority = _source_authority()
+    path = tmp_path / "source-authority.json"
+    path.write_text(json.dumps(authority), encoding="utf-8")
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
+    conn = None
+    try:
+        _record_verified_flat_reconcile()
+        cfg = _h74_source_cfg(path)
+        conn = ensure_db(str(tmp_path / "h74-broker-snapshot-failure.sqlite"))
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        strategy_set = RuntimeStrategySet(
+            source="RUNTIME_STRATEGY_SET_JSON",
+            strategies=(
+                RuntimeStrategySpec(
+                    "daily_participation_sma",
+                    strategy_instance_id="h74-source-observation",
+                    pair="KRW-BTC",
+                    interval="1m",
+                    desired_exposure_krw=100_000.0,
+                    parameters=_source_parameters(),
+                ),
+            ),
+            market_scope=RuntimeMarketScope(mode="single_pair", pair="KRW-BTC", interval="1m"),
+        )
+        authority_context = ProfileAuthorityContext.for_strategy_set(strategy_set, settings_obj=cfg)
+        bundle = _h74_runtime_bundle(
+            candle_ts=1_704_046_800_000,
+            authority_context=authority_context,
+        )
+        broker = _BalanceSnapshotBroker(fail=True)
+        planner = ExecutionPlanner(
+            settings_obj=cfg,
+            readiness_snapshot_builder=lambda _conn: _Readiness(),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+            broker_provider=lambda: broker,
+        )
+
+        plan = planner.plan_runtime_strategy_results(conn, bundle, updated_ts=1_704_046_800_000)
+
+        preference = plan.persistence_context["strategy_preferences"][0]
+        risk_decision = preference["strategy_risk_decision"]
+        assert broker.snapshot_calls == 1
+        assert risk_decision["status"] == "REQUIRE_RECONCILE"
+        assert risk_decision["reason_code"] == "RISK_STATE_MISMATCH"
+        assert preference["strategy_risk_status"] == "REQUIRE_RECONCILE"
+        assert plan.submit_plan is None
+        assert plan.persistence_context["allocation_primary_block_reason"] == "RISK_STATE_MISMATCH"
+    finally:
+        if conn is not None:
+            conn.close()
+        _restore_settings(original_settings)
 
 
 def test_h74_source_observation_other_strategy_still_requires_approved_profile(

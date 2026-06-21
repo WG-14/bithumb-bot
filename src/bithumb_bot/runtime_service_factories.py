@@ -21,11 +21,17 @@ def operator_flatten_service() -> OperatorFlattenService:
     return OperatorFlattenService()
 
 
-def run_loop_execution_planner(*, target_state_resolver, persistence_context_builder) -> ExecutionPlanner:
+def run_loop_execution_planner(
+    *,
+    target_state_resolver,
+    persistence_context_builder,
+    broker_provider=None,
+) -> ExecutionPlanner:
     return ExecutionPlanner(
         readiness_snapshot_builder=compute_runtime_readiness_snapshot,
         performance_gate_evaluator=evaluate_strategy_performance_gate,
         summary_builder=build_typed_execution_decision_summary,
         target_state_resolver=target_state_resolver,
         persistence_context_builder=persistence_context_builder,
+        broker_provider=(broker_provider or (lambda: None)),
     )

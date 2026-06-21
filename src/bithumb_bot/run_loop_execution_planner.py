@@ -90,6 +90,10 @@ READINESS_CONTEXT_KEYS = (
 )
 
 
+def _no_broker_provider() -> object | None:
+    return None
+
+
 @dataclass(frozen=True)
 class ExecutionPlanningResult:
     context: dict[str, object]
@@ -832,6 +836,7 @@ class ExecutionPlanner:
     summary_builder: Callable[..., ExecutionDecisionSummary] = build_typed_execution_decision_summary
     target_state_resolver: Callable[..., dict[str, object]] = resolve_target_position_state_for_run_loop
     persistence_context_builder: Callable[..., dict[str, object]] = prepare_strategy_decision_persistence_context
+    broker_provider: Callable[[], object | None] = _no_broker_provider
     strict_promotion_mode: bool = True
     read_only_planning: bool = False
 
@@ -846,6 +851,14 @@ class ExecutionPlanner:
     @staticmethod
     def live_real_target_delta_performance_gate_applies() -> bool:
         return _live_real_target_delta_performance_gate_applies()
+
+    def _strategy_risk_broker(self) -> object | None:
+        if str(getattr(self.settings_obj, "MODE", "") or "").strip().lower() != "live":
+            return None
+        try:
+            return self.broker_provider()
+        except Exception:
+            return None
 
     def fail_closed_context(
         self,
@@ -1528,6 +1541,7 @@ class ExecutionPlanner:
                                 as_of_ts_ms=int(result.candle_ts),
                                 mark_price=float(result.market_price),
                                 policy=risk_profile.policy,
+                                broker=self._strategy_risk_broker(),
                                 enforced=enforced,
                             )
                             missing_state = missing_required_risk_state(risk_profile.policy, snapshot)

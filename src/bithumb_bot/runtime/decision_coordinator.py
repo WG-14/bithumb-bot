@@ -42,6 +42,10 @@ def runtime_schema_ready_db_factory():
     return ensure_db(ensure_schema_ready=False)
 
 
+def _no_broker_provider() -> object | None:
+    return None
+
+
 def _artifact_hash(value: object) -> str | None:
     content_hash = getattr(value, "content_hash", None)
     if callable(content_hash):
@@ -357,6 +361,7 @@ class DecisionCoordinator:
     db_factory: Callable[[], object] = runtime_schema_ready_db_factory
     decision_gateway_factory: Callable[[], RuntimeDecisionGateway] = RuntimeDecisionGateway
     planner_factory: Callable[..., object] = run_loop_execution_planner
+    broker_provider: Callable[[], object | None] = _no_broker_provider
     target_state_resolver: Callable[..., object] = resolve_target_position_state_for_run_loop
     persistence_context_builder: Callable[..., object] = prepare_strategy_decision_persistence_context
     decision_persistence_uow_factory: Callable[[], DecisionPersistenceUnitOfWork] = DecisionPersistenceUnitOfWork
@@ -378,6 +383,7 @@ class DecisionCoordinator:
         updated_ts: int,
         runtime_data_cycle_preflight_hash: str | None = None,
         runtime_data_availability_report_hash: str | None = None,
+        broker: object | None = None,
     ) -> DecisionCycleResult:
         current_phase = "gateway"
         failure: DecisionCycleFailure | None = None
@@ -464,17 +470,26 @@ class DecisionCoordinator:
         persistence_metadata: dict[str, object] | None = None
         try:
             current_phase = "planner"
+            broker_provider = self.broker_provider if broker is None else (lambda: broker)
             try:
                 planner = self.planner_factory(
                     settings_obj=self.settings_obj,
                     target_state_resolver=self.target_state_resolver,
                     persistence_context_builder=self.persistence_context_builder,
+                    broker_provider=broker_provider,
                 )
             except TypeError:
-                planner = self.planner_factory(
-                    target_state_resolver=self.target_state_resolver,
-                    persistence_context_builder=self.persistence_context_builder,
-                )
+                try:
+                    planner = self.planner_factory(
+                        settings_obj=self.settings_obj,
+                        target_state_resolver=self.target_state_resolver,
+                        persistence_context_builder=self.persistence_context_builder,
+                    )
+                except TypeError:
+                    planner = self.planner_factory(
+                        target_state_resolver=self.target_state_resolver,
+                        persistence_context_builder=self.persistence_context_builder,
+                    )
             planning_bundle = planner.plan_runtime_strategy_results(
                 conn,
                 typed_bundle,

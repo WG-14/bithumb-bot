@@ -204,6 +204,7 @@ class RuntimeCyclePipeline:
             updated_ts=int(now * 1000),
             runtime_data_cycle_preflight_hash=preflight.as_dict()["decision_hash"],
             runtime_data_availability_report_hash=preflight.runtime_data_availability_report_hash,
+            broker=r.broker,
         )
         if decision_result.persistence_status == "insufficient_signal_history":
             return r._record_artifact(
