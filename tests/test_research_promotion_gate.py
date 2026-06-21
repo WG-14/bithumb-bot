@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -526,7 +527,8 @@ def _production_candidate(*, attach_stress_suite: bool = True, **overrides):
     if attach_stress_suite:
         _attach_stress_suite(payload)
     if "decision_equivalence_report_path" not in overrides:
-        decision_path = _decision_equivalence_report_for_candidate(payload, Path("/tmp"))
+        evidence_dir = Path(tempfile.mkdtemp(prefix="bithumb-bot-promotion-evidence-"))
+        decision_path = _decision_equivalence_report_for_candidate(payload, evidence_dir)
         with decision_path.open("r", encoding="utf-8") as handle:
             decision_report = json.load(handle)
         payload["decision_equivalence_report_path"] = str(decision_path.resolve())

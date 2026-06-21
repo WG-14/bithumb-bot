@@ -142,21 +142,14 @@ def _h74_source_observation_profile_payload(
     approved_profile_path: str | None,
     live_like: bool,
 ) -> Mapping[str, object] | None:
-    if not live_like:
-        return None
-    if str(strategy_name or "").strip().lower() != "daily_participation_sma":
-        return None
-    if str(approved_profile_path or "").strip():
-        return None
-    authority_path = (
-        str(getattr(settings_obj, "H74_SOURCE_OBSERVATION_AUTHORITY_PATH", "") or "").strip()
-        or os.getenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", "").strip()
-    )
-    if not authority_path:
-        return None
-    from .h74_observation import h74_source_observation_risk_profile_payload_from_settings
+    from .h74_observation import h74_source_observation_risk_profile_payload_for_runtime_strategy
 
-    return h74_source_observation_risk_profile_payload_from_settings(settings_obj)
+    return h74_source_observation_risk_profile_payload_for_runtime_strategy(
+        settings_obj=settings_obj,
+        strategy_name=strategy_name,
+        approved_profile_path=approved_profile_path,
+        live_like=live_like,
+    )
 
 
 SUPPORTED_RUNTIME_SCOPE = "multi_strategy_single_pair_single_interval"

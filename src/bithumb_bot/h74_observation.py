@@ -579,6 +579,22 @@ def h74_source_observation_risk_profile_payload_from_settings(
     }
 
 
+def h74_source_observation_risk_profile_payload_for_runtime_strategy(
+    *,
+    settings_obj: object,
+    strategy_name: str,
+    approved_profile_path: str | None,
+    live_like: bool,
+) -> dict[str, object] | None:
+    if not live_like:
+        return None
+    if str(strategy_name or "").strip().lower() != H74_STRATEGY_NAME:
+        return None
+    if str(approved_profile_path or "").strip():
+        return None
+    return h74_source_observation_risk_profile_payload_from_settings(settings_obj)
+
+
 def verify_h74_source_live_pipeline_smoke_evidence_file(path: str | Path) -> None:
     with Path(path).expanduser().open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
