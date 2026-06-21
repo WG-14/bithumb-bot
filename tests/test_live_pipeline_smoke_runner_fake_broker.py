@@ -23,6 +23,7 @@ from bithumb_bot.live_pipeline_smoke_authority import (
     LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
     build_live_pipeline_smoke_authority_payload,
 )
+from bithumb_bot.order_settlement import evaluate_settlement_snapshot
 from bithumb_bot.storage_io import write_json_atomic
 
 
@@ -41,6 +42,39 @@ class _Broker:
 
 def _record_reconcile_attempt(attempts: list[str]) -> None:
     attempts.append("reconcile")
+
+
+def _settlement_from_readiness(readiness_provider, reconcile):
+    def _settle(trade):
+        reconcile()
+        readiness = readiness_provider()
+        filled_qty = float(trade.get("filled_qty") or trade.get("submit_qty") or 0.0)
+        evidence = {
+            "order_state": "FILLED",
+            "order_terminal": True,
+            "fill_count": 1 if filled_qty > 0.0 else 0,
+            "fill_set_complete": filled_qty > 0.0,
+            "paid_fee_present": True,
+            "order_level_paid_fee_present": True,
+            "complete_fill_set_available": filled_qty > 0.0,
+            "fee_state": "finalized",
+            "principal_applied": filled_qty > 0.0,
+            "accounting_finalized": True,
+            "projection_applied": bool(readiness.projection_converged),
+            "projected_total_qty": float(readiness.projected_total_qty),
+            "portfolio_qty": float(readiness.portfolio_qty),
+            "broker_qty": float(readiness.broker_qty),
+            "broker_local_converged": bool(readiness.converged),
+            "reason_code": "settlement_evidence_complete",
+        }
+        return evaluate_settlement_snapshot(
+            client_order_id=str(trade.get("client_order_id") or ""),
+            exchange_order_id=str(trade.get("exchange_order_id") or "") or None,
+            evidence=evidence,
+            attempts=[evidence],
+        )
+
+    return _settle
 
 
 def _patch_settings(monkeypatch, db_path):
@@ -110,6 +144,7 @@ def test_fake_broker_executes_five_round_trips(monkeypatch, tmp_path) -> None:
 
         service = LivePipelineSmokeExecutionService(broker=broker)
         reconcile_attempts: list[str] = []
+        readiness_provider = lambda: _readiness_from_broker(broker)
         payload = run_live_pipeline_smoke(
             conn=conn,
             broker=broker,
@@ -120,8 +155,12 @@ def test_fake_broker_executes_five_round_trips(monkeypatch, tmp_path) -> None:
             authority_path=str(authority),
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
             execution_service=service,
-            readiness_provider=lambda: _readiness_from_broker(broker),
+            readiness_provider=readiness_provider,
             post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_attempts),
+            settlement_coordinator=_settlement_from_readiness(
+                readiness_provider,
+                lambda: _record_reconcile_attempt(reconcile_attempts),
+            ),
             run_id="lps_test",
         )
 
@@ -177,6 +216,7 @@ def test_real_live_service_executes_five_round_trips_with_fake_executor(monkeypa
             harmless_dust_recorder=lambda **_kwargs: False,
         )
         reconcile_attempts: list[str] = []
+        readiness_provider = lambda: _readiness_from_broker(broker)
 
         payload = run_live_pipeline_smoke(
             conn=conn,
@@ -188,8 +228,12 @@ def test_real_live_service_executes_five_round_trips_with_fake_executor(monkeypa
             authority_path=str(authority),
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
             execution_service=service,
-            readiness_provider=lambda: _readiness_from_broker(broker),
+            readiness_provider=readiness_provider,
             post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_attempts),
+            settlement_coordinator=_settlement_from_readiness(
+                readiness_provider,
+                lambda: _record_reconcile_attempt(reconcile_attempts),
+            ),
             run_id="lps_real_service_test",
         )
 
@@ -233,6 +277,7 @@ def test_failure_after_step_prevents_next_step(monkeypatch, tmp_path) -> None:
 
         service = LivePipelineSmokeExecutionService(broker=broker, fail_at_step=1)
         reconcile_attempts: list[str] = []
+        readiness_provider = lambda: _readiness_from_broker(broker)
         payload = run_live_pipeline_smoke(
             conn=conn,
             broker=broker,
@@ -243,8 +288,12 @@ def test_failure_after_step_prevents_next_step(monkeypatch, tmp_path) -> None:
             authority_path=str(authority),
             confirm=LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
             execution_service=service,
-            readiness_provider=lambda: _readiness_from_broker(broker),
+            readiness_provider=readiness_provider,
             post_trade_reconcile=lambda: _record_reconcile_attempt(reconcile_attempts),
+            settlement_coordinator=_settlement_from_readiness(
+                readiness_provider,
+                lambda: _record_reconcile_attempt(reconcile_attempts),
+            ),
             run_id="lps_test",
         )
 
