@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from .canonical_decision import canonical_payload_hash, sha256_prefixed
 from .portfolio_target import build_portfolio_risk_decision
+from .risk_contract import RiskSnapshot
 from .risk_policy_engine import RiskPolicyEngine
 from .strategy_risk_profile import risk_policy_from_mapping
 from .strategy_risk_state import StrategyRiskStateProvider
@@ -262,24 +263,22 @@ def _extract_strategy_decision(context: Mapping[str, object]) -> dict[str, objec
             for item in items:
                 if isinstance(item, Mapping) and isinstance(item.get("strategy_risk_decision"), Mapping):
                     return dict(item["strategy_risk_decision"])  # type: ignore[index]
-    for result in context.get("runtime_strategy_result_contexts") or []:
-        if isinstance(result, Mapping) and result.get("strategy_risk_decision_hash"):
-            return {
-                "evaluation_point": "pre_decision",
-                "status": result.get("strategy_risk_status"),
-                "reason_code": result.get("strategy_risk_reason_code"),
-                "reason": "",
-                "allowed_actions": [],
-                "recommended_action": None,
-                "risk_input_hash": result.get("strategy_risk_input_hash"),
-                "risk_policy_hash": result.get("strategy_risk_policy_hash"),
-                "risk_evidence_hash": result.get("strategy_risk_evidence_hash"),
-                "risk_decision_hash": result.get("strategy_risk_decision_hash"),
-                "effective_limits": {},
-                "state_source": result.get("strategy_risk_state_source"),
-                "evidence": {},
-            }
     return None
+
+
+def _risk_snapshot_from_stored_evidence(evidence: Mapping[str, object]) -> RiskSnapshot | None:
+    reconstruction = evidence.get("risk_snapshot_reconstruction")
+    if not isinstance(reconstruction, Mapping):
+        return None
+    required = {"evaluation_ts_ms", "mark_price", "state_source"}
+    if not required.issubset({str(key) for key in reconstruction.keys()}):
+        return None
+    payload = dict(reconstruction)
+    payload["evidence"] = dict(evidence)
+    try:
+        return RiskSnapshot(**payload)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_strategy_profile(context: Mapping[str, object]) -> dict[str, object] | None:
@@ -330,16 +329,18 @@ def _reconstruct_strategy_layer(
     if missing:
         return "not_applicable", "", missing
     policy = risk_policy_from_mapping(profile_policy)  # type: ignore[arg-type]
-    snapshot = StrategyRiskStateProvider(conn).snapshot(
-        strategy_instance_id=strategy_instance_id,
-        strategy_name=strategy_name,
-        pair=pair,
-        interval=interval,
-        as_of_ts_ms=int(as_of_ts_ms),
-        mark_price=float(mark_price),
-        policy=policy,
-        enforced=str(profile.get("risk_enforcement_mode") or "") == "enforced",
-    )
+    snapshot = _risk_snapshot_from_stored_evidence(evidence)
+    if snapshot is None:
+        snapshot = StrategyRiskStateProvider(conn).snapshot(
+            strategy_instance_id=strategy_instance_id,
+            strategy_name=strategy_name,
+            pair=pair,
+            interval=interval,
+            as_of_ts_ms=int(as_of_ts_ms),
+            mark_price=float(mark_price),
+            policy=policy,
+            enforced=str(profile.get("risk_enforcement_mode") or "") == "enforced",
+        )
     rebuilt = RiskPolicyEngine(policy).evaluate_pre_decision(snapshot).as_dict()
     return (
         "pass"

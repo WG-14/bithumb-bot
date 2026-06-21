@@ -389,6 +389,7 @@ def create_default_runtime_app(settings_obj=settings) -> RuntimeAppContainer:
         db_factory=runtime_db_factory,
         decision_gateway_factory=decision_gateway_factory,
         planner_factory=run_loop_execution_planner,
+        broker_provider=broker_factory,
     )
     execution_engine_name = str(getattr(settings_obj, "EXECUTION_ENGINE", "lot_native") or "lot_native")
     execution_coordinator = ExecutionCoordinator(execution_engine_name)

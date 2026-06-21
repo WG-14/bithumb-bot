@@ -620,8 +620,13 @@ class StrategyRiskStateProvider:
             snapshot = RiskSnapshot(
                 **{**snapshot.as_dict(), "evidence": evidence}  # type: ignore[arg-type]
             )
+        snapshot_payload = snapshot.as_dict()
+        snapshot_reconstruction = {
+            key: value for key, value in snapshot_payload.items() if key != "evidence"
+        }
         evidence = {
             **dict(snapshot.evidence),
+            "risk_snapshot_reconstruction": snapshot_reconstruction,
             "risk_state_evidence_hash": canonical_payload_hash(snapshot.evidence),
         }
         return RiskSnapshot(**{**snapshot.as_dict(), "evidence": evidence})  # type: ignore[arg-type]

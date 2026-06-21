@@ -1649,6 +1649,30 @@ class ExecutionPlanner:
                 preferences = tuple(preference_list)
             context["strategy_preference_count"] = len(preferences)
             context["strategy_preferences"] = [item.as_dict() for item in preferences]
+            if len(preferences) == 1:
+                preference_payload = preferences[0].as_dict()
+                strategy_risk_decision = preference_payload.get("strategy_risk_decision")
+                if isinstance(strategy_risk_decision, Mapping):
+                    context["strategy_risk_decision"] = dict(strategy_risk_decision)
+                    context["strategy_risk_decision_hash"] = strategy_risk_decision.get(
+                        "risk_decision_hash"
+                    )
+                    context["strategy_risk_policy_hash"] = strategy_risk_decision.get(
+                        "risk_policy_hash"
+                    )
+                    context["strategy_risk_input_hash"] = strategy_risk_decision.get(
+                        "risk_input_hash"
+                    )
+                    context["strategy_risk_evidence_hash"] = strategy_risk_decision.get(
+                        "risk_evidence_hash"
+                    )
+                    context["strategy_risk_status"] = strategy_risk_decision.get("status")
+                    context["strategy_risk_reason_code"] = strategy_risk_decision.get(
+                        "reason_code"
+                    )
+                    context["strategy_risk_state_source"] = strategy_risk_decision.get(
+                        "state_source"
+                    )
             preference_set = SignalAggregator().aggregate(preferences)
             allocation_input = PortfolioAllocationInput(
                 preference_set=preference_set,

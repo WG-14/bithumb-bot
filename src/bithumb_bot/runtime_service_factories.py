@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .config import settings
 from .operator_flatten_service import OperatorFlattenService
 from .operator_notification_service import OperatorNotificationService
 from .operator_repair_service import OperatorRepairService
@@ -23,11 +24,13 @@ def operator_flatten_service() -> OperatorFlattenService:
 
 def run_loop_execution_planner(
     *,
+    settings_obj=None,
     target_state_resolver,
     persistence_context_builder,
     broker_provider=None,
 ) -> ExecutionPlanner:
     return ExecutionPlanner(
+        settings_obj=settings_obj if settings_obj is not None else settings,
         readiness_snapshot_builder=compute_runtime_readiness_snapshot,
         performance_gate_evaluator=evaluate_strategy_performance_gate,
         summary_builder=build_typed_execution_decision_summary,

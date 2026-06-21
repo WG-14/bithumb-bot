@@ -25,7 +25,13 @@ _CANONICAL_COMPATIBILITY_TRUTH_SOURCES = {
 }
 _DECLARATION_RESIDUE_SUFFIXES = ("_source", "_truth_source", "_compatibility_residue")
 _DECLARATION_RESIDUE_KEYS = {"decision_compatibility_residue"}
-_DECLARATION_RESIDUE_KEY_ALLOWLIST = {"balance_source"}
+_DECLARATION_RESIDUE_KEY_ALLOWLIST = {
+    "balance_source",
+    "portfolio_risk_state_source",
+    "pre_submit_risk_state_source",
+    "state_source",
+    "strategy_risk_state_source",
+}
 _CANONICAL_OPEN_EXPOSURE_QTY_SOURCE = "position_state.normalized_exposure.open_exposure_qty"
 _CANONICAL_SELL_LOT_AUTHORITY = "position_state.normalized_exposure.sellable_executable_lot_count"
 _CANONICAL_SELL_QTY_DERIVATION = "position_state.normalized_exposure.sellable_executable_qty"
@@ -122,6 +128,21 @@ def materialize_strategy_decision_context(value: Any) -> Any:
 
 def _strip_declaration_residue(value: Any) -> Any:
     if isinstance(value, dict):
+        risk_decision_evidence = value.get("evidence")
+        if (
+            isinstance(risk_decision_evidence, dict)
+            and "risk_decision_hash" in value
+            and "risk_evidence_hash" in value
+            and "state_source" in value
+        ):
+            return {
+                key: (
+                    materialize_strategy_decision_context(item)
+                    if key == "evidence"
+                    else _strip_declaration_residue(item)
+                )
+                for key, item in value.items()
+            }
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
             if key in _DECLARATION_RESIDUE_KEY_ALLOWLIST:

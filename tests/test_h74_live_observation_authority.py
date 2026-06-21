@@ -9,7 +9,8 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.base import BrokerBalance
-from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
+from bithumb_bot.db_core import ensure_db, record_strategy_decision, set_portfolio_breakdown
+from bithumb_bot.risk_layer_replay import verify_risk_layer_replay
 from bithumb_bot.run_loop_execution_planner import ExecutionPlanner
 from bithumb_bot.strategy_policy_contract import (
     EntryExecutionIntent,
@@ -826,6 +827,29 @@ def test_h74_source_flat_first_entry_live_observation_reaches_execution_planning
         assert plan.submit_plan is not None
         assert plan.submit_plan.side == "BUY"
         assert plan.persistence_context["allocation_selected_signal"] == "BUY"
+        assert plan.persistence_context["strategy_risk_decision"] == risk_decision
+        assert (
+            plan.persistence_context["strategy_risk_state_source"]
+            == "runtime_db_strategy_instance_ledger"
+        )
+        assert risk_decision["state_source"] == "runtime_db_strategy_instance_ledger"
+        assert isinstance(risk_evidence.get("risk_snapshot_reconstruction"), dict)
+
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=1_704_046_800_000,
+            strategy_name="daily_participation_sma",
+            signal="BUY",
+            reason="unit",
+            candle_ts=1_704_046_800_000,
+            market_price=100_000_000.0,
+            confidence=None,
+            context=plan.persistence_context,
+        )
+        replay = verify_risk_layer_replay(conn, decision_id=decision_id)
+        assert replay["strategy_risk_replay_status"] == "pass"
+        assert replay["layers"]["strategy"]["source_reconstruction_status"] == "pass"
+        assert replay["layers"]["strategy"]["state_source"] == "runtime_db_strategy_instance_ledger"
     finally:
         if conn is not None:
             conn.close()
