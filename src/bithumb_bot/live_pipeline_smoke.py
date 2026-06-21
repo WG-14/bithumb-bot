@@ -14,7 +14,6 @@ from .db_core import ensure_db, record_strategy_decision
 from .decision_equivalence import sha256_prefixed
 from .execution_order_rules import ExecutionOrderRules, resolve_execution_order_rules
 from .execution_service import ExecutionDecisionSummary, ExecutionSubmitPlan, build_signal_execution_service
-from .order_settlement import OrderSettlementCoordinator, SettlementBarrierConfig
 from .quantity_contracts import build_quantity_semantics
 from .live_pipeline_smoke_authority import (
     LIVE_PIPELINE_SMOKE_CONFIRMATION_TOKEN,
@@ -34,6 +33,7 @@ from .live_pipeline_smoke_preflight import (
 from .runtime_readiness import compute_runtime_readiness_snapshot
 from .runtime_data_access import select_latest_closed_candle
 from .runtime.execution_coordinator import ExecutionCoordinator, build_signal_execution_request
+from .runtime.live_order_settlement import LiveOrderSettlementWrapper
 from .runtime.live_pipeline_smoke_decision import (
     OPERATOR_LIVE_PIPELINE_SMOKE_STRATEGY_NAME,
     LivePipelineSmokeDecisionProvider,
@@ -303,39 +303,6 @@ def _repair_event_delta_total(delta: Mapping[str, int]) -> int:
     return sum(int(value or 0) for value in delta.values())
 
 
-def _settlement_observation_from_readiness(
-    *,
-    readiness: LivePipelineSmokeReadiness,
-    trade: Mapping[str, Any],
-    side: str,
-    quantity_semantics: Mapping[str, object],
-) -> dict[str, Any]:
-    fee_pending = int(readiness.fee_pending_count or 0) > 0 or bool(readiness.active_fee_accounting_blocker)
-    fee_state = "pending" if fee_pending else "finalized"
-    filled_qty = float(trade.get("filled_qty") or trade.get("submit_qty") or 0.0)
-    return {
-        "order_state": "FILLED",
-        "order_terminal": True,
-        "fill_count": 1 if filled_qty > 0.0 else 0,
-        "fill_set_complete": filled_qty > 0.0,
-        "paid_fee_present": not fee_pending,
-        "order_level_paid_fee_present": not fee_pending,
-        "complete_fill_set_available": filled_qty > 0.0,
-        "fee_state": fee_state,
-        "principal_applied": filled_qty > 0.0,
-        "accounting_finalized": not fee_pending,
-        "projection_applied": bool(readiness.projection_converged),
-        "projected_total_qty": float(readiness.projected_total_qty),
-        "portfolio_qty": float(readiness.portfolio_qty),
-        "broker_qty": float(readiness.broker_qty),
-        "broker_local_converged": bool(readiness.converged),
-        "manual_intervention_required": False,
-        "quantity_semantics": dict(quantity_semantics),
-        "side": str(side).upper(),
-        "reason_code": "settlement_waiting" if fee_pending else "settlement_evidence_complete",
-    }
-
-
 def _smoke_risk_policy_hash() -> str:
     return sha256_prefixed({"risk_policy": "operator_live_pipeline_smoke_minimal_allow"})
 
@@ -528,6 +495,7 @@ def run_live_pipeline_smoke(
     execution_service: Any | None = None,
     readiness_provider: Callable[[], LivePipelineSmokeReadiness] | None = None,
     post_trade_reconcile: Callable[[], Any] | None = None,
+    settlement_coordinator: Callable[[Mapping[str, Any]], Any] | None = None,
     run_id: str | None = None,
     market: str | None = None,
 ) -> dict[str, Any]:
@@ -593,16 +561,19 @@ def run_live_pipeline_smoke(
         raise LivePipelineSmokeError("live_pipeline_smoke_execution_service_unavailable")
     readiness = readiness_provider or (lambda: readiness_from_snapshot(compute_runtime_readiness_snapshot(conn)))
     reconcile = post_trade_reconcile or (lambda: None)
+    live_settlement = settlement_coordinator or LiveOrderSettlementWrapper(
+        broker=broker,
+        db_factory=lambda: ensure_db(str(settings.DB_PATH)),
+        reconcile_with_broker=lambda _broker: reconcile(),
+    )
     rounds: list[dict[str, Any]] = []
     flat_round: dict[str, Any] = {}
     orders_submitted = 0
     buy_submitted = 0
     sell_submitted = 0
+    manual_intervention_required = False
     market_reference_sources: set[str] = set()
     repair_counters_before = _repair_event_counters(conn)
-    settlement_coordinator = OrderSettlementCoordinator(
-        SettlementBarrierConfig(max_attempts=5, poll_intervals_ms=(0, 0, 0, 0, 0), deadline_ms=5000)
-    )
 
     for step in range(max_orders):
         try:
@@ -717,26 +688,6 @@ def run_live_pipeline_smoke(
             terminal_closeout_covered_qty=(float(current.broker_qty) if side == "SELL" else float(qty)),
         ).as_dict()
 
-        def _settle_trade(_trade: Mapping[str, Any]):
-            client_order_id = str(_trade.get("client_order_id") or "")
-            exchange_order_id = str(_trade.get("exchange_order_id") or "") or None
-
-            def _observe(_attempt_index: int) -> Mapping[str, Any]:
-                observed = readiness()
-                return _settlement_observation_from_readiness(
-                    readiness=observed,
-                    trade=_trade,
-                    side=side,
-                    quantity_semantics=quantity_semantics,
-                )
-
-            return settlement_coordinator.settle(
-                client_order_id=client_order_id,
-                exchange_order_id=exchange_order_id,
-                observe=_observe,
-                reconcile=reconcile,
-            )
-
         result = coordinator.execute_cycle(
             candle_ts=ts,
             decision_id=decision_id,
@@ -750,7 +701,8 @@ def run_live_pipeline_smoke(
             execution_service=None,
             submit_invoker=_submit_invoker,
             post_trade_reconcile=None,
-            settlement_coordinator=_settle_trade,
+            settlement_coordinator=live_settlement,
+            settlement_required=True,
             input_hash=None,
         )
         trade = dict(result.trade or {}) if isinstance(result.trade, Mapping) else {}
@@ -774,6 +726,9 @@ def run_live_pipeline_smoke(
                 orders_submitted=orders_submitted,
             )
         settlement_result = dict(result.settlement_result or {})
+        manual_intervention_required = manual_intervention_required or bool(
+            settlement_result.get("operator_action_required")
+        )
         if not settlement_result or not bool(settlement_result.get("settled")):
             return _failure_payload(
                 run_id=smoke_run_id,
@@ -781,6 +736,9 @@ def run_live_pipeline_smoke(
                 step=step,
                 round_index=(step // 2) + 1,
                 orders_submitted=orders_submitted + 1,
+                settlement_result=settlement_result,
+                failed_trade=trade,
+                failed_side=side,
             )
         after = readiness()
         try:
@@ -828,6 +786,9 @@ def run_live_pipeline_smoke(
                 step=step,
                 round_index=(step // 2) + 1,
                 orders_submitted=orders_submitted + 1,
+                settlement_result=settlement_result,
+                failed_trade=trade,
+                failed_side=side,
             )
         orders_submitted += 1
         if side == "BUY":
@@ -862,6 +823,7 @@ def run_live_pipeline_smoke(
         or sell_submitted != cycles
         or not final_flat
         or repair_events_created != 0
+        or manual_intervention_required
     ):
         return _failure_payload(
             run_id=smoke_run_id,
@@ -880,6 +842,7 @@ def run_live_pipeline_smoke(
         "buy_submitted": int(buy_submitted),
         "sell_submitted": int(sell_submitted),
         "repair_events_created_during_run": int(repair_events_created),
+        "manual_intervention_required": bool(manual_intervention_required),
         "repair_event_delta": repair_delta,
         "rounds": rounds,
         "final": {
@@ -911,8 +874,11 @@ def _failure_payload(
     step: int,
     round_index: int,
     orders_submitted: int,
+    settlement_result: Mapping[str, Any] | None = None,
+    failed_trade: Mapping[str, Any] | None = None,
+    failed_side: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "status": "failed",
         "execution_mode": "live_pipeline_smoke",
         "run_id": run_id,
@@ -922,6 +888,21 @@ def _failure_payload(
         "orders_submitted": int(orders_submitted),
         "next_operator_action": "inspect health/audit and use flatten-position if exposure remains",
     }
+    if settlement_result is not None:
+        settlement_payload = dict(settlement_result)
+        payload["settlement_result"] = settlement_payload
+        payload["failed_client_order_id"] = (
+            str((failed_trade or {}).get("client_order_id") or settlement_payload.get("client_order_id") or "")
+            or None
+        )
+        payload["failed_exchange_order_id"] = (
+            str((failed_trade or {}).get("exchange_order_id") or settlement_payload.get("exchange_order_id") or "")
+            or None
+        )
+        payload["failed_side"] = (
+            str(failed_side or (failed_trade or {}).get("side") or "").upper() or None
+        )
+    return payload
 
 
 def cmd_live_pipeline_smoke(

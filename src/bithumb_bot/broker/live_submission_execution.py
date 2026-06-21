@@ -5,8 +5,18 @@ import time
 from dataclasses import dataclass
 
 from ..config import settings
-from ..db_core import record_broker_fill_observation
-from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, apply_fill_principal_with_pending_fee
+from ..db_core import (
+    FILL_FEE_ACCOUNTING_STATUS_PENDING,
+    fill_fee_accounting_status,
+    load_matching_accounted_fill,
+    record_broker_fill_observation,
+)
+from ..execution import (
+    LiveFillFeeValidationError,
+    apply_fill_and_trade,
+    apply_fill_principal_with_pending_fee,
+    finalize_fill_fee,
+)
 from ..fee_observation import fee_accounting_status
 from ..fill_reading import FillReadPolicy, get_broker_fills
 from ..notifier import format_event, notify
@@ -309,7 +319,15 @@ def reconcile_apply_fills_and_refresh(
     )
     fee_pending_fills = [fill for fill in fills if _fill_accounting_status(fill) == "fee_pending"]
     fee_rate_warning_fills = [fill for fill in fills if _fill_has_expected_fee_rate_warning(fill)]
+    order_level_accounting_complete_fills = [
+        fill
+        for fill in fills
+        if _fill_accounting_status(fill) == "finalized"
+        and str(getattr(fill, "fee_source", "") or "") == "order_level_paid_fee"
+    ]
     observation_summary: dict[str, int | str] | None = None
+    # Policy A: validated order-level paid_fee is persisted as broker observation
+    # evidence, while fills.fee_accounting_status remains the accounting authority.
     if fee_pending_fills:
         observation_summary = _record_application_fill_observations(
             conn=conn,
@@ -327,6 +345,15 @@ def reconcile_apply_fills_and_refresh(
             side=side,
             fills=fills,
             source="live_application_fee_rate_warning",
+        )
+    elif order_level_accounting_complete_fills:
+        observation_summary = _record_application_fill_observations(
+            conn=conn,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            side=side,
+            fills=order_level_accounting_complete_fills,
+            source="live_application_fee_finalized",
         )
 
     try:
@@ -403,6 +430,46 @@ def reconcile_apply_fills_and_refresh(
                     signal_ts=int(submission.ts),
                 ) or trade
             else:
+                existing_fill = load_matching_accounted_fill(
+                    conn,
+                    client_order_id=client_order_id,
+                    fill_id=fill.fill_id,
+                    fill_ts=fill.fill_ts,
+                    price=fill.price,
+                    qty=fill.qty,
+                )
+                if fill_fee_accounting_status(existing_fill) == FILL_FEE_ACCOUNTING_STATUS_PENDING:
+                    finalize_fill_fee(
+                        conn,
+                        client_order_id=client_order_id,
+                        fill_id=fill.fill_id,
+                        fill_ts=fill.fill_ts,
+                        price=fill.price,
+                        qty=fill.qty,
+                        fee=float(fill.fee or 0.0),
+                        fee_status=str(getattr(fill, "fee_status", "complete") or "complete"),
+                        fee_source=str(getattr(fill, "fee_source", "order_level_paid_fee") or "order_level_paid_fee"),
+                        fee_confidence=str(getattr(fill, "fee_confidence", "authoritative") or "authoritative"),
+                        fee_provenance=getattr(fill, "fee_provenance", None),
+                        fee_validation_reason=getattr(fill, "fee_validation_reason", None),
+                        fee_validation_checks=getattr(fill, "fee_validation_checks", None),
+                    )
+                    trade = {
+                        "ts": int(fill.fill_ts),
+                        "signal_ts": int(submission.ts),
+                        "candle_ts": int(submission.ts),
+                        "side": side,
+                        "price": float(fill.price),
+                        "qty": float(fill.qty),
+                        "filled_qty": float(fill.qty),
+                        "submit_qty": float(request.qty),
+                        "fee": float(fill.fee or 0.0),
+                        "client_order_id": client_order_id,
+                        "exchange_order_id": exchange_order_id,
+                        "fee_accounting_status": "fee_finalized",
+                        "principal_applied": True,
+                    }
+                    continue
                 trade = apply_fill_and_trade(
                     conn,
                     client_order_id=client_order_id,

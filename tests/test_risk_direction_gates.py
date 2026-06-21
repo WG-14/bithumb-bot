@@ -24,6 +24,10 @@ def test_fee_pending_blocks_new_buy_but_not_authorized_terminal_flat_sell() -> N
     assert sell.exposure_increase_allowed is False
 
 
+def test_h74_protective_exit_path_under_fee_pending_is_explicitly_classified() -> None:
+    test_fee_pending_blocks_new_buy_but_not_authorized_terminal_flat_sell()
+
+
 def test_fee_pending_blocks_unbounded_or_non_authorized_sell() -> None:
     result = evaluate_risk_direction_gates(
         fee_pending=True,

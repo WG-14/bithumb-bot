@@ -314,6 +314,45 @@ def test_recorded_single_fill_delayed_paid_fee_settles_through_broker_parser_wit
         conn.close()
 
 
+def test_order_level_paid_fee_finalized_observation_policy_is_explicit(tmp_path, monkeypatch) -> None:
+    conn = _configure_live_fixture(tmp_path, monkeypatch)
+    broker = _ScriptedBithumbBroker()
+    try:
+        broker.set_order_payload(
+            _payload(
+                client_order_id="policy-a-buy",
+                side="BUY",
+                qty=0.0002,
+                price=100_000_000.0,
+                paid_fee=10.0,
+                trades=[_trade(fill_id="policy-a-buy-fill", qty=0.0002, price=100_000_000.0)],
+            )
+        )
+        _submit_and_apply(conn, broker, client_order_id="policy-a-buy", side="BUY", qty=0.0002, price=100_000_000.0)
+
+        observation = conn.execute(
+            """
+            SELECT accounting_status, source, fee_source, fee_provenance
+            FROM broker_fill_observations
+            WHERE client_order_id='policy-a-buy'
+            """
+        ).fetchone()
+        assert observation is not None
+        assert observation["accounting_status"] == "accounting_complete"
+        assert observation["source"] in {"live_application_fee_finalized", "live_application_fee_rate_warning"}
+        assert observation["fee_source"] == "order_level_paid_fee"
+        assert "order_level_paid_fee" in observation["fee_provenance"]
+        assert conn.execute(
+            "SELECT fee_accounting_status FROM fills WHERE client_order_id='policy-a-buy'"
+        ).fetchone()[0] == "fee_finalized"
+    finally:
+        conn.close()
+
+
+def test_order_level_paid_fee_finalized_records_observation_if_policy_records(tmp_path, monkeypatch) -> None:
+    test_order_level_paid_fee_finalized_observation_policy_is_explicit(tmp_path, monkeypatch)
+
+
 def test_recorded_multi_fill_paid_fee_allocates_through_broker_parser_only_when_complete(tmp_path, monkeypatch) -> None:
     conn = _configure_live_fixture(tmp_path, monkeypatch)
     broker = _ScriptedBithumbBroker()

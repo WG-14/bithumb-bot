@@ -957,6 +957,10 @@ def test_runtime_cycle_pipeline_passes_settlement_coordinator_in_live_mode(monke
     assert settlement_coordinator.__class__.__name__ == "LiveOrderSettlementWrapper"
 
 
+def test_h74_live_path_uses_live_order_settlement_wrapper(monkeypatch) -> None:
+    test_runtime_cycle_pipeline_passes_settlement_coordinator_in_live_mode(monkeypatch)
+
+
 def test_runtime_cycle_artifact_hashes_required_paths() -> None:
     artifact = RuntimeCycleArtifact(
         cycle_id="submit",
