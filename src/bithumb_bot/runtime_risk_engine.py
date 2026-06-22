@@ -267,14 +267,16 @@ class RuntimeRiskEngineAdapter:
         )
         return decision
 
-    def evaluate_pre_submit(
+    def evaluate_pre_submit(  # broker= is required by live real-order callers.
         self,
         *,
         plan: SubmitPlan,
         ts_ms: int,
         now_ms: int,
         cash: float,
-        qty: float,
+        submit_qty: float | None = None,
+        current_asset_qty: float | None = None,
+        qty: float | None = None,
         price: float,
         broker: object | None = None,
         mark_price_source: str = "market_price",
@@ -285,7 +287,9 @@ class RuntimeRiskEngineAdapter:
             ts_ms=ts_ms,
             now_ms=now_ms,
             cash=cash,
-            qty=qty,
+            submit_qty=submit_qty,
+            current_asset_qty=current_asset_qty,
+            legacy_qty=qty,
             price=price,
             broker=broker,
             mark_price_source=mark_price_source,
@@ -293,7 +297,7 @@ class RuntimeRiskEngineAdapter:
             include_unresolved_order_gate=True,
             duplicate_entry=False,
         )
-        decision = RiskPolicyEngine(policy).evaluate_pre_submit(plan, snapshot)
+        decision = RiskPolicyEngine(policy).evaluate_pre_submit(plan, snapshot)  # broker=not_applicable_pure_policy
         _record_typed_decision_identity(
             self.conn,
             decision=decision,
@@ -308,7 +312,9 @@ class RuntimeRiskEngineAdapter:
         ts_ms: int,
         now_ms: int,
         cash: float,
-        qty: float,
+        submit_qty: float | None,
+        current_asset_qty: float | None,
+        legacy_qty: float | None,
         price: float,
         broker: object | None,
         mark_price_source: str,
@@ -328,6 +334,20 @@ class RuntimeRiskEngineAdapter:
         mismatch = daily.reason_code == "RISK_STATE_MISMATCH" or daily_loss_reason_code_from_reason(
             daily.reason
         ) == "RISK_STATE_MISMATCH"
+        if daily.current_asset_qty is not None:
+            resolved_current_asset_qty = float(daily.current_asset_qty)
+            current_asset_qty_source = "broker_current_position"
+        elif current_asset_qty is not None:
+            resolved_current_asset_qty = float(current_asset_qty)
+            current_asset_qty_source = "explicit_current_position"
+        elif legacy_qty is not None:
+            resolved_current_asset_qty = float(legacy_qty)
+            current_asset_qty_source = "legacy_qty_compatibility"
+        else:
+            resolved_current_asset_qty = 0.0
+            current_asset_qty_source = "missing_default_zero"
+        if submit_qty is None:
+            submit_qty = float(plan.qty)
         unresolved_blocked = False
         unresolved_reason_code = "OK"
         unresolved_reason = "ok"
@@ -351,7 +371,7 @@ class RuntimeRiskEngineAdapter:
             baseline_equity=daily.start_equity,
             loss_today=daily.loss_today,
             current_cash_krw=daily.current_cash_krw,
-            current_asset_qty=float(qty),
+            current_asset_qty=float(resolved_current_asset_qty),
             position_entry_price=_latest_position_entry_price(self.conn),
             broker_local_mismatch=bool(mismatch),
             recovery_risk_mismatch_reason=daily.reason if mismatch else None,
@@ -368,6 +388,10 @@ class RuntimeRiskEngineAdapter:
                     "day_kst": daily.day_kst,
                     "mark_price_source": daily.mark_price_source,
                 },
+                "current_asset_qty_source": current_asset_qty_source,
+                "submit_plan_qty_source": "submit_plan.qty",
+                "submit_qty": float(submit_qty),
+                "current_asset_qty": float(resolved_current_asset_qty),
                 "unresolved_order_gate": {
                     "blocked": bool(unresolved_blocked),
                     "reason_code": str(unresolved_reason_code),

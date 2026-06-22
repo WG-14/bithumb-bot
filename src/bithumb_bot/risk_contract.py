@@ -209,7 +209,7 @@ class RiskEngine(Protocol):
     def evaluate_pre_decision(self, snapshot: RiskSnapshot) -> RiskDecision:
         ...
 
-    def evaluate_pre_submit(self, plan: SubmitPlan, snapshot: RiskSnapshot) -> RiskDecision:
+    def evaluate_pre_submit(self, plan: SubmitPlan, snapshot: RiskSnapshot) -> RiskDecision:  # broker=not_applicable_protocol
         ...
 
     def evaluate_post_fill(self, fill: FillEvent, snapshot: RiskSnapshot) -> RiskEvent:

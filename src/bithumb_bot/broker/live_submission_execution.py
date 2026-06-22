@@ -598,7 +598,7 @@ def execute_live_submission_and_application(
             reference_price = None
             top_of_book_summary = {"error": str(exc).removeprefix("reference price unavailable: ")}
 
-    risk_decision = RuntimeRiskEngineAdapter(conn).evaluate_pre_submit(
+    risk_decision = RuntimeRiskEngineAdapter(conn).evaluate_pre_submit(  # broker=live_lower_boundary
         plan=SubmitPlan(
             side=feasibility.side,
             qty=float(feasibility.normalized_qty),
@@ -618,7 +618,8 @@ def execute_live_submission_and_application(
         ts_ms=int(ts),
         now_ms=int(time.time() * 1000),
         cash=float(position_state.cash),
-        qty=float(position_state.portfolio_qty),
+        submit_qty=float(feasibility.normalized_qty),
+        current_asset_qty=float(position_state.portfolio_qty),
         price=float(market_price),
         broker=broker,
         mark_price_source="live_market_reference",

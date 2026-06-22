@@ -22,7 +22,7 @@ from bithumb_bot.execution_service import (
     validate_execution_submit_plan_payload,
     validate_execution_submit_plan_serialization,
 )
-from bithumb_bot.risk_contract import RiskPolicy, RiskSnapshot
+from bithumb_bot.risk_contract import RiskPolicy, RiskSnapshot, SubmitPlan
 from bithumb_bot.risk_policy_engine import RiskPolicyEngine
 from bithumb_bot.submit_authority_policy import evaluate_submit_authority_policy
 from bithumb_bot.submit_authority_policy import operational_pre_submit_risk_approval_error
@@ -39,6 +39,7 @@ def _restore_execution_settings():
         "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
         "EXECUTION_ENGINE": settings.EXECUTION_ENGINE,
         "RESIDUAL_LIVE_SELL_MODE": settings.RESIDUAL_LIVE_SELL_MODE,
+        "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
     }
     yield
     for key, value in original.items():
@@ -701,6 +702,349 @@ def _typed_target_execution_summary_with_plan(plan: dict[str, object]) -> Execut
         target_shadow_decision=None,
         target_submit_plan=_typed_plan(plan),
     )
+
+
+def _target_plan_requiring_pre_submit(policy: RiskPolicy | None = None) -> dict[str, object]:
+    risk_policy = policy or RiskPolicy(source="unit_pre_submit", max_daily_loss_krw=50_000.0)
+    payload = {
+        key: value
+        for key, value in _valid_target_submit_plan().items()
+        if not str(key).startswith("pre_submit_risk_")
+        and key
+        not in {
+            "effective_pre_submit_risk_policy_hash",
+            "risk_policy_source",
+            "strategy_risk_profile_hashes",
+            "submit_plan_hash",
+            "content_hash",
+        }
+    }
+    payload.update(
+        {
+            "pre_submit_proof_status": "passed",
+            "pre_submit_risk_required": True,
+            "strategy_risk_profiles": [
+                {
+                    "strategy_instance_id": "h74-source-observation",
+                    "strategy_name": "daily_participation_sma",
+                    "strategy_risk_profile_hash": "sha256:" + "8" * 64,
+                    "risk_policy": risk_policy.as_dict(),
+                    "risk_policy_hash": risk_policy.policy_hash(),
+                }
+            ],
+            "portfolio_risk_policy_hash": "sha256:" + "9" * 64,
+        }
+    )
+    return payload
+
+
+def _seed_execution_plan_row(db_path, submit_plan_hash: str) -> None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE execution_plan (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_submit_plan_hash TEXT,
+                execution_submit_plan_json TEXT,
+                submit_plan_side TEXT,
+                submit_plan_qty REAL,
+                submit_plan_notional_krw REAL,
+                submit_plan_idempotency_key TEXT,
+                submit_plan_source TEXT,
+                submit_plan_authority TEXT,
+                submit_expected INTEGER NOT NULL DEFAULT 0,
+                final_action TEXT NOT NULL DEFAULT '',
+                block_reason TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO execution_plan(execution_submit_plan_hash, execution_submit_plan_json) VALUES (?, ?)",
+            (submit_plan_hash, "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _sqlite_ensure_db_for(path):
+    def _ensure_db(_path: str | None = None):
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    return _ensure_db
+
+
+def test_live_target_delta_pre_submit_uses_live_broker_snapshot(tmp_path, monkeypatch) -> None:
+    from bithumb_bot.risk_contract import RiskSnapshot
+    from bithumb_bot.risk_policy_engine import RiskPolicyEngine
+
+    _arm_live_real_orders(engine="target_delta")
+    broker = object()
+    captured: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
+    plan_payload = _target_plan_requiring_pre_submit()
+    summary = _typed_target_execution_summary_with_plan(plan_payload)
+    expected = summary.target_submit_plan.as_final_payload()  # type: ignore[union-attr]
+    db_path = tmp_path / "pre-submit-broker.sqlite"
+    _seed_execution_plan_row(db_path, str(expected["submit_plan_hash"]))
+    monkeypatch.setattr("bithumb_bot.execution_service.ensure_db", _sqlite_ensure_db_for(db_path))
+
+    def _fake_evaluate(self, *, plan, broker=None, submit_qty=None, current_asset_qty=None, **_kwargs):
+        captured["broker"] = broker
+        captured["submit_qty"] = submit_qty
+        captured["current_asset_qty"] = current_asset_qty
+        return RiskPolicyEngine(self.policy).evaluate_pre_submit(
+            plan,
+            RiskSnapshot(
+                evaluation_ts_ms=1_800_000_000_000,
+                mark_price=100_000_000.0,
+                current_equity=1_000_000.0,
+                baseline_equity=1_000_000.0,
+                loss_today=0.0,
+                current_cash_krw=1_000_000.0,
+                current_asset_qty=0.0,
+                state_source="runtime_db_broker",
+                evidence={
+                    "current_asset_qty_source": "broker_current_position",
+                    "submit_plan_qty_source": "submit_plan.qty",
+                    "submit_qty": float(submit_qty or 0.0),
+                    "current_asset_qty": 0.0,
+                },
+            ),
+        )
+
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine.RuntimeRiskEngineAdapter.evaluate_pre_submit",
+        _fake_evaluate,
+    )
+
+    service = LiveSignalExecutionService(
+        broker=broker,
+        executor=lambda _broker, signal, ts, market_price, **kwargs: calls.append(
+            {"signal": signal, "ts": ts, "market_price": market_price, "kwargs": kwargs}
+        )
+        or {"status": "submitted"},
+        harmless_dust_recorder=lambda **_kwargs: False,
+    )
+    result = service.execute(
+        TypedExecutionRequest(
+            signal="BUY",
+            ts=1_800_000_000_000,
+            market_price=100_000_000.0,
+            strategy_name="daily_participation_sma",
+            decision_reason="unit",
+            execution_decision_summary=summary,
+        )
+    )
+
+    assert result == {"status": "submitted"}
+    assert captured["broker"] is broker
+    assert captured["submit_qty"] == pytest.approx(0.001)
+    assert captured["current_asset_qty"] is None
+    submitted_plan = calls[0]["kwargs"]["execution_submit_plan"]
+    assert submitted_plan["pre_submit_risk_status"] == "ALLOW"
+    assert submitted_plan["pre_submit_risk_state_source"] == "runtime_db_broker"
+
+
+def test_live_target_delta_pre_submit_broker_none_fails_closed(tmp_path, monkeypatch) -> None:
+    _arm_live_real_orders(engine="target_delta")
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50_000.0)
+    calls: list[dict[str, object]] = []
+    plan_payload = _target_plan_requiring_pre_submit()
+    summary = _typed_target_execution_summary_with_plan(plan_payload)
+    expected = summary.target_submit_plan.as_final_payload()  # type: ignore[union-attr]
+    db_path = tmp_path / "pre-submit-broker-none.sqlite"
+    _seed_execution_plan_row(db_path, str(expected["submit_plan_hash"]))
+    monkeypatch.setattr("bithumb_bot.execution_service.ensure_db", _sqlite_ensure_db_for(db_path))
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine._latest_position_entry_price", lambda _conn: None)
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine._count_orders_today", lambda _conn, _ts: 0)
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine.collect_risky_order_state",
+        lambda *_args, **_kwargs: {},
+    )
+    from bithumb_bot.risk import DailyLossEvaluation
+
+    def _broker_missing_daily_loss(_conn, *, broker=None, ts_ms, price, **_kwargs):
+        assert broker is None
+        return DailyLossEvaluation(
+            blocked=True,
+            reason="risk state mismatch (current broker balance snapshot unavailable in live risk path)",
+            reason_code="RISK_STATE_MISMATCH",
+            decision="block",
+            evaluation_ts_ms=int(ts_ms),
+            day_kst="2026-06-22",
+            max_daily_loss_krw=50_000.0,
+            start_equity=None,
+            current_equity=None,
+            loss_today=None,
+            current_cash_krw=None,
+            current_asset_qty=None,
+            mark_price=float(price),
+            mark_price_source="market_price",
+            details={"current_source": "broker_balance_snapshot_missing"},
+        )
+
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine.evaluate_daily_loss_state",
+        _broker_missing_daily_loss,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine._record_typed_decision_identity",
+        lambda *_args, **_kwargs: None,
+    )
+
+    service = LiveSignalExecutionService(
+        broker=None,  # type: ignore[arg-type]
+        executor=lambda *_args, **kwargs: calls.append(kwargs) or {"status": "submitted"},
+        harmless_dust_recorder=lambda **_kwargs: False,
+    )
+    result = service.execute(
+        TypedExecutionRequest(
+            signal="BUY",
+            ts=1_800_000_000_000,
+            market_price=100_000_000.0,
+            strategy_name="daily_participation_sma",
+            decision_reason="unit",
+            execution_decision_summary=summary,
+        )
+    )
+
+    assert result is None
+    assert calls == []
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute("SELECT execution_submit_plan_json FROM execution_plan").fetchone()
+        stored = json.loads(row[0])
+    finally:
+        conn.close()
+    assert stored["final_submit_payload_persistence_status"] == "post_proof_submit_skipped"
+    assert stored["pre_submit_risk_reason_code"] == "RISK_STATE_MISMATCH"
+    assert stored["pre_submit_risk_status"] != "ALLOW"
+
+
+def test_pre_submit_evidence_separates_submit_qty_and_current_asset_qty(monkeypatch) -> None:
+    from bithumb_bot.risk import DailyLossEvaluation
+    from bithumb_bot.runtime_risk_engine import RuntimeRiskEngineAdapter
+
+    def _daily_loss_state(*_args, **_kwargs) -> DailyLossEvaluation:
+        return DailyLossEvaluation(
+            blocked=False,
+            reason="ok",
+            reason_code="OK",
+            decision="allow",
+            evaluation_ts_ms=1_800_000_000_000,
+            day_kst="2026-06-22",
+            max_daily_loss_krw=50_000.0,
+            start_equity=1_000_000.0,
+            current_equity=1_000_000.0,
+            loss_today=0.0,
+            current_cash_krw=1_000_000.0,
+            current_asset_qty=0.0,
+            mark_price=100_000_000.0,
+            mark_price_source="unit",
+            details={},
+        )
+
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine.evaluate_daily_loss_state", _daily_loss_state)
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine._latest_position_entry_price", lambda _conn: None)
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine._count_orders_today", lambda _conn, _ts: 0)
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine.collect_risky_order_state",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine._record_typed_decision_identity",
+        lambda *_args, **_kwargs: None,
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        decision = RuntimeRiskEngineAdapter(conn, policy=RiskPolicy(max_daily_loss_krw=50_000.0)).evaluate_pre_submit(
+            plan=SubmitPlan(
+                side="BUY",
+                qty=0.0002,
+                notional_krw=20_000.0,
+                source="target_delta",
+            ),
+            ts_ms=1_800_000_000_000,
+            now_ms=1_800_000_000_000,
+            cash=0.0,
+            submit_qty=0.0002,
+            current_asset_qty=None,
+            price=100_000_000.0,
+            broker=object(),
+            evaluation_origin="live_real_submit_authority_pre_submit",
+        )
+    finally:
+        conn.close()
+
+    assert decision.evidence["current_asset_qty"] == 0.0
+    assert decision.evidence["submit_qty"] == 0.0002
+    assert decision.evidence["current_asset_qty_source"] == "broker_current_position"
+    assert decision.evidence["submit_plan_qty_source"] == "submit_plan.qty"
+
+
+def test_pre_submit_coordinator_proof_persist_outside_serialization(tmp_path, monkeypatch) -> None:
+    from bithumb_bot.risk_contract import RiskSnapshot
+    from bithumb_bot.risk_policy_engine import RiskPolicyEngine
+
+    _arm_live_real_orders(engine="target_delta")
+    plan_payload = _target_plan_requiring_pre_submit()
+    typed_plan = _typed_plan(plan_payload)
+    final_payload = typed_plan.as_final_payload()
+    db_path = tmp_path / "coordinator-persist.sqlite"
+    _seed_execution_plan_row(db_path, str(final_payload["submit_plan_hash"]))
+    monkeypatch.setattr("bithumb_bot.execution_service.ensure_db", _sqlite_ensure_db_for(db_path))
+
+    def _fake_evaluate(self, *, plan, broker=None, submit_qty=None, **_kwargs):
+        assert broker is not None
+        return RiskPolicyEngine(self.policy).evaluate_pre_submit(
+            plan,
+            RiskSnapshot(
+                evaluation_ts_ms=1_800_000_000_000,
+                mark_price=100_000_000.0,
+                current_equity=1_000_000.0,
+                baseline_equity=1_000_000.0,
+                loss_today=0.0,
+                current_cash_krw=1_000_000.0,
+                current_asset_qty=0.0,
+                state_source="runtime_db_broker",
+                evidence={
+                    "current_asset_qty_source": "broker_current_position",
+                    "submit_plan_qty_source": "submit_plan.qty",
+                    "submit_qty": float(submit_qty or 0.0),
+                    "current_asset_qty": 0.0,
+                },
+            ),
+        )
+
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine.RuntimeRiskEngineAdapter.evaluate_pre_submit",
+        _fake_evaluate,
+    )
+
+    from bithumb_bot.execution_service import _finalize_live_real_pre_submit_risk_proof
+
+    result = _finalize_live_real_pre_submit_risk_proof(
+        broker=object(),
+        payload=final_payload,
+        ts_ms=1_800_000_000_000,
+        market_price=100_000_000.0,
+        field_name="target_submit_plan",
+    )
+
+    assert result is not None
+    assert result["pre_submit_risk_status"] == "ALLOW"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute("SELECT execution_submit_plan_json FROM execution_plan").fetchone()
+        stored = json.loads(row[0])
+    finally:
+        conn.close()
+    assert stored["final_submit_payload_persistence_status"] == "final_broker_bound_payload"
+    assert stored["pre_submit_risk_status"] == "ALLOW"
 
 
 def _typed_buy_execution_summary(

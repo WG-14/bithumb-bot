@@ -522,168 +522,6 @@ def _pre_submit_risk_required_for_live_real(payload: Mapping[str, object]) -> bo
     )
 
 
-def _attach_live_real_pre_submit_risk_proof(
-    payload: dict[str, object],
-    *,
-    ts_ms: int,
-    market_price: float,
-    field_name: str,
-) -> dict[str, object] | None:
-    if not _pre_submit_risk_required_for_live_real(payload):
-        return payload
-    expected_hash = str(payload.get("submit_plan_hash") or "").strip()
-    if not expected_hash:
-        expected_hash = execution_submit_plan_payload_hash(payload)
-        payload["submit_plan_hash"] = expected_hash
-    existing_approval_error = operational_pre_submit_risk_approval_error(
-        payload,
-        expected_submit_plan_hash=expected_hash,
-    )
-    if existing_approval_error is None:
-        return payload
-    side = str(payload.get("side") or "").strip().upper()
-    try:
-        from .risk_contract import SubmitPlan
-        from .runtime_risk_engine import RuntimeRiskEngineAdapter
-        from .runtime_risk_engine import resolve_effective_pre_submit_risk_policy
-
-        effective_policy = resolve_effective_pre_submit_risk_policy(payload)
-
-        conn = ensure_db()
-        try:
-            decision = RuntimeRiskEngineAdapter(conn, policy=effective_policy.policy).evaluate_pre_submit(
-                plan=SubmitPlan(
-                    side=side or "UNKNOWN",
-                    qty=float(payload.get("qty") or 0.0),
-                    notional_krw=(
-                        None
-                        if payload.get("notional_krw") is None
-                        else float(payload.get("notional_krw") or 0.0)
-                    ),
-                    source=str(payload.get("source") or "execution_submit_plan"),
-                    evidence={
-                        "execution_submit_plan_hash": expected_hash,
-                        "execution_submit_plan_source": str(payload.get("source") or ""),
-                        "execution_submit_plan_authority": str(payload.get("authority") or ""),
-                        "plan_kind": field_name,
-                        **effective_policy.evidence_fields(),
-                    },
-                ),
-                ts_ms=int(ts_ms),
-                now_ms=int(ts_ms),
-                cash=0.0,
-                qty=float(payload.get("qty") or 0.0),
-                price=float(market_price),
-                evaluation_origin="live_real_submit_authority_pre_submit",
-            )
-        finally:
-            conn.close()
-    except Exception as exc:
-        _log_live_submit_plan_block(
-            reason=f"live_real_order_pre_submit_risk_evaluation_failed:{exc}",
-            field_name=field_name,
-            source=payload.get("source"),
-            side=side,
-        )
-        return None
-    proof_fields = {
-        **effective_policy.evidence_fields(),
-        "pre_submit_risk_decision": decision.as_dict(),
-        "pre_submit_risk_status": decision.status,
-        "pre_submit_risk_decision_hash": decision.risk_decision_hash,
-        "pre_submit_risk_policy_hash": decision.risk_policy_hash,
-        "effective_pre_submit_risk_policy_hash": decision.risk_policy_hash,
-        "pre_submit_risk_input_hash": decision.risk_input_hash,
-        "pre_submit_risk_evidence_hash": decision.risk_evidence_hash,
-        "pre_submit_risk_plan_hash": expected_hash,
-        "pre_submit_risk_reason_code": decision.reason_code,
-        "pre_submit_risk_state_source": decision.state_source,
-        "pre_submit_risk_evidence": dict(decision.evidence),
-    }
-    approval_error = operational_pre_submit_risk_approval_error(
-        proof_fields,
-        expected_submit_plan_hash=expected_hash,
-    )
-    if approval_error is not None:
-        payload.update(
-            {
-                **proof_fields,
-                "final_submit_payload_persistence_status": "post_proof_submit_skipped",
-                "final_submit_payload_skip_reason": approval_error,
-            }
-        )
-        payload["content_hash"] = execution_submit_plan_payload_hash(payload)
-        from .execution_plan_batch import build_pre_submit_risk_finalization_artifact
-
-        finalization = build_pre_submit_risk_finalization_artifact(payload)
-        payload["pre_submit_risk_finalization_artifact"] = finalization
-        payload["pre_submit_risk_finalization_hash"] = finalization[
-            "pre_submit_risk_finalization_hash"
-        ]
-        try:
-            from .db_core import update_execution_plan_final_submit_payload
-
-            conn = ensure_db()
-            try:
-                persist_result = update_execution_plan_final_submit_payload(
-                    conn,
-                    final_submit_payload=payload,
-                    persistence_status="post_proof_submit_skipped",
-                )
-                if not bool(persist_result.get("updated")):
-                    raise RuntimeError(str(persist_result.get("reason") or "execution_plan_final_submit_payload_not_bound"))
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception as exc:
-            _log_live_submit_plan_block(
-                reason=f"final_submit_payload_persist_failed:{exc}",
-                field_name=field_name,
-                source=payload.get("source"),
-                side=side,
-            )
-        _log_live_submit_plan_block(
-            reason=approval_error,
-            field_name=field_name,
-            source=payload.get("source"),
-            side=side,
-        )
-        return None
-    payload.update(proof_fields)
-    payload["content_hash"] = execution_submit_plan_payload_hash(payload)
-    from .execution_plan_batch import build_pre_submit_risk_finalization_artifact
-
-    finalization = build_pre_submit_risk_finalization_artifact(payload)
-    payload["pre_submit_risk_finalization_artifact"] = finalization
-    payload["pre_submit_risk_finalization_hash"] = finalization[
-        "pre_submit_risk_finalization_hash"
-    ]
-    try:
-        from .db_core import update_execution_plan_final_submit_payload
-
-        conn = ensure_db()
-        try:
-            persist_result = update_execution_plan_final_submit_payload(
-                conn,
-                final_submit_payload=payload,
-                persistence_status="final_broker_bound_payload",
-            )
-            if not bool(persist_result.get("updated")):
-                raise RuntimeError(str(persist_result.get("reason") or "execution_plan_final_submit_payload_not_bound"))
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as exc:
-        _log_live_submit_plan_block(
-            reason=f"final_submit_payload_persist_failed:{exc}",
-            field_name=field_name,
-            source=payload.get("source"),
-            side=side,
-        )
-        return None
-    return payload
-
-
 def validate_execution_submit_plan_serialization(
     plan: dict[str, object] | None,
     *,
@@ -770,6 +608,53 @@ def _log_live_submit_plan_block(
             execution_engine=_execution_engine(),
         )
     )
+
+
+def _finalize_live_real_pre_submit_risk_proof(
+    *,
+    broker: object | None,
+    payload: dict[str, object],
+    ts_ms: int,
+    market_price: float,
+    field_name: str,
+) -> dict[str, object] | None:
+    if not _pre_submit_risk_required_for_live_real(payload):
+        return payload
+    side = str(payload.get("side") or "").strip().upper()
+    from .pre_submit_risk_coordinator import PreSubmitRiskCoordinator
+
+    conn = ensure_db(None)
+    try:
+        try:
+            result = PreSubmitRiskCoordinator().evaluate_and_persist(
+                conn,
+                payload=payload,
+                broker=broker,
+                ts_ms=int(ts_ms),
+                market_price=float(market_price),
+                field_name=field_name,
+            )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            _log_live_submit_plan_block(
+                reason=f"live_real_order_pre_submit_risk_evaluation_failed:{exc}",
+                field_name=field_name,
+                source=payload.get("source"),
+                side=side,
+            )
+            return None
+    finally:
+        conn.close()
+    if not result.allowed:
+        _log_live_submit_plan_block(
+            reason=result.reason,
+            field_name=field_name,
+            source=result.payload.get("source"),
+            side=side,
+        )
+        return None
+    return result.payload
 
 
 def _block_live_submit_plan(
@@ -2670,7 +2555,7 @@ class LiveSignalExecutionService:
         )
         if harmless_dust_preview is None:
             return False
-        suppression_conn = ensure_db()
+        suppression_conn = ensure_db(None)
         try:
             recorded = self.harmless_dust_recorder(
                 conn=suppression_conn,
@@ -2791,8 +2676,9 @@ class LiveSignalExecutionService:
                         extra=_execution_batch_payload_extra(request)
                     )
                     if _execution_engine() == "target_delta":
-                        target_plan = _attach_live_real_pre_submit_risk_proof(
-                            target_plan,
+                        target_plan = _finalize_live_real_pre_submit_risk_proof(
+                            broker=self.broker,
+                            payload=target_plan,
                             ts_ms=int(request.ts),
                             market_price=float(request.market_price),
                             field_name="target_submit_plan",
@@ -2801,8 +2687,9 @@ class LiveSignalExecutionService:
                     residual_plan = typed_residual_plan.as_final_payload(
                         extra=_execution_batch_payload_extra(request)
                     )
-                    residual_plan = _attach_live_real_pre_submit_risk_proof(
-                        residual_plan,
+                    residual_plan = _finalize_live_real_pre_submit_risk_proof(
+                        broker=self.broker,
+                        payload=residual_plan,
                         ts_ms=int(request.ts),
                         market_price=float(request.market_price),
                         field_name="residual_submit_plan",

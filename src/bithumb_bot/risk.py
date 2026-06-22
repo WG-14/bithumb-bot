@@ -996,12 +996,13 @@ def evaluate_order_submission_halt(
     from .risk_contract import SubmitPlan
     from .runtime_risk_engine import RuntimeRiskEngineAdapter
 
-    decision = RuntimeRiskEngineAdapter(conn).evaluate_pre_submit(
+    decision = RuntimeRiskEngineAdapter(conn).evaluate_pre_submit(  # broker=compatibility_wrapper_arg
         plan=SubmitPlan(side="UNKNOWN", qty=0.0, source="compatibility_wrapper"),
         ts_ms=ts_ms,
         now_ms=now_ms,
         cash=cash,
-        qty=qty,
+        submit_qty=0.0,
+        current_asset_qty=qty,
         price=price,
         broker=broker,
         mark_price_source=mark_price_source,

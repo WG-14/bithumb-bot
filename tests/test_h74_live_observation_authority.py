@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1044,6 +1045,73 @@ def test_h74_source_live_strategy_risk_fails_closed_when_broker_snapshot_fails(
         if conn is not None:
             conn.close()
         _restore_settings(original_settings)
+
+
+def test_h74_live_pre_submit_proof_allows_with_verified_broker_snapshot(monkeypatch) -> None:
+    from bithumb_bot.risk import DailyLossEvaluation
+    from bithumb_bot.risk_contract import RiskPolicy, SubmitPlan
+    from bithumb_bot.runtime_risk_engine import RuntimeRiskEngineAdapter
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    def _daily_loss_state(_conn, *, broker=None, **_kwargs) -> DailyLossEvaluation:
+        assert broker is not None
+        snapshot = broker.get_balance_snapshot()
+        asset_qty = float(snapshot.balance.asset_available) + float(snapshot.balance.asset_locked)
+        return DailyLossEvaluation(
+            blocked=False,
+            reason="ok",
+            reason_code="OK",
+            decision="allow",
+            evaluation_ts_ms=1_704_046_800_000,
+            day_kst="2024-01-01",
+            max_daily_loss_krw=50_000.0,
+            start_equity=1_000_000.0,
+            current_equity=1_000_000.0,
+            loss_today=0.0,
+            current_cash_krw=1_000_000.0,
+            current_asset_qty=asset_qty,
+            mark_price=100_000_000.0,
+            mark_price_source="unit",
+            details={"current_source": "broker_balance_snapshot"},
+        )
+
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine.evaluate_daily_loss_state", _daily_loss_state)
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine._latest_position_entry_price", lambda _conn: None)
+    monkeypatch.setattr("bithumb_bot.runtime_risk_engine._count_orders_today", lambda _conn, _ts: 0)
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine.collect_risky_order_state",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.runtime_risk_engine._record_typed_decision_identity",
+        lambda *_args, **_kwargs: None,
+    )
+    conn = sqlite3.connect(":memory:")
+    broker = _BalanceSnapshotBroker(asset_available=0.0, asset_locked=0.0)
+    try:
+        decision = RuntimeRiskEngineAdapter(conn, policy=RiskPolicy(max_daily_loss_krw=50_000.0)).evaluate_pre_submit(
+            plan=SubmitPlan(side="BUY", qty=0.0002, notional_krw=20_000.0, source="target_delta"),
+            ts_ms=1_704_046_800_000,
+            now_ms=1_704_046_800_000,
+            cash=0.0,
+            submit_qty=0.0002,
+            current_asset_qty=None,
+            price=100_000_000.0,
+            broker=broker,
+            evaluation_origin="live_real_submit_authority_pre_submit",
+        )
+    finally:
+        conn.close()
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert broker.snapshot_calls == 1
+    assert decision.status == "ALLOW"
+    assert decision.reason_code == "OK"
+    assert decision.evidence["current_asset_qty"] == 0.0
+    assert decision.evidence["submit_qty"] == 0.0002
+    assert decision.evidence["current_asset_qty_source"] == "broker_current_position"
 
 
 def test_h74_source_observation_other_strategy_still_requires_approved_profile(

@@ -487,12 +487,14 @@ def paper_execute(
             fill_price = _get_fill_price(plan_side)
         if fill_price is None:
             return None
-        pre_submit_risk = RuntimeRiskEngineAdapter(conn).evaluate_pre_submit(
+        current_qty = float(qty)
+        pre_submit_risk = RuntimeRiskEngineAdapter(conn).evaluate_pre_submit(  # broker=paper_not_applicable
             plan=SubmitPlan(side=str(signal).upper(), qty=0.0, source="paper_pre_submit"),
             ts_ms=int(ts),
             now_ms=int(ts),
             cash=float(cash),
-            qty=float(qty),
+            submit_qty=0.0,
+            current_asset_qty=current_qty,
             price=float(fill_price),
             mark_price_source="paper_fill_price",
             evaluation_origin="paper_pre_submit",

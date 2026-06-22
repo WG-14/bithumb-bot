@@ -28,7 +28,7 @@ class RiskPolicyEngine:
     def evaluate_pre_decision(self, snapshot: RiskSnapshot) -> RiskDecision:
         return self._evaluate(snapshot=snapshot, evaluation_point="pre_decision")
 
-    def evaluate_pre_submit(self, plan: SubmitPlan, snapshot: RiskSnapshot) -> RiskDecision:
+    def evaluate_pre_submit(self, plan: SubmitPlan, snapshot: RiskSnapshot) -> RiskDecision:  # broker=not_applicable_pure_policy
         evidence = {"submit_plan": plan.as_dict(), **dict(snapshot.evidence)}
         return self._evaluate(
             snapshot=RiskSnapshot(
