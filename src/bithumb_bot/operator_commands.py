@@ -61,6 +61,12 @@ from .runtime_compat import (
     maybe_clear_stale_initial_reconcile_halt,
     perform_panic_stop_cleanup,
 )
+from .runtime_recovery_gate import resume_blocker
+from .runtime_resume_services import (
+    classify_dust_resume_blocker,
+    dust_residual_resume_blocker,
+    reconcile_dust_context,
+)
 from .runtime_decision_service import compute_legacy_signal_for_diagnostics
 from .recovery import (
     backfill_broker_order_with_exchange_id,
@@ -3889,7 +3895,8 @@ def _load_recovery_report(
     unprocessed_remote_open_orders = 0
     remote_known_unresolved_verification_summary = "none"
     balance_split_mismatch_summary = "none"
-    dust_context = build_dust_display_context(health_row["last_reconcile_metadata"] if health_row else None)
+    reconcile_metadata_raw = health_row["last_reconcile_metadata"] if health_row else None
+    dust_context = build_dust_display_context(reconcile_metadata_raw)
     dust = dust_context.classification
     dust_view = dust_context.operator_view
     dust_fields = dust_context.fields
@@ -3925,6 +3932,24 @@ def _load_recovery_report(
         )
 
     resume_allowed, blockers = evaluate_resume_eligibility()
+    dust_resume_blocker = dust_residual_resume_blocker(reconcile_dust_context(reconcile_metadata_raw))
+    if dust_resume_blocker is not None:
+        blocker_code, blocker_detail = dust_resume_blocker
+        if not any(str(existing.code) == blocker_code for existing in blockers):
+            dust_reason_code, dust_summary = classify_dust_resume_blocker(
+                reconcile_dust_context(reconcile_metadata_raw)
+            )
+            blockers = [
+                *blockers,
+                resume_blocker(
+                    code=blocker_code,
+                    detail=blocker_detail,
+                    reason_code=dust_reason_code,
+                    summary=dust_summary,
+                    overridable=False,
+                ),
+            ]
+        resume_allowed = False
     guidance = build_resume_guidance(
         resume_allowed=bool(resume_allowed),
         blockers=blockers,
