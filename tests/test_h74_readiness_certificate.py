@@ -56,6 +56,41 @@ def test_certificate_contains_commit_env_broker_order_rule_hashes(tmp_path) -> N
     assert cert["order_rule_fee_authority_hash"].startswith("sha256:")
     assert cert["gate_trace_hash"] == rehearsal["gate_trace_hash"]
     assert cert["would_submit_plan_hash"] == rehearsal["would_submit_plan_hash"]
+    assert cert["positive_rehearsal_kst_10_pass"] is True
+    assert cert["negative_rehearsal_kst_18_blocks_entry"] is True
+    assert cert["entry_authority_gate_present"] is True
+    assert str(cert["entry_authority_gate_hash"]).startswith("sha256:")
+
+
+def test_certificate_requires_negative_entry_rehearsal(tmp_path) -> None:
+    env = tmp_path / "live.env"
+    env.write_text("MODE=live\n", encoding="utf-8")
+    positive = _passing_rehearsal(tmp_path)
+    negative = run_h74_live_rehearsal(
+        H74LiveRehearsalConfig(kst_time="18:00", source_artifact_path=_source_artifact(tmp_path))
+    )
+
+    cert = build_h74_readiness_certificate(positive, env_file=str(env), negative_rehearsal=negative)
+
+    assert cert["negative_rehearsal_kst_18_blocks_entry"] is True
+
+
+def test_certificate_fails_when_kst_18_would_submit(tmp_path) -> None:
+    positive = _passing_rehearsal(tmp_path)
+    negative = run_h74_live_rehearsal(
+        H74LiveRehearsalConfig(kst_time="18:00", source_artifact_path=_source_artifact(tmp_path))
+    )
+    negative["would_submit"] = True
+
+    with pytest.raises(H74ReadinessCertificateError, match="negative_rehearsal_kst_18"):
+        build_h74_readiness_certificate(positive, env_file=None, negative_rehearsal=negative)
+
+
+def test_certificate_contains_entry_authority_gate_hash(tmp_path) -> None:
+    cert, _rehearsal, _env = _certificate(tmp_path)
+
+    assert cert["entry_authority_gate_present"] is True
+    assert str(cert["entry_authority_gate_hash"]).startswith("sha256:")
 
 
 def test_certificate_invalid_when_env_hash_changes(tmp_path) -> None:

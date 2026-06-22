@@ -558,6 +558,7 @@ def _target_delta_planning_bundle(
     conn: sqlite3.Connection,
     *,
     ts_ms: int,
+    kst_time: str,
     order_rules: Mapping[str, object],
     projection_converged: bool,
     active_fee_accounting_blocker: bool,
@@ -577,10 +578,15 @@ def _target_delta_planning_bundle(
 
     def _target_state_resolver(*_args, **_kwargs) -> dict[str, object]:
         current_exposure_krw = float(closeout_existing_qty or 0.0) * 100_000_000.0
+        previous_target_exposure_krw = current_exposure_krw
+        if current_exposure_krw <= 0.0 and str(kst_time) != "10:00":
+            previous_target_exposure_krw = 100_000.0
         return {
-            "previous_target_exposure_krw": current_exposure_krw,
+            "previous_target_exposure_krw": previous_target_exposure_krw,
             "target_policy_metadata": {
-                "target_policy_action": "use_existing_target" if current_exposure_krw else "initialize_flat_target",
+                "target_policy_action": "use_existing_target"
+                if previous_target_exposure_krw
+                else "initialize_flat_target",
                 "target_origin": "h74_rehearsal_runtime_target_state",
             },
         }
@@ -602,15 +608,22 @@ def _blocking_gate(gate_trace: list[dict[str, object]]) -> tuple[str, str]:
 
 def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict[str, Any]:
     cfg = config or H74LiveRehearsalConfig()
-    if str(cfg.kst_time) != "10:00":
-        raise H74LiveRehearsalError("h74_rehearsal_requires_injected_kst_10_00")
     if not cfg.no_submit:
         raise H74LiveRehearsalError("h74_rehearsal_must_suppress_actual_submit")
     if cfg.smoke_authority_hash:
         raise H74LiveRehearsalError("h74_rehearsal_rejects_operator_smoke_authority")
 
+    try:
+        kst_hour_text, kst_minute_text = str(cfg.kst_time).split(":", 1)
+        kst_hour = int(kst_hour_text)
+        kst_minute = int(kst_minute_text)
+    except (TypeError, ValueError):
+        raise H74LiveRehearsalError("h74_rehearsal_invalid_kst_time") from None
+    if not (0 <= kst_hour <= 23 and 0 <= kst_minute <= 59):
+        raise H74LiveRehearsalError("h74_rehearsal_invalid_kst_time")
+
     kst = timezone(timedelta(hours=9))
-    ts_ms = int(datetime(2026, 6, 22, 10, 0, 0, tzinfo=kst).timestamp() * 1000)
+    ts_ms = int(datetime(2026, 6, 22, kst_hour, kst_minute, 0, tzinfo=kst).timestamp() * 1000)
     order_rules = dict(cfg.order_rules or {"min_qty": 0.0001, "min_notional_krw": 5000.0})
     equivalence_manifest = build_h74_equivalence_manifest(
         source_artifact_path=cfg.source_artifact_path,
@@ -652,6 +665,7 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
                     planning_bundle = _target_delta_planning_bundle(
                         conn,
                         ts_ms=ts_ms,
+                        kst_time=str(cfg.kst_time),
                         order_rules=order_rules,
                         projection_converged=cfg.projection_converged,
                         active_fee_accounting_blocker=cfg.active_fee_accounting_blocker,
@@ -789,6 +803,14 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         planning_path_mode = str(getattr(settings, "MODE", ""))
         planning_path_live_dry_run = bool(getattr(settings, "LIVE_DRY_RUN", True))
         planning_path_live_real_order_armed = bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False))
+        entry_authority_payload = dict(would_submit_plan.get("entry_authority") or {})
+        if not entry_authority_payload:
+            entry_authority_payload = {
+                "gate": "entry_authority",
+                "status": str(would_submit_plan.get("entry_authority_status") or "ALLOW"),
+                "reason_code": str(would_submit_plan.get("entry_authority_reason_code") or "not_new_buy_exposure"),
+                "blocking": str(would_submit_plan.get("entry_authority_status") or "") == "BLOCK",
+            }
         gate_trace = [
             {"gate": "time_window", "status": "ALLOW", "reason_code": "within_kst_window", "blocking": False},
             {"gate": "runtime_cycle_pipeline", "status": "ALLOW", "reason_code": "RuntimeCyclePipeline/ExecutionCoordinator", "blocking": False},
@@ -806,6 +828,7 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
             },
             {"gate": "strategy_risk", "status": "ALLOW", "reason_code": "OK", "blocking": False},
             {"gate": "portfolio_risk", "status": "ALLOW", "reason_code": "OK", "blocking": False},
+            entry_authority_payload,
             {
                 "gate": "pre_submit_risk",
                 "status": pre_submit_status,
@@ -828,6 +851,9 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         daily_reason = str(participation_decision.get("reason_code") or "")
     if not daily_reason:
         daily_reason = str(trace.get("final_reason") or planning_context.get("final_reason") or "")
+    daily_window_start = int(_h74_runtime_strategy_parameters()["DAILY_PARTICIPATION_WINDOW_START_HOUR_KST"])
+    daily_window_end = int(_h74_runtime_strategy_parameters()["DAILY_PARTICIPATION_WINDOW_END_HOUR_KST"])
+    daily_entry_authorized = daily_reason == "daily_participation_fallback_allowed"
     payload: dict[str, Any] = {
         "artifact_type": "h74_live_rehearsal",
         "schema_version": 1,
@@ -848,6 +874,7 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         "planning_path_LIVE_DRY_RUN": planning_path_live_dry_run,
         "planning_path_LIVE_REAL_ORDER_ARMED": planning_path_live_real_order_armed,
         "kst_time": cfg.kst_time,
+        "decision_kst_hour": kst_hour,
         "strategy_name": H74_STRATEGY_NAME,
         "operator_live_pipeline_smoke": False,
         "runtime_cycle_pipeline_called": bool(planning_bundle.execution_plan_batch is not None),
@@ -863,6 +890,16 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         "daily_participation_plugin_called": str(trace.get("strategy_family") or "") == "daily_participation_sma",
         "target_delta_final_payload_created": bool(would_submit_plan.get("schema_version")),
         "daily_participation_reason_code": daily_reason,
+        "daily_participation_window_start_hour_kst": daily_window_start,
+        "daily_participation_window_end_hour_kst": daily_window_end,
+        "daily_participation_entry_authorized": daily_entry_authorized,
+        "entry_authority_status": str(would_submit_plan.get("entry_authority_status") or ""),
+        "entry_authority_reason_code": str(would_submit_plan.get("entry_authority_reason_code") or ""),
+        "entry_authority_gate_present": any(
+            isinstance(entry, Mapping) and entry.get("gate") == "entry_authority"
+            for entry in gate_trace
+        ),
+        "entry_authority_gate_hash": sha256_prefixed(entry_authority_payload),
         "pre_submit_risk_status": pre_submit_status,
         "pre_submit_risk_reason_code": pre_submit_reason,
         "pre_submit_proof_created": bool(would_submit_plan.get("pre_submit_risk_decision_hash")),
@@ -876,6 +913,7 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         "broker_balance_snapshot_hash": broker_snapshot_hash,
         "experiment_equivalence_status": equivalence_status,
         "source_artifact_status": equivalence_manifest["source_artifact_status"],
+        "source_artifact_path": cfg.source_artifact_path,
         "fee_authority_source": equivalence["fee_authority_source"],
         "fee_comparison": equivalence["fee_comparison"],
         "order_rule_comparison": equivalence["order_rule_comparison"],

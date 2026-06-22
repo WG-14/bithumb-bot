@@ -216,6 +216,48 @@ def test_telemetry_primary_block_gate_from_non_risk_gate_trace(tmp_path, monkeyp
     assert rows[0].primary_block_reason == "target_delta_missing_target_submit_plan"
 
 
+def test_telemetry_reports_entry_authority_block(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-entry-authority-gate.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1_800_000_000_000,
+            strategy_name="daily_participation_sma",
+            signal="BUY",
+            reason="target delta entry block",
+            candle_ts=1_800_000_000_000,
+            market_price=100_000_000.0,
+            context={
+                "decision_contract_version": 1,
+                "base_signal": "HOLD",
+                "raw_signal": "HOLD",
+                "final_signal": "HOLD",
+                "target_delta_side": "BUY",
+                "primary_block_gate": "none",
+                "primary_block_reason": "none",
+                "gate_trace": [
+                    {
+                        "gate": "entry_authority",
+                        "status": "BLOCK",
+                        "reason_code": "target_delta_entry_without_strategy_buy_authority",
+                        "blocking": True,
+                    }
+                ],
+            },
+        )
+        conn.commit()
+        rows = fetch_decision_telemetry_summary(conn, limit=20)
+    finally:
+        conn.close()
+
+    assert rows[0].primary_block_gate == "entry_authority"
+    assert rows[0].primary_block_reason == "target_delta_entry_without_strategy_buy_authority"
+
+
 def test_telemetry_reads_pre_submit_block_from_runtime_cycle_artifact(tmp_path, monkeypatch):
     db_path = str(tmp_path / "decision-runtime-artifact-pre-submit.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

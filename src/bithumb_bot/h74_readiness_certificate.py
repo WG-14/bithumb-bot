@@ -27,6 +27,7 @@ def build_h74_readiness_certificate(
     env_file: str | None,
     expires_at_sec: float | None = None,
     schema_hash: str = "sha256:operational-schema-v1",
+    negative_rehearsal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if str(rehearsal.get("artifact_type") or "") != "h74_live_rehearsal":
         raise H74ReadinessCertificateError("h74_certificate_requires_h74_live_rehearsal")
@@ -48,12 +49,43 @@ def build_h74_readiness_certificate(
     for key, expected in required.items():
         if rehearsal.get(key) != expected:
             raise H74ReadinessCertificateError(f"h74_certificate_rehearsal_requirement_failed:{key}")
+    if negative_rehearsal is None:
+        from .h74_live_rehearsal import H74LiveRehearsalConfig, run_h74_live_rehearsal
+
+        negative_rehearsal = run_h74_live_rehearsal(
+            H74LiveRehearsalConfig(
+                kst_time="18:00",
+                no_submit=True,
+                source_artifact_path=str(rehearsal.get("source_artifact_path") or "") or None,
+            )
+        )
+    if str(negative_rehearsal.get("artifact_type") or "") != "h74_live_rehearsal":
+        raise H74ReadinessCertificateError("h74_certificate_requires_negative_h74_live_rehearsal")
+    negative_blocks_entry = (
+        negative_rehearsal.get("broker_submit_reached") is False
+        and negative_rehearsal.get("would_submit") is False
+        and negative_rehearsal.get("actual_submit") is False
+        and negative_rehearsal.get("primary_block_gate") == "entry_authority"
+        and negative_rehearsal.get("entry_authority_status") == "BLOCK"
+    )
+    if not negative_blocks_entry:
+        raise H74ReadinessCertificateError("h74_certificate_negative_rehearsal_kst_18_did_not_block_entry")
+    if not bool(negative_rehearsal.get("entry_authority_gate_present")):
+        raise H74ReadinessCertificateError("h74_certificate_entry_authority_gate_missing")
+    entry_authority_gate_hash = str(negative_rehearsal.get("entry_authority_gate_hash") or "")
+    if not entry_authority_gate_hash:
+        raise H74ReadinessCertificateError("h74_certificate_entry_authority_gate_hash_missing")
     provenance = runtime_code_provenance()
     env_hash = _file_hash(env_file)
     payload: dict[str, Any] = {
         "artifact_type": "h74_readiness_certificate",
         "schema_version": 1,
         "status": "pass",
+        "positive_rehearsal_kst_10_pass": True,
+        "negative_rehearsal_kst_18_blocks_entry": True,
+        "entry_authority_gate_present": True,
+        "out_of_window_buy_blocked": True,
+        "entry_authority_gate_hash": entry_authority_gate_hash,
         "commit_sha": str(provenance.get("commit_sha") or "unavailable"),
         "env_file_hash": env_hash,
         "db_schema_hash": schema_hash,
@@ -67,11 +99,16 @@ def build_h74_readiness_certificate(
             }
         ),
         "gate_trace_hash": str(rehearsal.get("gate_trace_hash") or ""),
+        "negative_rehearsal_gate_trace_hash": str(negative_rehearsal.get("gate_trace_hash") or ""),
         "would_submit_plan_hash": str(rehearsal.get("would_submit_plan_hash") or ""),
+        "negative_rehearsal_would_submit_plan_hash": str(
+            negative_rehearsal.get("would_submit_plan_hash") or ""
+        ),
         "pre_submit_risk_status": str(rehearsal.get("pre_submit_risk_status") or ""),
         "submit_authority": str(rehearsal.get("submit_authority_reason") or ""),
         "broker_submit_reached": bool(rehearsal.get("broker_submit_reached")),
         "actual_submit": bool(rehearsal.get("actual_submit")),
+        "negative_rehearsal_actual_submit": bool(negative_rehearsal.get("actual_submit")),
         "issued_at_sec": float(time.time()),
         "expires_at_sec": float(expires_at_sec if expires_at_sec is not None else time.time() + 3600),
     }
@@ -131,8 +168,32 @@ def validate_h74_readiness_certificate(
     }
 
 
+def validate_h74_long_run_preflight(certificate: Mapping[str, Any]) -> dict[str, Any]:
+    required_true = (
+        "positive_rehearsal_kst_10_pass",
+        "negative_rehearsal_kst_18_blocks_entry",
+        "entry_authority_gate_present",
+        "out_of_window_buy_blocked",
+    )
+    reasons: list[str] = []
+    if str(certificate.get("status") or "") != "pass":
+        reasons.append("certificate_not_pass")
+    for key in required_true:
+        if certificate.get(key) is not True:
+            reasons.append(f"{key}_missing_or_false")
+    if not str(certificate.get("entry_authority_gate_hash") or "").strip():
+        reasons.append("entry_authority_gate_hash_missing")
+    return {
+        "valid": not reasons,
+        "status": "pass" if not reasons else "blocked",
+        "reasons": reasons,
+        "run_startup_enforced": False,
+    }
+
+
 __all__ = [
     "H74ReadinessCertificateError",
     "build_h74_readiness_certificate",
+    "validate_h74_long_run_preflight",
     "validate_h74_readiness_certificate",
 ]

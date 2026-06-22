@@ -1701,6 +1701,45 @@ def test_normal_live_target_delta_buy_with_blocked_performance_gate_does_not_rea
     assert not live_broker._is_operator_live_pipeline_smoke_submit(plan, strategy_name="sma_with_filter")
 
 
+def test_live_target_delta_buy_requires_entry_authority(caplog: pytest.LogCaptureFixture) -> None:
+    _arm_live_real_orders(engine="target_delta")
+    calls: list[dict[str, object]] = []
+    base = {
+        key: value
+        for key, value in _valid_target_submit_plan().items()
+        if not str(key).startswith("pre_submit_risk_")
+        and key
+        not in {
+            "effective_pre_submit_risk_policy_hash",
+            "risk_policy_source",
+            "strategy_risk_profile_hashes",
+        }
+    }
+    plan = _with_pre_submit_risk_proof(
+        {
+            **base,
+            "entry_authority_status": "BLOCK",
+            "entry_authority_reason_code": "target_delta_entry_without_strategy_buy_authority",
+        }
+    )
+
+    result = _service(calls).execute(
+        SignalExecutionRequest(
+            signal="BUY",
+            ts=123,
+            market_price=100_000_000.0,
+            strategy_name="daily_participation_sma",
+            decision_reason="target_delta_rebalance",
+            decision_context={},
+            execution_decision_summary=_typed_target_execution_summary_with_plan(plan),
+        )
+    )
+
+    assert result is None
+    assert calls == []
+    assert "target_delta_entry_without_strategy_buy_authority" in caplog.text
+
+
 def test_operator_live_pipeline_smoke_bypasses_strategy_gate_with_exact_markers() -> None:
     _arm_live_real_orders(engine="target_delta")
     calls: list[dict[str, object]] = []

@@ -181,3 +181,54 @@ def test_execution_result_pre_submit_trace_overrides_missing_decision_trace() ->
     assert pre_submit["reason_code"] == "RISK_STATE_MISMATCH"
     assert pre_submit["blocking"] is True
     assert artifact["primary_block_gate"] == "pre_submit_risk"
+
+
+def test_entry_authority_block_is_primary_block_gate() -> None:
+    artifact = RuntimeCycleArtifact(
+        cycle_id="cycle-entry",
+        candle_ts=1_800_000_000_000,
+        hard_gate_trace_entries=[
+            {
+                "gate": "entry_authority",
+                "status": "BLOCK",
+                "reason_code": "target_delta_entry_without_strategy_buy_authority",
+                "input_hash": "sha256:entry-input",
+                "evidence_hash": "sha256:entry-evidence",
+                "state_source": "entry_authority_policy",
+                "blocking": True,
+            }
+        ],
+        strategy_risk_status="ALLOW",
+        strategy_risk_reason_code="OK",
+        portfolio_risk_status="ALLOW",
+        portfolio_risk_reason_code="OK",
+    ).as_dict()
+
+    assert artifact["primary_block_gate"] == "entry_authority"
+    assert artifact["primary_block_reason"] == "target_delta_entry_without_strategy_buy_authority"
+
+
+def test_entry_authority_allow_recorded_for_kst_10_buy() -> None:
+    artifact = RuntimeCycleArtifact(
+        cycle_id="cycle-entry-allow",
+        candle_ts=1_800_000_000_000,
+        hard_gate_trace_entries=[
+            {
+                "gate": "entry_authority",
+                "status": "ALLOW",
+                "reason_code": "daily_participation_entry",
+                "input_hash": "sha256:entry-input",
+                "evidence_hash": "sha256:entry-evidence",
+                "state_source": "entry_authority_policy",
+                "blocking": False,
+            }
+        ],
+        strategy_risk_status="ALLOW",
+        strategy_risk_reason_code="OK",
+        portfolio_risk_status="ALLOW",
+        portfolio_risk_reason_code="OK",
+    ).as_dict()
+
+    entry = [item for item in artifact["gate_trace"] if item["gate"] == "entry_authority"][0]
+    assert entry["status"] == "ALLOW"
+    assert artifact["primary_block_gate"] == "none"

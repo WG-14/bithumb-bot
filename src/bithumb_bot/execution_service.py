@@ -11,6 +11,11 @@ from .decision_contract import apply_decision_contract
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .decision_equivalence import sha256_prefixed
 from .execution_order_rules import resolve_execution_order_rules
+from .entry_authority import (
+    ENTRY_AUTHORITY_BLOCK,
+    ENTRY_AUTHORITY_REASON_BLOCKED,
+    evaluate_entry_authority,
+)
 from .execution_submit_plan_schema import (
     EXECUTION_SUBMIT_PLAN_SCHEMA_KNOWN_AUTHORITIES,
     EXECUTION_SUBMIT_PLAN_SCHEMA_KNOWN_SOURCES,
@@ -1829,6 +1834,34 @@ def _build_execution_decision_summary_from_authority_payload(
             authoritative_target_exposure_krw=authoritative_target_exposure_krw,
         )
         target_shadow_decision = target_decision.as_dict()
+        entry_authority = evaluate_entry_authority(
+            payload=payload,
+            side=str(target_decision.delta_side),
+            current_exposure_krw=target_decision.current_exposure_krw,
+            target_exposure_krw=target_decision.new_target_exposure_krw,
+            delta_krw=target_decision.delta_notional_krw,
+        )
+        target_shadow_decision.update(
+            {
+                "entry_authority": entry_authority.as_dict(),
+                "entry_authority_status": entry_authority.status,
+                "entry_authority_reason_code": entry_authority.reason_code,
+                "entry_authority_source": entry_authority.source,
+                "entry_authorized": entry_authority.allowed,
+                "active_target_state": (
+                    "inactive"
+                    if entry_authority.status == ENTRY_AUTHORITY_BLOCK
+                    else "active"
+                    if target_decision.new_target_exposure_krw is not None
+                    else "unknown"
+                ),
+                "active_target_exposure_krw": (
+                    0.0
+                    if entry_authority.status == ENTRY_AUTHORITY_BLOCK
+                    else target_decision.new_target_exposure_krw
+                ),
+            }
+        )
         if target_authority_error is not None:
             target_shadow_decision.update(
                 {
@@ -1843,7 +1876,11 @@ def _build_execution_decision_summary_from_authority_payload(
         if execution_engine == "target_delta":
             target_sizing = None
             target_sizing_dict: dict[str, object] | None = None
-            if target_authority_error is None and target_decision.delta_side in {"BUY", "SELL"}:
+            if (
+                target_authority_error is None
+                and entry_authority.status != ENTRY_AUTHORITY_BLOCK
+                and target_decision.delta_side in {"BUY", "SELL"}
+            ):
                 target_sizing = build_target_delta_execution_sizing(
                     pair=authoritative_pair,
                     side=str(target_decision.delta_side),
@@ -1874,6 +1911,9 @@ def _build_execution_decision_summary_from_authority_payload(
             submit_allowed = bool(target_decision.would_submit and target_sizing is not None and target_sizing.allowed)
             if target_authority_error is not None:
                 submit_allowed = False
+            if entry_authority.status == ENTRY_AUTHORITY_BLOCK:
+                submit_allowed = False
+                sizing_block_reason = ENTRY_AUTHORITY_REASON_BLOCKED
             performance_gate_blocks_buy = bool(
                 submit_allowed
                 and _target_delta_buy_blocked_by_performance_gate(
@@ -1895,12 +1935,16 @@ def _build_execution_decision_summary_from_authority_payload(
                     "BLOCK_PORTFOLIO_TARGET_AUTHORITY"
                     if target_authority_error is not None
                     else (
+                    "BLOCK_ENTRY_AUTHORITY"
+                    if entry_authority.status == ENTRY_AUTHORITY_BLOCK
+                    else (
                     "BLOCK_STRATEGY_PERFORMANCE_GATE"
                     if performance_gate_blocks_buy
                     else (
                         "HOLD_TARGET_TRUE_DUST"
                         if target_decision.block_reason == "delta_below_exchange_min"
                         else "BLOCK_TARGET_DELTA"
+                    )
                     )
                     )
                 )
@@ -1912,6 +1956,35 @@ def _build_execution_decision_summary_from_authority_payload(
                 "intent_type": "target_delta_rebalance",
                 "strategy_context": "target_delta",
                 "authority_source": "target_delta",
+                "entry_authority": entry_authority.as_dict(),
+                "entry_authority_status": entry_authority.status,
+                "entry_authority_reason_code": entry_authority.reason_code,
+                "entry_authority_source": entry_authority.source,
+                "entry_authorized": entry_authority.allowed,
+                "active_target_state": (
+                    "inactive"
+                    if entry_authority.status == ENTRY_AUTHORITY_BLOCK
+                    else "active"
+                    if target_decision.new_target_exposure_krw is not None
+                    else "unknown"
+                ),
+                "active_target_exposure_krw": (
+                    0.0
+                    if entry_authority.status == ENTRY_AUTHORITY_BLOCK
+                    else target_decision.new_target_exposure_krw
+                ),
+                "position_management_authority_status": "ALLOW"
+                if str(target_decision.delta_side) in {"SELL", "NONE"}
+                else "NOT_APPLICABLE",
+                "position_management_authority_reason_code": "target_delta_sell_or_noop_allowed"
+                if str(target_decision.delta_side) in {"SELL", "NONE"}
+                else "not_position_management",
+                "closeout_authority_status": "ALLOW"
+                if bool(target_decision.target_closeout_requested)
+                else "NOT_APPLICABLE",
+                "closeout_authority_reason_code": "operator_closeout_requested"
+                if bool(target_decision.target_closeout_requested)
+                else "not_closeout",
                 "authoritative_pair": authoritative_pair,
                 "portfolio_target_pair": None if portfolio_target is None else portfolio_target.pair,
                 "runtime_pair": str(payload.get("runtime_pair") or ""),

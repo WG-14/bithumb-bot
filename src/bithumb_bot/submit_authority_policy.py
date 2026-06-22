@@ -66,6 +66,10 @@ class SubmitAuthorityPolicyDecision:
     pre_submit_proof_status: str
     pre_submit_risk_approval_status: str = "not_required"
     pre_submit_risk_block_reason: str = "none"
+    entry_authority_status: str = "not_required"
+    entry_authority_reason_code: str = "none"
+    position_management_authority_status: str = "not_required"
+    closeout_authority_status: str = "not_required"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -83,6 +87,10 @@ class SubmitAuthorityPolicyDecision:
             "pre_submit_proof_status": self.pre_submit_proof_status,
             "pre_submit_risk_approval_status": self.pre_submit_risk_approval_status,
             "pre_submit_risk_block_reason": self.pre_submit_risk_block_reason,
+            "entry_authority_status": self.entry_authority_status,
+            "entry_authority_reason_code": self.entry_authority_reason_code,
+            "position_management_authority_status": self.position_management_authority_status,
+            "closeout_authority_status": self.closeout_authority_status,
             "submit_authority_mode": self.policy.submit_authority_mode,
             "submit_authority_policy_hash": self.policy.content_hash(),
         }
@@ -222,6 +230,12 @@ def evaluate_submit_authority_policy(
             pre_submit_proof_status=proof,
             pre_submit_risk_approval_status=risk_status,
             pre_submit_risk_block_reason="none" if risk_error is None else risk_error,
+            entry_authority_status=str(payload.get("entry_authority_status") or "not_required"),
+            entry_authority_reason_code=str(payload.get("entry_authority_reason_code") or "none"),
+            position_management_authority_status=str(
+                payload.get("position_management_authority_status") or "not_required"
+            ),
+            closeout_authority_status=str(payload.get("closeout_authority_status") or "not_required"),
         )
 
     if mode == "live" and live_dry_run:
@@ -261,6 +275,8 @@ def evaluate_submit_authority_policy(
                 return decision(False, "live_real_order_target_plan_invalid_side")
             if not submit_expected:
                 return decision(False, "live_real_order_target_plan_submit_not_expected")
+            if side == "BUY" and str(payload.get("entry_authority_status") or "") == "BLOCK":
+                return decision(False, "target_delta_entry_without_strategy_buy_authority")
             if proof != "passed":
                 return decision(False, "live_real_order_target_plan_pre_submit_proof_not_passed")
             if not bool(payload.get("portfolio_target_authoritative")):

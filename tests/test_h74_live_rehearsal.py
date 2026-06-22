@@ -45,6 +45,40 @@ def test_h74_rehearsal_reaches_broker_submit_boundary_at_kst_10(tmp_path) -> Non
     assert payload["LIVE_DRY_RUN"] is False
 
 
+def test_h74_rehearsal_kst_10_allows_daily_participation_buy(tmp_path) -> None:
+    payload = run_h74_live_rehearsal(
+        H74LiveRehearsalConfig(kst_time="10:00", no_submit=True, source_artifact_path=_source_artifact(tmp_path))
+    )
+
+    assert payload["would_submit"] is True
+    assert payload["broker_submit_reached"] is True
+    assert payload["actual_submit"] is False
+    assert payload["daily_participation_entry_authorized"] is True
+    assert payload["entry_authority_status"] == "ALLOW"
+
+
+def test_h74_rehearsal_kst_18_blocks_out_of_window_buy(tmp_path) -> None:
+    payload = run_h74_live_rehearsal(
+        H74LiveRehearsalConfig(kst_time="18:00", no_submit=True, source_artifact_path=_source_artifact(tmp_path))
+    )
+
+    assert payload["would_submit"] is False
+    assert payload["broker_submit_reached"] is False
+    assert payload["actual_submit"] is False
+    assert payload["primary_block_gate"] == "entry_authority"
+    assert payload["entry_authority_status"] == "BLOCK"
+    assert payload["entry_authority_reason_code"] == "target_delta_entry_without_strategy_buy_authority"
+
+
+def test_h74_negative_rehearsal_does_not_use_operator_smoke(tmp_path) -> None:
+    payload = run_h74_live_rehearsal(
+        H74LiveRehearsalConfig(kst_time="18:00", no_submit=True, source_artifact_path=_source_artifact(tmp_path))
+    )
+
+    assert payload["operator_live_pipeline_smoke"] is False
+    assert "operator_live_pipeline_smoke" not in payload["would_submit_plan"]
+
+
 def test_h74_rehearsal_uses_runtime_cycle_pipeline(tmp_path) -> None:
     payload = run_h74_live_rehearsal(H74LiveRehearsalConfig(source_artifact_path=_source_artifact(tmp_path)))
 
@@ -182,6 +216,18 @@ def test_h74_rehearsal_does_not_use_operator_smoke_authority(tmp_path) -> None:
     assert "operator_live_pipeline_smoke" not in payload["would_submit_plan"]
     with pytest.raises(H74LiveRehearsalError, match="rejects_operator_smoke_authority"):
         run_h74_live_rehearsal(H74LiveRehearsalConfig(smoke_authority_hash="sha256:smoke"))
+
+
+def test_negative_rehearsal_reports_daily_window_result(tmp_path) -> None:
+    payload = run_h74_live_rehearsal(
+        H74LiveRehearsalConfig(kst_time="18:00", no_submit=True, source_artifact_path=_source_artifact(tmp_path))
+    )
+
+    assert payload["decision_kst_hour"] == 18
+    assert payload["daily_participation_entry_authorized"] is False
+    assert payload["daily_participation_reason_code"] == "outside_daily_participation_window"
+    assert payload["daily_participation_window_start_hour_kst"] == 9
+    assert payload["daily_participation_window_end_hour_kst"] == 11
 
 
 def test_h74_rehearsal_does_not_accept_smoke_proof_as_pre_submit_proof() -> None:
