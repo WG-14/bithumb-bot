@@ -12,6 +12,7 @@ ENTRY_AUTHORITY_BLOCK = "BLOCK"
 ENTRY_AUTHORITY_REASON_FINAL_SIGNAL_BUY = "strategy_final_signal_buy"
 ENTRY_AUTHORITY_REASON_DAILY_PARTICIPATION = "daily_participation_entry"
 ENTRY_AUTHORITY_REASON_OPERATOR_OR_RECOVERY = "explicit_operator_or_recovery_buy_authority"
+ENTRY_AUTHORITY_REASON_EXISTING_TARGET_REBALANCE = "existing_target_rebalance"
 ENTRY_AUTHORITY_REASON_NOT_REQUIRED = "not_new_buy_exposure"
 ENTRY_AUTHORITY_REASON_BLOCKED = "target_delta_entry_without_strategy_buy_authority"
 
@@ -78,16 +79,28 @@ def evaluate_entry_authority(
     new_buy_exposure = normalized_side == "BUY" and delta > 1e-9 and target_exposure > current_exposure + 1e-9
 
     final_signal = _first_text(payload, "final_signal", "signal").upper() or "HOLD"
+    try:
+        previous_target_exposure = max(0.0, float(payload.get("previous_target_exposure_krw") or 0.0))
+    except (TypeError, ValueError):
+        previous_target_exposure = 0.0
     daily_reason = _first_text(payload, "daily_participation_reason_code", "final_reason", "reason")
     explicit_authority = _first_text(payload, "entry_authority_source", "authority_source", "buy_authority_source")
+    existing_target_rebalance = (
+        new_buy_exposure
+        and previous_target_exposure > 1e-9
+        and current_exposure > 1e-9
+        and target_exposure <= previous_target_exposure + 1e-9
+    )
     input_payload = {
         "side": normalized_side,
         "current_exposure_krw": current_exposure,
         "target_exposure_krw": target_exposure,
+        "previous_target_exposure_krw": previous_target_exposure,
         "delta_krw": delta,
         "final_signal": final_signal,
         "daily_participation_reason_code": daily_reason,
         "explicit_authority": explicit_authority,
+        "existing_target_rebalance": existing_target_rebalance,
     }
     input_hash = sha256_prefixed(input_payload)
 
@@ -99,6 +112,10 @@ def evaluate_entry_authority(
         reason_code = ENTRY_AUTHORITY_REASON_FINAL_SIGNAL_BUY
         status = ENTRY_AUTHORITY_ALLOW
         source = "strategy_final_signal"
+    elif existing_target_rebalance:
+        reason_code = ENTRY_AUTHORITY_REASON_EXISTING_TARGET_REBALANCE
+        status = ENTRY_AUTHORITY_ALLOW
+        source = "existing_target_rebalance"
     elif daily_reason in DAILY_PARTICIPATION_ALLOW_REASONS:
         reason_code = ENTRY_AUTHORITY_REASON_DAILY_PARTICIPATION
         status = ENTRY_AUTHORITY_ALLOW

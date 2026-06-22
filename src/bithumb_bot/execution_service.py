@@ -1726,6 +1726,12 @@ def _build_execution_decision_summary_from_authority_payload(
 
     raw = str(raw_signal or payload.get("raw_signal") or payload.get("base_signal") or payload.get("signal") or "HOLD").upper()
     final = str(final_signal or payload.get("final_signal") or payload.get("signal") or "HOLD").upper()
+    payload["raw_signal"] = raw
+    payload["final_signal"] = final
+    if final_reason is not None:
+        payload["final_reason"] = final_reason
+    if previous_target_exposure_krw is not None:
+        payload["previous_target_exposure_krw"] = previous_target_exposure_krw
     strategy_candidate = _strategy_sell_candidate(payload)
     residual_candidate = build_residual_sell_candidate(payload)
     residual_candidate_dict = None if residual_candidate is None else {
