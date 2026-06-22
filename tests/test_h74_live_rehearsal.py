@@ -50,6 +50,7 @@ def test_h74_rehearsal_uses_runtime_cycle_pipeline(tmp_path) -> None:
 
     assert payload["runtime_cycle_pipeline_called"] is True
     assert payload["execution_result_status"] == "submitted"
+    assert payload["live_signal_execution_service_called"] is True
 
 
 def test_h74_rehearsal_uses_production_runtime_strategy_set(tmp_path, monkeypatch) -> None:
@@ -98,6 +99,9 @@ def test_h74_rehearsal_invokes_live_signal_execution_service_before_mock_submit(
     assert payload["pre_submit_proof_created"] is True
     assert payload["submit_authority_allowed"] is True
     assert payload["broker_submit_reached"] is True
+    assert payload["would_submit_plan"]["pre_submit_risk_status"] == "ALLOW"
+    assert payload["would_submit_plan"]["pre_submit_risk_decision_hash"].startswith("sha256:")
+    assert payload["would_submit_plan"]["pre_submit_risk_evidence_hash"].startswith("sha256:")
 
 
 def test_h74_rehearsal_uses_production_target_delta_planner(tmp_path, monkeypatch) -> None:
@@ -117,6 +121,34 @@ def test_h74_rehearsal_uses_production_target_delta_planner(tmp_path, monkeypatc
     assert calls["count"] == 1
     assert payload["would_submit_plan"]["source"] == "target_delta"
     assert payload["would_submit_plan"]["authority"] == "canonical_target_delta_sizing"
+    assert payload["broker_submit_reached"] is True
+
+
+def test_h74_rehearsal_invokes_pre_submit_and_submit_authority_policies(tmp_path, monkeypatch) -> None:
+    from bithumb_bot import execution_service
+    from bithumb_bot.pre_submit_risk_coordinator import PreSubmitRiskCoordinator
+
+    calls = {"pre_submit": 0, "submit_authority": 0}
+    original_pre_submit = PreSubmitRiskCoordinator.evaluate_and_persist
+    original_submit_authority = execution_service.evaluate_submit_authority_policy
+
+    def _wrapped_pre_submit(self, *args, **kwargs):
+        calls["pre_submit"] += 1
+        return original_pre_submit(self, *args, **kwargs)
+
+    def _wrapped_submit_authority(*args, **kwargs):
+        calls["submit_authority"] += 1
+        return original_submit_authority(*args, **kwargs)
+
+    monkeypatch.setattr(PreSubmitRiskCoordinator, "evaluate_and_persist", _wrapped_pre_submit)
+    monkeypatch.setattr(execution_service, "evaluate_submit_authority_policy", _wrapped_submit_authority)
+
+    payload = run_h74_live_rehearsal(H74LiveRehearsalConfig(source_artifact_path=_source_artifact(tmp_path)))
+
+    assert calls["pre_submit"] >= 1
+    assert calls["submit_authority"] >= 1
+    assert payload["pre_submit_risk_status"] == "ALLOW"
+    assert payload["submit_authority_allowed"] is True
     assert payload["broker_submit_reached"] is True
 
 
@@ -155,6 +187,24 @@ def test_h74_rehearsal_does_not_use_operator_smoke_authority(tmp_path) -> None:
 def test_h74_rehearsal_does_not_accept_smoke_proof_as_pre_submit_proof() -> None:
     with pytest.raises(H74LiveRehearsalError, match="rejects_operator_smoke_authority"):
         run_h74_live_rehearsal(H74LiveRehearsalConfig(smoke_authority_hash="sha256:smoke"))
+
+
+def test_h74_rehearsal_does_not_use_live_dry_run_or_paper_mode_for_success_path(tmp_path) -> None:
+    payload = run_h74_live_rehearsal(H74LiveRehearsalConfig(source_artifact_path=_source_artifact(tmp_path)))
+
+    assert payload["MODE"] == "live"
+    assert payload["LIVE_DRY_RUN"] is False
+    assert payload["LIVE_REAL_ORDER_ARMED"] is True
+    assert payload["decision_path_MODE"] == "live"
+    assert payload["decision_path_LIVE_DRY_RUN"] is False
+    assert payload["decision_path_LIVE_REAL_ORDER_ARMED"] is True
+    assert payload["planning_path_MODE"] == "live"
+    assert payload["planning_path_LIVE_DRY_RUN"] is False
+    assert payload["planning_path_LIVE_REAL_ORDER_ARMED"] is True
+    assert payload["broker_submit_reached"] is True
+    assert payload["actual_submit"] is False
+    assert payload["operator_live_pipeline_smoke"] is False
+    assert "operator_live_pipeline_smoke" not in payload["would_submit_plan"]
 
 
 def test_h74_rehearsal_fails_when_pre_submit_broker_snapshot_missing(tmp_path) -> None:

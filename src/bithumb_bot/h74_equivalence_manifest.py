@@ -21,11 +21,15 @@ def build_h74_equivalence_manifest(
     source = _load_source_artifact(source_artifact_path)
     source_missing = source is None
     source_cost = _source_cost_assumptions(source)
+    source_identity = _source_artifact_identity(source)
     parameters = dict(H74_SOURCE_OBSERVATION_PARAMETERS)
     manifest: dict[str, Any] = {
         "schema_version": H74_EQUIVALENCE_SCHEMA_VERSION,
         "artifact_type": "h74_backtest_live_equivalence_manifest",
         "candidate_id": H74_SOURCE_CANDIDATE_ID,
+        "source_candidate_id": source_identity["source_candidate_id"],
+        "source_backtest_report_hash": source_identity["source_backtest_report_hash"],
+        "source_artifact_schema": source_identity["source_artifact_schema"],
         "source_artifact_status": "missing" if source_missing else "loaded",
         "source_artifact_path": None if source_artifact_path is None else str(source_artifact_path),
         "source_artifact_hash": "" if source is None else sha256_prefixed(source),
@@ -73,9 +77,10 @@ def compare_h74_equivalence(
     current_fee_authority_source: str,
     current_order_rules: Mapping[str, object],
 ) -> dict[str, Any]:
-    expected_fee = float(manifest.get("fee_rate") or 0.0)
+    expected_fee_raw = manifest.get("fee_rate")
+    expected_fee = None if expected_fee_raw in (None, "") else float(expected_fee_raw)
     actual_fee = float(current_fee_rate)
-    fee_match = abs(expected_fee - actual_fee) <= 1e-12
+    fee_match = expected_fee is not None and abs(expected_fee - actual_fee) <= 1e-12
     order_rules = manifest.get("order_rules") if isinstance(manifest.get("order_rules"), Mapping) else {}
     order_rule_matches = {
         key: order_rules.get(key) == current_order_rules.get(key)
@@ -119,15 +124,36 @@ def _load_source_artifact(source_artifact_path: str | Path | None) -> Mapping[st
     return payload if isinstance(payload, Mapping) else None
 
 
+def _source_artifact_identity(source: Mapping[str, object] | None) -> dict[str, object]:
+    if source is None:
+        return {
+            "source_candidate_id": None,
+            "source_backtest_report_hash": None,
+            "source_artifact_schema": "missing",
+        }
+    cost_schema = (
+        "runtime_base_cost_assumption"
+        if isinstance(source.get("runtime_base_cost_assumption"), Mapping)
+        else "cost_model"
+        if isinstance(source.get("cost_model"), Mapping)
+        else "unknown"
+    )
+    return {
+        "source_candidate_id": source.get("candidate_id"),
+        "source_backtest_report_hash": source.get("backtest_report_hash"),
+        "source_artifact_schema": cost_schema,
+    }
+
+
 def _source_cost_assumptions(source: Mapping[str, object] | None) -> dict[str, object]:
     if source is None:
         return {
             "source_assumption_status": "missing_source",
             "source_missing_assumption_fields": ["source_artifact"],
-            "fee_rate": H74_SOURCE_BASE_FEE_RATE,
-            "fee_source": "source_artifact_missing_reference_default_non_pass",
-            "slippage_bps": H74_SOURCE_BASE_SLIPPAGE_BPS,
-            "slippage_source": "source_artifact_missing_reference_default_non_pass",
+            "fee_rate": None,
+            "fee_source": "source_artifact_missing",
+            "slippage_bps": None,
+            "slippage_source": "source_artifact_missing",
             "candle_timing": "unknown_source_artifact_missing",
         }
     cost = source.get("runtime_base_cost_assumption")
@@ -143,11 +169,11 @@ def _source_cost_assumptions(source: Mapping[str, object] | None) -> dict[str, o
     return {
         "source_assumption_status": "valid" if not missing else "missing_required_fields",
         "source_missing_assumption_fields": missing,
-        "fee_rate": float(cost.get("fee_rate", H74_SOURCE_BASE_FEE_RATE) or 0.0),
+        "fee_rate": None if "fee_rate" in missing else float(cost.get("fee_rate") or 0.0),
         "fee_source": str(cost.get("fee_source") or "source_artifact"),
-        "slippage_bps": float(cost.get("slippage_bps", H74_SOURCE_BASE_SLIPPAGE_BPS) or 0.0),
+        "slippage_bps": None if "slippage_bps" in missing else float(cost.get("slippage_bps") or 0.0),
         "slippage_source": str(cost.get("slippage_source") or "source_artifact"),
-        "candle_timing": str(source.get("candle_timing") or "closed_candle_kst"),
+        "candle_timing": None if "candle_timing" in missing else str(source.get("candle_timing")),
     }
 
 

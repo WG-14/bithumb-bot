@@ -560,7 +560,11 @@ def verify_h74_source_observation_authority_file(path: str | Path, *, settings_o
         and not bool(getattr(settings_obj, "LIVE_DRY_RUN", False))
         and bool(getattr(settings_obj, "LIVE_REAL_ORDER_ARMED", False))
     )
-    if real_order and not smoke_evidence_path:
+    rehearsal_no_submit_boundary = bool(
+        getattr(settings_obj, "H74_LIVE_REHEARSAL_NO_SUBMIT_BOUNDARY", False)
+        or os.getenv("H74_LIVE_REHEARSAL_NO_SUBMIT_BOUNDARY", "").strip().lower() == "true"
+    )
+    if real_order and not smoke_evidence_path and not rehearsal_no_submit_boundary:
         raise H74ObservationAuthorityError("h74_source_observation_live_pipeline_smoke_evidence_missing")
     if smoke_evidence_path:
         verify_h74_source_live_pipeline_smoke_evidence_file(smoke_evidence_path)
