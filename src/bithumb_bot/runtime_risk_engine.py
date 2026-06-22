@@ -392,6 +392,8 @@ class RuntimeRiskEngineAdapter:
                 "submit_plan_qty_source": "submit_plan.qty",
                 "submit_qty": float(submit_qty),
                 "current_asset_qty": float(resolved_current_asset_qty),
+                "daily_order_count_scope": "account_global",
+                "daily_order_count_source": "orders.created_ts_kst_day",
                 "unresolved_order_gate": {
                     "blocked": bool(unresolved_blocked),
                     "reason_code": str(unresolved_reason_code),

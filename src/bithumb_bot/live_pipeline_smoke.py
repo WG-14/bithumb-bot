@@ -159,12 +159,15 @@ def build_live_pipeline_smoke_plan(
         authority_path=None,
         confirm=None,
     )
-    return build_live_pipeline_smoke_plan_payload(
+    payload = build_live_pipeline_smoke_plan_payload(
         cycles=cycles,
         max_orders=max_orders,
         max_notional_krw=max_notional_krw,
         market=str(market or settings.PAIR),
     )
+    payload["readiness_scope"] = "operator_pipeline_only"
+    payload["normal_h74_readiness"] = False
+    return payload
 
 
 def _readiness_from_broker(broker: Any) -> LivePipelineSmokeReadiness:
@@ -1100,6 +1103,8 @@ def run_live_pipeline_smoke(
     return {
         "status": "passed",
         "execution_mode": "live_pipeline_smoke",
+        "readiness_scope": "operator_pipeline_only",
+        "normal_h74_readiness": False,
         "run_id": smoke_run_id,
         "cycles_requested": int(cycles),
         "orders_expected": int(max_orders),
@@ -1133,6 +1138,8 @@ def run_live_pipeline_smoke(
         },
         "execution_mode_metadata": {
             "execution_mode": "live_pipeline_smoke",
+            "readiness_scope": "operator_pipeline_only",
+            "normal_h74_readiness": False,
             "candle_checkpoint_authority": "smoke_step_checkpoint",
             "market_reference_source": (
                 next(iter(market_reference_sources))
@@ -1168,6 +1175,8 @@ def _failure_payload(
     payload = {
         "status": "failed",
         "execution_mode": "live_pipeline_smoke",
+        "readiness_scope": "operator_pipeline_only",
+        "normal_h74_readiness": False,
         "run_id": run_id,
         "reason": str(reason),
         "failed_step": int(step),

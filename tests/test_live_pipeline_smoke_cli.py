@@ -40,3 +40,17 @@ def test_live_pipeline_smoke_plan_payload_is_bounded() -> None:
     assert payload["sell_expected"] == 5
     assert payload["allowed_sequence"] == ["BUY", "SELL"] * 5
     assert payload["requires_confirmation"] == "LIVE_PIPELINE_SMOKE_5X_10000"
+
+
+def test_smoke_artifact_not_normal_h74_readiness() -> None:
+    from bithumb_bot.live_pipeline_smoke import build_live_pipeline_smoke_plan
+
+    payload = build_live_pipeline_smoke_plan(
+        cycles=5,
+        max_orders=10,
+        max_notional_krw=10_000.0,
+        market="KRW-BTC",
+    )
+
+    assert payload["readiness_scope"] == "operator_pipeline_only"
+    assert payload["normal_h74_readiness"] is False

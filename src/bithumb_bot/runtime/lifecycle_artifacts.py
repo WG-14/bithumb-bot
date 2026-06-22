@@ -237,6 +237,111 @@ class RuntimeDependencyManifest:
 
 
 @dataclass(frozen=True)
+class ExecutionGateTraceEntry:
+    gate: str
+    status: str
+    reason_code: str
+    input_hash: str | None
+    evidence_hash: str | None
+    state_source: str | None
+    evaluated_at_ms: int | None
+    blocking: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "gate": self.gate,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "input_hash": self.input_hash,
+            "evidence_hash": self.evidence_hash,
+            "state_source": self.state_source,
+            "evaluated_at_ms": self.evaluated_at_ms,
+            "blocking": bool(self.blocking),
+        }
+
+
+@dataclass(frozen=True)
+class ExecutionGateTrace:
+    entries: Sequence[ExecutionGateTraceEntry] = ()
+
+    @classmethod
+    def from_risk_layers(
+        cls,
+        *,
+        evaluated_at_ms: int | None,
+        strategy_status: str | None = None,
+        strategy_reason_code: str | None = None,
+        strategy_input_hash: str | None = None,
+        strategy_evidence_hash: str | None = None,
+        strategy_state_source: str | None = None,
+        portfolio_status: str | None = None,
+        portfolio_reason_code: str | None = None,
+        portfolio_input_hash: str | None = None,
+        portfolio_evidence_hash: str | None = None,
+        portfolio_state_source: str | None = None,
+        pre_submit_status: str | None = None,
+        pre_submit_reason_code: str | None = None,
+        pre_submit_input_hash: str | None = None,
+        pre_submit_evidence_hash: str | None = None,
+        pre_submit_state_source: str | None = None,
+    ) -> "ExecutionGateTrace":
+        entries: list[ExecutionGateTraceEntry] = []
+        for gate, status, reason_code, input_hash, evidence_hash, state_source in (
+            (
+                "strategy_risk",
+                strategy_status,
+                strategy_reason_code,
+                strategy_input_hash,
+                strategy_evidence_hash,
+                strategy_state_source,
+            ),
+            (
+                "portfolio_risk",
+                portfolio_status,
+                portfolio_reason_code,
+                portfolio_input_hash,
+                portfolio_evidence_hash,
+                portfolio_state_source,
+            ),
+            (
+                "pre_submit_risk",
+                pre_submit_status,
+                pre_submit_reason_code,
+                pre_submit_input_hash,
+                pre_submit_evidence_hash,
+                pre_submit_state_source,
+            ),
+        ):
+            normalized_status = str(status or "").strip().upper()
+            normalized_reason = str(reason_code or "").strip()
+            if not normalized_status and not normalized_reason and not input_hash and not evidence_hash:
+                continue
+            blocking = normalized_status in {"BLOCK", "REQUIRE_RECONCILE", "FORCE_EXIT"}
+            entries.append(
+                ExecutionGateTraceEntry(
+                    gate=gate,
+                    status=normalized_status or "UNKNOWN",
+                    reason_code=normalized_reason or "UNKNOWN",
+                    input_hash=input_hash,
+                    evidence_hash=evidence_hash,
+                    state_source=state_source,
+                    evaluated_at_ms=evaluated_at_ms,
+                    blocking=blocking,
+                )
+            )
+        return cls(entries=tuple(entries))
+
+    def as_list(self) -> list[dict[str, Any]]:
+        return [entry.as_dict() for entry in self.entries]
+
+    def primary_block(self) -> tuple[str, str]:
+        for entry in self.entries:
+            if entry.blocking:
+                return entry.gate, entry.reason_code
+        return "none", "none"
+
+
+@dataclass(frozen=True)
 class RuntimeCycleArtifact:
     cycle_id: str
     candle_ts: int | None
@@ -297,7 +402,29 @@ class RuntimeCycleArtifact:
     lock_wait_elapsed_ms: float | None = None
     last_lock_error: str | None = None
 
+    def gate_trace(self) -> ExecutionGateTrace:
+        return ExecutionGateTrace.from_risk_layers(
+            evaluated_at_ms=self.candle_ts,
+            strategy_status=self.strategy_risk_status,
+            strategy_reason_code=self.strategy_risk_reason_code,
+            strategy_input_hash=self.strategy_risk_input_hash,
+            strategy_evidence_hash=self.strategy_risk_evidence_hash,
+            strategy_state_source=self.strategy_risk_state_source,
+            portfolio_status=self.portfolio_risk_status,
+            portfolio_reason_code=self.portfolio_risk_reason_code,
+            portfolio_input_hash=self.portfolio_risk_input_hash,
+            portfolio_evidence_hash=self.portfolio_risk_evidence_hash,
+            portfolio_state_source=self.portfolio_risk_state_source,
+            pre_submit_status=self.pre_submit_risk_status,
+            pre_submit_reason_code=self.pre_submit_risk_reason_code,
+            pre_submit_input_hash=self.pre_submit_risk_input_hash,
+            pre_submit_evidence_hash=self.pre_submit_risk_evidence_hash,
+            pre_submit_state_source=self.pre_submit_risk_state_source,
+        )
+
     def as_dict(self) -> dict[str, Any]:
+        gate_trace = self.gate_trace()
+        primary_block_gate, primary_block_reason = gate_trace.primary_block()
         payload = {
             "artifact_type": "runtime_cycle_artifact",
             "schema_version": 1,
@@ -361,6 +488,9 @@ class RuntimeCycleArtifact:
             "transaction_elapsed_ms": self.transaction_elapsed_ms,
             "lock_wait_elapsed_ms": self.lock_wait_elapsed_ms,
             "last_lock_error": self.last_lock_error,
+            "gate_trace": gate_trace.as_list(),
+            "primary_block_gate": primary_block_gate,
+            "primary_block_reason": primary_block_reason,
         }
         payload["input_hash"] = _stable_hash(
             {
@@ -429,6 +559,8 @@ class RuntimeCycleArtifact:
 
 
 __all__ = [
+    "ExecutionGateTrace",
+    "ExecutionGateTraceEntry",
     "RecoveryClearance",
     "RuntimeCycleArtifact",
     "RuntimeDependencyManifest",

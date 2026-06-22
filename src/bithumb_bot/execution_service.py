@@ -612,6 +612,7 @@ def _log_live_submit_plan_block(
 
 def _finalize_live_real_pre_submit_risk_proof(
     *,
+    conn: object,
     broker: object | None,
     payload: dict[str, object],
     ts_ms: int,
@@ -623,29 +624,23 @@ def _finalize_live_real_pre_submit_risk_proof(
     side = str(payload.get("side") or "").strip().upper()
     from .pre_submit_risk_coordinator import PreSubmitRiskCoordinator
 
-    conn = ensure_db(None)
     try:
-        try:
-            result = PreSubmitRiskCoordinator().evaluate_and_persist(
-                conn,
-                payload=payload,
-                broker=broker,
-                ts_ms=int(ts_ms),
-                market_price=float(market_price),
-                field_name=field_name,
-            )
-            conn.commit()
-        except Exception as exc:
-            conn.rollback()
-            _log_live_submit_plan_block(
-                reason=f"live_real_order_pre_submit_risk_evaluation_failed:{exc}",
-                field_name=field_name,
-                source=payload.get("source"),
-                side=side,
-            )
-            return None
-    finally:
-        conn.close()
+        result = PreSubmitRiskCoordinator().evaluate_and_persist(
+            conn,  # type: ignore[arg-type]
+            payload=payload,
+            broker=broker,
+            ts_ms=int(ts_ms),
+            market_price=float(market_price),
+            field_name=field_name,
+        )
+    except Exception as exc:
+        _log_live_submit_plan_block(
+            reason=f"live_real_order_pre_submit_risk_evaluation_failed:{exc}",
+            field_name=field_name,
+            source=payload.get("source"),
+            side=side,
+        )
+        return None
     if not result.allowed:
         _log_live_submit_plan_block(
             reason=result.reason,
@@ -655,6 +650,27 @@ def _finalize_live_real_pre_submit_risk_proof(
         )
         return None
     return result.payload
+
+
+def _attach_live_real_pre_submit_risk_proof(
+    payload: dict[str, object],
+    *,
+    conn: object,
+    broker: object | None,
+    ts_ms: int,
+    market_price: float,
+    field_name: str,
+) -> dict[str, object] | None:
+    """Compatibility entrypoint for broker-bound pre-submit proof finalization."""
+
+    return _finalize_live_real_pre_submit_risk_proof(
+        conn=conn,
+        broker=broker,
+        payload=payload,
+        ts_ms=ts_ms,
+        market_price=market_price,
+        field_name=field_name,
+    )
 
 
 def _block_live_submit_plan(
@@ -2670,41 +2686,67 @@ class LiveSignalExecutionService:
             typed_target_plan = typed_summary.typed_target_submit_plan()
             typed_residual_plan = typed_summary.typed_residual_submit_plan()
             typed_buy_plan = typed_summary.typed_buy_submit_plan()
+            pre_submit_conn = None
             try:
+                if (
+                    _live_real_order_submit_plan_required()
+                    and (
+                        (typed_target_plan is not None and _execution_engine() == "target_delta")
+                        or typed_residual_plan is not None
+                    )
+                ):
+                    pre_submit_conn = ensure_db(None)
                 if typed_target_plan is not None:
                     target_plan = typed_target_plan.as_final_payload(
                         extra=_execution_batch_payload_extra(request)
                     )
                     if _execution_engine() == "target_delta":
                         target_plan = _finalize_live_real_pre_submit_risk_proof(
+                            conn=pre_submit_conn,
                             broker=self.broker,
                             payload=target_plan,
                             ts_ms=int(request.ts),
                             market_price=float(request.market_price),
                             field_name="target_submit_plan",
                         ) or {}
+                        if not target_plan:
+                            if pre_submit_conn is not None:
+                                pre_submit_conn.commit()
+                            return None
                 if typed_residual_plan is not None:
                     residual_plan = typed_residual_plan.as_final_payload(
                         extra=_execution_batch_payload_extra(request)
                     )
                     residual_plan = _finalize_live_real_pre_submit_risk_proof(
+                        conn=pre_submit_conn,
                         broker=self.broker,
                         payload=residual_plan,
                         ts_ms=int(request.ts),
                         market_price=float(request.market_price),
                         field_name="residual_submit_plan",
                     ) or {}
+                    if not residual_plan:
+                        if pre_submit_conn is not None:
+                            pre_submit_conn.commit()
+                        return None
                 if typed_buy_plan is not None:
                     buy_plan = typed_buy_plan.as_final_payload(
                         extra=_execution_batch_payload_extra(request)
                     )
+                if pre_submit_conn is not None:
+                    pre_submit_conn.commit()
             except ValueError as exc:
+                if pre_submit_conn is not None:
+                    pre_submit_conn.rollback()
                 _log_live_submit_plan_block(
                     reason=str(exc),
                     field_name="execution_submit_plan",
                     side=request.signal,
                 )
                 return None
+            finally:
+                if pre_submit_conn is not None:
+                    pre_submit_conn.close()
         submit_authority_policy = submit_authority_policy_from_settings(settings)
         residual_only_plan = bool(
             request.signal == "SELL"

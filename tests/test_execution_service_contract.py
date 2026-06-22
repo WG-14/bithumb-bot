@@ -1027,13 +1027,19 @@ def test_pre_submit_coordinator_proof_persist_outside_serialization(tmp_path, mo
 
     from bithumb_bot.execution_service import _finalize_live_real_pre_submit_risk_proof
 
-    result = _finalize_live_real_pre_submit_risk_proof(
-        broker=object(),
-        payload=final_payload,
-        ts_ms=1_800_000_000_000,
-        market_price=100_000_000.0,
-        field_name="target_submit_plan",
-    )
+    persist_conn = sqlite3.connect(str(db_path))
+    try:
+        result = _finalize_live_real_pre_submit_risk_proof(
+            conn=persist_conn,
+            broker=object(),
+            payload=final_payload,
+            ts_ms=1_800_000_000_000,
+            market_price=100_000_000.0,
+            field_name="target_submit_plan",
+        )
+        persist_conn.commit()
+    finally:
+        persist_conn.close()
 
     assert result is not None
     assert result["pre_submit_risk_status"] == "ALLOW"
