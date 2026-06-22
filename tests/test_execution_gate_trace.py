@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from bithumb_bot.runtime.cycle_artifact_assembler import RuntimeCycleArtifactAssembler
+from bithumb_bot.runtime.execution_coordinator import ExecutionCycleResult
 from bithumb_bot.runtime.lifecycle_artifacts import RuntimeCycleArtifact
 
 
@@ -93,3 +97,87 @@ def test_non_risk_hard_gate_block_visible_in_runtime_artifact() -> None:
     assert submit_authority["blocking"] is True
     assert artifact["primary_block_gate"] == "submit_authority"
     assert artifact["primary_block_reason"] == "target_delta_missing_target_submit_plan"
+
+
+def test_execution_result_pre_submit_trace_overrides_missing_decision_trace() -> None:
+    decision_result = SimpleNamespace(
+        candle_ts=1_800_000_000_000,
+        strategy_decision_hash="sha256:strategy",
+        runtime_strategy_decision_bundle_id=None,
+        runtime_strategy_decision_bundle_hash=None,
+        portfolio_allocation_decision_id=None,
+        portfolio_allocation_decision_hash=None,
+        portfolio_target_id=None,
+        portfolio_target_hash=None,
+        strategy_contribution_hash=None,
+        execution_plan_id=None,
+        execution_plan_bundle_hash=None,
+        execution_submit_plan_hash=None,
+        strategy_virtual_lifecycle_transition_hashes=(),
+        strategy_risk_decision_hash=None,
+        strategy_risk_policy_hash=None,
+        strategy_risk_input_hash=None,
+        strategy_risk_evidence_hash=None,
+        strategy_risk_state_source=None,
+        strategy_risk_status="ALLOW",
+        strategy_risk_reason_code="OK",
+        portfolio_risk_decision_hash=None,
+        portfolio_risk_policy_hash=None,
+        portfolio_risk_input_hash=None,
+        portfolio_risk_evidence_hash=None,
+        portfolio_risk_state_source=None,
+        portfolio_risk_status="ALLOW",
+        portfolio_risk_reason_code="OK",
+        pre_submit_risk_decision_hash=None,
+        pre_submit_risk_policy_hash=None,
+        pre_submit_risk_input_hash=None,
+        pre_submit_risk_evidence_hash=None,
+        pre_submit_risk_plan_hash=None,
+        pre_submit_risk_state_source=None,
+        pre_submit_risk_status=None,
+        pre_submit_risk_reason_code=None,
+        failure_phase=None,
+        failure_subphase=None,
+        failure_reason_code=None,
+        failure_detail=None,
+        operator_next_action=None,
+        failure_evidence_hash=None,
+        persistence_failure_metadata={},
+        db_subphase=None,
+        sql_group=None,
+        persistence_retry_count=None,
+        persistence_max_retry_count=None,
+        transaction_elapsed_ms=None,
+        lock_wait_elapsed_ms=None,
+    )
+    execution_result = ExecutionCycleResult(
+        candle_ts=1_800_000_000_000,
+        decision_id=1,
+        planning_status="submit_blocked",
+        submit_expected=True,
+        submitted=False,
+        post_trade_reconciled=False,
+        mark_processed_allowed=True,
+        pre_submit_risk_decision_hash="sha256:decision",
+        pre_submit_risk_policy_hash="sha256:policy",
+        pre_submit_risk_input_hash="sha256:input",
+        pre_submit_risk_evidence_hash="sha256:evidence",
+        pre_submit_risk_plan_hash="sha256:plan",
+        pre_submit_risk_state_source="runtime_db_broker",
+        pre_submit_risk_status="BLOCK",
+        pre_submit_risk_reason_code="RISK_STATE_MISMATCH",
+    )
+
+    artifact = RuntimeCycleArtifactAssembler().from_cycle_results(
+        cycle_id="checkpoint:processed",
+        startup_state="READY",
+        decision_result=decision_result,
+        execution_result=execution_result,
+    ).as_dict()
+
+    pre_submit = artifact["gate_trace"][-1]
+    assert pre_submit["gate"] == "pre_submit_risk"
+    assert pre_submit["status"] == "BLOCK"
+    assert pre_submit["reason_code"] == "RISK_STATE_MISMATCH"
+    assert pre_submit["blocking"] is True
+    assert artifact["primary_block_gate"] == "pre_submit_risk"

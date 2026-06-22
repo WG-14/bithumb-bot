@@ -283,6 +283,7 @@ class RuntimeRiskEngineAdapter:
         broker: object | None = None,
         mark_price_source: str = "market_price",
         evaluation_origin: str = "submission_halt",
+        commit_identity_if_no_transaction: bool = True,
     ) -> RiskDecision:
         policy = self.policy or settings_risk_policy()
         snapshot = self._snapshot(
@@ -305,6 +306,7 @@ class RuntimeRiskEngineAdapter:
             decision=decision,
             evaluation_ts_ms=int(ts_ms),
             evaluation_origin=evaluation_origin,
+            commit_if_no_transaction=commit_identity_if_no_transaction,
         )
         return decision
 
@@ -442,6 +444,7 @@ def _record_typed_decision_identity(
     decision: RiskDecision,
     evaluation_ts_ms: int,
     evaluation_origin: str,
+    commit_if_no_transaction: bool = True,
 ) -> None:
     _ensure_typed_risk_columns(conn)
     had_tx = conn.in_transaction
@@ -480,7 +483,7 @@ def _record_typed_decision_identity(
             str(evaluation_origin),
         ),
     )
-    if not had_tx:
+    if not had_tx and commit_if_no_transaction:
         conn.commit()
 
 

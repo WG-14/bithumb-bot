@@ -66,6 +66,8 @@ class PreSubmitRiskCoordinator:
                 persistence_status="already_approved",
                 reason="pre_submit_risk_already_approved",
             )
+        if not bool(getattr(conn, "in_transaction", False)):
+            raise RuntimeError("pre_submit_risk_requires_caller_owned_transaction")
 
         side = str(final_payload.get("side") or "").strip().upper() or "UNKNOWN"
         effective_policy = resolve_effective_pre_submit_risk_policy(final_payload)
@@ -97,6 +99,7 @@ class PreSubmitRiskCoordinator:
             price=float(market_price),
             broker=broker,
             evaluation_origin="live_real_submit_authority_pre_submit",
+            commit_identity_if_no_transaction=False,
         )
 
         proof_fields = {

@@ -24,6 +24,13 @@ class RuntimeCycleArtifactAssembler:
         decision_result: DecisionCycleResult,
         execution_result: ExecutionCycleResult | None = None,
     ) -> RuntimeCycleArtifact:
+        def _coalesce_execution_pre_submit(field_name: str):
+            if execution_result is not None:
+                execution_value = getattr(execution_result, field_name, None)
+                if execution_value:
+                    return execution_value
+            return getattr(decision_result, field_name)
+
         return RuntimeCycleArtifact(
             cycle_id=cycle_id,
             candle_ts=decision_result.candle_ts,
@@ -54,14 +61,14 @@ class RuntimeCycleArtifactAssembler:
             portfolio_risk_state_source=decision_result.portfolio_risk_state_source,
             portfolio_risk_status=decision_result.portfolio_risk_status,
             portfolio_risk_reason_code=decision_result.portfolio_risk_reason_code,
-            pre_submit_risk_decision_hash=decision_result.pre_submit_risk_decision_hash,
-            pre_submit_risk_policy_hash=decision_result.pre_submit_risk_policy_hash,
-            pre_submit_risk_input_hash=decision_result.pre_submit_risk_input_hash,
-            pre_submit_risk_evidence_hash=decision_result.pre_submit_risk_evidence_hash,
-            pre_submit_risk_plan_hash=decision_result.pre_submit_risk_plan_hash,
-            pre_submit_risk_state_source=decision_result.pre_submit_risk_state_source,
-            pre_submit_risk_status=decision_result.pre_submit_risk_status,
-            pre_submit_risk_reason_code=decision_result.pre_submit_risk_reason_code,
+            pre_submit_risk_decision_hash=_coalesce_execution_pre_submit("pre_submit_risk_decision_hash"),
+            pre_submit_risk_policy_hash=_coalesce_execution_pre_submit("pre_submit_risk_policy_hash"),
+            pre_submit_risk_input_hash=_coalesce_execution_pre_submit("pre_submit_risk_input_hash"),
+            pre_submit_risk_evidence_hash=_coalesce_execution_pre_submit("pre_submit_risk_evidence_hash"),
+            pre_submit_risk_plan_hash=_coalesce_execution_pre_submit("pre_submit_risk_plan_hash"),
+            pre_submit_risk_state_source=_coalesce_execution_pre_submit("pre_submit_risk_state_source"),
+            pre_submit_risk_status=_coalesce_execution_pre_submit("pre_submit_risk_status"),
+            pre_submit_risk_reason_code=_coalesce_execution_pre_submit("pre_submit_risk_reason_code"),
             execution_result_hash=(
                 execution_result.as_dict()["decision_hash"] if execution_result is not None else None
             ),

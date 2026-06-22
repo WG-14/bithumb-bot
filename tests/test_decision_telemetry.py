@@ -9,6 +9,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
 from bithumb_bot.decision_context import resolve_canonical_position_exposure_snapshot
 from bithumb_bot.reporting import build_decision_v2_summary, fetch_decision_telemetry_summary, fetch_recent_decision_flow
+from bithumb_bot.runtime.lifecycle_artifacts import RuntimeCycleArtifact
 
 
 def _collect_residue_paths(value, path: str = "") -> list[str]:
@@ -213,6 +214,49 @@ def test_telemetry_primary_block_gate_from_non_risk_gate_trace(tmp_path, monkeyp
 
     assert rows[0].primary_block_gate == "submit_authority"
     assert rows[0].primary_block_reason == "target_delta_missing_target_submit_plan"
+
+
+def test_telemetry_reads_pre_submit_block_from_runtime_cycle_artifact(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-runtime-artifact-pre-submit.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    artifact = RuntimeCycleArtifact(
+        cycle_id="checkpoint:processed",
+        candle_ts=1_800_000_000_000,
+        strategy_risk_status="ALLOW",
+        strategy_risk_reason_code="OK",
+        portfolio_risk_status="ALLOW",
+        portfolio_risk_reason_code="OK",
+        pre_submit_risk_status="BLOCK",
+        pre_submit_risk_reason_code="RISK_STATE_MISMATCH",
+        pre_submit_risk_input_hash="sha256:pre-input",
+        pre_submit_risk_evidence_hash="sha256:pre-evidence",
+        pre_submit_risk_state_source="runtime_db_broker",
+    ).as_dict()
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1_800_000_000_000,
+            strategy_name="daily_participation_sma",
+            signal="BUY",
+            reason="pre-submit block",
+            candle_ts=1_800_000_000_000,
+            market_price=100_000_000.0,
+            context=artifact,
+        )
+        conn.commit()
+        rows = fetch_decision_telemetry_summary(conn, limit=20)
+    finally:
+        conn.close()
+
+    assert rows[0].primary_block_gate == "pre_submit_risk"
+    assert rows[0].primary_block_reason == "RISK_STATE_MISMATCH"
+
+
+test_telemetry_reads_pre_submit_block_from_runtime_cycle_artifact.gate_trace = True
 
 
 def test_recent_decision_flow_surfaces_target_delta_order_rule_authority(tmp_path, monkeypatch):

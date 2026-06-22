@@ -546,6 +546,7 @@ def test_live_real_pre_submit_proof_uses_plan_bound_strategy_risk_policy(monkeyp
 
     policy = RiskPolicy(kill_switch=True, source="approved_profile_unit")
     captured: dict[str, object] = {}
+    persisted: dict[str, object] = {}
 
     def _fake_ensure_db():
         conn = sqlite3.connect(":memory:")
@@ -569,6 +570,10 @@ def test_live_real_pre_submit_proof_uses_plan_bound_strategy_risk_policy(monkeyp
         "bithumb_bot.runtime_risk_engine.RuntimeRiskEngineAdapter.evaluate_pre_submit",
         _fake_evaluate_pre_submit,
     )
+    monkeypatch.setattr(
+        "bithumb_bot.pre_submit_risk_coordinator.update_execution_plan_final_submit_payload",
+        lambda *_args, **kwargs: persisted.update(dict(kwargs["final_submit_payload"])) or {"updated": True},
+    )
     payload = {
         "side": "BUY",
         "source": "target_delta",
@@ -588,27 +593,35 @@ def test_live_real_pre_submit_proof_uses_plan_bound_strategy_risk_policy(monkeyp
         ],
     }
 
-    result = execution_service._attach_live_real_pre_submit_risk_proof(
-        payload,
-        ts_ms=1_800_000_000_000,
-        market_price=100.0,
-        field_name="target_submit_plan",
-    )
+    conn = _fake_ensure_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        result = execution_service._attach_live_real_pre_submit_risk_proof(
+            payload,
+            conn=conn,
+            broker=object(),
+            ts_ms=1_800_000_000_000,
+            market_price=100.0,
+            field_name="target_submit_plan",
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     assert result is None
     effective_policy = captured["policy"]
     assert isinstance(effective_policy, RiskPolicy)
     assert effective_policy.kill_switch is True
     assert effective_policy.source == "composed_selected_strategy_risk_profiles"
-    assert payload["risk_policy_source"] == "strategy_risk_profiles"
-    assert payload["pre_submit_risk_policy_composition_rule"] == "most_restrictive_selected_strategy_policy"
-    assert payload["strategy_instance_ids"] == ["unit_canary"]
-    assert payload["strategy_risk_profile_hashes"] == ["sha256:" + "8" * 64]
-    assert payload["portfolio_risk_policy_hash"] == "sha256:" + "9" * 64
-    assert payload["effective_pre_submit_risk_policy_hash"] == effective_policy.policy_hash()
-    assert payload["pre_submit_risk_policy_hash"] == effective_policy.policy_hash()
-    assert payload["pre_submit_risk_decision_hash"].startswith("sha256:")
-    assert payload["pre_submit_risk_reason_code"] == "KILL_SWITCH"
+    assert persisted["risk_policy_source"] == "strategy_risk_profiles"
+    assert persisted["pre_submit_risk_policy_composition_rule"] == "most_restrictive_selected_strategy_policy"
+    assert persisted["strategy_instance_ids"] == ["unit_canary"]
+    assert persisted["strategy_risk_profile_hashes"] == ["sha256:" + "8" * 64]
+    assert persisted["portfolio_risk_policy_hash"] == "sha256:" + "9" * 64
+    assert persisted["effective_pre_submit_risk_policy_hash"] == effective_policy.policy_hash()
+    assert persisted["pre_submit_risk_policy_hash"] == effective_policy.policy_hash()
+    assert str(persisted["pre_submit_risk_decision_hash"]).startswith("sha256:")
+    assert persisted["pre_submit_risk_reason_code"] == "KILL_SWITCH"
 
 
 def test_live_real_target_delta_pre_submit_rejects_missing_strategy_risk_profiles() -> None:
@@ -1272,6 +1285,7 @@ def test_pre_submit_coordinator_proof_persist_outside_serialization(tmp_path, mo
 
     persist_conn = sqlite3.connect(str(db_path))
     try:
+        persist_conn.execute("BEGIN IMMEDIATE")
         result = _finalize_live_real_pre_submit_risk_proof(
             conn=persist_conn,
             broker=object(),

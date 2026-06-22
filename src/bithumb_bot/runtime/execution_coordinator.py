@@ -32,6 +32,14 @@ class ExecutionCycleResult:
     input_hash: str | None = None
     evidence_hash: str | None = None
     decision_hash: str | None = None
+    pre_submit_risk_decision_hash: str | None = None
+    pre_submit_risk_policy_hash: str | None = None
+    pre_submit_risk_input_hash: str | None = None
+    pre_submit_risk_evidence_hash: str | None = None
+    pre_submit_risk_plan_hash: str | None = None
+    pre_submit_risk_state_source: str | None = None
+    pre_submit_risk_status: str | None = None
+    pre_submit_risk_reason_code: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload = {
@@ -58,8 +66,19 @@ class ExecutionCycleResult:
                     "submitted": bool(self.submitted),
                     "post_trade_reconciled": bool(self.post_trade_reconciled),
                     "settled": bool((self.settlement_result or {}).get("settled")),
+                    "pre_submit_risk_status": self.pre_submit_risk_status,
+                    "pre_submit_risk_reason_code": self.pre_submit_risk_reason_code,
+                    "pre_submit_risk_decision_hash": self.pre_submit_risk_decision_hash,
                 }
             ),
+            "pre_submit_risk_decision_hash": self.pre_submit_risk_decision_hash,
+            "pre_submit_risk_policy_hash": self.pre_submit_risk_policy_hash,
+            "pre_submit_risk_input_hash": self.pre_submit_risk_input_hash,
+            "pre_submit_risk_evidence_hash": self.pre_submit_risk_evidence_hash,
+            "pre_submit_risk_plan_hash": self.pre_submit_risk_plan_hash,
+            "pre_submit_risk_state_source": self.pre_submit_risk_state_source,
+            "pre_submit_risk_status": self.pre_submit_risk_status,
+            "pre_submit_risk_reason_code": self.pre_submit_risk_reason_code,
         }
         payload["decision_hash"] = self.decision_hash or sha256_prefixed(payload)
         return payload
@@ -241,6 +260,19 @@ class ExecutionCoordinator:
                 input_hash=input_hash,
                 execution_plan_bundle_hash=execution_plan_bundle_hash,
             )
+        pre_submit_fields = _execution_time_pre_submit_fields(execution_service)
+        if trade is None:
+            return ExecutionCycleResult(
+                candle_ts=candle_ts,
+                decision_id=decision_id,
+                planning_status="submit_blocked",
+                submit_expected=True,
+                submitted=False,
+                post_trade_reconciled=False,
+                mark_processed_allowed=True,
+                input_hash=input_hash,
+                **pre_submit_fields,
+            )
         try:
             if post_trade_reconcile is not None:
                 post_trade_reconcile()
@@ -291,6 +323,7 @@ class ExecutionCoordinator:
             input_hash=input_hash,
             trade=trade if isinstance(trade, Mapping) else None,
             settlement_result=settlement_payload,
+            **pre_submit_fields,
         )
 
     def _halted_result(
@@ -324,6 +357,29 @@ class ExecutionCoordinator:
             halt_transition=transition.as_dict(),
             input_hash=input_hash,
         )
+
+
+def _execution_time_pre_submit_fields(execution_service: Any | None) -> dict[str, str | None]:
+    payload = getattr(execution_service, "last_pre_submit_risk_payload", None)
+    if not isinstance(payload, Mapping):
+        return {}
+    fields = {
+        key: payload.get(key)
+        for key in (
+            "pre_submit_risk_decision_hash",
+            "pre_submit_risk_policy_hash",
+            "pre_submit_risk_input_hash",
+            "pre_submit_risk_evidence_hash",
+            "pre_submit_risk_plan_hash",
+            "pre_submit_risk_state_source",
+            "pre_submit_risk_status",
+            "pre_submit_risk_reason_code",
+        )
+    }
+    return {
+        key: (None if value is None else str(value))
+        for key, value in fields.items()
+    }
 
 
 __all__ = [

@@ -618,29 +618,23 @@ def _finalize_live_real_pre_submit_risk_proof(
     ts_ms: int,
     market_price: float,
     field_name: str,
+    result_sink: Callable[[object], None] | None = None,
 ) -> dict[str, object] | None:
     if not _pre_submit_risk_required_for_live_real(payload):
         return payload
     side = str(payload.get("side") or "").strip().upper()
     from .pre_submit_risk_coordinator import PreSubmitRiskCoordinator
 
-    try:
-        result = PreSubmitRiskCoordinator().evaluate_and_persist(
-            conn,  # type: ignore[arg-type]
-            payload=payload,
-            broker=broker,
-            ts_ms=int(ts_ms),
-            market_price=float(market_price),
-            field_name=field_name,
-        )
-    except Exception as exc:
-        _log_live_submit_plan_block(
-            reason=f"live_real_order_pre_submit_risk_evaluation_failed:{exc}",
-            field_name=field_name,
-            source=payload.get("source"),
-            side=side,
-        )
-        return None
+    result = PreSubmitRiskCoordinator().evaluate_and_persist(
+        conn,  # type: ignore[arg-type]
+        payload=payload,
+        broker=broker,
+        ts_ms=int(ts_ms),
+        market_price=float(market_price),
+        field_name=field_name,
+    )
+    if result_sink is not None:
+        result_sink(result)
     if not result.allowed:
         _log_live_submit_plan_block(
             reason=result.reason,
@@ -671,6 +665,15 @@ def _attach_live_real_pre_submit_risk_proof(
         market_price=market_price,
         field_name=field_name,
     )
+
+
+def _begin_live_real_pre_submit_uow(conn: object) -> None:
+    if bool(getattr(conn, "in_transaction", False)):
+        return
+    execute = getattr(conn, "execute", None)
+    if not callable(execute):
+        raise RuntimeError("live_real_order_pre_submit_connection_missing_execute")
+    execute("BEGIN IMMEDIATE")
 
 
 def _block_live_submit_plan(
@@ -2560,6 +2563,7 @@ class LiveSignalExecutionService:
     executor: Callable[..., dict | None]
     harmless_dust_recorder: Callable[..., bool]
     db_factory: Callable[[], object] | None = None
+    last_pre_submit_risk_payload: Mapping[str, object] | None = field(default=None, init=False)
 
     def record_harmless_dust_suppression_if_applicable(
         self,
@@ -2599,6 +2603,7 @@ class LiveSignalExecutionService:
             suppression_conn.close()
 
     def execute(self, request: TypedExecutionRequest) -> dict | None:
+        object.__setattr__(self, "last_pre_submit_risk_payload", None)
         submit_plan_required = _live_real_order_submit_plan_required()
         observability_context = _request_observability_payload(request)
         if observability_context is not None and not isinstance(observability_context, dict):
@@ -2689,33 +2694,47 @@ class LiveSignalExecutionService:
             typed_buy_plan = typed_summary.typed_buy_submit_plan()
             pre_submit_conn = None
             try:
-                if (
-                    _live_real_order_submit_plan_required()
-                    and (
-                        (typed_target_plan is not None and _execution_engine() == "target_delta")
-                        or typed_residual_plan is not None
-                    )
-                ):
+                def _ensure_pre_submit_conn() -> object:
+                    nonlocal pre_submit_conn
+                    if pre_submit_conn is not None:
+                        return pre_submit_conn
                     if self.db_factory is None:
                         _log_live_submit_plan_block(
                             reason="live_real_order_pre_submit_runtime_db_factory_missing",
                             field_name="pre_submit_risk",
                             side=request.signal,
                         )
-                        return None
+                        raise RuntimeError("live_real_order_pre_submit_runtime_db_factory_missing")
                     pre_submit_conn = self.db_factory()
+                    _begin_live_real_pre_submit_uow(pre_submit_conn)
+                    return pre_submit_conn
+
+                def _capture_pre_submit_result(result: object) -> None:
+                    payload = getattr(result, "payload", None)
+                    if isinstance(payload, Mapping):
+                        object.__setattr__(self, "last_pre_submit_risk_payload", dict(payload))
+
                 if typed_target_plan is not None:
                     target_plan = typed_target_plan.as_final_payload(
                         extra=_execution_batch_payload_extra(request)
                     )
                     if _execution_engine() == "target_delta":
+                        if str(target_plan.get("pre_submit_proof_status") or "") != "passed":
+                            _block_live_submit_plan(
+                                reason="target_delta_pre_submit_proof_not_passed",
+                                field_name="target_submit_plan",
+                                source=target_plan.get("source"),
+                                side=target_plan.get("side"),
+                            )
+                            return None
                         target_plan = _finalize_live_real_pre_submit_risk_proof(
-                            conn=pre_submit_conn,
+                            conn=_ensure_pre_submit_conn(),
                             broker=self.broker,
                             payload=target_plan,
                             ts_ms=int(request.ts),
                             market_price=float(request.market_price),
                             field_name="target_submit_plan",
+                            result_sink=_capture_pre_submit_result,
                         ) or {}
                         if not target_plan:
                             if pre_submit_conn is not None:
@@ -2726,12 +2745,13 @@ class LiveSignalExecutionService:
                         extra=_execution_batch_payload_extra(request)
                     )
                     residual_plan = _finalize_live_real_pre_submit_risk_proof(
-                        conn=pre_submit_conn,
+                        conn=_ensure_pre_submit_conn(),
                         broker=self.broker,
                         payload=residual_plan,
                         ts_ms=int(request.ts),
                         market_price=float(request.market_price),
                         field_name="residual_submit_plan",
+                        result_sink=_capture_pre_submit_result,
                     ) or {}
                     if not residual_plan:
                         if pre_submit_conn is not None:
@@ -2748,6 +2768,15 @@ class LiveSignalExecutionService:
                     pre_submit_conn.rollback()
                 _log_live_submit_plan_block(
                     reason=str(exc),
+                    field_name="execution_submit_plan",
+                    side=request.signal,
+                )
+                return None
+            except Exception as exc:
+                if pre_submit_conn is not None:
+                    pre_submit_conn.rollback()
+                _log_live_submit_plan_block(
+                    reason=f"live_real_order_pre_submit_risk_evaluation_failed:{exc}",
                     field_name="execution_submit_plan",
                     side=request.signal,
                 )
