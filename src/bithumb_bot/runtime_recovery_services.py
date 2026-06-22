@@ -133,8 +133,29 @@ class StartupSafetyGateService:
             portfolio_conn.close()
 
         normalized_position = readiness_snapshot.position_state.normalized_exposure
+        residual_disposition = getattr(readiness_snapshot, "residual_disposition", None)
+        residual_disposition_name = str(
+            getattr(residual_disposition, "disposition", "") if residual_disposition is not None else ""
+        )
+        residual_run_allowed = bool(
+            residual_disposition is not None and bool(getattr(residual_disposition, "run_allowed", False))
+        )
         clean_account_gate = evaluate_clean_account_gate(readiness_snapshot)
-        if not clean_account_gate.allowed:
+        if (
+            residual_disposition is not None
+            and residual_disposition_name in {"BLOCKING_INCONSISTENT", "AUTHORITY_REPAIR_REQUIRED"}
+            and not residual_run_allowed
+        ):
+            reasons.append(
+                "residual_disposition="
+                f"{residual_disposition_name or 'unknown'}"
+                f"(run_allowed=0,"
+                f"reason_code={(getattr(residual_disposition, 'reason_codes', ()) or ('residual_disposition_blocked',))[0]},"
+                f"recommended_action={getattr(residual_disposition, 'recommended_action', 'review_recovery_report')})"
+            )
+        if not clean_account_gate.allowed and not (
+            residual_disposition_name == "TRACKED_NON_EXECUTABLE" and residual_run_allowed
+        ):
             reasons.append(
                 "clean_account_gate="
                 f"{clean_account_gate.reason_code}"

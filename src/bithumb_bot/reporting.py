@@ -63,6 +63,27 @@ from .experiment_fingerprint import experiment_context
 from .strategy_performance import fetch_strategy_performance_summary
 
 
+def _residual_report_field_values(source: dict[str, object]) -> dict[str, object]:
+    return {
+        "residual_disposition": source.get("residual_disposition") or "NONE",
+        "residual_reason_code": source.get("residual_reason_code") or "none",
+        "manual_exchange_action_required": bool(source.get("manual_exchange_action_required")),
+        "quantity_rule_authority": source.get("quantity_rule_authority") or "unknown",
+        "broker_local_projection_state": source.get("broker_local_projection_state") or "unknown",
+    }
+
+
+def _format_residual_report_fields(source: dict[str, object]) -> str:
+    fields = _residual_report_field_values(source)
+    return (
+        f"residual_disposition={fields['residual_disposition']} "
+        f"residual_reason_code={fields['residual_reason_code']} "
+        f"manual_exchange_action_required={1 if fields['manual_exchange_action_required'] else 0} "
+        f"quantity_rule_authority={fields['quantity_rule_authority']} "
+        f"broker_local_projection_state={fields['broker_local_projection_state']}"
+    )
+
+
 @dataclass
 class StrategyStat:
     strategy_context: str
@@ -4502,6 +4523,17 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         "raw_symbol": raw_symbol,
         "interval": settings.INTERVAL,
         "db_path": settings.DB_PATH,
+        "residual_disposition": readiness_snapshot.residual_disposition.disposition,
+        "residual_reason_code": (
+            readiness_snapshot.residual_disposition.reason_codes[0]
+            if readiness_snapshot.residual_disposition.reason_codes
+            else "none"
+        ),
+        "manual_exchange_action_required": bool(
+            readiness_snapshot.residual_disposition.manual_exchange_action_required
+        ),
+        "quantity_rule_authority": readiness_snapshot.residual_disposition.quantity_rule_authority,
+        "broker_local_projection_state": readiness_snapshot.residual_disposition.broker_local_projection_state,
         "strategy_summary": [
             {
                 "strategy_context": stat.strategy_context,
@@ -4664,6 +4696,17 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     recent_sell_suppression_count = len(recent_sell_suppressions)
     payload["operator_recovery_summary"] = {
         "recovery_stage": readiness_snapshot.recovery_stage,
+        "residual_disposition": readiness_snapshot.residual_disposition.disposition,
+        "residual_reason_code": (
+            readiness_snapshot.residual_disposition.reason_codes[0]
+            if readiness_snapshot.residual_disposition.reason_codes
+            else "none"
+        ),
+        "manual_exchange_action_required": bool(
+            readiness_snapshot.residual_disposition.manual_exchange_action_required
+        ),
+        "quantity_rule_authority": readiness_snapshot.residual_disposition.quantity_rule_authority,
+        "broker_local_projection_state": readiness_snapshot.residual_disposition.broker_local_projection_state,
         "recovery_blocker_categories": list(readiness_snapshot.blocker_categories),
         "canonical_next_action": readiness_snapshot.operator_next_action,
         "fee_gap_incident": readiness_snapshot.fee_gap_incident.as_dict(),
@@ -4759,6 +4802,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     print(
         "  "
         f"recovery_stage={operator_recovery['recovery_stage']} "
+        f"{_format_residual_report_fields(operator_recovery)} "
         "recovery_blocker_categories="
         f"{','.join(str(x) for x in operator_recovery['recovery_blocker_categories']) or 'none'} "
         f"canonical_next_action={operator_recovery['canonical_next_action']} "

@@ -1741,6 +1741,7 @@ def _clear_reconcile_halt_if_safe(
         residual_disposition is not None and bool(getattr(residual_disposition, "run_allowed", False))
     )
     dust_resume_allowed = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
+    legacy_dust_resume_allowed = bool(residual_disposition is None and dust_resume_allowed)
     dust_context = build_dust_display_context(metadata)
     lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
     lot_definition = getattr(lot_snapshot, "lot_definition", None)
@@ -1793,7 +1794,7 @@ def _clear_reconcile_halt_if_safe(
         and (
             residual_run_allowed
             or position_flat
-            or (position_dust_only and dust_resume_allowed)
+            or (position_dust_only and legacy_dust_resume_allowed)
         )
     ):
         _LOG.info(

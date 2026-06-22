@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .. import runtime_state
+from ..db_core import ensure_db
 from ..runtime_gate_api import RuntimeGateApi
+from ..runtime_readiness import compute_runtime_readiness_snapshot
 from .app_container import create_default_runtime_app
 
 
@@ -20,6 +22,46 @@ class RuntimeHealthQuery:
             startup_gate_reason=startup_gate_reason,
         )
         state = self.state_snapshot()
+        residual_fields: dict[str, str | bool | None] = {
+            "residual_disposition": None,
+            "residual_reason_code": None,
+            "manual_exchange_action_required": None,
+            "quantity_rule_authority": None,
+            "broker_local_projection_state": None,
+        }
+        conn = ensure_db()
+        try:
+            readiness = compute_runtime_readiness_snapshot(conn).as_dict()
+            disposition = readiness.get("residual_disposition")
+            residual_fields.update(
+                {
+                    "residual_disposition": (
+                        str(disposition.get("disposition"))
+                        if isinstance(disposition, dict) and disposition.get("disposition") is not None
+                        else None
+                    ),
+                    "residual_reason_code": (
+                        str(readiness.get("residual_reason_code"))
+                        if readiness.get("residual_reason_code") is not None
+                        else None
+                    ),
+                    "manual_exchange_action_required": bool(
+                        readiness.get("manual_exchange_action_required")
+                    ),
+                    "quantity_rule_authority": (
+                        str(readiness.get("quantity_rule_authority"))
+                        if readiness.get("quantity_rule_authority") is not None
+                        else None
+                    ),
+                    "broker_local_projection_state": (
+                        str(readiness.get("broker_local_projection_state"))
+                        if readiness.get("broker_local_projection_state") is not None
+                        else None
+                    ),
+                }
+            )
+        finally:
+            conn.close()
         return {
             "last_candle_age_sec": state.last_candle_age_sec,
             "last_candle_status": state.last_candle_status,
@@ -58,6 +100,7 @@ class RuntimeHealthQuery:
             "startup_gate_reason": state.startup_gate_reason,
             "resume_gate_blocked": state.resume_gate_blocked,
             "resume_gate_reason": state.resume_gate_reason,
+            **residual_fields,
         }
 
 

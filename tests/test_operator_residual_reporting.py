@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from bithumb_bot.operator_commands import _print_residual_operator_fields
+from bithumb_bot.reporting import _format_residual_report_fields
+from bithumb_bot.runtime.public_api import RuntimeHealthQuery
 from bithumb_bot.residual_disposition import build_residual_disposition
 
 
@@ -70,3 +73,71 @@ def test_reports_include_quantity_rule_authority():
 
     assert payload["quantity_rule_authority"] == "persisted_exchange_snapshot"
     assert payload["residual_reason_code"] == "sub_min_qty_residual_tracked"
+
+
+class _Conn:
+    def close(self) -> None:
+        return None
+
+
+class _RecoveryController:
+    def evaluate_clearance(self, **_kwargs):
+        return SimpleNamespace(allowed=False)
+
+    def apply_clearance(self, _clearance) -> None:
+        return None
+
+
+class _App:
+    runtime_gate_api = SimpleNamespace(startup_safety_gate=lambda: None)
+    recovery_controller = _RecoveryController()
+
+
+class _State:
+    def __getattr__(self, _name: str):
+        return None
+
+
+def test_health_reports_tracked_residual_manual_action_false(monkeypatch):
+    payload = _payload()
+    monkeypatch.setattr("bithumb_bot.runtime.public_api.ensure_db", lambda: _Conn())
+    monkeypatch.setattr(
+        "bithumb_bot.runtime.public_api.compute_runtime_readiness_snapshot",
+        lambda _conn: SimpleNamespace(
+            as_dict=lambda: {
+                "residual_disposition": {"disposition": payload["residual_disposition"]},
+                "residual_reason_code": payload["residual_reason_code"],
+                "manual_exchange_action_required": payload["manual_exchange_action_required"],
+                "quantity_rule_authority": payload["quantity_rule_authority"],
+                "broker_local_projection_state": payload["broker_local_projection_state"],
+            }
+        ),
+    )
+
+    health = RuntimeHealthQuery(state_snapshot=lambda: _State(), app_factory=lambda: _App()).get_status()
+
+    assert health["residual_disposition"] == "TRACKED_NON_EXECUTABLE"
+    assert health["manual_exchange_action_required"] is False
+    assert health["quantity_rule_authority"] == "persisted_exchange_snapshot"
+
+
+def test_recovery_report_text_includes_residual_disposition(capsys):
+    payload = _payload()
+
+    _print_residual_operator_fields("    ", payload)
+
+    out = capsys.readouterr().out
+    assert "residual_disposition=TRACKED_NON_EXECUTABLE" in out
+    assert "manual_exchange_action_required=0" in out
+    assert "quantity_rule_authority=persisted_exchange_snapshot" in out
+
+
+def test_ops_report_includes_manual_exchange_action_required(capsys):
+    payload = _payload()
+
+    print(_format_residual_report_fields(payload))
+
+    out = capsys.readouterr().out
+    assert "residual_disposition=TRACKED_NON_EXECUTABLE" in out
+    assert "manual_exchange_action_required=0" in out
+    assert "quantity_rule_authority=persisted_exchange_snapshot" in out

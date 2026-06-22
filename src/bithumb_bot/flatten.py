@@ -694,6 +694,90 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         init_portfolio(conn)
         readiness = compute_runtime_readiness_snapshot(conn)
         residual_disposition = getattr(readiness, "residual_disposition", None)
+        if trigger == "operator" and residual_disposition is not None:
+            residual_name = str(getattr(residual_disposition, "disposition", "") or "")
+            residual_reason = str(
+                (getattr(residual_disposition, "reason_codes", ()) or ("residual_disposition",))[0]
+            )
+            if residual_name in {"BLOCKING_INCONSISTENT", "AUTHORITY_REPAIR_REQUIRED"}:
+                summary = _operator_blocked_json_summary(
+                    reason=residual_reason,
+                    dry_run=dry_run,
+                    trigger=trigger,
+                    recommended_action=str(
+                        getattr(residual_disposition, "recommended_action", "review_recovery_report")
+                    ),
+                    recommended_command="uv run python bot.py recovery-report --json",
+                    residual_disposition=residual_name,
+                    residual_reason_code=residual_reason,
+                    operator_action_required=bool(
+                        getattr(residual_disposition, "operator_action_required", True)
+                    ),
+                    manual_exchange_action_required=bool(
+                        getattr(residual_disposition, "manual_exchange_action_required", False)
+                    ),
+                    submit_expected=False,
+                    flatten_allowed=bool(getattr(residual_disposition, "flatten_allowed", False)),
+                    quantity_rule_authority=str(
+                        getattr(residual_disposition, "quantity_rule_authority", "unknown")
+                    ),
+                    qty_step_authority_level=str(
+                        getattr(residual_disposition, "qty_step_authority_level", "unknown")
+                    ),
+                    quantity_rule_source_mode=str(
+                        getattr(residual_disposition, "quantity_rule_source_mode", "unknown")
+                    ),
+                    quantity_contract_complete=bool(
+                        getattr(residual_disposition, "quantity_contract_complete", False)
+                    ),
+                    broker_local_projection_state=str(
+                        getattr(residual_disposition, "broker_local_projection_state", "unknown")
+                    ),
+                )
+                runtime_state.record_flatten_position_result(status="blocked", summary=summary)
+                return summary
+            if residual_name == "CLOSEOUT_EXECUTABLE" and not bool(
+                getattr(residual_disposition, "flatten_allowed", False)
+            ):
+                summary = _operator_blocked_json_summary(
+                    reason=residual_reason,
+                    dry_run=dry_run,
+                    trigger=trigger,
+                    recommended_action=str(
+                        getattr(
+                            residual_disposition,
+                            "recommended_action",
+                            MANUAL_EXCHANGE_CLOSEOUT_OR_RULE_UPDATE,
+                        )
+                    ),
+                    residual_disposition=residual_name,
+                    residual_reason_code=residual_reason,
+                    operator_action_required=bool(
+                        getattr(residual_disposition, "operator_action_required", True)
+                    ),
+                    manual_exchange_action_required=bool(
+                        getattr(residual_disposition, "manual_exchange_action_required", False)
+                    ),
+                    submit_expected=False,
+                    flatten_allowed=False,
+                    quantity_rule_authority=str(
+                        getattr(residual_disposition, "quantity_rule_authority", "unknown")
+                    ),
+                    qty_step_authority_level=str(
+                        getattr(residual_disposition, "qty_step_authority_level", "unknown")
+                    ),
+                    quantity_rule_source_mode=str(
+                        getattr(residual_disposition, "quantity_rule_source_mode", "unknown")
+                    ),
+                    quantity_contract_complete=bool(
+                        getattr(residual_disposition, "quantity_contract_complete", False)
+                    ),
+                    broker_local_projection_state=str(
+                        getattr(residual_disposition, "broker_local_projection_state", "unknown")
+                    ),
+                )
+                runtime_state.record_flatten_position_result(status="blocked", summary=summary)
+                return summary
         if (
             trigger == "operator"
             and residual_disposition is not None
@@ -724,6 +808,15 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
                 ),
                 "quantity_rule_authority": getattr(
                     residual_disposition, "quantity_rule_authority", "unknown"
+                ),
+                "qty_step_authority_level": getattr(
+                    residual_disposition, "qty_step_authority_level", "unknown"
+                ),
+                "quantity_rule_source_mode": getattr(
+                    residual_disposition, "quantity_rule_source_mode", "unknown"
+                ),
+                "quantity_contract_complete": bool(
+                    getattr(residual_disposition, "quantity_contract_complete", False)
                 ),
                 "broker_local_projection_state": getattr(
                     residual_disposition, "broker_local_projection_state", "unknown"

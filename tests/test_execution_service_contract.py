@@ -18,6 +18,7 @@ from bithumb_bot.execution_service import (
     PaperSignalExecutionService,
     SignalExecutionRequest,
     TypedExecutionRequest,
+    build_execution_decision_summary,
     execution_submit_plan_payload_hash,
     _operator_live_pipeline_smoke_authorized_target_plan,
     validate_execution_submit_plan_payload,
@@ -1627,6 +1628,57 @@ def test_valid_target_plan_reaches_executor_only_for_target_delta_engine() -> No
     assert submitted == {"status": "submitted", "signal": "BUY"}
     assert len(calls) == 1
     assert calls[0]["kwargs"]["execution_submit_plan"]["source"] == "target_delta"  # type: ignore[index]
+
+
+def test_target_delta_live_path_uses_current_effective_exposure() -> None:
+    _arm_live_real_orders(engine="target_delta")
+    payload = {
+        "runtime_pair": "KRW-BTC",
+        "market_price": 100_000_000.0,
+        "cash_available": 1_000_000.0,
+        "broker_position_evidence": {
+            "broker_qty_known": True,
+            "broker_qty": 0.00009665,
+        },
+        "broker_portfolio_converged": True,
+        "projection_convergence": {
+            "converged": True,
+            "portfolio_qty": 0.00009665,
+            "projected_total_qty": 0.00009665,
+        },
+        "open_order_count": 0,
+        "unresolved_open_order_count": 0,
+        "recovery_required_count": 0,
+        "submit_unknown_count": 0,
+        "accounting_projection_ok": True,
+        "min_qty": 0.00000001,
+        "min_notional_krw": 5000.0,
+        "qty_step": 0.00000001,
+        "order_rule_authority": "exchange_hard",
+        "order_rule_authority_source": "unit",
+        "order_rule_authority_source_mode": "exchange",
+    }
+    old_max_order = settings.MAX_ORDER_KRW
+    old_pair = settings.PAIR
+    try:
+        object.__setattr__(settings, "MAX_ORDER_KRW", 100_000.0)
+        object.__setattr__(settings, "PAIR", "KRW-BTC")
+        summary = build_execution_decision_summary(
+            decision_context=payload,
+            raw_signal="BUY",
+            final_signal="BUY",
+        )
+    finally:
+        object.__setattr__(settings, "MAX_ORDER_KRW", old_max_order)
+        object.__setattr__(settings, "PAIR", old_pair)
+
+    assert summary.target_submit_plan is not None
+    plan = summary.target_submit_plan.as_dict()
+    assert plan["source"] == "target_delta"
+    assert plan["current_effective_exposure_krw"] == pytest.approx(9_665.0)
+    assert plan["target_exposure_krw"] == pytest.approx(100_000.0)
+    assert plan["delta_krw"] == pytest.approx(90_335.0)
+    assert plan["notional_krw"] == pytest.approx(90_335.0)
 
 
 def test_typed_execution_summary_can_supply_validated_target_submit_plan() -> None:

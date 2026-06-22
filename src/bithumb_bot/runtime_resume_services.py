@@ -344,12 +344,15 @@ class RuntimeResumeService:
         residual_run_allowed = bool(
             residual_disposition is not None and bool(getattr(residual_disposition, "run_allowed", False))
         )
+        legacy_dust_effective_flat = bool(
+            residual_disposition is None and bool(dust_context_for_halt["effective_flat"])
+        )
         unresolved_dust_safe = bool(
             state.halt_state_unresolved
             and (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
             and int(state.unresolved_open_order_count) == 0
             and int(state.recovery_required_count) == 0
-            and (residual_run_allowed or bool(dust_context_for_halt["effective_flat"]))
+            and (residual_run_allowed or legacy_dust_effective_flat)
         )
         if state.halt_state_unresolved and not unresolved_dust_safe:
             reasons.append(

@@ -128,6 +128,34 @@ from .markets import canonical_market_with_raw
 from .position_state_snapshot import build_canonical_position_snapshot
 from .repair_plan import build_recovery_policy_from_report, build_repair_plan_preview_from_report
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
+
+
+def _residual_operator_field_values(source: dict[str, object]) -> dict[str, object]:
+    disposition = source.get("residual_disposition")
+    if isinstance(disposition, dict):
+        disposition_value = disposition.get("disposition")
+    else:
+        disposition_value = disposition
+    return {
+        "residual_disposition": disposition_value or "NONE",
+        "residual_reason_code": source.get("residual_reason_code") or "none",
+        "manual_exchange_action_required": bool(source.get("manual_exchange_action_required")),
+        "quantity_rule_authority": source.get("quantity_rule_authority") or "unknown",
+        "broker_local_projection_state": source.get("broker_local_projection_state") or "unknown",
+    }
+
+
+def _print_residual_operator_fields(prefix: str, source: dict[str, object]) -> None:
+    fields = _residual_operator_field_values(source)
+    print(
+        prefix
+        + f"residual_disposition={fields['residual_disposition']} "
+        + f"residual_reason_code={fields['residual_reason_code']} "
+        + "manual_exchange_action_required="
+        + f"{1 if fields['manual_exchange_action_required'] else 0} "
+        + f"quantity_rule_authority={fields['quantity_rule_authority']} "
+        + f"broker_local_projection_state={fields['broker_local_projection_state']}"
+    )
 from .messages import (
     EXPLAIN_INSUFFICIENT_CANDLES,
     SIGNAL_INSUFFICIENT_CANDLES,
@@ -1894,6 +1922,7 @@ def cmd_health() -> None:
     print(f"    blockers={blockers_label}")
     print(f"    blocker_reason_codes={blocker_reason_codes_label}")
     print(f"    recovery_stage={readiness_snapshot.recovery_stage}")
+    _print_residual_operator_fields("    ", readiness_payload)
     print(
         "    recovery_blocker_categories="
         f"{', '.join(readiness_snapshot.blocker_categories) if readiness_snapshot.blocker_categories else 'none'}"
@@ -4400,6 +4429,17 @@ def _load_recovery_report(
 
     report = {
         "mode": settings.MODE,
+        "residual_disposition": (
+            (runtime_readiness_snapshot.get("residual_disposition") or {}).get("disposition")
+            if isinstance(runtime_readiness_snapshot.get("residual_disposition"), dict)
+            else runtime_readiness_snapshot.get("residual_disposition")
+        ),
+        "residual_reason_code": runtime_readiness_snapshot.get("residual_reason_code"),
+        "manual_exchange_action_required": bool(
+            runtime_readiness_snapshot.get("manual_exchange_action_required")
+        ),
+        "quantity_rule_authority": runtime_readiness_snapshot.get("quantity_rule_authority"),
+        "broker_local_projection_state": runtime_readiness_snapshot.get("broker_local_projection_state"),
         "unresolved_count": unresolved_count,
         "recovery_required_count": recovery_required_count,
         "submit_unknown_count": submit_unknown_count,
@@ -4614,6 +4654,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("  [P2] resume_eligibility")
     runtime_readiness = report.get("runtime_readiness") or {}
     print(f"    recovery_stage={runtime_readiness.get('recovery_stage') or 'UNKNOWN'}")
+    _print_residual_operator_fields("    ", report)
     print(f"    accounting_projection_ok={1 if bool(report.get('accounting_projection_ok')) else 0}")
     print(f"    broker_portfolio_converged={1 if bool(report.get('broker_portfolio_converged')) else 0}")
     print(f"    lot_projection_converged={1 if bool(report.get('lot_projection_converged')) else 0}")

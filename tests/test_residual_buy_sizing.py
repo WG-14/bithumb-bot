@@ -24,13 +24,54 @@ def _summary(monkeypatch, *, mode: str, target: float = 100_000.0, current: floa
     )
 
 
+def _target_delta_summary(*, target: float = 100_000.0, current_qty: float = 0.00009665):
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    object.__setattr__(settings, "MAX_ORDER_KRW", target)
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    payload = {
+        "runtime_pair": "KRW-BTC",
+        "market_price": 100_000_000.0,
+        "cash_available": 1_000_000.0,
+        "broker_position_evidence": {
+            "broker_qty_known": True,
+            "broker_qty": current_qty,
+        },
+        "broker_portfolio_converged": True,
+        "projection_convergence": {
+            "converged": True,
+            "portfolio_qty": current_qty,
+            "projected_total_qty": current_qty,
+        },
+        "open_order_count": 0,
+        "unresolved_open_order_count": 0,
+        "recovery_required_count": 0,
+        "submit_unknown_count": 0,
+        "accounting_projection_ok": True,
+        "min_qty": 0.00000001,
+        "min_notional_krw": 5000.0,
+        "qty_step": 0.00000001,
+        "order_rule_authority": "exchange_hard",
+        "order_rule_authority_source": "unit",
+        "order_rule_authority_source_mode": "exchange",
+    }
+    return build_execution_decision_summary(
+        decision_context=payload,
+        raw_signal="BUY",
+        final_signal="BUY",
+    )
+
+
 @pytest.fixture(autouse=True)
 def restore_settings():
     original_mode = settings.RESIDUAL_BUY_SIZING_MODE
     original_max_order = settings.MAX_ORDER_KRW
+    original_engine = settings.EXECUTION_ENGINE
+    original_pair = settings.PAIR
     yield
     object.__setattr__(settings, "RESIDUAL_BUY_SIZING_MODE", original_mode)
     object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+    object.__setattr__(settings, "EXECUTION_ENGINE", original_engine)
+    object.__setattr__(settings, "PAIR", original_pair)
 
 
 def test_delta_buy_sizing_offsets_tracked_residual_exposure(monkeypatch):
@@ -66,3 +107,15 @@ def test_tracked_residual_covering_target_blocks_buy_submit(monkeypatch):
     assert payload["buy_delta_krw"] == pytest.approx(0.0)
     assert plan["submit_expected"] is False
     assert plan["block_reason"] == "tracked_residual_exposure_covers_target"
+
+
+def test_target_delta_submit_plan_offsets_tracked_residual_exposure(monkeypatch):
+    summary = _target_delta_summary()
+    payload = summary.as_dict()
+    plan = payload["target_submit_plan"]
+
+    assert plan["source"] == "target_delta"
+    assert plan["current_effective_exposure_krw"] == pytest.approx(9_665.0)
+    assert plan["target_exposure_krw"] == pytest.approx(100_000.0)
+    assert plan["delta_krw"] == pytest.approx(90_335.0)
+    assert plan["notional_krw"] == pytest.approx(90_335.0)

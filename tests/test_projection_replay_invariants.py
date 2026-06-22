@@ -3,9 +3,10 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db
+from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.lifecycle import rebuild_lifecycle_projections_from_trades, summarize_position_lots
+from bithumb_bot.position_authority_state import build_lot_projection_convergence
 from bithumb_bot.oms import set_status
 
 
@@ -152,3 +153,49 @@ def test_projection_rebuild_preserves_incident_residual_qty(projection_replay_db
     assert before.dust_tracking_qty == pytest.approx(RESIDUAL_QTY)
     assert after.dust_tracking_qty == pytest.approx(RESIDUAL_QTY)
     assert after.open_lot_count == 0
+
+
+def test_projection_convergence_matches_portfolio_after_rebuild(projection_replay_db):
+    conn = ensure_db(str(projection_replay_db))
+    try:
+        _seed(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=RESIDUAL_QTY,
+            asset_locked=0.0,
+        )
+        rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR)
+        convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    assert convergence["portfolio_qty"] == pytest.approx(RESIDUAL_QTY)
+    assert convergence["projected_total_qty"] == pytest.approx(RESIDUAL_QTY)
+    assert convergence["decomposed_total_qty"] == pytest.approx(RESIDUAL_QTY)
+    assert convergence["converged"] is True
+    assert convergence["reason"] == "none"
+
+
+def test_projection_mismatch_blocks_readiness_after_rebuild(projection_replay_db):
+    conn = ensure_db(str(projection_replay_db))
+    try:
+        _seed(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=RESIDUAL_QTY + 0.0001,
+            asset_locked=0.0,
+        )
+        rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR)
+        convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    assert convergence["portfolio_qty"] == pytest.approx(RESIDUAL_QTY + 0.0001)
+    assert convergence["projected_total_qty"] == pytest.approx(RESIDUAL_QTY)
+    assert convergence["decomposed_total_qty"] == pytest.approx(RESIDUAL_QTY)
+    assert convergence["converged"] is False
+    assert "portfolio_projection_qty_mismatch" in str(convergence["reason"])
