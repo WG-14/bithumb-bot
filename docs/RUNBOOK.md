@@ -111,9 +111,18 @@ uv run bithumb-bot reconcile
 uv run bithumb-bot recovery-report
 ```
 
+For H74 long-run live operation, generate a certificate that covers both the KST10 positive path and the KST18 negative entry block, then run the read-only preflight:
+
+```bash
+uv run bithumb-bot h74-readiness-certificate --no-submit --source-artifact "$H74_SOURCE_ARTIFACT" --json > "$H74_READINESS_CERTIFICATE"
+uv run bithumb-bot h74-long-run-preflight --certificate "$H74_READINESS_CERTIFICATE" --json
+```
+
 Interpretation:
 
 - `broker-diagnose` must pass before live arming.
+- `broker-diagnose` is not sufficient for H74 one-week readiness by itself.
+- `h74-long-run-preflight` must return `status=pass`; a missing or false `negative_rehearsal_kst_18_blocks_entry` or empty `entry_authority_gate_hash` blocks long-run operation.
 - Judge BUY `price=None` / BUY market support from `broker-diagnose`, not from indirect inference in other surfaces.
 - In `broker-diagnose`, inspect the `BUY price=None chance resolution` line and confirm:
   `allowed`, `resolved_order_type`, `support_source`, `decision_basis`, `alias_used`, and `block_reason`.

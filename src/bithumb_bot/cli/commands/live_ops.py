@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sqlite3
+from pathlib import Path
 
 from bithumb_bot.cli.registry import CommandSpec
 
@@ -140,6 +141,23 @@ def _h74_readiness_certificate(args: argparse.Namespace, _context) -> None:
         print(json.dumps(payload, sort_keys=True))
         return
     print(payload["certificate_hash"])
+
+
+def _h74_long_run_preflight(args: argparse.Namespace, _context) -> int:
+    from bithumb_bot.h74_readiness_certificate import validate_h74_long_run_preflight
+
+    with Path(str(args.certificate)).expanduser().open("r", encoding="utf-8") as handle:
+        certificate = json.load(handle)
+    if not isinstance(certificate, dict):
+        raise SystemExit("h74_long_run_preflight_certificate_not_object")
+    payload = validate_h74_long_run_preflight(certificate)
+    if bool(args.json):
+        print(json.dumps(payload, sort_keys=True))
+    elif bool(payload.get("valid")):
+        print("h74_long_run_preflight pass")
+    else:
+        print("h74_long_run_preflight blocked:" + ",".join(payload.get("reasons") or []))
+    return 0 if bool(payload.get("valid")) else 2
 
 
 def _exchange_submit_diagnose(args: argparse.Namespace, _context) -> None:
@@ -356,6 +374,24 @@ def command_specs() -> list[CommandSpec]:
             requires_live=True,
             uses_broker=False,
             produces_artifact=True,
+            json_output_supported=True,
+        ),
+        make_spec(
+            "h74-long-run-preflight",
+            domain="live_ops",
+            handler=_h74_long_run_preflight,
+            help="validate h74 one-week live preflight certificate",
+            description=(
+                "Read an h74 readiness certificate and block long-running operation unless "
+                "KST10 positive and KST18 negative entry-gate coverage pass."
+            ),
+            build=lambda p: (
+                p.add_argument("--certificate", required=True),
+                p.add_argument("--json", action="store_true"),
+            ),
+            read_only=True,
+            requires_live=True,
+            uses_broker=False,
             json_output_supported=True,
         ),
         make_spec(

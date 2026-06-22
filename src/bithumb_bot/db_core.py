@@ -2369,6 +2369,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             final_intended_qty REAL,
             final_submitted_qty REAL,
             decision_reason_code TEXT,
+            intent_type TEXT,
+            authority_source TEXT,
+            entry_authority_source TEXT,
+            entry_authority_status TEXT,
+            decision_kst_hour INTEGER,
             local_intent_state TEXT,
             daily_participation_policy_hash TEXT,
             daily_count_snapshot_hash TEXT,
@@ -2400,6 +2405,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "orders", "final_intended_qty", "final_intended_qty REAL")
     _ensure_column(conn, "orders", "final_submitted_qty", "final_submitted_qty REAL")
     _ensure_column(conn, "orders", "decision_reason_code", "decision_reason_code TEXT")
+    _ensure_column(conn, "orders", "intent_type", "intent_type TEXT")
+    _ensure_column(conn, "orders", "authority_source", "authority_source TEXT")
+    _ensure_column(conn, "orders", "entry_authority_source", "entry_authority_source TEXT")
+    _ensure_column(conn, "orders", "entry_authority_status", "entry_authority_status TEXT")
+    _ensure_column(conn, "orders", "decision_kst_hour", "decision_kst_hour INTEGER")
     _ensure_column(conn, "orders", "local_intent_state", "local_intent_state TEXT")
     _ensure_column(conn, "orders", "daily_participation_policy_hash", "daily_participation_policy_hash TEXT")
     _ensure_column(conn, "orders", "daily_count_snapshot_hash", "daily_count_snapshot_hash TEXT")

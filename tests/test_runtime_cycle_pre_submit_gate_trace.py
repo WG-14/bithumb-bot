@@ -176,7 +176,11 @@ def _execution_plan_bundle(plan: ExecutionSubmitPlan) -> object:
     return SimpleNamespace(execution_plan_batch=_Batch(pair_plan))
 
 
-def _decision_result(summary: ExecutionDecisionSummary) -> object:
+def _decision_result(
+    summary: ExecutionDecisionSummary,
+    *,
+    hard_gate_trace_entries: tuple[dict[str, object], ...] = (),
+) -> object:
     return SimpleNamespace(
         candle_ts=1_800_000_000_000,
         decision_id=1,
@@ -222,6 +226,7 @@ def _decision_result(summary: ExecutionDecisionSummary) -> object:
         pre_submit_risk_state_source=None,
         pre_submit_risk_status=None,
         pre_submit_risk_reason_code=None,
+        hard_gate_trace_entries=hard_gate_trace_entries,
         failure_phase=None,
         failure_subphase=None,
         failure_reason_code=None,
@@ -238,7 +243,13 @@ def _decision_result(summary: ExecutionDecisionSummary) -> object:
     )
 
 
-def _execute_pre_submit_block(tmp_path, monkeypatch, *, status: str = "BLOCK") -> dict[str, object]:
+def _execute_pre_submit_block(
+    tmp_path,
+    monkeypatch,
+    *,
+    status: str = "BLOCK",
+    hard_gate_trace_entries: tuple[dict[str, object], ...] = (),
+) -> dict[str, object]:
     _arm_live_target_delta()
     plan = _target_submit_plan()
     summary = _summary(plan)
@@ -261,7 +272,7 @@ def _execute_pre_submit_block(tmp_path, monkeypatch, *, status: str = "BLOCK") -
         harmless_dust_recorder=lambda **_kwargs: False,
         db_factory=_runtime_db_factory,
     )
-    decision_result = _decision_result(summary)
+    decision_result = _decision_result(summary, hard_gate_trace_entries=hard_gate_trace_entries)
     execution_result = ExecutionCoordinator("target_delta").execute_cycle(
         candle_ts=decision_result.candle_ts,
         decision_id=decision_result.decision_id,
@@ -316,3 +327,27 @@ def test_runtime_cycle_artifact_primary_block_gate_from_execution_result(tmp_pat
     assert pre_submit["blocking"] is True
     assert artifact["primary_block_gate"] == "pre_submit_risk"
     assert artifact["primary_block_reason"] == "RISK_STATE_MISMATCH"
+
+
+def test_entry_authority_precedes_pre_submit_gate(tmp_path, monkeypatch) -> None:
+    result = _execute_pre_submit_block(
+        tmp_path,
+        monkeypatch,
+        hard_gate_trace_entries=(
+            {
+                "gate": "entry_authority",
+                "status": "BLOCK",
+                "reason_code": "target_delta_entry_without_strategy_buy_authority",
+                "input_hash": "sha256:entry-input",
+                "evidence_hash": "sha256:entry-evidence",
+                "state_source": "entry_authority_policy",
+                "blocking": True,
+            },
+        ),
+    )
+
+    artifact = result["artifact"]
+    gates = [entry["gate"] for entry in artifact["gate_trace"]]
+    assert gates.index("entry_authority") < gates.index("pre_submit_risk")
+    assert artifact["primary_block_gate"] == "entry_authority"
+    assert artifact["primary_block_reason"] == "target_delta_entry_without_strategy_buy_authority"

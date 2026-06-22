@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .live_trade_classification import classify_h74_live_trade
 from .research.hashing import sha256_prefixed
 
 
@@ -352,13 +353,55 @@ def _sqlite_metrics(
         slippage_expr = "f.slippage_bps" if _column_exists(conn, "fills", "slippage_bps") else "NULL"
         fill_ts_expr = "f.fill_ts" if _column_exists(conn, "fills", "fill_ts") else "0"
         created_ts_expr = "o.created_ts" if _column_exists(conn, "orders", "created_ts") else "0"
+        decision_reason_expr = (
+            "COALESCE(o.decision_reason_code, o.decision_reason, '')"
+            if _column_exists(conn, "orders", "decision_reason_code")
+            else "COALESCE(o.decision_reason, '')"
+            if _column_exists(conn, "orders", "decision_reason")
+            else "''"
+        )
+        intent_type_expr = "COALESCE(o.intent_type, '')" if _column_exists(conn, "orders", "intent_type") else "''"
+        authority_source_expr = (
+            "COALESCE(o.authority_source, '')" if _column_exists(conn, "orders", "authority_source") else "''"
+        )
+        entry_authority_source_expr = (
+            "COALESCE(o.entry_authority_source, '')"
+            if _column_exists(conn, "orders", "entry_authority_source")
+            else "''"
+        )
+        entry_authority_status_expr = (
+            "COALESCE(o.entry_authority_status, '')"
+            if _column_exists(conn, "orders", "entry_authority_status")
+            else "''"
+        )
+        decision_kst_hour_expr = (
+            "o.decision_kst_hour"
+            if _column_exists(conn, "orders", "decision_kst_hour")
+            else "CAST(strftime('%H', datetime(o.created_ts / 1000, 'unixepoch', '+9 hours')) AS INTEGER)"
+            if _column_exists(conn, "orders", "created_ts")
+            else "NULL"
+        )
+        exchange_order_id_expr = (
+            "COALESCE(o.exchange_order_id, '')"
+            if _column_exists(conn, "orders", "exchange_order_id")
+            else "''"
+        )
         fill_rows = conn.execute(
             f"""
             SELECT COALESCE(f.fee,0.0) AS fee, {price_expr} AS price, {qty_expr} AS qty,
                    {reference_expr} AS reference_price,
                    {slippage_expr} AS slippage_bps,
                    {fill_ts_expr} AS fill_ts,
-                   {created_ts_expr} AS created_ts
+                   {created_ts_expr} AS created_ts,
+                   COALESCE(o.client_order_id, '') AS client_order_id,
+                   COALESCE(o.side, '') AS side,
+                   {decision_reason_expr} AS decision_reason_code,
+                   {intent_type_expr} AS intent_type,
+                   {authority_source_expr} AS authority_source,
+                   {entry_authority_source_expr} AS entry_authority_source,
+                   {entry_authority_status_expr} AS entry_authority_status,
+                   {decision_kst_hour_expr} AS decision_kst_hour,
+                   {exchange_order_id_expr} AS exchange_order_id
             FROM fills f JOIN orders o ON o.client_order_id=f.client_order_id
             WHERE {scope_sql}{time_sql.replace('fill_ts', 'f.fill_ts')}
             """,
@@ -382,6 +425,44 @@ def _sqlite_metrics(
             ordered = sorted(delays)
             metrics["exit_delay_seconds_p50"] = ordered[len(ordered) // 2]
             metrics["exit_delay_seconds_max"] = max(ordered)
+        classified_rows: list[dict[str, Any]] = []
+        classification_error_count = 0
+        for row in fill_rows:
+            base = {
+                "client_order_id": str(row[7] or ""),
+                "side": str(row[8] or ""),
+                "filled": True,
+                "exchange_order_id": str(row[15] or ""),
+                "decision_reason_code": str(row[9] or ""),
+                "intent_type": str(row[10] or ""),
+                "authority_source": str(row[11] or ""),
+                "entry_authority_source": str(row[12] or ""),
+                "entry_authority_status": str(row[13] or ""),
+                "decision_kst_hour": row[14],
+            }
+            try:
+                classification = classify_h74_live_trade(base)
+            except ValueError as exc:
+                classification_error_count += 1
+                classification = {
+                    "live_plumbing_success": True,
+                    "h74_backtest_validation_sample": False,
+                    "incident_type": "classification_error",
+                    "entry_authority_source": "",
+                    "classification_error": str(exc),
+                }
+            classified_rows.append({**base, **classification})
+        metrics["h74_live_trade_classifications"] = classified_rows
+        metrics["h74_backtest_validation_sample_count"] = sum(
+            1 for row in classified_rows if bool(row.get("h74_backtest_validation_sample"))
+        )
+        incident_counts: dict[str, int] = {}
+        for row in classified_rows:
+            incident_type = str(row.get("incident_type") or "none")
+            if incident_type != "none":
+                incident_counts[incident_type] = incident_counts.get(incident_type, 0) + 1
+        metrics["h74_incident_counts"] = incident_counts
+        metrics["h74_trade_classification_error_count"] = classification_error_count
     if _table_exists(conn, "daily_participation_claims"):
         if not _claim_interval_scope_available(conn):
             interval_scope_unavailable.append("daily_participation_claims")

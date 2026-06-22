@@ -73,6 +73,7 @@ class RuntimeCycleArtifactAssembler:
                 execution_result.as_dict()["decision_hash"] if execution_result is not None else None
             ),
             runtime_dependency_manifest_hash=self.runtime_dependency_manifest_hash,
+            hard_gate_trace_entries=getattr(decision_result, "hard_gate_trace_entries", ()),
             failure_phase=decision_result.failure_phase,
             failure_subphase=decision_result.failure_subphase,
             failure_reason_code=decision_result.failure_reason_code,

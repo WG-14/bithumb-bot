@@ -719,6 +719,11 @@ def create_order(
     final_intended_qty: float | None = None,
     final_submitted_qty: float | None = None,
     decision_reason_code: str | None = None,
+    intent_type: str | None = None,
+    authority_source: str | None = None,
+    entry_authority_source: str | None = None,
+    entry_authority_status: str | None = None,
+    decision_kst_hour: int | None = None,
     local_intent_state: str | None = None,
     daily_participation_policy_hash: str | None = None,
     daily_count_snapshot_hash: str | None = None,
@@ -739,12 +744,14 @@ def create_order(
                 client_order_id, submit_attempt_id, exchange_order_id, status, side, order_type, price, qty_req, qty_filled,
                 pair, strategy_name, strategy_instance_id, entry_decision_id, exit_decision_id, decision_reason, exit_rule_name,
                 internal_lot_size, effective_min_trade_qty, qty_step, min_notional_krw, intended_lot_count,
-                executable_lot_count, final_intended_qty, final_submitted_qty, decision_reason_code, local_intent_state,
+                executable_lot_count, final_intended_qty, final_submitted_qty, decision_reason_code,
+                intent_type, authority_source, entry_authority_source, entry_authority_status, decision_kst_hour,
+                local_intent_state,
                 daily_participation_policy_hash, daily_count_snapshot_hash, participation_decision_hash,
                 daily_participation_kst_day, daily_participation_fallback_mode,
                 created_ts, updated_ts, last_error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 client_order_id,
@@ -772,6 +779,11 @@ def create_order(
                 final_intended_qty,
                 final_submitted_qty,
                 decision_reason_code,
+                intent_type,
+                authority_source,
+                entry_authority_source,
+                entry_authority_status,
+                (int(decision_kst_hour) if decision_kst_hour is not None else None),
                 local_intent_state,
                 daily_participation_policy_hash,
                 daily_count_snapshot_hash,

@@ -47,6 +47,7 @@ EXPECTED_COMMANDS = {
     "live-pipeline-smoke-authority",
     "h74-live-rehearsal",
     "h74-readiness-certificate",
+    "h74-long-run-preflight",
     "exchange-submit-diagnose",
     "panic-stop",
     "flatten-position",
@@ -170,6 +171,16 @@ def test_command_registration_contains_expected_major_groups() -> None:
     assert registry["fee-gap-accounting-repair"].writes_db is True
 
 
+def test_h74_long_run_preflight_registered() -> None:
+    registry = command_registry()
+
+    spec = registry["h74-long-run-preflight"]
+    assert spec.domain == "live_ops"
+    assert spec.read_only is True
+    assert spec.requires_live is True
+    assert spec.json_output_supported is True
+
+
 @pytest.mark.parametrize(
     ("command", "options"),
     [
@@ -186,6 +197,7 @@ def test_command_registration_contains_expected_major_groups() -> None:
         ("flatten-position", ["--dry-run", "--json"]),
         ("live-pipeline-smoke", ["--plan", "--apply", "--yes", "--cycles", "--max-orders", "--max-notional-krw", "--authority-path", "--confirm", "--json"]),
         ("live-pipeline-smoke-authority", ["--out", "--cycles", "--max-orders", "--max-notional-krw", "--expires-min"]),
+        ("h74-long-run-preflight", ["--certificate", "--json"]),
     ],
 )
 def test_important_command_help_exposes_owned_options(

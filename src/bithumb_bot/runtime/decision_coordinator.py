@@ -134,6 +134,40 @@ def _risk_layer_fields_from_context(context: Mapping[str, object] | None) -> dic
     return fields
 
 
+def _hard_gate_trace_entries_from_context(
+    context: Mapping[str, object] | None,
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(context, Mapping):
+        return ()
+    entries: list[dict[str, object]] = []
+    raw_trace = context.get("gate_trace")
+    if isinstance(raw_trace, list):
+        for raw_entry in raw_trace:
+            if isinstance(raw_entry, Mapping):
+                entries.append(dict(raw_entry))
+    raw_entry_authority = context.get("entry_authority")
+    if not isinstance(raw_entry_authority, Mapping):
+        target_decision = context.get("target_shadow_decision")
+        if isinstance(target_decision, Mapping):
+            raw_entry_authority = target_decision.get("entry_authority")
+    if isinstance(raw_entry_authority, Mapping):
+        entry = dict(raw_entry_authority)
+        entry["gate"] = "entry_authority"
+        existing_index = next(
+            (
+                index
+                for index, item in enumerate(entries)
+                if str(item.get("gate") or "").strip() == "entry_authority"
+            ),
+            None,
+        )
+        if existing_index is None:
+            entries.insert(0, entry)
+        else:
+            entries[existing_index] = {**entries[existing_index], **entry}
+    return tuple(entries)
+
+
 def persist_target_position_state_for_run_loop(
     conn,
     *,
@@ -267,6 +301,7 @@ class DecisionCycleResult:
     pre_submit_risk_state_source: str | None = None
     pre_submit_risk_status: str | None = None
     pre_submit_risk_reason_code: str | None = None
+    hard_gate_trace_entries: tuple[dict[str, object], ...] = ()
     typed_runtime_decision: RuntimeStrategyDecisionResult | None = None
     representative_runtime_decision_for_observability: RuntimeStrategyDecisionResult | None = None
     typed_runtime_decision_bundle: RuntimeStrategyDecisionResultBundle | None = None
@@ -333,6 +368,7 @@ class DecisionCycleResult:
             "pre_submit_risk_state_source": self.pre_submit_risk_state_source,
             "pre_submit_risk_status": self.pre_submit_risk_status,
             "pre_submit_risk_reason_code": self.pre_submit_risk_reason_code,
+            "hard_gate_trace_entries": [dict(item) for item in self.hard_gate_trace_entries],
             "persistence_status": self.persistence_status,
             "mark_processed_candidate": bool(self.mark_processed_candidate),
             "market_price": self.market_price,
@@ -584,6 +620,7 @@ class DecisionCoordinator:
             conn.close()
 
         risk_layer_fields = _risk_layer_fields_from_context(context)
+        hard_gate_trace_entries = _hard_gate_trace_entries_from_context(context)
         return DecisionCycleResult(
             candle_ts=typed_bundle.candle_ts,
             strategy_name=strategy_name,
@@ -637,6 +674,7 @@ class DecisionCoordinator:
             pre_submit_risk_state_source=risk_layer_fields["pre_submit_risk_state_source"],
             pre_submit_risk_status=risk_layer_fields["pre_submit_risk_status"],
             pre_submit_risk_reason_code=risk_layer_fields["pre_submit_risk_reason_code"],
+            hard_gate_trace_entries=hard_gate_trace_entries,
             persistence_status=persistence_status,
             mark_processed_candidate=decision_id is not None and planning_bundle is not None,
             typed_runtime_decision=single_runtime_decision,

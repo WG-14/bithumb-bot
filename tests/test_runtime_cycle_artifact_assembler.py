@@ -3,7 +3,10 @@ from __future__ import annotations
 import inspect
 
 from bithumb_bot.runtime.cycle_artifact_assembler import RuntimeCycleArtifactAssembler
-from bithumb_bot.runtime.decision_coordinator import DecisionCycleResult
+from bithumb_bot.runtime.decision_coordinator import (
+    DecisionCycleResult,
+    _hard_gate_trace_entries_from_context,
+)
 from bithumb_bot.runtime.execution_coordinator import ExecutionCycleResult
 from bithumb_bot.runtime.lifecycle_artifacts import RuntimeCycleArtifact
 
@@ -89,3 +92,37 @@ def test_runner_artifact_creation_survives_db_select_failure_after_execution() -
     assert isinstance(artifact, RuntimeCycleArtifact)
     assert _FailingDb  # proves the fixture is intentionally unused
     assert artifact.as_dict()["pre_submit_risk_decision_hash"] == "sha256:pre-decision"
+
+
+def test_entry_authority_gate_from_decision_context_becomes_primary_block() -> None:
+    decision_context = {
+        "entry_authority": {
+            "gate": "entry_authority",
+            "status": "BLOCK",
+            "reason_code": "target_delta_entry_without_strategy_buy_authority",
+            "input_hash": "sha256:entry-input",
+            "evidence_hash": "sha256:entry-evidence",
+            "state_source": "entry_authority_policy",
+            "blocking": True,
+        }
+    }
+    artifact = RuntimeCycleArtifactAssembler().from_cycle_results(
+        cycle_id="checkpoint:processed",
+        startup_state="READY",
+        decision_result=_decision_result(
+            decision_context=decision_context,
+            hard_gate_trace_entries=_hard_gate_trace_entries_from_context(decision_context),
+            pre_submit_risk_status="ALLOW",
+            pre_submit_risk_reason_code="OK",
+        ),
+        execution_result=None,
+    ).as_dict()
+
+    entry = [item for item in artifact["gate_trace"] if item["gate"] == "entry_authority"][0]
+    assert entry["status"] == "BLOCK"
+    assert entry["reason_code"] == "target_delta_entry_without_strategy_buy_authority"
+    assert entry["input_hash"] == "sha256:entry-input"
+    assert entry["evidence_hash"] == "sha256:entry-evidence"
+    assert entry["state_source"] == "entry_authority_policy"
+    assert artifact["primary_block_gate"] == "entry_authority"
+    assert artifact["primary_block_reason"] == "target_delta_entry_without_strategy_buy_authority"

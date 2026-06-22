@@ -124,3 +124,20 @@ def test_daily_participation_fallback_allowed_allows_target_delta_buy() -> None:
     assert plan["submit_expected"] is True
     assert plan["entry_authority_status"] == "ALLOW"
     assert plan["entry_authority_reason_code"] == "daily_participation_entry"
+
+
+def test_restart_target_state_daily_participation_fallback_allowed_can_buy() -> None:
+    old = _set_target_delta()
+    try:
+        plan = _target_plan(
+            final_signal="HOLD",
+            final_reason="daily_participation_fallback_allowed",
+            previous_target_exposure_krw=100_000.0,
+        )
+    finally:
+        _restore(old)
+
+    assert plan["target_delta_side"] == "BUY"
+    assert plan["submit_expected"] is True
+    assert plan["entry_authority_status"] == "ALLOW"
+    assert plan["entry_authority_reason_code"] == "daily_participation_entry"
