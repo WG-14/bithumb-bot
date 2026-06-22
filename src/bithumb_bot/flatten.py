@@ -693,6 +693,51 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     try:
         init_portfolio(conn)
         readiness = compute_runtime_readiness_snapshot(conn)
+        residual_disposition = getattr(readiness, "residual_disposition", None)
+        if (
+            trigger == "operator"
+            and residual_disposition is not None
+            and getattr(residual_disposition, "disposition", "") == "TRACKED_NON_EXECUTABLE"
+        ):
+            summary = {
+                "status": "tracked_non_executable_residual",
+                "reason": "sub_min_qty_residual_tracked",
+                "residual_disposition": "TRACKED_NON_EXECUTABLE",
+                "residual_reason_code": "sub_min_qty_residual_tracked",
+                "operator_action_required": False,
+                "recommended_action": "none",
+                "recommended_command": None,
+                "manual_exchange_action_required": False,
+                "submit_expected": False,
+                "closeout_allowed": False,
+                "flatten_required": False,
+                "qty": 0.0,
+                "raw_total_asset_qty": float(readiness.residual_inventory.residual_qty),
+                "executable_exposure_qty": float(
+                    readiness.position_state.normalized_exposure.open_exposure_qty
+                ),
+                "tracked_dust_qty": float(readiness.residual_inventory.residual_qty),
+                "terminal_state": str(readiness.position_state.normalized_exposure.terminal_state),
+                "execution_flat": True,
+                "sellable_executable_lot_count": int(
+                    readiness.position_state.normalized_exposure.sellable_executable_lot_count
+                ),
+                "quantity_rule_authority": getattr(
+                    residual_disposition, "quantity_rule_authority", "unknown"
+                ),
+                "broker_local_projection_state": getattr(
+                    residual_disposition, "broker_local_projection_state", "unknown"
+                ),
+                "dry_run": int(bool(dry_run)),
+                "side": "SELL",
+                "symbol": settings.PAIR,
+                "trigger": trigger,
+            }
+            runtime_state.record_flatten_position_result(
+                status="tracked_non_executable_residual",
+                summary=summary,
+            )
+            return summary
         if trigger == "operator":
             if int(readiness.recovery_required_count or 0) > 0:
                 return _operator_blocked_json_summary(

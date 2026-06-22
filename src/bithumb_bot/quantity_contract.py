@@ -145,7 +145,7 @@ class ExchangeQuantityContract:
     @property
     def quantity_contract_recommended_action(self) -> str | None:
         if self.qty_step_authority_level == "unknown":
-            return "refresh_order_rules_or_manual_exchange_closeout"
+            return "refresh_order_rules_or_review_quantity_settings"
         if not self.quantity_contract_complete:
             return "refresh_order_rules_or_review_quantity_settings"
         if self.qty_step_authority_level == "local_fallback":

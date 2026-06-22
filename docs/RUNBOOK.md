@@ -148,6 +148,25 @@ uv run bithumb-bot recovery-report
 - Confirm `last_candle_age_sec`, `error_count`, and `trading_enabled` are healthy.
 - Confirm `recovery-report` still shows no unresolved or recovery-required order state.
 
+## Residual Inventory Operator Actions
+
+A converged tracked sub-min BTC residual is not a manual mobile-app closeout
+condition. If `health`, `recovery-report`, `ops-report`, or
+`flatten-position --json` reports `residual_disposition=TRACKED_NON_EXECUTABLE`,
+`manual_exchange_action_required=false`, and matching broker/local/projection
+quantities, leave the residual tracked and resume through the normal gate.
+
+Manual exchange intervention may be considered only when evidence shows one of
+these conditions:
+
+- broker/local/projection mismatch
+- open order, locked asset, submit-unknown order, or recovery-required order
+- unknown quantity-rule authority that cannot be refreshed
+- exchange-hard sellable residual where bot closeout proof failed
+- actual broker rejection evidence
+
+Do not use mobile-app closeout for a converged, tracked, sub-min residual.
+
 ## Emergency Stop, Pause, and Resume
 
 ### A. Integrated emergency stop

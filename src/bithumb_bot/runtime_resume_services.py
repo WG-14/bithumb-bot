@@ -270,6 +270,18 @@ class RuntimeResumeService:
                 )
 
         reasons.extend(recovery_gate.startup_safety_resume_blockers(startup_gate_reason))
+        readiness_snapshot = None
+        residual_disposition = None
+        try:
+            conn = self.db_factory()
+            try:
+                readiness_snapshot = compute_runtime_readiness_snapshot(conn)
+                residual_disposition = getattr(readiness_snapshot, "residual_disposition", None)
+            finally:
+                conn.close()
+        except Exception:
+            readiness_snapshot = None
+            residual_disposition = None
 
         if state.emergency_flatten_blocked:
             reasons.append(
@@ -288,7 +300,34 @@ class RuntimeResumeService:
         reasons.extend(recovery_gate.reconcile_ok_did_not_clear_blockers(startup_gate_reason))
 
         dust_context_for_halt = reconcile_dust_context(state.last_reconcile_metadata)
-        dust_resume_blocker = dust_residual_resume_blocker(dust_context_for_halt)
+        residual_blocking_disposition = str(
+            getattr(residual_disposition, "disposition", "") if residual_disposition is not None else ""
+        )
+        if (
+            residual_disposition is not None
+            and residual_blocking_disposition in {"BLOCKING_INCONSISTENT", "AUTHORITY_REPAIR_REQUIRED"}
+            and not bool(getattr(residual_disposition, "run_allowed", False))
+        ):
+            reasons.append(
+                _resume_blocker(
+                    code=str(getattr(residual_disposition, "disposition", "BLOCKING_INCONSISTENT")),
+                    detail=(
+                        "residual disposition blocks resume: "
+                        f"disposition={getattr(residual_disposition, 'disposition', 'unknown')} "
+                        f"reason={','.join(getattr(residual_disposition, 'reason_codes', ()) or ('none',))}"
+                    ),
+                    reason_code=str(
+                        (getattr(residual_disposition, "reason_codes", ()) or ("residual_disposition_blocked",))[0]
+                    ),
+                    summary="residual disposition blocks resume",
+                    overridable=False,
+                )
+            )
+        dust_resume_blocker = (
+            None
+            if residual_disposition is not None
+            else dust_residual_resume_blocker(dust_context_for_halt)
+        )
         if dust_resume_blocker is not None:
             blocker_code, blocker_detail = dust_resume_blocker
             dust_reason_code, dust_summary = classify_dust_resume_blocker(dust_context_for_halt)
@@ -302,12 +341,15 @@ class RuntimeResumeService:
                 )
             )
 
+        residual_run_allowed = bool(
+            residual_disposition is not None and bool(getattr(residual_disposition, "run_allowed", False))
+        )
         unresolved_dust_safe = bool(
             state.halt_state_unresolved
             and (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
             and int(state.unresolved_open_order_count) == 0
             and int(state.recovery_required_count) == 0
-            and bool(dust_context_for_halt["effective_flat"])
+            and (residual_run_allowed or bool(dust_context_for_halt["effective_flat"]))
         )
         if state.halt_state_unresolved and not unresolved_dust_safe:
             reasons.append(
@@ -342,8 +384,14 @@ class RuntimeResumeService:
             dust_exposure_only = bool(
                 not open_orders_present
                 and position_present
-                and bool(dust_context["present"])
-                and bool(dust_context["effective_flat"])
+                and (
+                    residual_run_allowed
+                    or (
+                        residual_disposition is None
+                        and bool(dust_context["present"])
+                        and bool(dust_context["effective_flat"])
+                    )
+                )
             )
             if open_orders_present or (position_present and not dust_exposure_only):
                 detail = (

@@ -445,11 +445,11 @@ def test_quantity_contract_unknown_authority_requires_manual_action() -> None:
 
     assert contract.qty_step_authority_level == "unknown"
     assert contract.quantity_contract_complete is False
-    assert contract.quantity_contract_recommended_action == "refresh_order_rules_or_manual_exchange_closeout"
+    assert contract.quantity_contract_recommended_action == "refresh_order_rules_or_review_quantity_settings"
     payload = contract.as_dict()
     assert payload["qty_step_authority_level"] == "unknown"
     assert payload["quantity_contract_complete"] is False
-    assert payload["quantity_contract_recommended_action"] == "refresh_order_rules_or_manual_exchange_closeout"
+    assert payload["quantity_contract_recommended_action"] == "refresh_order_rules_or_review_quantity_settings"
 
 
 def test_buy_price_none_market_to_price_alias_flag_is_deprecated_and_ignored(monkeypatch, caplog):

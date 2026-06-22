@@ -28,6 +28,7 @@ from .lifecycle import (
 )
 from .markets import normalize_market_id
 from .position_authority_state import build_lot_projection_convergence, build_position_authority_assessment
+from .residual_disposition import ResidualDisposition, build_residual_disposition
 from .recovery_policy import (
     build_tradeability_operator_fields,
     classify_canonical_recovery_state,
@@ -92,6 +93,7 @@ class RuntimeReadinessSnapshot:
     residual_inventory_policy_allows_run: bool
     residual_inventory_policy_allows_buy: bool
     residual_inventory_policy_allows_sell: bool
+    residual_disposition: ResidualDisposition
     total_effective_exposure_qty: float
     total_effective_exposure_notional_krw: float | None
     residual_sell_candidate: dict[str, object] | None
@@ -220,6 +222,17 @@ class RuntimeReadinessSnapshot:
             "residual_inventory_policy_allows_run": bool(self.residual_inventory_policy_allows_run),
             "residual_inventory_policy_allows_buy": bool(self.residual_inventory_policy_allows_buy),
             "residual_inventory_policy_allows_sell": bool(self.residual_inventory_policy_allows_sell),
+            "residual_disposition": self.residual_disposition.as_dict(),
+            "residual_reason_code": (
+                self.residual_disposition.reason_codes[0]
+                if self.residual_disposition.reason_codes
+                else "none"
+            ),
+            "quantity_rule_authority": self.residual_disposition.quantity_rule_authority,
+            "manual_exchange_action_required": bool(
+                self.residual_disposition.manual_exchange_action_required
+            ),
+            "broker_local_projection_state": self.residual_disposition.broker_local_projection_state,
             "total_effective_exposure_qty": float(self.total_effective_exposure_qty),
             "total_effective_exposure_notional_krw": (
                 None
@@ -328,9 +341,7 @@ def evaluate_clean_account_gate(
             price = float(residual_inventory.residual_notional_krw) / residual_qty
     notional = raw_qty * price if price > 0 else 0.0
     min_notional = float(settings.MIN_ORDER_NOTIONAL_KRW or 0.0)
-    exchange_sellable = bool(getattr(residual_inventory, "exchange_sellable", False)) or (
-        min_notional > 0 and notional + 1e-12 >= min_notional
-    )
+    exchange_sellable = bool(getattr(residual_inventory, "exchange_sellable", False))
     if (
         effective_flat
         and evidence_scoped_qty_available
@@ -534,7 +545,12 @@ def _is_residual_inventory_trackable(
         return False
     if not bool(projection_convergence.get("converged")):
         return False
-    if not bool(residual_inventory.material_residual):
+    true_dust_trackable = bool(
+        float(getattr(residual_inventory, "residual_qty", 0.0) or 0.0) > 1e-12
+        and not bool(residual_inventory.exchange_sellable)
+        and "TRUE_DUST" in tuple(getattr(residual_inventory, "residual_classes", ()) or ())
+    )
+    if not (bool(residual_inventory.material_residual) or true_dust_trackable):
         return False
     if not bool(residual_inventory.explainable):
         return False
@@ -1444,6 +1460,21 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         residual_inventory_policy_allows_sell = bool(
             residual_inventory_policy_allows_run and residual_inventory.exchange_sellable
         )
+        residual_disposition = build_residual_disposition(
+            residual_inventory=residual_inventory,
+            residual_inventory_state=residual_inventory_state,
+            residual_policy_allows_run=residual_inventory_policy_allows_run,
+            residual_policy_allows_buy=residual_inventory_policy_allows_buy,
+            residual_policy_allows_sell=residual_inventory_policy_allows_sell,
+            position_state=position_state,
+            authority_assessment=authority_assessment,
+            projection_convergence=projection_convergence,
+            broker_position_evidence=broker_position_evidence,
+            lot_definition=lot_definition,
+            open_order_count=open_order_count,
+            submit_unknown_count=submit_unknown_count,
+            recovery_required_count=recovery_required_count,
+        )
         residual_sell_candidate = _build_residual_sell_candidate_summary(
             residual_inventory=residual_inventory,
             residual_inventory_mode=residual_inventory_mode,
@@ -1543,6 +1574,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             residual_inventory_policy_allows_run=residual_inventory_policy_allows_run,
             residual_inventory_policy_allows_buy=residual_inventory_policy_allows_buy,
             residual_inventory_policy_allows_sell=residual_inventory_policy_allows_sell,
+            residual_disposition=residual_disposition,
             total_effective_exposure_qty=total_effective_exposure_qty,
             total_effective_exposure_notional_krw=total_effective_exposure_notional_krw,
             residual_sell_candidate=residual_sell_candidate,

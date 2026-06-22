@@ -2317,6 +2317,7 @@ def summarize_non_executable_residuals(
                 value in residual_classes
                 for value in (
                     "NEAR_LOT_RESIDUAL",
+                    "TRUE_DUST",
                     "PORTFOLIO_ANCHOR_RESIDUAL",
                     "DEGRADED_RECOVERY_RESIDUAL",
                     "UNCLASSIFIED_RESIDUAL",

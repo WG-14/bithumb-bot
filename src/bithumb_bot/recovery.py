@@ -58,6 +58,7 @@ from . import runtime_state
 from .notifier import format_event, notify
 from .observability import safety_event
 from .reason_codes import AMBIGUOUS_RECENT_FILL, AMBIGUOUS_SUBMIT, RECONCILE_MISMATCH, WEAK_ORDER_CORRELATION
+from .runtime_readiness import compute_runtime_readiness_snapshot
 
 
 LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "ACCOUNTING_PENDING", "CANCEL_REQUESTED")
@@ -1734,6 +1735,11 @@ def _clear_reconcile_halt_if_safe(
     unresolved_count = int(unresolved_row["unresolved_count"] or 0) if unresolved_row else 0
     recovery_required_count = int(unresolved_row["recovery_required_count"] or 0) if unresolved_row else 0
     position_qty = float(portfolio_row["asset_qty"] or 0.0) if portfolio_row else 0.0
+    readiness_snapshot = compute_runtime_readiness_snapshot(conn)
+    residual_disposition = getattr(readiness_snapshot, "residual_disposition", None)
+    residual_run_allowed = bool(
+        residual_disposition is not None and bool(getattr(residual_disposition, "run_allowed", False))
+    )
     dust_resume_allowed = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
     dust_context = build_dust_display_context(metadata)
     lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
@@ -1776,7 +1782,7 @@ def _clear_reconcile_halt_if_safe(
         normalized_exposure.exit_block_reason,
         int(position_has_executable_exposure),
         int(position_dust_only),
-        int(dust_resume_allowed),
+        int(residual_run_allowed or dust_resume_allowed),
         state.halt_reason_code or "-",
     )
     if not (
@@ -1784,7 +1790,11 @@ def _clear_reconcile_halt_if_safe(
         and recovery_required_count == 0
         and broker_open_order_count == 0
         and not position_has_executable_exposure
-        and (position_flat or (position_dust_only and dust_resume_allowed))
+        and (
+            residual_run_allowed
+            or position_flat
+            or (position_dust_only and dust_resume_allowed)
+        )
     ):
         _LOG.info(
             "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s raw_total_asset_qty=%.8f executable_exposure_qty=%.8f dust_tracking_qty=%.8f open_lot_count=%s dust_tracking_lot_count=%s sellable_executable_lot_count=%s sellable_executable_qty=%.8f exit_block_reason=%s position_terminal_state=%s position_has_executable_exposure=%s position_dust_only=%s dust_resume_allowed=%s",
@@ -1802,7 +1812,7 @@ def _clear_reconcile_halt_if_safe(
             normalized_exposure.terminal_state,
             int(position_has_executable_exposure),
             int(position_dust_only),
-            int(dust_resume_allowed),
+            int(residual_run_allowed or dust_resume_allowed),
         )
         return
     _LOG.info(

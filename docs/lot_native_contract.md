@@ -119,6 +119,13 @@ non-executable residue. That residue is born during BUY fill ingestion. A later
 SELL consumes only `open_exposure` lots and must not consume the existing
 `dust_tracking` row.
 
+Residual inventory architecture is documented in
+[`docs/residual_inventory_architecture.md`](/docs/residual_inventory_architecture.md).
+The selected architecture keeps lot-native authority and allows any future dust
+re-bucketing only as an explicit ledger/projection event. This task does not
+implement re-bucketing or restore SELL authority by summing `open_exposure` and
+`dust_tracking`.
+
 This design is only acceptable when emitted diagnostics keep the layers
 explicit. Repair and recovery logic must verify present-state convergence
 rather than treating the existence of a repair event as proof that these layers

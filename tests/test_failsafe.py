@@ -484,7 +484,7 @@ def test_unknown_qty_step_authority_blocks_clean_closeout() -> None:
     assert contract.closeout_allowed is False
     assert contract.clean_account_after_sell is False
     assert contract.block_reason == "quantity_step_authority_unknown_or_fallback"
-    assert contract.recommended_action == "refresh_order_rules_or_manual_exchange_closeout"
+    assert contract.recommended_action == "refresh_order_rules_or_review_quantity_settings"
     assert contract.quantity_authority["qty_step_authority_level"] == "unknown"
     assert contract.quantity_authority["quantity_contract_complete"] is False
     assert plan_calls == []
