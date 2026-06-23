@@ -121,6 +121,68 @@ def test_h74_runtime_planner_injects_startup_gate_block(monkeypatch) -> None:
     assert summary.target_submit_plan.submit_expected is False
 
 
+def test_h74_runtime_planner_blocks_nonzero_persisted_target_state() -> None:
+    original_engine = settings.EXECUTION_ENGINE
+    object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")
+    try:
+        payload = _inject_h74_startup_gate(
+            readiness_payload={
+                **_readiness(),
+                "position_mode": POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT,
+            },
+            target_state={"target_exposure_krw": 100_000.0},
+            authority_fields={"residual_inventory_mode": "block_executable_residual"},
+        )
+        summary = build_execution_decision_summary(
+            decision_context={
+                **payload,
+                "position_mode": POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT,
+                "signal": "BUY",
+                "final_signal": "BUY",
+                "cash_available": 1_000_000.0,
+            },
+            raw_signal="BUY",
+            final_signal="BUY",
+            previous_target_exposure_krw=100_000.0,
+        )
+    finally:
+        object.__setattr__(settings, "EXECUTION_ENGINE", original_engine)
+
+    assert payload["h74_startup_gate_status"] == "START_BLOCKED"
+    assert payload["h74_startup_gate_reason_code"] == "target_state_nonzero"
+    assert summary.target_submit_plan is not None
+    plan = summary.target_submit_plan.as_dict()
+    assert plan["h74_startup_gate_status"] == "START_BLOCKED"
+    assert plan["h74_startup_gate_reason_code"] == "target_state_nonzero"
+    assert plan["submit_expected"] is False
+
+
+def test_h74_runtime_planner_runs_startup_gate_even_when_previous_target_nonzero(monkeypatch) -> None:
+    called = {"target_state": None}
+
+    def fake_gate(*, readiness_payload, target_state=None, authority=None):
+        called["target_state"] = target_state
+        return evaluate_h74_startup_gate(
+            readiness_payload=readiness_payload,
+            target_state=target_state,
+            authority=authority,
+        )
+
+    monkeypatch.setattr(
+        "bithumb_bot.run_loop_execution_planner.evaluate_h74_startup_gate",
+        fake_gate,
+    )
+    payload = _inject_h74_startup_gate(
+        readiness_payload=_readiness(),
+        target_state={"target_exposure_krw": 100_000.0},
+        authority_fields={"residual_inventory_mode": "block_executable_residual"},
+    )
+
+    assert called["target_state"] == {"target_exposure_krw": 100_000.0}
+    assert payload["h74_startup_gate_status"] == "START_BLOCKED"
+    assert payload["startup_gate"]["details"]["target_exposure_krw"] == 100_000.0
+
+
 def test_h74_startup_gate_hash_is_recorded_in_submit_plan_or_certificate() -> None:
     original_engine = settings.EXECUTION_ENGINE
     object.__setattr__(settings, "EXECUTION_ENGINE", "target_delta")

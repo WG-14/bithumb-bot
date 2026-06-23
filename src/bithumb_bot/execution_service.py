@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from . import runtime_state
-from .config import settings
+from .config import runtime_code_provenance, settings
 from .db_core import ensure_db
 from .decision_contract import apply_decision_contract
 from .decision_context import resolve_canonical_position_exposure_snapshot
@@ -40,8 +40,11 @@ from .submit_authority_policy import (
     submit_authority_policy_from_settings,
 )
 from .target_position import TargetPositionSettings, build_target_position_decision
-from .experiment_execution_contract import POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
-from .h74_readiness_certificate import validate_h74_readiness_certificate
+from .experiment_execution_contract import (
+    POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT,
+    current_h74_experiment_execution_contract_from_payload,
+)
+from .h74_readiness_certificate import _file_hash, validate_h74_readiness_certificate
 from .virtual_target_state import assert_not_live_submit_authority
 
 if False:  # pragma: no cover
@@ -110,6 +113,8 @@ EXECUTION_PLANNING_READINESS_KEYS = frozenset(
         "position_mode",
         "hold_policy",
         "authority_hash",
+        "authority_parameter_hash",
+        "source_artifact_hash",
         "strategy_instance_id",
         "cycle_id",
         "h74_cycle_id",
@@ -117,12 +122,16 @@ EXECUTION_PLANNING_READINESS_KEYS = frozenset(
         "h74_remaining_cycle_qty",
         "h74_cycle_inventory",
         "locked_exit_qty",
+        "h74_cycle_inventory_error",
+        "h74_open_cycle_count",
         "residual_inventory_mode",
         "partial_fill_policy",
         "h74_startup_gate_status",
         "h74_startup_gate_reason_code",
         "startup_gate_hash",
         "startup_gate",
+        "contract_hash",
+        "experiment_execution_contract",
         "authority_source",
         "h74_source_authority_hash",
         "h74_source_authority",
@@ -409,6 +418,8 @@ class TypedExecutionPlanningInput:
             "position_mode",
             "hold_policy",
             "authority_hash",
+            "authority_parameter_hash",
+            "source_artifact_hash",
             "h74_source_authority_hash",
             "strategy_instance_id",
             "residual_inventory_mode",
@@ -418,11 +429,15 @@ class TypedExecutionPlanningInput:
             "remaining_cycle_qty",
             "h74_remaining_cycle_qty",
             "locked_exit_qty",
+            "h74_cycle_inventory_error",
+            "h74_open_cycle_count",
             "h74_cycle_inventory",
             "h74_startup_gate_status",
             "h74_startup_gate_reason_code",
             "startup_gate_hash",
             "startup_gate",
+            "contract_hash",
+            "experiment_execution_contract",
             "h74_source_authority",
         ):
             if h74_key in observability:
@@ -1877,12 +1892,6 @@ def _build_execution_decision_summary_from_authority_payload(
             )
         )
         if (
-            configured_position_mode == POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
-            and raw == "BUY"
-            and str(payload.get("h74_startup_gate_status") or "").strip() == "START_BLOCKED"
-        ):
-            target_authority_error = str(payload.get("h74_startup_gate_reason_code") or "h74_startup_gate_block")
-        if (
             target_authority_error is None
             and configured_position_mode == POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
             and raw == "BUY"
@@ -1899,34 +1908,6 @@ def _build_execution_decision_summary_from_authority_payload(
             ).strip()
             if not cert_path:
                 target_authority_error = "h74_readiness_certificate_missing"
-            else:
-                try:
-                    certificate = json.loads(Path(cert_path).read_text(encoding="utf-8"))
-                    verdict = validate_h74_readiness_certificate(
-                        certificate if isinstance(certificate, Mapping) else {},
-                        env_file=str(os.environ.get("BITHUMB_ENV_FILE") or ""),
-                        broker_balance_snapshot_hash=str(payload.get("broker_balance_snapshot_hash") or ""),
-                        current_commit_sha=str(payload.get("commit_sha") or ""),
-                        current_db_schema_hash=str(payload.get("db_schema_hash") or ""),
-                        current_order_rule_fee_authority_hash=str(
-                            payload.get("order_rule_fee_authority_hash") or ""
-                        ),
-                        current_gate_trace_hash=str(payload.get("gate_trace_hash") or ""),
-                        current_would_submit_plan_hash=str(
-                            payload.get("would_submit_plan_hash") or ""
-                        ),
-                        current_behavior_comparison_hash=str(
-                            payload.get("behavior_comparison_hash") or ""
-                        ),
-                        current_contract_hash=str(payload.get("contract_hash") or ""),
-                        strict=True,
-                    )
-                    if not bool(verdict.get("valid")):
-                        target_authority_error = "h74_certificate_gate_block:" + ",".join(
-                            str(reason) for reason in verdict.get("reasons", [])
-                        )
-                except Exception as exc:
-                    target_authority_error = f"h74_certificate_gate_block:{type(exc).__name__}"
         authoritative_target_exposure_krw = (
             None
             if portfolio_target is None or target_authority_error is not None
@@ -1950,6 +1931,13 @@ def _build_execution_decision_summary_from_authority_payload(
             authoritative_target_exposure_krw=authoritative_target_exposure_krw,
         )
         target_shadow_decision = target_decision.as_dict()
+        if (
+            target_authority_error is None
+            and configured_position_mode == POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
+            and str(target_decision.delta_side) == "BUY"
+            and str(payload.get("h74_startup_gate_status") or "").strip() == "START_BLOCKED"
+        ):
+            target_authority_error = str(payload.get("h74_startup_gate_reason_code") or "h74_startup_gate_block")
         entry_authority = evaluate_entry_authority(
             payload=payload,
             side=str(target_decision.delta_side),
@@ -2009,6 +1997,99 @@ def _build_execution_decision_summary_from_authority_payload(
                     authority_source="target_delta.desired_delta",
                 )
                 target_sizing_dict = target_sizing.as_dict()
+            if (
+                target_authority_error is None
+                and configured_position_mode == POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
+                and raw == "BUY"
+            ):
+                quantity_contract_hash = str(
+                    (target_sizing_dict or {}).get("quantity_contract_hash")
+                    or payload.get("quantity_contract_hash")
+                    or ""
+                )
+                order_rule_snapshot_hash = str(
+                    payload.get("order_rule_snapshot_hash")
+                    or sha256_prefixed(
+                        {
+                            "pair": authoritative_pair,
+                            "order_rules": execution_order_rules.as_order_rules(),
+                        }
+                    )
+                )
+                fee_slippage_timing_hash = str(
+                    payload.get("fee_slippage_timing_hash")
+                    or sha256_prefixed(
+                        {
+                            "fee": payload.get("fee_comparison"),
+                            "slippage_bps": payload.get("slippage_bps"),
+                            "candle_timing": payload.get("candle_timing"),
+                        }
+                    )
+                )
+                provenance = runtime_code_provenance()
+                current_commit_sha = str(
+                    payload.get("commit_sha")
+                    or payload.get("code_commit_sha")
+                    or provenance.get("commit_sha")
+                    or "unavailable"
+                )
+                env_file = str(os.environ.get("BITHUMB_ENV_FILE") or "")
+                current_contract = current_h74_experiment_execution_contract_from_payload(
+                    payload,
+                    code_commit_sha=current_commit_sha,
+                    env_file_hash=_file_hash(env_file),
+                    quantity_contract_hash=quantity_contract_hash,
+                    order_rule_snapshot_hash=order_rule_snapshot_hash,
+                    fee_slippage_timing_hash=fee_slippage_timing_hash,
+                ).as_payload()
+                payload["experiment_execution_contract"] = current_contract
+                payload["contract_hash"] = str(current_contract["contract_hash"])
+                payload["quantity_contract_hash"] = quantity_contract_hash
+                payload["order_rule_snapshot_hash"] = order_rule_snapshot_hash
+                payload["fee_slippage_timing_hash"] = fee_slippage_timing_hash
+                payload["commit_sha"] = current_commit_sha
+                if (
+                    str(getattr(settings, "MODE", "") or "").strip().lower() == "live"
+                    and bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False))
+                    and not bool(getattr(settings, "LIVE_DRY_RUN", True))
+                    and str(os.environ.get("H74_LIVE_REHEARSAL_NO_SUBMIT_BOUNDARY") or "").strip().lower()
+                    not in {"1", "true", "yes", "on"}
+                ):
+                    cert_path = str(
+                        payload.get("h74_readiness_certificate_path")
+                        or getattr(settings, "H74_READINESS_CERTIFICATE_PATH", "")
+                        or ""
+                    ).strip()
+                    if not cert_path:
+                        target_authority_error = "h74_readiness_certificate_missing"
+                    else:
+                        try:
+                            certificate = json.loads(Path(cert_path).read_text(encoding="utf-8"))
+                            verdict = validate_h74_readiness_certificate(
+                                certificate if isinstance(certificate, Mapping) else {},
+                                env_file=env_file,
+                                broker_balance_snapshot_hash=str(payload.get("broker_balance_snapshot_hash") or ""),
+                                current_commit_sha=current_commit_sha,
+                                current_db_schema_hash=str(payload.get("db_schema_hash") or ""),
+                                current_order_rule_fee_authority_hash=str(
+                                    payload.get("order_rule_fee_authority_hash") or ""
+                                ),
+                                current_gate_trace_hash=str(payload.get("gate_trace_hash") or ""),
+                                current_would_submit_plan_hash=str(
+                                    payload.get("would_submit_plan_hash") or ""
+                                ),
+                                current_behavior_comparison_hash=str(
+                                    payload.get("behavior_comparison_hash") or ""
+                                ),
+                                current_contract_hash=str(current_contract["contract_hash"]),
+                                strict=True,
+                            )
+                            if not bool(verdict.get("valid")):
+                                target_authority_error = "h74_certificate_gate_block:" + ",".join(
+                                    str(reason) for reason in verdict.get("reasons", [])
+                                )
+                        except Exception as exc:
+                            target_authority_error = f"h74_certificate_gate_block:{type(exc).__name__}"
             target_idempotency_key = None
             if target_sizing is not None and target_sizing.allowed:
                 target_idempotency_key = build_order_intent_key(
@@ -2266,6 +2347,8 @@ def _build_execution_decision_summary_from_authority_payload(
                 "position_mode",
                 "hold_policy",
                 "authority_hash",
+                "authority_parameter_hash",
+                "source_artifact_hash",
                 "h74_source_authority_hash",
                 "strategy_instance_id",
                 "residual_inventory_mode",
@@ -2275,11 +2358,15 @@ def _build_execution_decision_summary_from_authority_payload(
                 "remaining_cycle_qty",
                 "h74_remaining_cycle_qty",
                 "locked_exit_qty",
+                "h74_cycle_inventory_error",
+                "h74_open_cycle_count",
                 "h74_cycle_inventory",
                 "h74_startup_gate_status",
                 "h74_startup_gate_reason_code",
                 "startup_gate_hash",
                 "startup_gate",
+                "contract_hash",
+                "experiment_execution_contract",
             ):
                 if h74_key in payload:
                     target_plan_extra[h74_key] = payload[h74_key]

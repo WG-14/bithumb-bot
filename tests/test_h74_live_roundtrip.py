@@ -14,6 +14,7 @@ from bithumb_bot.db_core import ensure_db, init_portfolio, record_broker_fill_ob
 from bithumb_bot.execution import apply_fill_and_trade, apply_fill_principal_with_pending_fee, record_order_if_missing
 from bithumb_bot.h74_cycle_state import build_h74_cycle_id, load_h74_cycle_inventory
 from bithumb_bot.h74_live_rehearsal import H74LiveRehearsalConfig, run_h74_live_rehearsal
+from bithumb_bot.run_loop_execution_planner import _inject_h74_cycle_inventory
 from bithumb_bot.oms import set_status
 from bithumb_bot.order_settlement import OrderSettlementCoordinator, SettlementBarrierConfig
 from bithumb_bot.runtime.daily_participation_claims import (
@@ -297,10 +298,18 @@ def test_h74_buy_fill_marks_daily_claim_fulfilled(tmp_path, roundtrip_db) -> Non
         settlement = _runtime_settlement(order, fills, roundtrip_db)
         row = conn.execute("SELECT status FROM daily_participation_claims").fetchone()
         order_row = conn.execute(
-            "SELECT cycle_id FROM orders WHERE client_order_id=?",
+            "SELECT cycle_id, authority_hash, strategy_instance_id FROM orders WHERE client_order_id=?",
             (order.client_order_id,),
         ).fetchone()
         inventory = load_h74_cycle_inventory(conn, cycle_id=str(order_row["cycle_id"]))
+        discovered = _inject_h74_cycle_inventory(
+            conn,
+            readiness_payload={
+                "authority_hash": str(order_row["authority_hash"]),
+                "strategy_instance_id": str(order_row["strategy_instance_id"]),
+            },
+            planning_context={"runtime_pair": "KRW-BTC"},
+        )
     finally:
         conn.close()
 
@@ -308,6 +317,8 @@ def test_h74_buy_fill_marks_daily_claim_fulfilled(tmp_path, roundtrip_db) -> Non
     assert inventory is not None
     assert inventory.acquired_qty == pytest.approx(float(fills[0].qty))
     assert inventory.remaining_cycle_qty == pytest.approx(float(fills[0].qty))
+    assert discovered["h74_cycle_id"] == str(order_row["cycle_id"])
+    assert discovered["h74_remaining_cycle_qty"] == pytest.approx(float(fills[0].qty))
     assert settlement.settled is True
     assert settlement.fee_state == "finalized"
     assert settlement.principal_applied is True

@@ -48,7 +48,11 @@ from .runtime_strategy_set import (
 from .strategy_risk_profile import strategy_risk_profile_from_profile_payload
 from .strategy_policy_contract import StrategyDecisionV2
 from .strategy_performance import evaluate_strategy_performance_gate
-from .h74_cycle_state import build_h74_cycle_id, load_h74_cycle_inventory
+from .h74_cycle_state import (
+    build_h74_cycle_id,
+    load_h74_cycle_inventory,
+    load_open_h74_cycle_inventories,
+)
 from .h74_observation import (
     H74_SOURCE_OBSERVATION_AUTHORITY_ENV,
     verify_h74_source_observation_authority,
@@ -99,6 +103,8 @@ READINESS_CONTEXT_KEYS = (
     "position_mode",
     "hold_policy",
     "authority_hash",
+    "authority_parameter_hash",
+    "source_artifact_hash",
     "strategy_instance_id",
     "cycle_id",
     "h74_cycle_id",
@@ -106,11 +112,15 @@ READINESS_CONTEXT_KEYS = (
     "h74_remaining_cycle_qty",
     "h74_cycle_inventory",
     "locked_exit_qty",
+    "h74_cycle_inventory_error",
+    "h74_open_cycle_count",
     "partial_fill_policy",
     "h74_startup_gate_status",
     "h74_startup_gate_reason_code",
     "startup_gate_hash",
     "startup_gate",
+    "contract_hash",
+    "experiment_execution_contract",
     "cash_available",
 )
 
@@ -146,9 +156,14 @@ def _h74_authority_planning_fields(settings_obj: object) -> dict[str, object]:
         "hold_policy": str(authority.get("hold_policy") or bound.get("hold_policy") or "max_holding_time"),
         "authority_hash": str(authority.get("authority_content_hash") or ""),
         "h74_source_authority_hash": str(authority.get("authority_content_hash") or ""),
+        "authority_parameter_hash": str(authority.get("authority_parameter_hash") or ""),
+        "source_artifact_hash": str(
+            bound.get("source_candidate_artifact_hash") or bound.get("source_artifact_hash") or ""
+        ),
         "h74_source_authority": {
             "artifact_type": authority.get("artifact_type"),
             "authority_content_hash": authority.get("authority_content_hash"),
+            "authority_parameter_hash": authority.get("authority_parameter_hash"),
             "hash_bound_parameters": bound,
         },
         "strategy_instance_id": str(authority.get("strategy_instance_id") or bound.get("strategy_instance_id") or ""),
@@ -197,8 +212,41 @@ def _inject_h74_cycle_inventory(
         or ""
     ).strip()
     if not cycle_id:
-        return readiness_payload
-    inventory = load_h74_cycle_inventory(conn, cycle_id=cycle_id)
+        strategy_instance_id = str(
+            readiness_payload.get("strategy_instance_id")
+            or planning_context.get("strategy_instance_id")
+            or ""
+        ).strip()
+        authority_hash = str(
+            readiness_payload.get("authority_hash")
+            or readiness_payload.get("h74_source_authority_hash")
+            or planning_context.get("authority_hash")
+            or planning_context.get("h74_source_authority_hash")
+            or ""
+        ).strip()
+        pair = str(
+            readiness_payload.get("runtime_pair")
+            or planning_context.get("runtime_pair")
+            or getattr(settings, "PAIR", "")
+            or ""
+        ).strip()
+        if not strategy_instance_id or not authority_hash or not pair:
+            return readiness_payload
+        inventories = load_open_h74_cycle_inventories(
+            conn,
+            strategy_instance_id=strategy_instance_id,
+            authority_hash=authority_hash,
+            pair=pair,
+        )
+        if len(inventories) > 1:
+            return {
+                **readiness_payload,
+                "h74_cycle_inventory_error": "multiple_open_h74_cycles",
+                "h74_open_cycle_count": len(inventories),
+            }
+        inventory = inventories[0] if inventories else None
+    else:
+        inventory = load_h74_cycle_inventory(conn, cycle_id=cycle_id)
     if inventory is None:
         return readiness_payload
     inventory_payload = inventory.as_dict()
@@ -1945,11 +1993,7 @@ class ExecutionPlanner:
             else:
                 context["authoritative_execution_signal"] = planning_input.final_signal
             readiness_payload = {**readiness_payload, **target_policy_metadata}
-            flat_start_candidate = (
-                previous_target_exposure_krw is None
-                or float(previous_target_exposure_krw or 0.0) <= 1e-9
-            )
-            if h74_authority_fields and authoritative_signal == "BUY" and flat_start_candidate:
+            if h74_authority_fields and authoritative_signal == "BUY":
                 readiness_payload = _inject_h74_startup_gate(
                     readiness_payload=readiness_payload,
                     target_state={
@@ -1976,16 +2020,21 @@ class ExecutionPlanner:
                         "position_mode",
                         "hold_policy",
                         "authority_hash",
+                        "authority_parameter_hash",
+                        "source_artifact_hash",
                         "strategy_instance_id",
                         "cycle_id",
                         "h74_cycle_id",
                         "remaining_cycle_qty",
                         "h74_remaining_cycle_qty",
                         "locked_exit_qty",
+                        "h74_cycle_inventory_error",
+                        "h74_open_cycle_count",
                         "partial_fill_policy",
                         "h74_startup_gate_status",
                         "h74_startup_gate_reason_code",
                         "startup_gate_hash",
+                        "contract_hash",
                     )
                     if key in readiness_payload
                 }
@@ -2147,6 +2196,8 @@ def _with_h74_submit_plan_evidence(
         "position_mode",
         "hold_policy",
         "authority_hash",
+        "authority_parameter_hash",
+        "source_artifact_hash",
         "h74_source_authority_hash",
         "strategy_instance_id",
         "residual_inventory_mode",
@@ -2156,11 +2207,15 @@ def _with_h74_submit_plan_evidence(
         "remaining_cycle_qty",
         "h74_remaining_cycle_qty",
         "locked_exit_qty",
+        "h74_cycle_inventory_error",
+        "h74_open_cycle_count",
         "h74_cycle_inventory",
         "h74_startup_gate_status",
         "h74_startup_gate_reason_code",
         "startup_gate_hash",
         "startup_gate",
+        "contract_hash",
+        "experiment_execution_contract",
         "h74_source_authority",
     ):
         if h74_key in extra:

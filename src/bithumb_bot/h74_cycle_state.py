@@ -157,6 +157,62 @@ def load_h74_cycle_inventory(conn: sqlite3.Connection, *, cycle_id: str) -> H74C
     )
 
 
+def load_open_h74_cycle_inventories(
+    conn: sqlite3.Connection,
+    *,
+    strategy_instance_id: str,
+    authority_hash: str,
+    pair: str,
+) -> tuple[H74CycleInventory, ...]:
+    ensure_h74_cycle_schema(conn)
+    rows = conn.execute(
+        """
+        SELECT cycle_id, authority_hash, strategy_instance_id, acquired_qty, sold_qty, locked_exit_qty
+        FROM h74_cycle_state
+        WHERE strategy_instance_id=?
+          AND authority_hash=?
+          AND pair=?
+          AND state=?
+        ORDER BY updated_ts ASC, cycle_id ASC
+        """,
+        (
+            str(strategy_instance_id),
+            str(authority_hash),
+            str(pair),
+            H74_CYCLE_STATE_HOLDING,
+        ),
+    ).fetchall()
+    return tuple(
+        H74CycleInventory(
+            cycle_id=str(row["cycle_id"] if hasattr(row, "keys") else row[0]),
+            authority_hash=str(row["authority_hash"] if hasattr(row, "keys") else row[1]),
+            strategy_instance_id=str(row["strategy_instance_id"] if hasattr(row, "keys") else row[2]),
+            acquired_qty=float(row["acquired_qty"] if hasattr(row, "keys") else row[3]),
+            sold_qty=float(row["sold_qty"] if hasattr(row, "keys") else row[4]),
+            locked_exit_qty=float(row["locked_exit_qty"] if hasattr(row, "keys") else row[5]),
+        )
+        for row in rows
+    )
+
+
+def load_open_h74_cycle_inventory(
+    conn: sqlite3.Connection,
+    *,
+    strategy_instance_id: str,
+    authority_hash: str,
+    pair: str,
+) -> H74CycleInventory | None:
+    inventories = load_open_h74_cycle_inventories(
+        conn,
+        strategy_instance_id=strategy_instance_id,
+        authority_hash=authority_hash,
+        pair=pair,
+    )
+    if len(inventories) > 1:
+        raise ValueError("multiple_open_h74_cycles")
+    return inventories[0] if inventories else None
+
+
 def lock_h74_cycle_exit_qty(
     conn: sqlite3.Connection,
     *,
@@ -198,6 +254,8 @@ __all__ = [
     "ensure_h74_cycle_schema",
     "h74_cycle_inventory_from_payload",
     "load_h74_cycle_inventory",
+    "load_open_h74_cycle_inventories",
+    "load_open_h74_cycle_inventory",
     "lock_h74_cycle_exit_qty",
     "upsert_h74_cycle_fill",
 ]

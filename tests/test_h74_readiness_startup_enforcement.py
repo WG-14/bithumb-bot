@@ -111,3 +111,41 @@ def test_h74_live_start_blocks_when_current_hashes_fallback_to_certificate_would
     assert "missing_current_commit_sha" in result["reasons"]
     assert "missing_current_order_rule_fee_authority_hash" in result["reasons"]
     assert "missing_current_contract_hash" in result["reasons"]
+
+
+def test_h74_live_start_blocks_when_current_contract_hash_mismatch() -> None:
+    result = validate_h74_readiness_certificate(
+        _certificate(contract_hash="sha256:certificate-contract"),
+        env_file=None,
+        broker_balance_snapshot_hash="sha256:broker",
+        current_commit_sha="abc",
+        current_db_schema_hash="sha256:schema",
+        current_order_rule_fee_authority_hash="sha256:rules",
+        current_gate_trace_hash="sha256:gate",
+        current_would_submit_plan_hash="sha256:plan",
+        current_behavior_comparison_hash="sha256:behavior",
+        current_contract_hash="sha256:current-contract",
+        strict=True,
+    )
+
+    assert result["valid"] is False
+    assert "contract_hash_mismatch" in result["reasons"]
+
+
+def test_h74_live_start_passes_contract_hash_when_current_values_match() -> None:
+    result = validate_h74_readiness_certificate(
+        _certificate(contract_hash="sha256:contract"),
+        env_file=None,
+        broker_balance_snapshot_hash="sha256:broker",
+        current_commit_sha="abc",
+        current_db_schema_hash="sha256:schema",
+        current_order_rule_fee_authority_hash="sha256:rules",
+        current_gate_trace_hash="sha256:gate",
+        current_would_submit_plan_hash="sha256:plan",
+        current_behavior_comparison_hash="sha256:behavior",
+        current_contract_hash="sha256:contract",
+        strict=True,
+    )
+
+    assert result["valid"] is True
+    assert result["status"] == "pass"

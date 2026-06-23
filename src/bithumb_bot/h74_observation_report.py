@@ -8,7 +8,7 @@ from typing import Any
 
 from .live_trade_classification import classify_h74_live_trade
 from .h74_cycle_classification import classify_h74_cycle
-from .h74_pnl_attribution import build_pnl_attribution, build_terminal_residual
+from .h74_pnl_attribution import build_pnl_attribution, build_terminal_residual, pnl_attribution_passes
 from .research.hashing import sha256_prefixed
 
 
@@ -571,6 +571,9 @@ def _h74_cycle_metrics(
             "created_ts",
             "cycle_id",
             "authority_hash",
+            "target_desired_qty",
+            "target_exchange_constrained_qty",
+            "target_final_submitted_qty",
         ],
     )
     if not {"client_order_id", "side", "cycle_id"}.issubset(set(order_columns)):
@@ -725,7 +728,13 @@ def _cycle_fill_payload(
     fills = fills_by_order.get(client_order_id, [])
     fill_qty = sum(_float_value(fill.get("qty")) for fill in fills)
     fill_notional = sum(_float_value(fill.get("qty")) * _float_value(fill.get("price")) for fill in fills)
+    reference_notional = sum(
+        _float_value(fill.get("qty")) * _float_value(fill.get("reference_price"))
+        for fill in fills
+        if _float_value(fill.get("reference_price")) > 0
+    )
     avg_price = fill_notional / fill_qty if fill_qty > 0 else 0.0
+    avg_reference_price = reference_notional / fill_qty if fill_qty > 0 and reference_notional > 0 else avg_price
     fill_ts_values = [
         int(_float_value(fill.get("fill_ts")))
         for fill in fills
@@ -739,7 +748,20 @@ def _cycle_fill_payload(
         "qty": fill_qty,
         "avg_price": avg_price,
         "fee": sum(_float_value(fill.get("fee")) for fill in fills),
-        "reference_price": _float_value(fills[0].get("reference_price")) if fills else avg_price,
+        "reference_price": avg_reference_price,
+        "slippage_bps": _weighted_average(
+            [
+                (_float_value(fill.get("slippage_bps")), _float_value(fill.get("qty")))
+                for fill in fills
+                if fill.get("slippage_bps") is not None and _float_value(fill.get("qty")) > 0
+            ]
+        ),
+        "submitted_qty": _first_positive(
+            order.get("target_final_submitted_qty"),
+            order.get("target_exchange_constrained_qty"),
+            order.get("target_desired_qty"),
+            fill_qty,
+        ),
         "authority_source": order.get("entry_authority_source")
         or order.get("authority_source")
         or "daily_participation_entry",
@@ -762,20 +784,60 @@ def _cycle_pnl_attribution(
 ) -> dict[str, Any]:
     entry_price = _float_value((entry or {}).get("avg_price"))
     exit_price = _float_value((exit or {}).get("avg_price"))
-    qty = min(_float_value((entry or {}).get("qty")), _float_value((exit or {}).get("qty")))
-    fee_delta = _float_value((entry or {}).get("fee")) + _float_value((exit or {}).get("fee"))
+    entry_qty = _float_value((entry or {}).get("qty"))
+    exit_qty = _float_value((exit or {}).get("qty"))
+    qty = min(entry_qty, exit_qty)
+    entry_reference = _float_value((entry or {}).get("reference_price")) or entry_price
+    exit_reference = _float_value((exit or {}).get("reference_price")) or exit_price
+    fee_delta = -(_float_value((entry or {}).get("fee")) + _float_value((exit or {}).get("fee")))
+    missing_reasons: list[str] = []
+    if entry is None:
+        missing_reasons.append("entry_fill_missing")
+    if exit is None:
+        missing_reasons.append("exit_fill_missing")
+    if entry_qty <= 0:
+        missing_reasons.append("entry_qty_missing")
+    if exit_qty <= 0:
+        missing_reasons.append("exit_qty_missing")
+    if entry_reference <= 0:
+        missing_reasons.append("entry_reference_price_missing")
+    if exit_reference <= 0:
+        missing_reasons.append("exit_reference_price_missing")
+    entry_slippage_bps = (entry or {}).get("slippage_bps")
+    exit_slippage_bps = (exit or {}).get("slippage_bps")
+    if entry_slippage_bps is not None or exit_slippage_bps is not None:
+        slippage_delta = (
+            entry_reference * entry_qty * _float_value(entry_slippage_bps) / 10_000.0
+            + exit_reference * exit_qty * _float_value(exit_slippage_bps) / 10_000.0
+        )
+    else:
+        slippage_delta = (entry_price - entry_reference) * entry_qty + (exit_reference - exit_price) * exit_qty
+    submitted_entry_qty = _float_value((entry or {}).get("submitted_qty"))
+    submitted_exit_qty = _float_value((exit or {}).get("submitted_qty"))
+    rounding_delta = 0.0
+    if submitted_entry_qty > 0:
+        rounding_delta += (submitted_entry_qty - entry_qty) * entry_reference
+    if submitted_exit_qty > 0:
+        rounding_delta += (submitted_exit_qty - exit_qty) * exit_reference
+    residual_mtm = _float_value(residual.get("residual_notional_krw"))
+    live_pnl = (exit_price - entry_price) * qty + fee_delta + residual_mtm
+    backtest_pnl = (exit_reference - entry_reference) * qty
+    live_minus_backtest_delta = live_pnl - backtest_pnl
     attribution = build_pnl_attribution(
-        backtest_expected_entry_price=_float_value((entry or {}).get("reference_price")) or entry_price,
+        backtest_expected_entry_price=entry_reference,
         live_entry_avg_price=entry_price,
-        backtest_expected_exit_price=_float_value((exit or {}).get("reference_price")) or exit_price,
+        backtest_expected_exit_price=exit_reference,
         live_exit_avg_price=exit_price,
         qty=qty,
         fee_delta_krw=fee_delta,
-        residual_mark_to_market_krw=_float_value(residual.get("residual_notional_krw")),
+        slippage_delta_krw=slippage_delta,
+        spread_or_price_path_delta_krw=live_minus_backtest_delta - fee_delta - slippage_delta - rounding_delta - residual_mtm,
+        rounding_delta_krw=rounding_delta,
+        residual_mark_to_market_krw=residual_mtm,
+        live_minus_backtest_delta_krw=live_minus_backtest_delta,
     )
-    from .h74_pnl_attribution import pnl_attribution_passes
-
-    attribution["passes"] = pnl_attribution_passes(attribution)
+    attribution["missing_component_reasons"] = missing_reasons
+    attribution["passes"] = bool(not missing_reasons and pnl_attribution_passes(attribution))
     return attribution
 
 
@@ -784,6 +846,21 @@ def _float_value(value: object) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _weighted_average(values: list[tuple[float, float]]) -> float | None:
+    total_weight = sum(weight for _value, weight in values)
+    if total_weight <= 0:
+        return None
+    return sum(value * weight for value, weight in values) / total_weight
+
+
+def _first_positive(*values: object) -> float:
+    for value in values:
+        parsed = _float_value(value)
+        if parsed > 0:
+            return parsed
+    return 0.0
 
 
 def _load_authority_scope(authority_path: str | None) -> dict[str, object]:

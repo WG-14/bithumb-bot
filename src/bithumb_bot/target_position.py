@@ -570,6 +570,14 @@ def build_target_position_decision(
     if fixed_h74 and signal == "SELL":
         cycle_id = str(base["h74_cycle_id"] or "")
         remaining_qty = base["h74_remaining_cycle_qty"]
+        inventory_error = str(payload.get("h74_cycle_inventory_error") or "").strip()
+        if inventory_error:
+            return _decision(
+                new_target_exposure_krw=0.0,
+                block_reason=inventory_error,
+                position_truth_state="blocked",
+                h74_no_submit_reason=inventory_error,
+            )
         if not cycle_id:
             return _decision(
                 new_target_exposure_krw=0.0,

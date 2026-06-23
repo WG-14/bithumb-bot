@@ -4,8 +4,11 @@ from bithumb_bot.core.sma_policy import EntryExecutionIntent, PositionSnapshot, 
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, load_target_position_state
 from bithumb_bot.decision_envelope import DecisionEnvelope
+from bithumb_bot.execution_service import build_execution_decision_summary
+from bithumb_bot.experiment_execution_contract import POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
 from bithumb_bot.run_loop_execution_planner import (
     ExecutionPlanner,
+    _inject_h74_startup_gate,
     resolve_target_position_state_for_run_loop,
 )
 from bithumb_bot.target_position import TARGET_POLICY_INITIALIZE_FLAT_TARGET
@@ -193,6 +196,44 @@ def test_restart_missing_target_state_kst10_entry_can_buy() -> None:
 
     assert plan["submit_expected"] is True
     assert plan["entry_authority_status"] == "ALLOW"
+
+
+def test_h74_source_authority_nonzero_target_state_blocks_entry() -> None:
+    old = _set_target_delta()
+    try:
+        payload = _inject_h74_startup_gate(
+            readiness_payload={
+                **_readiness(broker_qty=0.0),
+                "position_mode": POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT,
+            },
+            target_state={"target_exposure_krw": 100_000.0},
+            authority_fields={"residual_inventory_mode": "block_executable_residual"},
+        )
+        summary = build_execution_decision_summary(
+            decision_context={
+                **payload,
+                "position_mode": POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT,
+                "raw_signal": "BUY",
+                "final_signal": "BUY",
+                "signal": "BUY",
+                "final_reason": "daily_participation_fallback_allowed",
+                "market_price": 100_000_000.0,
+                "cash_available": 1_000_000.0,
+            },
+            readiness_payload=payload,
+            raw_signal="BUY",
+            final_signal="BUY",
+            final_reason="daily_participation_fallback_allowed",
+            previous_target_exposure_krw=100_000.0,
+        )
+    finally:
+        _restore(old)
+
+    assert summary.target_submit_plan is not None
+    plan = summary.target_submit_plan.as_dict()
+    assert plan["h74_startup_gate_status"] == "START_BLOCKED"
+    assert plan["h74_startup_gate_reason_code"] == "target_state_nonzero"
+    assert plan["submit_expected"] is False
 
 
 def test_restart_preserves_existing_position_management() -> None:

@@ -207,10 +207,11 @@ def _insert_cycle_fill(
     qty: float = 0.0008,
     fee: float = 10.0,
     reference_price: float | None = None,
+    slippage_bps: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO fills VALUES (?,?,?,?,?,?,?)",
-        (cid, _ts(fill_ts), price, qty, fee, reference_price if reference_price is not None else price, None),
+        (cid, _ts(fill_ts), price, qty, fee, reference_price if reference_price is not None else price, slippage_bps),
     )
 
 
@@ -758,6 +759,73 @@ def test_h74_observation_report_complete_requires_7_distinct_kst_days() -> None:
     assert report["daily_buy_filled_count"] == 7
     assert len(report["covered_kst_days"]) == 6
     assert report["complete"] is False
+
+
+def test_report_pnl_attribution_uses_fill_slippage_component() -> None:
+    conn = _cycle_conn()
+    _insert_cycle_order(conn, "entry", created="2026-06-18T00:00:00Z", side="BUY")
+    _insert_cycle_order(
+        conn,
+        "exit",
+        created="2026-06-18T01:14:00Z",
+        side="SELL",
+        exit_rule="max_holding_time",
+    )
+    _insert_cycle_fill(
+        conn,
+        "entry",
+        fill_ts="2026-06-18T00:00:10Z",
+        price=100_100_000.0,
+        reference_price=100_000_000.0,
+        slippage_bps=10.0,
+    )
+    _insert_cycle_fill(
+        conn,
+        "exit",
+        fill_ts="2026-06-18T01:14:10Z",
+        price=100_900_000.0,
+        reference_price=101_000_000.0,
+        slippage_bps=10.0,
+    )
+    _insert_cycle_state(conn)
+
+    report = build_h74_observation_report(
+        conn=conn,
+        days=7,
+        now=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        strategy_instance_id="h74:one",
+    )
+
+    attribution = report["pnl_attribution"]
+    assert attribution["slippage_delta_krw"] != 0.0
+    assert attribution["slippage_delta_krw"] == pytest.approx(160.8)
+
+
+def test_report_pnl_attribution_uses_rounding_or_residual_component() -> None:
+    conn = _cycle_conn()
+    _insert_cycle_order(conn, "entry", created="2026-06-18T00:00:00Z", side="BUY")
+    _insert_cycle_order(
+        conn,
+        "exit",
+        created="2026-06-18T01:14:00Z",
+        side="SELL",
+        exit_rule="max_holding_time",
+    )
+    _insert_cycle_fill(conn, "entry", fill_ts="2026-06-18T00:00:10Z", qty=0.0008)
+    _insert_cycle_fill(conn, "exit", fill_ts="2026-06-18T01:14:10Z", qty=0.0007)
+    _insert_cycle_state(conn, acquired_qty=0.0008, sold_qty=0.0007)
+
+    report = build_h74_observation_report(
+        conn=conn,
+        days=7,
+        now=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        strategy_instance_id="h74:one",
+    )
+
+    attribution = report["pnl_attribution"]
+    assert attribution["residual_mark_to_market_krw"] == pytest.approx(10_000.0)
+    assert report["terminal_residual"]["residual_qty"] == pytest.approx(0.0001)
+    assert report["cycle_validation_success_count"] == 0
 
 
 def test_h74_observation_report_rejects_unscoped_pair_rows_in_strict_h74_scope() -> None:
