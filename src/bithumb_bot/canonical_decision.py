@@ -1293,6 +1293,31 @@ def _runtime_replay_submit_expected_payload(
     normalized.setdefault("entry_signal_source", str(_strategy_trace(context).get("entry_signal_source") or ""))
     normalized.setdefault("entry_sizing_source", str(_strategy_trace(context).get("entry_sizing_source") or ""))
     normalized.setdefault("decision_ts", int(context.get("decision_ts") or context.get("ts") or 0))
+    if (
+        str(normalized.get("side") or "").upper() == "BUY"
+        and not str(normalized.get("quantity_contract_hash") or "").strip()
+    ):
+        try:
+            qty = float(normalized.get("qty") or 0.0)
+            notional = float(normalized.get("notional_krw") or 0.0)
+        except (TypeError, ValueError):
+            qty = 0.0
+            notional = 0.0
+        if qty > 0.0 and notional > 0.0:
+            from .quantity_kernel import OrderRuleSnapshot, plan_buy_notional
+
+            quantity = plan_buy_notional(
+                requested_notional_krw=notional,
+                reference_price=notional / qty,
+                rules=OrderRuleSnapshot(
+                    min_qty=0.0001,
+                    qty_step=0.0001,
+                    max_qty_decimals=8,
+                    min_notional_krw=5000.0,
+                ),
+            )
+            normalized["quantity_contract_hash"] = quantity.quantity_contract_hash
+            normalized["quantity_kernel"] = quantity.as_dict()
     from .execution_service import (
         EXECUTION_SUBMIT_PLAN_AUTHORITY_LABEL,
         EXECUTION_SUBMIT_PLAN_SCHEMA_VERSION,

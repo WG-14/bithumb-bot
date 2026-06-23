@@ -128,6 +128,8 @@ class StandardSubmitPlanningFailureRequest:
     sell_observability: dict[str, object]
     order_type: str = "-"
     strategy_instance_id: str | None = None
+    cycle_id: str | None = None
+    authority_hash: str | None = None
 
 
 @dataclass(frozen=True)

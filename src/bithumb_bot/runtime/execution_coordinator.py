@@ -142,7 +142,12 @@ class ExecutionCoordinator:
                 input_hash=input_hash,
             )
         expectation = self.resolve_submit_expectation(execution_decision_summary)
-        primary_plan = primary_execution_submit_plan(execution_decision_summary)
+        bundle_submit_plan = getattr(execution_plan_bundle, "submit_plan", None)
+        primary_plan = (
+            bundle_submit_plan
+            if callable(getattr(bundle_submit_plan, "content_hash", None))
+            else primary_execution_submit_plan(execution_decision_summary)
+        )
         batch_error = _batch_selected_pair_plan_error(
             execution_plan_bundle=execution_plan_bundle,
             primary_plan=primary_plan,

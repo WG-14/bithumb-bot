@@ -1081,6 +1081,10 @@ class ExecutionPlanner:
             context=planning.context,
             readiness_payload=planning.readiness_payload,
         )
+        execution_decision_summary = _summary_with_primary_submit_plan(
+            planning.execution_decision_summary,
+            submit_plan,
+        )
         context = dict(planning.context)
         context["planner_subphase"] = "lock_intent_build"
         try:
@@ -1130,7 +1134,7 @@ class ExecutionPlanner:
             }
         )
         bundle = ExecutionPlanBundle(
-            summary=planning.execution_decision_summary,
+            summary=execution_decision_summary,
             submit_plan=submit_plan,
             persistence_context=context,
             readiness_payload=planning.readiness_payload,
@@ -1165,6 +1169,10 @@ class ExecutionPlanner:
             _primary_submit_plan(planning.execution_decision_summary),
             context=planning.context,
             readiness_payload=planning.readiness_payload,
+        )
+        execution_decision_summary = _summary_with_primary_submit_plan(
+            planning.execution_decision_summary,
+            submit_plan,
         )
         context = dict(planning.context)
         context["planner_subphase"] = "lock_intent_build"
@@ -1215,7 +1223,7 @@ class ExecutionPlanner:
             }
         )
         bundle = ExecutionPlanBundle(
-            summary=planning.execution_decision_summary,
+            summary=execution_decision_summary,
             submit_plan=submit_plan,
             persistence_context=context,
             readiness_payload=planning.readiness_payload,
@@ -2224,7 +2232,26 @@ def _with_h74_submit_plan_evidence(
             extra[h74_key] = readiness_payload[h74_key]
         elif h74_key in context:
             extra[h74_key] = context[h74_key]
+    if extra == dict(submit_plan.extra_payload):
+        return submit_plan
     return replace(submit_plan, extra_payload=extra)
+
+
+def _summary_with_primary_submit_plan(
+    summary: ExecutionDecisionSummary | None,
+    submit_plan: ExecutionSubmitPlan | None,
+) -> ExecutionDecisionSummary | None:
+    if summary is None or submit_plan is None:
+        return summary
+    if not isinstance(summary, ExecutionDecisionSummary):
+        return summary
+    if summary.typed_target_submit_plan() is not None:
+        return replace(summary, target_submit_plan=submit_plan)
+    if summary.typed_residual_submit_plan() is not None:
+        return replace(summary, residual_submit_plan=submit_plan)
+    if summary.typed_buy_submit_plan() is not None:
+        return replace(summary, buy_submit_plan=submit_plan)
+    return summary
 
 
 def _base_currency_from_pair(pair: str) -> str:
@@ -2395,6 +2422,14 @@ def _build_execution_plan_batch_for_runtime_pair(
         and (
             (submit_plan is not None and bool(submit_plan.extra_payload.get("pre_submit_risk_required")))
             or bool(context.get("pre_submit_risk_required"))
+            or (
+                run_loop_uses_target_delta(settings)
+                and str(getattr(settings, "MODE", "") or "").strip().lower() == "live"
+                and not bool(getattr(settings, "LIVE_DRY_RUN", True))
+                and bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False))
+                and submit_plan is not None
+                and str(submit_plan.source or "") == "target_delta"
+            )
         )
     )
     pre_submit_not_required_reason = ""

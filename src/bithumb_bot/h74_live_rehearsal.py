@@ -621,10 +621,34 @@ def _target_delta_planning_bundle(
 
 
 def _blocking_gate(gate_trace: list[dict[str, object]]) -> tuple[str, str]:
+    priority = {
+        "readiness": 10,
+        "entry_authority": 20,
+        "pre_submit_risk": 30,
+        "fee_equivalence": 40,
+        "submit_authority": 50,
+    }
+    blocked = [entry for entry in gate_trace if bool(entry.get("blocking"))]
+    if blocked:
+        entry = min(blocked, key=lambda item: priority.get(str(item.get("gate") or ""), 100))
+        return str(entry.get("gate") or "unknown"), str(entry.get("reason_code") or "blocked")
     for entry in gate_trace:
         if bool(entry.get("blocking")):
             return str(entry.get("gate") or "unknown"), str(entry.get("reason_code") or "blocked")
     return "none", "none"
+
+
+def _configured_pre_submit_block_reason(cfg: H74LiveRehearsalConfig) -> str:
+    if not bool(cfg.broker_snapshot_available) or bool(cfg.broker_snapshot_stale):
+        return "RISK_STATE_MISMATCH"
+    unresolved_status = str(cfg.unresolved_order_status or "").strip().upper()
+    if unresolved_status in {"NEW", "PARTIALLY_FILLED"}:
+        return "UNRESOLVED_OPEN_ORDER_PRESENT"
+    if unresolved_status == "SUBMIT_UNKNOWN":
+        return "SUBMIT_UNKNOWN_PRESENT"
+    if unresolved_status == "RECOVERY_REQUIRED":
+        return "RECOVERY_REQUIRED_PRESENT"
+    return ""
 
 
 def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict[str, Any]:
@@ -678,12 +702,22 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         },
     )
     equivalence_status = str(equivalence["experiment_equivalence_status"])
+    fee_gate_reason = (
+        "mismatch"
+        if equivalence_status == "unknown_source_assumption_missing"
+        and str(cfg.fee_authority_source or "").strip() == "degraded_fee_authority"
+        else equivalence_status
+    )
     equivalence_allows = equivalence_status == "pass"
 
     with _h74_live_settings():
         captured: list[dict[str, object]] = []
-        pre_submit_status = "BLOCK"
+        pre_submit_status = "NOT_EVALUATED"
         pre_submit_reason = "equivalence_blocked" if not equivalence_allows else "not_evaluated"
+        configured_pre_submit_reason = _configured_pre_submit_block_reason(cfg)
+        if configured_pre_submit_reason:
+            pre_submit_status = "REQUIRE_RECONCILE"
+            pre_submit_reason = configured_pre_submit_reason
         broker_snapshot_hash = ""
         execution_result_status = "submit_blocked"
         with tempfile.TemporaryDirectory(prefix="h74-live-rehearsal-") as tmp_dir:
@@ -880,7 +914,7 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
             {
                 "gate": "fee_equivalence",
                 "status": "ALLOW" if equivalence_allows else "BLOCK",
-                "reason_code": equivalence_status,
+                "reason_code": fee_gate_reason,
                 "blocking": not equivalence_allows,
             },
             {
@@ -898,7 +932,7 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
                 "reason_code": pre_submit_reason,
                 "state_source": "runtime_db_broker" if captured else None,
                 "evidence_hash": str(would_submit_plan.get("pre_submit_risk_evidence_hash") or "") or None,
-                "blocking": pre_submit_status != "ALLOW",
+                "blocking": pre_submit_status not in {"ALLOW", "NOT_EVALUATED"},
             },
             {
                 "gate": "submit_authority",

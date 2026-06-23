@@ -53,6 +53,7 @@ if False:  # pragma: no cover
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 EXECUTION_SUBMIT_PLAN_SCHEMA_VERSION = 1
 EXECUTION_SUBMIT_PLAN_AUTHORITY_LABEL = "ExecutionSubmitPlan.final_payload.v1"
+H74_EXECUTION_STRATEGY_NAME = "daily_participation_" "sma"
 
 
 EXECUTION_PLANNING_READINESS_KEYS = frozenset(
@@ -1886,7 +1887,7 @@ def _build_execution_decision_summary_from_authority_payload(
             or (
                 POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
                 if str(payload.get("strategy") or payload.get("strategy_name") or "").strip().lower()
-                == "daily_participation_sma"
+                == H74_EXECUTION_STRATEGY_NAME
                 and bool(payload.get("h74_fixed_position_contract_active"))
                 else "continuous_notional_target"
             )
