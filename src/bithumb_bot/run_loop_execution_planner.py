@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Callable, Mapping
 
 from .config import settings
@@ -13,6 +15,7 @@ from .decision_envelope import DecisionEnvelope, _thaw_mapping
 from .decision_equivalence import sha256_prefixed
 from .execution_order_rules import resolve_execution_order_rules
 from .execution_plan_batch import ExecutionPlanBatch, PairExecutionPlan
+from .experiment_execution_contract import POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
 from .execution_service import (
     ExecutionDecisionSummary,
     ExecutionReadinessPlanningInput,
@@ -45,6 +48,13 @@ from .runtime_strategy_set import (
 from .strategy_risk_profile import strategy_risk_profile_from_profile_payload
 from .strategy_policy_contract import StrategyDecisionV2
 from .strategy_performance import evaluate_strategy_performance_gate
+from .h74_cycle_state import build_h74_cycle_id, load_h74_cycle_inventory
+from .h74_observation import (
+    H74_SOURCE_OBSERVATION_AUTHORITY_ENV,
+    verify_h74_source_observation_authority,
+    h74_source_runtime_values_from_settings,
+)
+from .h74_startup_gate import evaluate_h74_startup_gate
 from .target_position import (
     STARTUP_TARGET_SOURCE_BROKER_POSITION_ADOPTION,
     STARTUP_TARGET_SOURCE_POLICY_INITIALIZATION,
@@ -86,12 +96,144 @@ READINESS_CONTEXT_KEYS = (
     "target_missing_state_resolution",
     "target_closeout_requested",
     "target_strategy_signal_source",
+    "position_mode",
+    "hold_policy",
+    "authority_hash",
+    "strategy_instance_id",
+    "cycle_id",
+    "h74_cycle_id",
+    "remaining_cycle_qty",
+    "h74_remaining_cycle_qty",
+    "h74_cycle_inventory",
+    "locked_exit_qty",
+    "partial_fill_policy",
+    "h74_startup_gate_status",
+    "h74_startup_gate_reason_code",
+    "startup_gate_hash",
+    "startup_gate",
     "cash_available",
 )
 
 
 def _no_broker_provider() -> object | None:
     return None
+
+
+def _load_h74_source_authority_payload(settings_obj: object) -> dict[str, object]:
+    authority_path = (
+        str(getattr(settings_obj, H74_SOURCE_OBSERVATION_AUTHORITY_ENV, "") or "").strip()
+    )
+    if not authority_path:
+        return {}
+    with Path(authority_path).expanduser().open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("h74_source_observation_authority_payload_not_object")
+    verify_h74_source_observation_authority(
+        payload,
+        runtime_values=h74_source_runtime_values_from_settings(settings_obj),
+    )
+    return payload
+
+
+def _h74_authority_planning_fields(settings_obj: object) -> dict[str, object]:
+    authority = _load_h74_source_authority_payload(settings_obj)
+    if not authority:
+        return {}
+    bound = dict(authority.get("hash_bound_parameters") or {})
+    return {
+        "position_mode": str(authority.get("position_mode") or bound.get("position_mode") or ""),
+        "hold_policy": str(authority.get("hold_policy") or bound.get("hold_policy") or "max_holding_time"),
+        "authority_hash": str(authority.get("authority_content_hash") or ""),
+        "h74_source_authority_hash": str(authority.get("authority_content_hash") or ""),
+        "h74_source_authority": {
+            "artifact_type": authority.get("artifact_type"),
+            "authority_content_hash": authority.get("authority_content_hash"),
+            "hash_bound_parameters": bound,
+        },
+        "strategy_instance_id": str(authority.get("strategy_instance_id") or bound.get("strategy_instance_id") or ""),
+        "residual_inventory_mode": str(
+            authority.get("residual_inventory_mode")
+            or bound.get("residual_inventory_mode")
+            or "block_executable_residual"
+        ),
+        "partial_fill_policy": str(
+            authority.get("partial_fill_policy")
+            or bound.get("partial_fill_policy")
+            or "accumulate_cycle_fills"
+        ),
+    }
+
+
+def _h74_entry_cycle_fields(*, planning_context: Mapping[str, object], updated_ts: int) -> dict[str, object]:
+    authority_hash = str(planning_context.get("authority_hash") or "").strip()
+    strategy_instance_id = str(planning_context.get("strategy_instance_id") or "").strip()
+    if not authority_hash or not strategy_instance_id:
+        return {}
+    entry_client_order_id = f"h74_entry_plan_{int(updated_ts)}"
+    cycle_id = build_h74_cycle_id(
+        strategy_instance_id=strategy_instance_id,
+        entry_client_order_id=entry_client_order_id,
+        authority_hash=authority_hash,
+    )
+    return {
+        "cycle_id": cycle_id,
+        "h74_cycle_id": cycle_id,
+        "h74_entry_plan_client_order_id": entry_client_order_id,
+    }
+
+
+def _inject_h74_cycle_inventory(
+    conn: object,
+    *,
+    readiness_payload: dict[str, object],
+    planning_context: Mapping[str, object],
+) -> dict[str, object]:
+    cycle_id = str(
+        readiness_payload.get("h74_cycle_id")
+        or readiness_payload.get("cycle_id")
+        or planning_context.get("h74_cycle_id")
+        or planning_context.get("cycle_id")
+        or ""
+    ).strip()
+    if not cycle_id:
+        return readiness_payload
+    inventory = load_h74_cycle_inventory(conn, cycle_id=cycle_id)
+    if inventory is None:
+        return readiness_payload
+    inventory_payload = inventory.as_dict()
+    return {
+        **readiness_payload,
+        "cycle_id": inventory.cycle_id,
+        "h74_cycle_id": inventory.cycle_id,
+        "authority_hash": inventory.authority_hash,
+        "strategy_instance_id": inventory.strategy_instance_id,
+        "locked_exit_qty": inventory.locked_exit_qty,
+        "remaining_cycle_qty": inventory.remaining_cycle_qty,
+        "h74_remaining_cycle_qty": inventory.remaining_cycle_qty,
+        "h74_cycle_inventory": inventory_payload,
+    }
+
+
+def _inject_h74_startup_gate(
+    *,
+    readiness_payload: dict[str, object],
+    target_state: Mapping[str, object],
+    authority_fields: Mapping[str, object],
+) -> dict[str, object]:
+    gate = evaluate_h74_startup_gate(
+        readiness_payload=readiness_payload,
+        target_state=target_state,
+        authority=authority_fields,
+    )
+    gate_payload = gate.as_dict()
+    return {
+        **readiness_payload,
+        "h74_startup_gate_status": gate.status,
+        "h74_startup_gate_reason_code": gate.reason_code,
+        "startup_gate_hash": gate_payload["startup_gate_hash"],
+        "startup_gate": gate_payload,
+    }
 
 
 @dataclass(frozen=True)
@@ -886,7 +1028,11 @@ class ExecutionPlanner:
             planning_input=planning_input,
             updated_ts=int(updated_ts),
         )
-        submit_plan = _primary_submit_plan(planning.execution_decision_summary)
+        submit_plan = _with_h74_submit_plan_evidence(
+            _primary_submit_plan(planning.execution_decision_summary),
+            context=planning.context,
+            readiness_payload=planning.readiness_payload,
+        )
         context = dict(planning.context)
         context["planner_subphase"] = "lock_intent_build"
         try:
@@ -967,7 +1113,11 @@ class ExecutionPlanner:
             updated_ts=int(updated_ts),
             runtime_result_bundle=result_bundle,
         )
-        submit_plan = _primary_submit_plan(planning.execution_decision_summary)
+        submit_plan = _with_h74_submit_plan_evidence(
+            _primary_submit_plan(planning.execution_decision_summary),
+            context=planning.context,
+            readiness_payload=planning.readiness_payload,
+        )
         context = dict(planning.context)
         context["planner_subphase"] = "lock_intent_build"
         try:
@@ -1111,6 +1261,10 @@ class ExecutionPlanner:
             context["runtime_pair"] = runtime_pair
             context["planner_subphase"] = "readiness_snapshot"
             readiness_payload = self.readiness_snapshot_builder(conn).as_dict()
+            h74_authority_fields = _h74_authority_planning_fields(self.settings_obj)
+            if h74_authority_fields:
+                readiness_payload = {**readiness_payload, **h74_authority_fields}
+                context.update(h74_authority_fields)
             strategy_performance_gate = None
             pre_allocation_target_resolution_applied = False
             reference_price = context.get("market_price", context.get("last_close", context.get("close")))
@@ -1791,6 +1945,51 @@ class ExecutionPlanner:
             else:
                 context["authoritative_execution_signal"] = planning_input.final_signal
             readiness_payload = {**readiness_payload, **target_policy_metadata}
+            flat_start_candidate = (
+                previous_target_exposure_krw is None
+                or float(previous_target_exposure_krw or 0.0) <= 1e-9
+            )
+            if h74_authority_fields and authoritative_signal == "BUY" and flat_start_candidate:
+                readiness_payload = _inject_h74_startup_gate(
+                    readiness_payload=readiness_payload,
+                    target_state={
+                        "target_exposure_krw": previous_target_exposure_krw,
+                    },
+                    authority_fields=h74_authority_fields,
+                )
+                readiness_payload.update(
+                    _h74_entry_cycle_fields(
+                        planning_context={**context, **readiness_payload},
+                        updated_ts=updated_ts,
+                    )
+                )
+            if h74_authority_fields and authoritative_signal == "SELL":
+                readiness_payload = _inject_h74_cycle_inventory(
+                    conn,
+                    readiness_payload=readiness_payload,
+                    planning_context=context,
+                )
+            context.update(
+                {
+                    key: readiness_payload[key]
+                    for key in (
+                        "position_mode",
+                        "hold_policy",
+                        "authority_hash",
+                        "strategy_instance_id",
+                        "cycle_id",
+                        "h74_cycle_id",
+                        "remaining_cycle_qty",
+                        "h74_remaining_cycle_qty",
+                        "locked_exit_qty",
+                        "partial_fill_policy",
+                        "h74_startup_gate_status",
+                        "h74_startup_gate_reason_code",
+                        "startup_gate_hash",
+                    )
+                    if key in readiness_payload
+                }
+            )
             context["planner_subphase"] = "execution_plan_batch_build"
             authority = ExecutionAuthorityEnvelope(
                 planning_input=planning_input,
@@ -1933,6 +2132,44 @@ def _primary_submit_plan(
         or summary.typed_residual_submit_plan()
         or summary.typed_buy_submit_plan()
     )
+
+
+def _with_h74_submit_plan_evidence(
+    submit_plan: ExecutionSubmitPlan | None,
+    *,
+    context: Mapping[str, object],
+    readiness_payload: Mapping[str, object],
+) -> ExecutionSubmitPlan | None:
+    if submit_plan is None:
+        return None
+    extra = dict(submit_plan.extra_payload)
+    for h74_key in (
+        "position_mode",
+        "hold_policy",
+        "authority_hash",
+        "h74_source_authority_hash",
+        "strategy_instance_id",
+        "residual_inventory_mode",
+        "partial_fill_policy",
+        "cycle_id",
+        "h74_cycle_id",
+        "remaining_cycle_qty",
+        "h74_remaining_cycle_qty",
+        "locked_exit_qty",
+        "h74_cycle_inventory",
+        "h74_startup_gate_status",
+        "h74_startup_gate_reason_code",
+        "startup_gate_hash",
+        "startup_gate",
+        "h74_source_authority",
+    ):
+        if h74_key in extra:
+            continue
+        if h74_key in readiness_payload:
+            extra[h74_key] = readiness_payload[h74_key]
+        elif h74_key in context:
+            extra[h74_key] = context[h74_key]
+    return replace(submit_plan, extra_payload=extra)
 
 
 def _base_currency_from_pair(pair: str) -> str:

@@ -107,6 +107,25 @@ EXECUTION_PLANNING_READINESS_KEYS = frozenset(
         "target_missing_state_resolution",
         "target_closeout_requested",
         "target_strategy_signal_source",
+        "position_mode",
+        "hold_policy",
+        "authority_hash",
+        "strategy_instance_id",
+        "cycle_id",
+        "h74_cycle_id",
+        "remaining_cycle_qty",
+        "h74_remaining_cycle_qty",
+        "h74_cycle_inventory",
+        "locked_exit_qty",
+        "residual_inventory_mode",
+        "partial_fill_policy",
+        "h74_startup_gate_status",
+        "h74_startup_gate_reason_code",
+        "startup_gate_hash",
+        "startup_gate",
+        "authority_source",
+        "h74_source_authority_hash",
+        "h74_source_authority",
     }
 )
 
@@ -385,6 +404,29 @@ class TypedExecutionPlanningInput:
                     "allocation_primary_block_reason": "portfolio_target_missing",
                 }
             )
+        observability = dict(self.observability_context)
+        for h74_key in (
+            "position_mode",
+            "hold_policy",
+            "authority_hash",
+            "h74_source_authority_hash",
+            "strategy_instance_id",
+            "residual_inventory_mode",
+            "partial_fill_policy",
+            "cycle_id",
+            "h74_cycle_id",
+            "remaining_cycle_qty",
+            "h74_remaining_cycle_qty",
+            "locked_exit_qty",
+            "h74_cycle_inventory",
+            "h74_startup_gate_status",
+            "h74_startup_gate_reason_code",
+            "startup_gate_hash",
+            "startup_gate",
+            "h74_source_authority",
+        ):
+            if h74_key in observability:
+                payload[h74_key] = observability[h74_key]
         return payload
 
 
@@ -1864,25 +1906,19 @@ def _build_execution_decision_summary_from_authority_payload(
                         certificate if isinstance(certificate, Mapping) else {},
                         env_file=str(os.environ.get("BITHUMB_ENV_FILE") or ""),
                         broker_balance_snapshot_hash=str(payload.get("broker_balance_snapshot_hash") or ""),
-                        current_commit_sha=str(payload.get("commit_sha") or certificate.get("commit_sha") or ""),
-                        current_db_schema_hash=str(payload.get("db_schema_hash") or certificate.get("db_schema_hash") or ""),
+                        current_commit_sha=str(payload.get("commit_sha") or ""),
+                        current_db_schema_hash=str(payload.get("db_schema_hash") or ""),
                         current_order_rule_fee_authority_hash=str(
-                            payload.get("order_rule_fee_authority_hash")
-                            or certificate.get("order_rule_fee_authority_hash")
-                            or ""
+                            payload.get("order_rule_fee_authority_hash") or ""
                         ),
-                        current_gate_trace_hash=str(payload.get("gate_trace_hash") or certificate.get("gate_trace_hash") or ""),
+                        current_gate_trace_hash=str(payload.get("gate_trace_hash") or ""),
                         current_would_submit_plan_hash=str(
-                            payload.get("would_submit_plan_hash")
-                            or certificate.get("would_submit_plan_hash")
-                            or ""
+                            payload.get("would_submit_plan_hash") or ""
                         ),
                         current_behavior_comparison_hash=str(
-                            payload.get("behavior_comparison_hash")
-                            or certificate.get("behavior_comparison_hash")
-                            or ""
+                            payload.get("behavior_comparison_hash") or ""
                         ),
-                        current_contract_hash=str(payload.get("contract_hash") or certificate.get("contract_hash") or ""),
+                        current_contract_hash=str(payload.get("contract_hash") or ""),
                         strict=True,
                     )
                     if not bool(verdict.get("valid")):
@@ -2226,6 +2262,27 @@ def _build_execution_decision_summary_from_authority_payload(
                 ),
                 "pre_submit_risk_decision_authority": "RuntimeRiskEngineAdapter.evaluate_pre_submit",
             }
+            for h74_key in (
+                "position_mode",
+                "hold_policy",
+                "authority_hash",
+                "h74_source_authority_hash",
+                "strategy_instance_id",
+                "residual_inventory_mode",
+                "partial_fill_policy",
+                "cycle_id",
+                "h74_cycle_id",
+                "remaining_cycle_qty",
+                "h74_remaining_cycle_qty",
+                "locked_exit_qty",
+                "h74_cycle_inventory",
+                "h74_startup_gate_status",
+                "h74_startup_gate_reason_code",
+                "startup_gate_hash",
+                "startup_gate",
+            ):
+                if h74_key in payload:
+                    target_plan_extra[h74_key] = payload[h74_key]
             if performance_gate_fields and str(target_decision.delta_side) == "BUY":
                 target_plan_extra.update(performance_gate_fields)
             target_plan = ExecutionSubmitPlan(
@@ -3192,6 +3249,53 @@ class LiveSignalExecutionService:
                         field_name="target_submit_plan",
                     ):
                         return None
+                    if (
+                        plan_side == "SELL"
+                        and str(target_plan.get("position_mode") or "")
+                        == POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
+                    ):
+                        cycle_id = str(
+                            target_plan.get("h74_cycle_id")
+                            or target_plan.get("cycle_id")
+                            or ""
+                        ).strip()
+                        authority_hash = str(target_plan.get("authority_hash") or "").strip()
+                        if not cycle_id:
+                            _block_live_submit_plan(
+                                reason="h74_cycle_id_required_for_exit",
+                                field_name="target_submit_plan",
+                                source=target_plan.get("source"),
+                                side=target_plan.get("side"),
+                            )
+                            return None
+                        if not authority_hash:
+                            _block_live_submit_plan(
+                                reason="h74_authority_hash_required_for_exit",
+                                field_name="target_submit_plan",
+                                source=target_plan.get("source"),
+                                side=target_plan.get("side"),
+                            )
+                            return None
+                        from .h74_cycle_state import lock_h74_cycle_exit_qty
+
+                        lock_conn = self.db_factory() if self.db_factory is not None else ensure_db()
+                        try:
+                            lock_h74_cycle_exit_qty(
+                                lock_conn,
+                                cycle_id=cycle_id,
+                                exit_client_order_id=str(
+                                    target_plan.get("idempotency_key")
+                                    or target_plan.get("submit_plan_hash")
+                                    or "pending_exit"
+                                ),
+                                qty=plan_qty,
+                                updated_ts=int(request.ts),
+                            )
+                            lock_conn.commit()
+                        finally:
+                            close = getattr(lock_conn, "close", None)
+                            if callable(close):
+                                close()
                     return self.executor(
                         self.broker,
                         plan_side,

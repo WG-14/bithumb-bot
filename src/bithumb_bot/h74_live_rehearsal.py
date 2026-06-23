@@ -17,6 +17,7 @@ from .broker import order_rules as order_rules_module
 from .config import settings
 from .db_core import ensure_schema
 from .decision_equivalence import sha256_prefixed
+from .entry_authority import ENTRY_AUTHORITY_REASON_BLOCKED
 from .execution_service import (
     LiveSignalExecutionService,
     TypedExecutionRequest,
@@ -525,7 +526,7 @@ def _readiness_snapshot_payload(
     closeout_existing_qty: float,
 ) -> dict[str, object]:
     current_exposure_krw = float(closeout_existing_qty or 0.0) * 100_000_000.0
-    return {
+    payload = {
         "broker_position_evidence": {
             "broker_qty_known": True,
             "broker_qty": float(closeout_existing_qty or 0.0),
@@ -554,6 +555,10 @@ def _readiness_snapshot_payload(
         "bid_types": ["market"],
         "ask_types": ["market"],
     }
+    if float(closeout_existing_qty or 0.0) > 0.0:
+        payload["h74_cycle_id"] = "h74-rehearsal-closeout-cycle"
+        payload["cycle_id"] = "h74-rehearsal-closeout-cycle"
+    return payload
 
 
 def _target_delta_planning_bundle(
@@ -567,6 +572,20 @@ def _target_delta_planning_bundle(
     closeout_existing_qty: float,
 ):
     result_bundle = _runtime_decision_bundle(conn, ts_ms=ts_ms)
+    if float(closeout_existing_qty or 0.0) > 0.0:
+        from .h74_cycle_state import upsert_h74_cycle_fill
+
+        upsert_h74_cycle_fill(
+            conn,
+            cycle_id="h74-rehearsal-closeout-cycle",
+            authority_hash="sha256:h74-rehearsal-authority",
+            strategy_instance_id="h74-source-observation",
+            pair="KRW-BTC",
+            side="BUY",
+            qty=float(closeout_existing_qty),
+            client_order_id="h74-rehearsal-entry",
+            fill_ts=int(ts_ms) - (74 * 60_000),
+        )
     readiness_payload = _readiness_snapshot_payload(
         order_rules=order_rules,
         projection_converged=projection_converged,
@@ -834,8 +853,29 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
                 "reason_code": str(would_submit_plan.get("entry_authority_reason_code") or "not_new_buy_exposure"),
                 "blocking": str(would_submit_plan.get("entry_authority_status") or "") == "BLOCK",
             }
+        participation_decision_payload = dict(trace.get("daily_participation_decision") or {})
+        daily_entry_allowed = participation_decision_payload.get("allowed") is True
+        daily_entry_reason = str(
+            participation_decision_payload.get("reason_code")
+            or would_submit_plan.get("entry_authority_reason_code")
+            or ""
+        )
+        if not daily_entry_allowed and daily_entry_reason:
+            entry_authority_payload = {
+                **entry_authority_payload,
+                "gate": "entry_authority",
+                "status": "BLOCK",
+                "reason_code": ENTRY_AUTHORITY_REASON_BLOCKED,
+                "blocking": True,
+                "source": "daily_participation_entry_authority",
+            }
         gate_trace = [
-            {"gate": "time_window", "status": "ALLOW", "reason_code": "within_kst_window", "blocking": False},
+            {
+                "gate": "time_window",
+                "status": "ALLOW" if daily_entry_allowed else "BLOCK",
+                "reason_code": "within_kst_window" if daily_entry_allowed else daily_entry_reason,
+                "blocking": False,
+            },
             {"gate": "runtime_cycle_pipeline", "status": "ALLOW", "reason_code": "RuntimeCyclePipeline/ExecutionCoordinator", "blocking": False},
             {
                 "gate": "fee_equivalence",
@@ -916,8 +956,8 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         "daily_participation_window_start_hour_kst": daily_window_start,
         "daily_participation_window_end_hour_kst": daily_window_end,
         "daily_participation_entry_authorized": daily_entry_authorized,
-        "entry_authority_status": str(would_submit_plan.get("entry_authority_status") or ""),
-        "entry_authority_reason_code": str(would_submit_plan.get("entry_authority_reason_code") or ""),
+        "entry_authority_status": str(entry_authority_payload.get("status") or ""),
+        "entry_authority_reason_code": str(entry_authority_payload.get("reason_code") or ""),
         "entry_authority_gate_present": any(
             isinstance(entry, Mapping) and entry.get("gate") == "entry_authority"
             for entry in gate_trace
@@ -944,7 +984,15 @@ def run_h74_live_rehearsal(config: H74LiveRehearsalConfig | None = None) -> dict
         "behavior_comparison_hash": equivalence["behavior_comparison_hash"],
         "source_artifact_hash": equivalence_manifest["source_artifact_hash"],
         "position_mode": H74_POSITION_MODE,
-        "quantity_contract_hash": order_rule_snapshot.contract_hash(),
+        "quantity_contract_hash": str(
+            (
+                would_submit_plan.get("target_sizing")
+                if isinstance(would_submit_plan.get("target_sizing"), Mapping)
+                else {}
+            ).get("quantity_contract_hash")
+            or would_submit_plan.get("quantity_contract_hash")
+            or ""
+        ),
         "order_rule_snapshot_hash": order_rule_snapshot.contract_hash(),
         "execution_result_status": execution_result_status,
         "gate_trace": gate_trace,

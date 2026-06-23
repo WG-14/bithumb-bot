@@ -300,3 +300,11 @@ def test_rehearsal_does_not_reach_submit_boundary_when_equivalence_blocks(tmp_pa
     assert payload["broker_submit_reached"] is False
     assert payload["would_submit"] is False
     assert payload["primary_block_gate"] == "fee_equivalence"
+
+
+def test_h74_would_submit_plan_contains_authority_hash_and_position_mode(tmp_path) -> None:
+    payload = run_h74_live_rehearsal(H74LiveRehearsalConfig(source_artifact_path=_source_artifact(tmp_path)))
+    plan = payload["would_submit_plan"]
+
+    assert plan["position_mode"] == "fixed_fill_qty_until_exit"
+    assert str(plan["authority_hash"]).startswith("sha256:")

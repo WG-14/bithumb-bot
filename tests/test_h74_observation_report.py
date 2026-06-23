@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
+
 from bithumb_bot.h74_observation_report import build_h74_observation_report
 from bithumb_bot.runtime.daily_participation_claims import ensure_daily_participation_claims_schema
 
@@ -100,6 +102,153 @@ def _interval_conn() -> sqlite3.Connection:
         """
     )
     return conn
+
+
+def _cycle_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE orders (
+            client_order_id TEXT,
+            strategy_name TEXT,
+            strategy_instance_id TEXT,
+            pair TEXT,
+            interval TEXT,
+            side TEXT,
+            status TEXT,
+            exit_rule_name TEXT,
+            decision_reason TEXT,
+            decision_reason_code TEXT,
+            entry_authority_source TEXT,
+            authority_source TEXT,
+            last_error TEXT,
+            created_ts INTEGER,
+            cycle_id TEXT,
+            authority_hash TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE fills (
+            client_order_id TEXT,
+            fill_ts INTEGER,
+            price REAL,
+            qty REAL,
+            fee REAL,
+            reference_price REAL,
+            slippage_bps REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE h74_cycle_state (
+            cycle_id TEXT PRIMARY KEY,
+            authority_hash TEXT NOT NULL,
+            strategy_instance_id TEXT NOT NULL,
+            pair TEXT NOT NULL,
+            state TEXT NOT NULL,
+            entry_client_order_id TEXT,
+            exit_client_order_id TEXT,
+            entry_filled_ts INTEGER,
+            scheduled_exit_ts INTEGER,
+            acquired_qty REAL NOT NULL DEFAULT 0,
+            sold_qty REAL NOT NULL DEFAULT 0,
+            locked_exit_qty REAL NOT NULL DEFAULT 0,
+            unauthorized_intermediate_order_count INTEGER NOT NULL DEFAULT 0,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _insert_cycle_order(
+    conn: sqlite3.Connection,
+    cid: str,
+    *,
+    cycle_id: str = "cycle-1",
+    created: str,
+    side: str,
+    exit_rule: str = "",
+    instance: str = "h74:one",
+    authority_hash: str = "sha256:auth-a",
+) -> None:
+    conn.execute(
+        "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            cid,
+            "daily_participation_sma",
+            instance,
+            "KRW-BTC",
+            "1m",
+            side,
+            "FILLED",
+            exit_rule,
+            "",
+            "daily_participation_fallback_allowed" if side == "BUY" else "",
+            "daily_participation_entry" if side == "BUY" else "",
+            "daily_participation_entry" if side == "BUY" else "",
+            "",
+            _ts(created),
+            cycle_id,
+            authority_hash,
+        ),
+    )
+
+
+def _insert_cycle_fill(
+    conn: sqlite3.Connection,
+    cid: str,
+    *,
+    fill_ts: str,
+    price: float = 100_000_000.0,
+    qty: float = 0.0008,
+    fee: float = 10.0,
+    reference_price: float | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO fills VALUES (?,?,?,?,?,?,?)",
+        (cid, _ts(fill_ts), price, qty, fee, reference_price if reference_price is not None else price, None),
+    )
+
+
+def _insert_cycle_state(
+    conn: sqlite3.Connection,
+    *,
+    cycle_id: str = "cycle-1",
+    acquired_qty: float = 0.0008,
+    sold_qty: float = 0.0008,
+    locked_exit_qty: float = 0.0,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO h74_cycle_state(
+            cycle_id, authority_hash, strategy_instance_id, pair, state,
+            entry_client_order_id, exit_client_order_id, entry_filled_ts,
+            scheduled_exit_ts, acquired_qty, sold_qty, locked_exit_qty,
+            unauthorized_intermediate_order_count, updated_ts
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            cycle_id,
+            "sha256:auth-a",
+            "h74:one",
+            "KRW-BTC",
+            "CLOSED",
+            "entry",
+            "exit",
+            _ts("2026-06-18T00:00:00Z"),
+            _ts("2026-06-18T01:14:00Z"),
+            acquired_qty,
+            sold_qty,
+            locked_exit_qty,
+            0,
+            _ts("2026-06-18T01:14:00Z"),
+        ),
+    )
 
 
 def _insert_order(
@@ -628,3 +777,80 @@ def test_h74_observation_report_rejects_unscoped_pair_rows_in_strict_h74_scope()
     )
 
     assert report["daily_buy_intent_count"] == 1
+
+
+def test_report_uses_cycle_classifier_for_roundtrip_success() -> None:
+    conn = _cycle_conn()
+    _insert_cycle_order(conn, "entry", created="2026-06-18T00:00:00Z", side="BUY")
+    _insert_cycle_fill(conn, "entry", fill_ts="2026-06-18T00:00:00Z")
+    _insert_cycle_order(conn, "exit", created="2026-06-18T01:14:00Z", side="SELL", exit_rule="max_holding_time")
+    _insert_cycle_fill(conn, "exit", fill_ts="2026-06-18T01:14:00Z")
+    _insert_cycle_state(conn)
+
+    report = build_h74_observation_report(conn=conn, days=7, now=datetime(2026, 6, 19, tzinfo=timezone.utc))
+
+    assert report["entry_path_sample_count"] == 1
+    assert report["cycle_validation_success_count"] == 1
+    assert report["h74_backtest_validation_sample_count"] == 1
+
+
+def test_report_buy_only_counts_entry_sample_not_cycle_success() -> None:
+    conn = _cycle_conn()
+    _insert_cycle_order(conn, "entry", created="2026-06-18T00:00:00Z", side="BUY")
+    _insert_cycle_fill(conn, "entry", fill_ts="2026-06-18T00:00:00Z")
+    _insert_cycle_state(conn, sold_qty=0.0)
+
+    report = build_h74_observation_report(conn=conn, days=7, now=datetime(2026, 6, 19, tzinfo=timezone.utc))
+
+    assert report["entry_path_sample_count"] == 1
+    assert report["cycle_validation_success_count"] == 0
+    assert report["h74_backtest_validation_sample_count"] == 0
+
+
+def test_report_terminal_true_dust_uses_cycle_origin_and_notional() -> None:
+    conn = _cycle_conn()
+    _insert_cycle_order(conn, "entry", created="2026-06-18T00:00:00Z", side="BUY")
+    _insert_cycle_fill(conn, "entry", fill_ts="2026-06-18T00:00:00Z")
+    _insert_cycle_order(conn, "exit", created="2026-06-18T01:14:00Z", side="SELL", exit_rule="max_holding_time")
+    _insert_cycle_fill(conn, "exit", fill_ts="2026-06-18T01:14:00Z", qty=0.00079)
+    _insert_cycle_state(conn, acquired_qty=0.0008, sold_qty=0.00079)
+
+    report = build_h74_observation_report(conn=conn, days=7, now=datetime(2026, 6, 19, tzinfo=timezone.utc))
+
+    residual = report["terminal_residual"]
+    assert residual["residual_qty"] > 0
+    assert residual["residual_notional_krw"] > 0
+    assert residual["origin_cycle_id"] == "cycle-1"
+    assert residual["residual_class"] == "EXCHANGE_TRUE_DUST"
+
+
+def test_report_executable_residual_blocks_cycle_success() -> None:
+    conn = _cycle_conn()
+    _insert_cycle_order(conn, "entry", created="2026-06-18T00:00:00Z", side="BUY")
+    _insert_cycle_fill(conn, "entry", fill_ts="2026-06-18T00:00:00Z")
+    _insert_cycle_order(conn, "exit", created="2026-06-18T01:14:00Z", side="SELL", exit_rule="max_holding_time")
+    _insert_cycle_fill(conn, "exit", fill_ts="2026-06-18T01:14:00Z", qty=0.0006)
+    _insert_cycle_state(conn, acquired_qty=0.0008, sold_qty=0.0006)
+
+    report = build_h74_observation_report(conn=conn, days=7, now=datetime(2026, 6, 19, tzinfo=timezone.utc))
+
+    assert report["terminal_residual"]["residual_qty"] == pytest.approx(0.0002)
+    assert report["terminal_residual"]["next_cycle_allowed"] is False
+    assert report["cycle_validation_success_count"] == 0
+
+
+def test_report_records_unauthorized_intermediate_order_ids() -> None:
+    conn = _cycle_conn()
+    _insert_cycle_order(conn, "entry", created="2026-06-18T00:00:00Z", side="BUY")
+    _insert_cycle_fill(conn, "entry", fill_ts="2026-06-18T00:00:00Z")
+    _insert_cycle_order(conn, "rebalance", created="2026-06-18T00:30:00Z", side="BUY")
+    _insert_cycle_fill(conn, "rebalance", fill_ts="2026-06-18T00:30:00Z")
+    _insert_cycle_order(conn, "exit", created="2026-06-18T01:14:00Z", side="SELL", exit_rule="max_holding_time")
+    _insert_cycle_fill(conn, "exit", fill_ts="2026-06-18T01:14:00Z")
+    _insert_cycle_state(conn)
+
+    report = build_h74_observation_report(conn=conn, days=7, now=datetime(2026, 6, 19, tzinfo=timezone.utc))
+
+    assert report["unauthorized_intermediate_order_count"] == 1
+    assert report["unauthorized_order_ids"] == ["rebalance"]
+    assert report["cycle_validation_success_count"] == 0

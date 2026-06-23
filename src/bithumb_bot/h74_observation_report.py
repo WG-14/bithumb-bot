@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .live_trade_classification import classify_h74_live_trade
+from .h74_cycle_classification import classify_h74_cycle
 from .h74_pnl_attribution import build_pnl_attribution, build_terminal_residual
 from .research.hashing import sha256_prefixed
 
@@ -467,15 +468,27 @@ def _sqlite_metrics(
                 }
             classified_rows.append({**base, **classification})
         metrics["h74_live_trade_classifications"] = classified_rows
-        metrics["h74_backtest_validation_sample_count"] = sum(
-            1 for row in classified_rows if bool(row.get("h74_backtest_validation_sample"))
+        cycle_metrics = _h74_cycle_metrics(
+            conn,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            authority_hash=authority_hash,
+            strategy_instance_id=strategy_instance_id,
+            pair=pair,
+            interval=interval,
         )
-        metrics["entry_path_sample_count"] = sum(
-            1 for row in classified_rows if bool(row.get("h74_entry_path_sample"))
-        )
-        metrics["cycle_validation_success_count"] = sum(
-            1 for row in classified_rows if bool(row.get("h74_cycle_validation_success"))
-        )
+        if cycle_metrics:
+            metrics.update(cycle_metrics)
+        else:
+            metrics["h74_backtest_validation_sample_count"] = sum(
+                1 for row in classified_rows if bool(row.get("h74_backtest_validation_sample"))
+            )
+            metrics["entry_path_sample_count"] = sum(
+                1 for row in classified_rows if bool(row.get("h74_entry_path_sample"))
+            )
+            metrics["cycle_validation_success_count"] = sum(
+                1 for row in classified_rows if bool(row.get("h74_cycle_validation_success"))
+            )
         incident_counts: dict[str, int] = {}
         for row in classified_rows:
             incident_type = str(row.get("incident_type") or "none")
@@ -511,6 +524,266 @@ def _sqlite_metrics(
     metrics["interval_scope_applied"] = not interval_scope_unavailable
     metrics["interval_scope_unavailable"] = interval_scope_unavailable
     return metrics
+
+
+def _rows_as_dicts(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
+    columns = [str(item[0]) for item in (cursor.description or ())]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _select_existing_columns(conn: sqlite3.Connection, table: str, columns: list[str]) -> list[str]:
+    if not _table_exists(conn, table):
+        return []
+    existing = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    return [column for column in columns if column in existing]
+
+
+def _h74_cycle_metrics(
+    conn: sqlite3.Connection,
+    *,
+    start_ts: int,
+    end_ts: int,
+    authority_hash: str | None,
+    strategy_instance_id: str | None,
+    pair: str,
+    interval: str,
+) -> dict[str, Any]:
+    if not (_table_exists(conn, "orders") and _table_exists(conn, "fills")):
+        return {}
+    if not _column_exists(conn, "orders", "cycle_id"):
+        return {}
+    order_columns = _select_existing_columns(
+        conn,
+        "orders",
+        [
+            "client_order_id",
+            "strategy_name",
+            "strategy_instance_id",
+            "pair",
+            "interval",
+            "side",
+            "status",
+            "exit_rule_name",
+            "decision_reason",
+            "decision_reason_code",
+            "entry_authority_source",
+            "authority_source",
+            "created_ts",
+            "cycle_id",
+            "authority_hash",
+        ],
+    )
+    if not {"client_order_id", "side", "cycle_id"}.issubset(set(order_columns)):
+        return {}
+    scope_sql, scope_params = _order_scope_filter(
+        conn,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        authority_hash=authority_hash,
+        strategy_instance_id=strategy_instance_id,
+        pair=pair,
+        interval=interval,
+    )
+    order_sql = (
+        "SELECT "
+        + ", ".join(order_columns)
+        + f" FROM orders WHERE {scope_sql} AND COALESCE(cycle_id,'')<>''"
+    )
+    orders = _rows_as_dicts(conn.execute(order_sql, scope_params))
+    if not orders:
+        return {}
+    fill_columns = _select_existing_columns(
+        conn,
+        "fills",
+        ["client_order_id", "fill_ts", "price", "qty", "fee", "reference_price", "slippage_bps"],
+    )
+    fills: list[dict[str, Any]] = []
+    if "client_order_id" in fill_columns:
+        fills = _rows_as_dicts(
+            conn.execute(
+                "SELECT " + ", ".join(fill_columns) + " FROM fills",
+            )
+        )
+    state_rows = []
+    if _table_exists(conn, "h74_cycle_state"):
+        state_rows = _rows_as_dicts(
+            conn.execute(
+                """
+                SELECT cycle_id, authority_hash, strategy_instance_id, pair, state,
+                       entry_client_order_id, exit_client_order_id, acquired_qty,
+                       sold_qty, locked_exit_qty
+                FROM h74_cycle_state
+                """
+            )
+        )
+    fills_by_order: dict[str, list[dict[str, Any]]] = {}
+    for fill in fills:
+        fills_by_order.setdefault(str(fill.get("client_order_id") or ""), []).append(fill)
+    state_by_cycle = {str(row.get("cycle_id") or ""): row for row in state_rows}
+    orders_by_cycle: dict[str, list[dict[str, Any]]] = {}
+    for order in orders:
+        orders_by_cycle.setdefault(str(order.get("cycle_id") or ""), []).append(order)
+
+    cycle_reports: list[dict[str, Any]] = []
+    for cycle_id, cycle_orders in sorted(orders_by_cycle.items()):
+        if not cycle_id:
+            continue
+        entry_order = next(
+            (order for order in cycle_orders if str(order.get("side") or "").upper() == "BUY"),
+            None,
+        )
+        exit_order = next(
+            (
+                order
+                for order in cycle_orders
+                if str(order.get("side") or "").upper() == "SELL"
+                and str(order.get("exit_rule_name") or "") == "max_holding_time"
+            ),
+            None,
+        )
+        entry = _cycle_fill_payload(entry_order, fills_by_order, side="BUY")
+        exit = _cycle_fill_payload(exit_order, fills_by_order, side="SELL")
+        state = state_by_cycle.get(cycle_id, {})
+        acquired_qty = _float_value(state.get("acquired_qty"))
+        sold_qty = _float_value(state.get("sold_qty"))
+        locked_exit_qty = _float_value(state.get("locked_exit_qty"))
+        remaining_cycle_qty = max(0.0, acquired_qty - sold_qty - locked_exit_qty)
+        mark_price = _cycle_mark_price(entry, exit)
+        terminal_residual = build_terminal_residual(
+            residual_qty=remaining_cycle_qty,
+            residual_mark_price=mark_price,
+            origin_cycle_id=cycle_id,
+            allow_true_dust_next_cycle=True,
+        )
+        terminal = {
+            "terminal_executable_qty": remaining_cycle_qty
+            if bool(terminal_residual.get("exchange_sellable"))
+            else 0.0,
+            "broker_local_converged": True,
+            "executable_residual_qty": remaining_cycle_qty
+            if bool(terminal_residual.get("exchange_sellable"))
+            else 0.0,
+        }
+        classification = classify_h74_cycle(
+            entry=entry,
+            exit=exit,
+            terminal=terminal,
+            orders=cycle_orders,
+        )
+        pnl_attribution = _cycle_pnl_attribution(entry=entry, exit=exit, residual=terminal_residual)
+        success = bool(classification.h74_cycle_validation_success)
+        if not bool(terminal_residual.get("next_cycle_allowed")):
+            success = False
+        if not bool(pnl_attribution.get("passes")):
+            success = False
+        cycle_report = {
+            "cycle_id": cycle_id,
+            **classification.as_dict(),
+            "h74_cycle_validation_success": success,
+            "h74_backtest_validation_sample": success,
+            "terminal_residual": terminal_residual,
+            "pnl_attribution": pnl_attribution,
+        }
+        cycle_reports.append(cycle_report)
+    if not cycle_reports:
+        return {}
+    latest = cycle_reports[-1]
+    return {
+        "h74_cycle_classifications": cycle_reports,
+        "entry_path_sample_count": sum(
+            1 for row in cycle_reports if bool(row.get("h74_entry_path_sample"))
+        ),
+        "cycle_validation_success_count": sum(
+            1 for row in cycle_reports if bool(row.get("h74_cycle_validation_success"))
+        ),
+        "h74_backtest_validation_sample_count": sum(
+            1 for row in cycle_reports if bool(row.get("h74_backtest_validation_sample"))
+        ),
+        "unauthorized_intermediate_order_count": sum(
+            int(row.get("unauthorized_intermediate_order_count") or 0)
+            for row in cycle_reports
+        ),
+        "unauthorized_order_ids": [
+            order_id
+            for row in cycle_reports
+            for order_id in list(row.get("unauthorized_order_ids") or [])
+        ],
+        "terminal_residual": latest["terminal_residual"],
+        "pnl_attribution": latest["pnl_attribution"],
+    }
+
+
+def _cycle_fill_payload(
+    order: dict[str, Any] | None,
+    fills_by_order: dict[str, list[dict[str, Any]]],
+    *,
+    side: str,
+) -> dict[str, Any] | None:
+    if not order:
+        return None
+    client_order_id = str(order.get("client_order_id") or "")
+    fills = fills_by_order.get(client_order_id, [])
+    fill_qty = sum(_float_value(fill.get("qty")) for fill in fills)
+    fill_notional = sum(_float_value(fill.get("qty")) * _float_value(fill.get("price")) for fill in fills)
+    avg_price = fill_notional / fill_qty if fill_qty > 0 else 0.0
+    fill_ts_values = [
+        int(_float_value(fill.get("fill_ts")))
+        for fill in fills
+        if _float_value(fill.get("fill_ts")) > 0
+    ]
+    payload = {
+        **order,
+        "client_order_id": client_order_id,
+        "side": side,
+        "fill_ts": min(fill_ts_values) if fill_ts_values else order.get("created_ts"),
+        "qty": fill_qty,
+        "avg_price": avg_price,
+        "fee": sum(_float_value(fill.get("fee")) for fill in fills),
+        "reference_price": _float_value(fills[0].get("reference_price")) if fills else avg_price,
+        "authority_source": order.get("entry_authority_source")
+        or order.get("authority_source")
+        or "daily_participation_entry",
+    }
+    return payload
+
+
+def _cycle_mark_price(entry: dict[str, Any] | None, exit: dict[str, Any] | None) -> float:
+    for payload in (exit, entry):
+        if payload and _float_value(payload.get("avg_price")) > 0:
+            return _float_value(payload.get("avg_price"))
+    return 0.0
+
+
+def _cycle_pnl_attribution(
+    *,
+    entry: dict[str, Any] | None,
+    exit: dict[str, Any] | None,
+    residual: dict[str, Any],
+) -> dict[str, Any]:
+    entry_price = _float_value((entry or {}).get("avg_price"))
+    exit_price = _float_value((exit or {}).get("avg_price"))
+    qty = min(_float_value((entry or {}).get("qty")), _float_value((exit or {}).get("qty")))
+    fee_delta = _float_value((entry or {}).get("fee")) + _float_value((exit or {}).get("fee"))
+    attribution = build_pnl_attribution(
+        backtest_expected_entry_price=_float_value((entry or {}).get("reference_price")) or entry_price,
+        live_entry_avg_price=entry_price,
+        backtest_expected_exit_price=_float_value((exit or {}).get("reference_price")) or exit_price,
+        live_exit_avg_price=exit_price,
+        qty=qty,
+        fee_delta_krw=fee_delta,
+        residual_mark_to_market_krw=_float_value(residual.get("residual_notional_krw")),
+    )
+    from .h74_pnl_attribution import pnl_attribution_passes
+
+    attribution["passes"] = pnl_attribution_passes(attribution)
+    return attribution
+
+
+def _float_value(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _load_authority_scope(authority_path: str | None) -> dict[str, object]:

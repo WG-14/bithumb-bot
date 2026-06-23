@@ -12,6 +12,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.decision_equivalence import sha256_prefixed
 from bithumb_bot.db_core import ensure_db, init_portfolio, record_broker_fill_observation
 from bithumb_bot.execution import apply_fill_and_trade, apply_fill_principal_with_pending_fee, record_order_if_missing
+from bithumb_bot.h74_cycle_state import build_h74_cycle_id, load_h74_cycle_inventory
 from bithumb_bot.h74_live_rehearsal import H74LiveRehearsalConfig, run_h74_live_rehearsal
 from bithumb_bot.oms import set_status
 from bithumb_bot.order_settlement import OrderSettlementCoordinator, SettlementBarrierConfig
@@ -213,6 +214,12 @@ def _runtime_settlement(order: BrokerOrder, fills: list[BrokerFill], db_path: Pa
 
 def _record_h74_buy_intent(conn: sqlite3.Connection, order: BrokerOrder, fill: BrokerFill) -> None:
     key = _claim_key()
+    authority_hash = "sha256:h74-roundtrip-authority"
+    cycle_id = build_h74_cycle_id(
+        strategy_instance_id=key.strategy_instance_id,
+        entry_client_order_id=order.client_order_id,
+        authority_hash=authority_hash,
+    )
     record_order_if_missing(
         conn,
         client_order_id=order.client_order_id,
@@ -222,6 +229,8 @@ def _record_h74_buy_intent(conn: sqlite3.Connection, order: BrokerOrder, fill: B
         symbol=key.pair,
         strategy_name="daily_participation_sma",
         strategy_instance_id=key.strategy_instance_id,
+        cycle_id=cycle_id,
+        authority_hash=authority_hash,
         daily_participation_policy_hash=key.participation_policy_hash,
         daily_count_snapshot_hash=sha256_prefixed({"h74": "daily-count"}),
         participation_decision_hash=sha256_prefixed({"h74": "participation-decision"}),
@@ -287,10 +296,18 @@ def test_h74_buy_fill_marks_daily_claim_fulfilled(tmp_path, roundtrip_db) -> Non
         _apply_recorded_buy_fill(conn, order, fills[0])
         settlement = _runtime_settlement(order, fills, roundtrip_db)
         row = conn.execute("SELECT status FROM daily_participation_claims").fetchone()
+        order_row = conn.execute(
+            "SELECT cycle_id FROM orders WHERE client_order_id=?",
+            (order.client_order_id,),
+        ).fetchone()
+        inventory = load_h74_cycle_inventory(conn, cycle_id=str(order_row["cycle_id"]))
     finally:
         conn.close()
 
     assert row["status"] == "fulfilled"
+    assert inventory is not None
+    assert inventory.acquired_qty == pytest.approx(float(fills[0].qty))
+    assert inventory.remaining_cycle_qty == pytest.approx(float(fills[0].qty))
     assert settlement.settled is True
     assert settlement.fee_state == "finalized"
     assert settlement.principal_applied is True

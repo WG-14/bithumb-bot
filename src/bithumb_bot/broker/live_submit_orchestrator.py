@@ -84,6 +84,8 @@ class StandardSubmitPipelineRequest:
     submit_observability_fields: dict[str, object]
     sell_observability: dict[str, object]
     strategy_instance_id: str | None = None
+    cycle_id: str | None = None
+    authority_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -647,6 +649,8 @@ def _planning_failure(
         price=None,
         strategy_name=request.strategy_name,
         strategy_instance_id=request.strategy_instance_id,
+        cycle_id=request.cycle_id,
+        authority_hash=request.authority_hash,
         entry_decision_id=(request.decision_id if request.side == "BUY" else None),
         exit_decision_id=(request.decision_id if request.side == "SELL" else None),
         decision_reason=request.decision_reason,
@@ -863,6 +867,8 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
         price=None,
         strategy_name=request.strategy_name,
         strategy_instance_id=request.strategy_instance_id,
+        cycle_id=request.cycle_id,
+        authority_hash=request.authority_hash,
         entry_decision_id=(request.decision_id if request.side == "BUY" else None),
         exit_decision_id=(request.decision_id if request.side == "SELL" else None),
         decision_reason=request.decision_reason,

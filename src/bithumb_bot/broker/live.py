@@ -2416,6 +2416,21 @@ def _copy_pre_submit_authority_fields(
         "operational_risk_policy_hash",
         "residual_risk_policy_hash",
         "effective_pre_submit_risk_policy",
+        "position_mode",
+        "hold_policy",
+        "authority_hash",
+        "h74_source_authority_hash",
+        "strategy_instance_id",
+        "residual_inventory_mode",
+        "partial_fill_policy",
+        "cycle_id",
+        "h74_cycle_id",
+        "remaining_cycle_qty",
+        "h74_remaining_cycle_qty",
+        "locked_exit_qty",
+        "h74_startup_gate_status",
+        "h74_startup_gate_reason_code",
+        "startup_gate_hash",
     ):
         value = execution_submit_plan.get(field)
         if value not in (None, "", ()):

@@ -978,6 +978,71 @@ def test_h74_source_flat_first_entry_live_observation_reaches_execution_planning
         _restore_settings(original_settings)
 
 
+def test_h74_source_authority_position_mode_reaches_execution_payload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    original_settings = _force_live_strategy_risk_settings(
+        db_path=tmp_path / "runtime-state-live.sqlite"
+    )
+    authority = _source_authority()
+    path = tmp_path / "source-authority.json"
+    path.write_text(json.dumps(authority), encoding="utf-8")
+    monkeypatch.setenv("H74_SOURCE_OBSERVATION_AUTHORITY_PATH", str(path))
+    conn = None
+    try:
+        _record_verified_flat_reconcile()
+        cfg = _h74_source_cfg(path)
+        conn = ensure_db(str(tmp_path / "h74-source-authority-payload.sqlite"))
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        strategy_set = RuntimeStrategySet(
+            source="RUNTIME_STRATEGY_SET_JSON",
+            strategies=(
+                RuntimeStrategySpec(
+                    "daily_participation_sma",
+                    strategy_instance_id="h74-source-observation",
+                    pair="KRW-BTC",
+                    interval="1m",
+                    desired_exposure_krw=100_000.0,
+                    parameters=_source_parameters(),
+                ),
+            ),
+            market_scope=RuntimeMarketScope(mode="single_pair", pair="KRW-BTC", interval="1m"),
+        )
+        bundle = _h74_runtime_bundle(
+            candle_ts=1_704_046_800_000,
+            authority_context=ProfileAuthorityContext.for_strategy_set(strategy_set, settings_obj=cfg),
+        )
+        planner = ExecutionPlanner(
+            settings_obj=cfg,
+            readiness_snapshot_builder=lambda _conn: _Readiness(),
+            target_state_resolver=lambda *_args, **_kwargs: {
+                "previous_target_exposure_krw": 0.0,
+                "target_policy_metadata": {},
+            },
+            broker_provider=lambda: _BalanceSnapshotBroker(),
+        )
+
+        plan = planner.plan_runtime_strategy_results(conn, bundle, updated_ts=1_704_046_800_000)
+
+        assert plan.submit_plan is not None
+        submit_payload = plan.submit_plan.as_dict()
+        assert plan.persistence_context["position_mode"] == "fixed_fill_qty_until_exit"
+        assert plan.persistence_context["authority_hash"] == authority["authority_content_hash"]
+        assert submit_payload["position_mode"] == "fixed_fill_qty_until_exit"
+        assert submit_payload["authority_hash"] == authority["authority_content_hash"]
+    finally:
+        if conn is not None:
+            conn.close()
+        _restore_settings(original_settings)
+
+
 def test_h74_source_live_strategy_risk_fails_closed_when_broker_snapshot_fails(
     tmp_path,
     monkeypatch,

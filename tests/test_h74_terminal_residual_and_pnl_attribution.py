@@ -50,3 +50,22 @@ def test_unexplained_delta_above_tolerance_blocks_success() -> None:
     )
 
     assert pnl_attribution_passes(attribution, tolerance_krw=1.0) is False
+
+
+def test_unexplained_delta_above_tolerance_blocks_cycle_success() -> None:
+    attribution = build_pnl_attribution(
+        backtest_expected_entry_price=100,
+        live_entry_avg_price=101,
+        backtest_expected_exit_price=110,
+        live_exit_avg_price=111,
+        qty=1,
+        fee_delta_krw=0,
+        slippage_delta_krw=0,
+        spread_or_price_path_delta_krw=0,
+        rounding_delta_krw=0,
+        residual_mark_to_market_krw=0,
+        live_minus_backtest_delta_krw=25,
+    )
+    cycle_success = pnl_attribution_passes(attribution, tolerance_krw=1.0)
+
+    assert cycle_success is False

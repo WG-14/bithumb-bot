@@ -1218,6 +1218,16 @@ def execute_live_submission_and_application(
             submit_truth_source_fields=submit_truth_source_fields,
             submit_observability_fields=submit_observability_fields,
             sell_observability=sell_observability,
+            strategy_instance_id=str(decision_observability.get("strategy_instance_id") or "")
+            or None,
+            cycle_id=str(
+                decision_observability.get("h74_cycle_id")
+                or decision_observability.get("cycle_id")
+                or ""
+            )
+            or None,
+            authority_hash=str(decision_observability.get("authority_hash") or "")
+            or None,
         ),
         intent_key=intent_key,
         strategy_name=(strategy_name or settings.STRATEGY_NAME),

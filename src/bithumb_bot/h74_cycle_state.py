@@ -157,6 +157,28 @@ def load_h74_cycle_inventory(conn: sqlite3.Connection, *, cycle_id: str) -> H74C
     )
 
 
+def lock_h74_cycle_exit_qty(
+    conn: sqlite3.Connection,
+    *,
+    cycle_id: str,
+    exit_client_order_id: str,
+    qty: float,
+    updated_ts: int,
+) -> None:
+    ensure_h74_cycle_schema(conn)
+    lock_qty = max(0.0, float(qty))
+    conn.execute(
+        """
+        UPDATE h74_cycle_state
+        SET locked_exit_qty=?,
+            exit_client_order_id=?,
+            updated_ts=?
+        WHERE cycle_id=?
+        """,
+        (lock_qty, str(exit_client_order_id), int(updated_ts), str(cycle_id)),
+    )
+
+
 def h74_cycle_inventory_from_payload(payload: Mapping[str, Any]) -> H74CycleInventory:
     return H74CycleInventory(
         cycle_id=str(payload.get("cycle_id") or payload.get("h74_cycle_id") or ""),
@@ -176,5 +198,6 @@ __all__ = [
     "ensure_h74_cycle_schema",
     "h74_cycle_inventory_from_payload",
     "load_h74_cycle_inventory",
+    "lock_h74_cycle_exit_qty",
     "upsert_h74_cycle_fill",
 ]
