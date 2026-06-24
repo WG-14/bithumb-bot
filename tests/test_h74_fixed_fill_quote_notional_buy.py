@@ -6,6 +6,7 @@ from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.order_payloads import build_order_payload_from_plan
 from bithumb_bot.execution_models import OrderIntent
 from bithumb_bot.execution_planner import build_submit_plan
+from bithumb_bot.execution_service import ExecutionSubmitPlan, H74SubmitSemantics
 
 
 pytestmark = pytest.mark.fast_regression
@@ -98,6 +99,49 @@ def test_h74_buy_submit_plan_requires_quote_notional_semantics() -> None:
     assert plan.submit_semantics == "quote_notional_market_buy"
     assert plan.quote_notional_krw == pytest.approx(100_000.0)
     assert plan.exchange_submit_field == "price"
+
+
+def test_execution_submit_plan_as_final_payload_includes_h74_typed_fields() -> None:
+    plan = ExecutionSubmitPlan(
+        side="BUY",
+        source="h74_source_observation",
+        authority="h74_fixed_fill_quote_notional_buy",
+        final_action="REBALANCE_TO_TARGET",
+        qty=0.0009,
+        notional_krw=100_000.0,
+        target_exposure_krw=100_000.0,
+        current_effective_exposure_krw=0.0,
+        delta_krw=100_000.0,
+        submit_expected=True,
+        pre_submit_proof_status="passed",
+        block_reason="none",
+        idempotency_key="h74-final",
+        h74_submit_semantics=H74SubmitSemantics(
+            sizing_mode="quote_notional",
+            quote_notional_krw=100_000.0,
+            submit_semantics="quote_notional_market_buy",
+            fill_qty_authority="broker_fill",
+            position_mode="fixed_fill_qty_until_exit",
+            exchange_order_type="price",
+            exchange_submit_field="price",
+            exchange_submit_notional_krw=100_000.0,
+            exchange_submit_qty=None,
+            quote_notional_authority="h74_fixed_fill_quote_notional_buy",
+            submit_semantics_authority="h74_fixed_fill_quote_notional_buy",
+        ),
+    )
+
+    payload = plan.as_final_payload()
+
+    assert payload["submit_semantics"] == "quote_notional_market_buy"
+    assert payload["quote_notional_krw"] == pytest.approx(100_000.0)
+    assert payload["fill_qty_authority"] == "broker_fill"
+    assert payload["position_mode"] == "fixed_fill_qty_until_exit"
+    assert payload["exchange_order_type"] == "price"
+    assert payload["exchange_submit_field"] == "price"
+    assert payload["exchange_submit_notional_krw"] == pytest.approx(100_000.0)
+    assert payload["exchange_submit_qty"] is None
+    assert payload["content_hash"].startswith("sha256:")
 
 
 def test_h74_buy_submit_plan_rejects_base_qty_semantics() -> None:

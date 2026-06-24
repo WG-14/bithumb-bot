@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Callable, Mapping
 
 from bithumb_bot.decision_equivalence import sha256_prefixed
@@ -13,7 +15,9 @@ from bithumb_bot.research.decision_event import ResearchDecisionEvent
 from bithumb_bot.research.experiment_manifest import DateRange
 from bithumb_bot.runtime.data_cycle_preflight import RuntimeDataCyclePreflightProvider
 from bithumb_bot.runtime.decision_coordinator import DecisionCoordinator
+from bithumb_bot.runtime.runtime_checkpoint import RuntimeCheckpoint
 from bithumb_bot.runtime_data_access import select_latest_closed_candle
+from bithumb_bot.runtime_data_access import select_latest_candle
 from bithumb_bot.utils_time import parse_interval_sec
 
 
@@ -37,6 +41,15 @@ class PairedExperimentRun:
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class PairedExperimentRuntimeContext:
+    runtime_container: object
+    runtime_strategy_set: object
+    runtime_checkpoint: object
+    runtime_events: object
+    decision_coordinator: object | None = None
 
 
 @dataclass(frozen=True)
@@ -115,10 +128,17 @@ def run_paired_experiment(
     *,
     shadow_lane_runner: LaneRunner,
     operational_lane_runner: LaneRunner,
+    runtime_context: PairedExperimentRuntimeContext | None = None,
     broker_submit: Callable[..., object] | None = None,
 ) -> dict[str, object]:
+    if bool(run.submit_enabled) and broker_submit is None:
+        raise ValueError("paired_experiment_submit_enabled_requires_broker_submit_hook")
     shadow_lane = dict(shadow_lane_runner(run))
-    operational_lane = dict(operational_lane_runner(run))
+    operational_lane = _call_operational_lane(
+        operational_lane_runner,
+        run,
+        runtime_context=runtime_context,
+    )
     if not bool(run.submit_enabled) and broker_submit is not None:
         operational_lane.setdefault("submit_enabled", False)
     if bool(run.submit_enabled) and broker_submit is not None:
@@ -156,6 +176,7 @@ def run_closed_candle_paired_experiment(
     profile_hash: str,
     strategy_parameters_hash: str,
     submit_enabled: bool = False,
+    runtime_context: PairedExperimentRuntimeContext | None = None,
     broker_submit: BrokerSubmit | None = None,
 ) -> dict[str, object]:
     conn = db_factory()
@@ -177,6 +198,13 @@ def run_closed_candle_paired_experiment(
         run,
         shadow_lane_runner=shadow_backtest_lane,
         operational_lane_runner=operational_runtime_lane,
+        runtime_context=runtime_context
+        or build_default_runtime_context(
+            db_factory=db_factory,
+            market=market,
+            interval=interval,
+            now_ms=now_ms,
+        ),
         broker_submit=broker_submit,
     )
 
@@ -214,8 +242,11 @@ def shadow_backtest_lane(run: PairedExperimentRun) -> dict[str, object]:
     }
 
 
-def operational_runtime_lane(run: PairedExperimentRun) -> dict[str, object]:
-    operational_result = _run_operational_runtime_path(run)
+def operational_runtime_lane(
+    run: PairedExperimentRun,
+    runtime_context: PairedExperimentRuntimeContext | None = None,
+) -> dict[str, object]:
+    operational_result = _run_operational_runtime_path(run, runtime_context=runtime_context)
     stages = _operational_stage_hashes(run, operational_result)
     return {
         "lane": "operational_runtime",
@@ -228,6 +259,38 @@ def operational_runtime_lane(run: PairedExperimentRun) -> dict[str, object]:
         "runtime_path_reason_code": operational_result["reason_code"],
         "stages": stages,
     }
+
+
+def build_default_runtime_context(
+    *,
+    db_factory: Callable[[], sqlite3.Connection],
+    market: str,
+    interval: str,
+    now_ms: int,
+    runtime_strategy_set: object | None = None,
+) -> PairedExperimentRuntimeContext:
+    settings_obj = SimpleNamespace(PAIR=market, INTERVAL=interval, MODE="paper")
+    container = SimpleNamespace(
+        settings_obj=settings_obj,
+        market_sync=lambda quiet=True: None,
+        clock=lambda: float(now_ms) / 1000.0,
+        db_factory=db_factory,
+        candle_reader=select_latest_candle,
+        closed_candle_selector=lambda conn, *, pair, interval, interval_sec, now_ms: select_latest_closed_candle(
+            conn,
+            pair=pair,
+            interval=interval,
+            interval_sec=interval_sec,
+            now_ms=now_ms,
+            is_closed_candle=_is_closed_candle,
+        ),
+    )
+    return PairedExperimentRuntimeContext(
+        runtime_container=container,
+        runtime_strategy_set=runtime_strategy_set or SimpleNamespace(source="paired_experiment_read_only"),
+        runtime_checkpoint=RuntimeCheckpoint(symbol=market, interval=interval),
+        runtime_events=SimpleNamespace(event=lambda name, **fields: {"event_hash": sha256_prefixed({"name": name, **fields})}),
+    )
 
 
 def _stage(stage: str, payload: Mapping[str, object]) -> dict[str, object]:
@@ -398,7 +461,11 @@ def _shadow_stage_hashes(
     return stages
 
 
-def _run_operational_runtime_path(run: PairedExperimentRun) -> dict[str, object]:
+def _run_operational_runtime_path(
+    run: PairedExperimentRun,
+    *,
+    runtime_context: PairedExperimentRuntimeContext | None = None,
+) -> dict[str, object]:
     result = {
         "runtime_path": (
             "RuntimeDataCyclePreflightProvider.evaluate"
@@ -410,13 +477,14 @@ def _run_operational_runtime_path(run: PairedExperimentRun) -> dict[str, object]
         "preflight_hash": None,
         "decision_hash": None,
         "execution_plan_bundle_hash": None,
+        "submit_authority_hash": None,
     }
-    container = getattr(run, "runtime_container", None)
-    strategy_set = getattr(run, "runtime_strategy_set", None)
-    runtime_checkpoint = getattr(run, "runtime_checkpoint", None)
-    runtime_events = getattr(run, "runtime_events", None)
-    if container is None or strategy_set is None or runtime_checkpoint is None or runtime_events is None:
+    if runtime_context is None:
         return result
+    container = runtime_context.runtime_container
+    strategy_set = runtime_context.runtime_strategy_set
+    runtime_checkpoint = runtime_context.runtime_checkpoint
+    runtime_events = runtime_context.runtime_events
     try:
         preflight = RuntimeDataCyclePreflightProvider(
             container=container,
@@ -428,11 +496,12 @@ def _run_operational_runtime_path(run: PairedExperimentRun) -> dict[str, object]
             interval_sec=parse_interval_sec(str(run.interval)),
         )
         preflight_payload = preflight.as_dict()
-        decision = DecisionCoordinator(
+        coordinator = runtime_context.decision_coordinator or DecisionCoordinator(
             settings_obj=container.settings_obj,
             db_factory=container.db_factory,
             broker_provider=lambda: None,
-        ).decide_cycle(
+        )
+        decision = coordinator.decide_cycle(
             runtime_strategy_set=strategy_set,
             candle_ts=int(run.candle_ts),
             updated_ts=int(float(container.clock()) * 1000),
@@ -440,6 +509,7 @@ def _run_operational_runtime_path(run: PairedExperimentRun) -> dict[str, object]
             runtime_data_availability_report_hash=preflight.runtime_data_availability_report_hash,
             broker=None,
         )
+        submit_authority = _submit_authority_evaluation(run, decision)
     except Exception as exc:
         result["reason_code"] = f"operational_runtime_path_error:{type(exc).__name__}"
         return result
@@ -450,6 +520,8 @@ def _run_operational_runtime_path(run: PairedExperimentRun) -> dict[str, object]
             "preflight_hash": preflight_payload["decision_hash"],
             "decision_hash": decision.as_dict()["decision_hash"],
             "execution_plan_bundle_hash": decision.execution_plan_bundle_hash,
+            "submit_authority_hash": submit_authority["hash"],
+            "submit_authority": submit_authority,
             "decision_result": decision.as_dict(),
         }
     )
@@ -472,6 +544,7 @@ def _operational_stage_hashes(
         "runtime_data_cycle_preflight_hash": operational_result.get("preflight_hash"),
         "decision_hash": operational_result.get("decision_hash"),
         "execution_plan_bundle_hash": operational_result.get("execution_plan_bundle_hash"),
+        "submit_authority_hash": operational_result.get("submit_authority_hash"),
     }
     stages = {
         stage: _stage_with_status(stage, common, status, reason_code)
@@ -495,11 +568,64 @@ def _operational_stage_hashes(
             **common,
             "mode": "submit_capable" if run.submit_enabled else "read_only_no_submit",
             "submit_enabled": bool(run.submit_enabled),
+            "submit_authority": operational_result.get("submit_authority"),
         },
         status,
         reason_code,
     )
     return stages
+
+
+def _call_operational_lane(
+    operational_lane_runner: LaneRunner,
+    run: PairedExperimentRun,
+    *,
+    runtime_context: PairedExperimentRuntimeContext | None,
+) -> dict[str, object]:
+    signature = inspect.signature(operational_lane_runner)
+    positional_params = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+    ]
+    has_varargs = any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL
+        for parameter in signature.parameters.values()
+    )
+    if has_varargs or len(positional_params) >= 2:
+        return dict(operational_lane_runner(run, runtime_context))  # type: ignore[misc]
+    return dict(operational_lane_runner(run))
+
+
+def _submit_authority_evaluation(run: PairedExperimentRun, decision: object) -> dict[str, object]:
+    bundle = getattr(decision, "execution_plan_bundle", None)
+    submit_plan = getattr(bundle, "submit_plan", None)
+    submit_expected = bool(getattr(submit_plan, "submit_expected", False))
+    payload = {
+        "schema_version": 1,
+        "run_id": run.run_id,
+        "candle_ts": int(run.candle_ts),
+        "submit_enabled": bool(run.submit_enabled),
+        "submit_expected": submit_expected,
+        "read_only": not bool(run.submit_enabled),
+        "execution_submit_plan_hash": (
+            submit_plan.content_hash()
+            if submit_plan is not None and callable(getattr(submit_plan, "content_hash", None))
+            else getattr(decision, "execution_submit_plan_hash", None)
+        ),
+        "execution_plan_bundle_hash": getattr(decision, "execution_plan_bundle_hash", None),
+        "status": "ALLOW" if bool(run.submit_enabled) and submit_expected else "READ_ONLY_EVALUATED",
+        "reason_code": (
+            "submit_enabled_with_submit_plan"
+            if bool(run.submit_enabled) and submit_expected
+            else "read_only_no_broker_submit"
+            if not bool(run.submit_enabled)
+            else "submit_enabled_no_submit_expected"
+        ),
+    }
+    payload["hash"] = sha256_prefixed(payload)
+    return payload
 
 
 def _stage_with_status(

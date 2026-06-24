@@ -10,6 +10,8 @@ import pytest
 from bithumb_bot import paired_experiment
 from bithumb_bot.paired_experiment import (
     PairedExperimentRun,
+    PairedExperimentRuntimeContext,
+    build_default_runtime_context,
     operational_runtime_lane,
     run_closed_candle_paired_experiment,
     run_paired_experiment,
@@ -36,6 +38,67 @@ def _lane(run: PairedExperimentRun) -> dict[str, object]:
         "candle_ts": run.candle_ts,
         "stages": {stage: {"hash": f"sha256:{stage}", "status": "ok"} for stage in PAIRED_EXPERIMENT_STAGE_ORDER},
     }
+
+
+class _FakePreflight:
+    runtime_data_availability_report_hash = "sha256:availability"
+
+    def as_dict(self) -> dict[str, object]:
+        return {"decision_hash": "sha256:preflight"}
+
+
+class _FakePreflightProvider:
+    calls: list[dict[str, object]] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+
+    def evaluate(self, **kwargs: object) -> _FakePreflight:
+        self.calls.append({"init": self.kwargs, "evaluate": kwargs})
+        return _FakePreflight()
+
+
+class _FakeDecision:
+    execution_plan_bundle_hash = "sha256:bundle"
+    execution_submit_plan_hash = "sha256:submit-plan"
+    execution_plan_bundle = SimpleNamespace(
+        submit_plan=SimpleNamespace(
+            submit_expected=True,
+            content_hash=lambda: "sha256:submit-plan",
+        )
+    )
+
+    def as_dict(self) -> dict[str, object]:
+        return {"decision_hash": "sha256:decision"}
+
+
+class _FakeDecisionCoordinator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def decide_cycle(self, **kwargs: object) -> _FakeDecision:
+        self.calls.append(dict(kwargs))
+        return _FakeDecision()
+
+
+def _runtime_context(db_factory, *, now_ms: int = 1_704_046_920_000):
+    coordinator = _FakeDecisionCoordinator()
+    context = build_default_runtime_context(
+        db_factory=db_factory,
+        market="KRW-BTC",
+        interval="1m",
+        now_ms=now_ms,
+    )
+    return (
+        PairedExperimentRuntimeContext(
+            runtime_container=context.runtime_container,
+            runtime_strategy_set=context.runtime_strategy_set,
+            runtime_checkpoint=context.runtime_checkpoint,
+            runtime_events=context.runtime_events,
+            decision_coordinator=coordinator,
+        ),
+        coordinator,
+    )
 
 
 def test_paired_run_uses_same_closed_candle_for_both_lanes() -> None:
@@ -70,6 +133,40 @@ def test_paired_run_uses_runtime_closed_candle_snapshot() -> None:
 
     assert artifact["candle_ts"] == 1_704_046_800_000
     assert artifact["shadow_lane"]["candle_ts"] == artifact["operational_lane"]["candle_ts"]
+
+
+def test_default_operational_lane_uses_runtime_preflight_and_decision_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE candles(ts INTEGER, pair TEXT, interval TEXT, close REAL)")
+    conn.execute("CREATE TABLE orders(id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE fills(id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "INSERT INTO candles(ts, pair, interval, close) VALUES (?, ?, ?, ?)",
+        (1_704_046_800_000, "KRW-BTC", "1m", 100.0),
+    )
+    _FakePreflightProvider.calls = []
+    monkeypatch.setattr(paired_experiment, "RuntimeDataCyclePreflightProvider", _FakePreflightProvider)
+    context, coordinator = _runtime_context(lambda: conn)
+
+    artifact = run_closed_candle_paired_experiment(
+        db_factory=lambda: conn,
+        run_id="paired-runtime-path",
+        market="KRW-BTC",
+        interval="1m",
+        now_ms=1_704_046_920_000,
+        profile_hash="sha256:profile",
+        strategy_parameters_hash="sha256:parameters",
+        runtime_context=context,
+    )
+
+    assert _FakePreflightProvider.calls
+    assert coordinator.calls
+    assert artifact["operational_lane"]["runtime_path_reason_code"] != "runtime_container_not_injected"
+    assert artifact["operational_lane"]["stages"]["strategy_decision"]["hash"].startswith("sha256:")
+    assert artifact["operational_lane"]["stages"]["submit_authority"]["hash"].startswith("sha256:")
 
 
 def test_shadow_lane_does_not_write_live_orders_or_fills(tmp_path: Path) -> None:
@@ -131,24 +228,46 @@ def test_shadow_lane_calls_stage_owned_backtest_runner(monkeypatch: pytest.Monke
     assert lane["stages"]["market_input"]["status"] == "ok"
 
 
-def test_operational_lane_read_only_does_not_submit() -> None:
+def test_operational_lane_read_only_does_not_submit(monkeypatch: pytest.MonkeyPatch) -> None:
     submit = Mock()
+    _FakePreflightProvider.calls = []
+    monkeypatch.setattr(paired_experiment, "RuntimeDataCyclePreflightProvider", _FakePreflightProvider)
+    context, _coordinator = _runtime_context(lambda: sqlite3.connect(":memory:"))
 
     artifact = run_paired_experiment(
         _run(submit_enabled=False),
         shadow_lane_runner=_lane,
         operational_lane_runner=operational_runtime_lane,
+        runtime_context=context,
         broker_submit=submit,
     )
 
     assert artifact["operational_lane"]["submit_enabled"] is False
     assert artifact["operational_lane"]["read_only"] is True
-    assert artifact["operational_lane"]["runtime_path_reason_code"] == "runtime_container_not_injected"
+    assert artifact["operational_lane"]["runtime_path_reason_code"] != "runtime_container_not_injected"
     assert submit.call_count == 0
 
 
-def test_paired_run_artifact_contains_required_hashes() -> None:
-    artifact = run_paired_experiment(_run(), shadow_lane_runner=_lane, operational_lane_runner=_lane)
+def test_submit_enabled_true_requires_explicit_broker_submit_hook() -> None:
+    with pytest.raises(ValueError, match="submit_enabled_requires_broker_submit_hook"):
+        run_paired_experiment(
+            _run(submit_enabled=True),
+            shadow_lane_runner=_lane,
+            operational_lane_runner=_lane,
+        )
+
+
+def test_paired_run_artifact_contains_operational_stage_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FakePreflightProvider.calls = []
+    monkeypatch.setattr(paired_experiment, "RuntimeDataCyclePreflightProvider", _FakePreflightProvider)
+    context, _coordinator = _runtime_context(lambda: sqlite3.connect(":memory:"))
+
+    artifact = run_paired_experiment(
+        _run(),
+        shadow_lane_runner=_lane,
+        operational_lane_runner=operational_runtime_lane,
+        runtime_context=context,
+    )
 
     for key in (
         "shadow_lane",
@@ -161,3 +280,5 @@ def test_paired_run_artifact_contains_required_hashes() -> None:
         "stage_diffs",
     ):
         assert key in artifact
+    assert artifact["operational_lane"]["stages"]["strategy_decision"]["hash"].startswith("sha256:")
+    assert artifact["operational_lane"]["stages"]["submit_authority"]["hash"].startswith("sha256:")

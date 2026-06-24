@@ -469,6 +469,53 @@ class ResidualSellPreSubmitProof:
     reasons: tuple[str, ...]
 
 
+H74_SUBMIT_SEMANTIC_FIELDS = frozenset(
+    {
+        "sizing_mode",
+        "quote_notional_krw",
+        "submit_semantics",
+        "fill_qty_authority",
+        "position_mode",
+        "exchange_order_type",
+        "exchange_submit_field",
+        "exchange_submit_notional_krw",
+        "exchange_submit_qty",
+        "quote_notional_authority",
+        "submit_semantics_authority",
+    }
+)
+
+
+@dataclass(frozen=True)
+class H74SubmitSemantics:
+    sizing_mode: str
+    quote_notional_krw: float | None
+    submit_semantics: str
+    fill_qty_authority: str
+    position_mode: str
+    exchange_order_type: str
+    exchange_submit_field: str
+    exchange_submit_notional_krw: float | None
+    exchange_submit_qty: float | None
+    quote_notional_authority: str | None = None
+    submit_semantics_authority: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "sizing_mode": self.sizing_mode,
+            "quote_notional_krw": self.quote_notional_krw,
+            "submit_semantics": self.submit_semantics,
+            "fill_qty_authority": self.fill_qty_authority,
+            "position_mode": self.position_mode,
+            "exchange_order_type": self.exchange_order_type,
+            "exchange_submit_field": self.exchange_submit_field,
+            "exchange_submit_notional_krw": self.exchange_submit_notional_krw,
+            "exchange_submit_qty": self.exchange_submit_qty,
+            "quote_notional_authority": self.quote_notional_authority,
+            "submit_semantics_authority": self.submit_semantics_authority,
+        }
+
+
 @dataclass(frozen=True)
 class ExecutionSubmitPlan:
     side: str
@@ -488,10 +535,17 @@ class ExecutionSubmitPlan:
     scope_key_hash: str = ""
     portfolio_target_hash: str = ""
     submit_authority_policy_hash: str = ""
+    h74_submit_semantics: H74SubmitSemantics | None = None
     extra_payload: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         assert_not_live_submit_authority(self.extra_payload)
+        forbidden = sorted(H74_SUBMIT_SEMANTIC_FIELDS.intersection(self.extra_payload))
+        if forbidden:
+            raise ValueError(
+                "execution_submit_plan_extra_payload_reserved_h74_semantics:"
+                + ",".join(forbidden)
+            )
 
     def as_dict(self) -> dict[str, object]:
         payload = {
@@ -517,6 +571,10 @@ class ExecutionSubmitPlan:
         ):
             if str(value or "").strip():
                 payload[key] = value
+        if self.h74_submit_semantics is not None:
+            h74_payload = self.h74_submit_semantics.as_dict()
+            payload.update(h74_payload)
+            payload["h74_submit_semantics"] = h74_payload
         payload.update(dict(self.extra_payload))
         return payload
 
@@ -526,6 +584,12 @@ class ExecutionSubmitPlan:
     def as_final_payload(self, *, extra: dict[str, object] | None = None) -> dict[str, object]:
         payload = self.as_dict()
         if extra:
+            reserved = sorted(H74_SUBMIT_SEMANTIC_FIELDS.intersection(extra))
+            if reserved:
+                raise ValueError(
+                    "execution_submit_plan_final_payload_extra_reserved_h74_semantics:"
+                    + ",".join(reserved)
+                )
             payload.update(extra)
         payload.setdefault("submit_plan_hash", self.content_hash())
         daily_error = daily_participation_submit_payload_error(payload)
@@ -1084,6 +1148,12 @@ def _with_submit_plan_extra(
     plan: ExecutionSubmitPlan,
     extra: dict[str, object],
 ) -> ExecutionSubmitPlan:
+    reserved = sorted(H74_SUBMIT_SEMANTIC_FIELDS.intersection(extra))
+    if reserved:
+        raise ValueError(
+            "execution_submit_plan_extra_payload_reserved_h74_semantics:"
+            + ",".join(reserved)
+        )
     merged = dict(plan.extra_payload)
     merged.update(extra)
     return replace(plan, extra_payload=merged)
@@ -2466,6 +2536,25 @@ def _build_execution_decision_summary_from_authority_payload(
                     target_plan_extra[h74_key] = payload[h74_key]
             if performance_gate_fields and str(target_decision.delta_side) == "BUY":
                 target_plan_extra.update(performance_gate_fields)
+            h74_submit_semantics = (
+                H74SubmitSemantics(
+                    sizing_mode="quote_notional",
+                    quote_notional_krw=h74_quote_notional_krw,
+                    submit_semantics=H74_ENTRY_SUBMIT_SEMANTICS_NAME,
+                    fill_qty_authority="broker_fill",
+                    position_mode=configured_position_mode,
+                    exchange_order_type="price",
+                    exchange_submit_field="price",
+                    exchange_submit_notional_krw=h74_quote_notional_krw,
+                    exchange_submit_qty=None,
+                    quote_notional_authority=H74_ENTRY_SUBMIT_SEMANTICS_AUTHORITY,
+                    submit_semantics_authority=H74_ENTRY_SUBMIT_SEMANTICS_AUTHORITY,
+                )
+                if is_h74_fixed_buy
+                else None
+            )
+            for semantic_key in H74_SUBMIT_SEMANTIC_FIELDS:
+                target_plan_extra.pop(semantic_key, None)
             target_plan = ExecutionSubmitPlan(
                 side=str(target_decision.delta_side),
                 source="h74_source_observation" if is_h74_fixed_buy else "target_delta",
@@ -2488,6 +2577,7 @@ def _build_execution_decision_summary_from_authority_payload(
                 pre_submit_proof_status=("passed" if submit_allowed else "failed"),
                 block_reason=target_block_reason,
                 idempotency_key=target_idempotency_key,
+                h74_submit_semantics=h74_submit_semantics,
             )
             pre_trade_plan = target_plan.as_final_payload(extra=target_plan_extra)
             pre_trade_economics = _build_buy_pre_trade_economics(
@@ -2501,22 +2591,14 @@ def _build_execution_decision_summary_from_authority_payload(
                 if bool(pre_trade_economics.get("blocking_enabled")) and not bool(
                     pre_trade_economics.get("meaningful_edge")
                 ):
-                    target_plan = ExecutionSubmitPlan(
-                        side=target_plan.side,
-                        source=target_plan.source,
-                        authority=target_plan.authority,
+                    target_plan = replace(
+                        target_plan,
                         final_action="BLOCK_PRE_TRADE_ECONOMICS",
-                        qty=target_plan.qty,
-                        notional_krw=target_plan.notional_krw,
-                        target_exposure_krw=target_plan.target_exposure_krw,
-                        current_effective_exposure_krw=target_plan.current_effective_exposure_krw,
-                        delta_krw=target_plan.delta_krw,
                         submit_expected=False,
                         pre_submit_proof_status="failed",
                         block_reason=str(
                             pre_trade_economics.get("reason") or "net_edge_below_minimum"
                         ),
-                        idempotency_key=target_plan.idempotency_key,
                     )
             target_submit_plan = _with_submit_plan_extra(target_plan, target_plan_extra)
 

@@ -21,6 +21,7 @@ from .execution_service import (
     ExecutionReadinessPlanningInput,
     ExecutionSubmitPlan,
     ExecutionTargetPlanningInput,
+    H74_SUBMIT_SEMANTIC_FIELDS,
     TypedExecutionPlanningInput,
     build_typed_execution_decision_summary,
 )
@@ -2226,6 +2227,8 @@ def _with_h74_submit_plan_evidence(
         "experiment_execution_contract",
         "h74_source_authority",
     ):
+        if h74_key in H74_SUBMIT_SEMANTIC_FIELDS:
+            continue
         if h74_key in extra:
             continue
         if h74_key in readiness_payload:

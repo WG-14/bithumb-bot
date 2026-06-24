@@ -10,6 +10,7 @@ from bithumb_bot.broker import live
 from bithumb_bot.broker import order_rules
 from bithumb_bot.execution_models import OrderIntent
 from bithumb_bot.execution_planner import build_submit_plan
+from bithumb_bot.execution_service import ExecutionSubmitPlan, H74SubmitSemantics
 from bithumb_bot.h74_live_rehearsal import H74LiveRehearsalConfig, run_h74_live_rehearsal
 from bithumb_bot.submit_authority_policy import evaluate_submit_authority_policy
 
@@ -131,6 +132,64 @@ def test_broker_does_not_branch_on_h74_strategy_name() -> None:
     assert "strategy_name == 'daily_participation_sma'" not in source
 
 
+def test_execution_submit_plan_h74_semantics_are_typed_fields_not_extra_payload() -> None:
+    plan = ExecutionSubmitPlan(
+        side="BUY",
+        source="h74_source_observation",
+        authority="h74_fixed_fill_quote_notional_buy",
+        final_action="REBALANCE_TO_TARGET",
+        qty=0.0009,
+        notional_krw=100_000.0,
+        target_exposure_krw=100_000.0,
+        current_effective_exposure_krw=0.0,
+        delta_krw=100_000.0,
+        submit_expected=True,
+        pre_submit_proof_status="passed",
+        block_reason="none",
+        idempotency_key="h74-plan",
+        h74_submit_semantics=H74SubmitSemantics(
+            sizing_mode="quote_notional",
+            quote_notional_krw=100_000.0,
+            submit_semantics="quote_notional_market_buy",
+            fill_qty_authority="broker_fill",
+            position_mode="fixed_fill_qty_until_exit",
+            exchange_order_type="price",
+            exchange_submit_field="price",
+            exchange_submit_notional_krw=100_000.0,
+            exchange_submit_qty=None,
+            quote_notional_authority="h74_fixed_fill_quote_notional_buy",
+            submit_semantics_authority="h74_fixed_fill_quote_notional_buy",
+        ),
+        extra_payload={"strategy_name": "daily_participation_sma"},
+    )
+
+    payload = plan.as_dict()
+
+    assert plan.h74_submit_semantics is not None
+    assert payload["submit_semantics"] == "quote_notional_market_buy"
+    assert payload["sizing_mode"] == "quote_notional"
+    assert payload["quote_notional_krw"] == pytest.approx(100_000.0)
+    assert payload["fill_qty_authority"] == "broker_fill"
+    assert "submit_semantics" not in plan.extra_payload
+    with pytest.raises(ValueError, match="reserved_h74_semantics"):
+        ExecutionSubmitPlan(
+            side="BUY",
+            source="h74_source_observation",
+            authority="h74_fixed_fill_quote_notional_buy",
+            final_action="REBALANCE_TO_TARGET",
+            qty=0.0009,
+            notional_krw=100_000.0,
+            target_exposure_krw=100_000.0,
+            current_effective_exposure_krw=0.0,
+            delta_krw=100_000.0,
+            submit_expected=True,
+            pre_submit_proof_status="passed",
+            block_reason="none",
+            idempotency_key="h74-plan",
+            extra_payload={"submit_semantics": "quote_notional_market_buy"},
+        )
+
+
 def test_submit_authority_rejects_h74_source_without_typed_semantics() -> None:
     decision = evaluate_submit_authority_policy(
         {
@@ -143,6 +202,42 @@ def test_submit_authority_rejects_h74_source_without_typed_semantics() -> None:
             "portfolio_target_hash": "sha256:portfolio",
             "allocation_decision_hash": "sha256:allocation",
             "strategy_contribution_hash": "sha256:contribution",
+        },
+        settings_obj=SimpleNamespace(
+            MODE="live",
+            LIVE_DRY_RUN=False,
+            LIVE_REAL_ORDER_ARMED=True,
+            EXECUTION_ENGINE="target_delta",
+            TARGET_DELTA_LIVE_REAL_ORDER_ENABLED=True,
+            H74_SOURCE_OBSERVATION_AUTHORITY_PATH="/runtime/h74-authority.json",
+        ),
+        plan_kind="target",
+        require_final_payload=False,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "h74_source_observation_submit_semantics_missing"
+
+
+def test_submit_authority_rejects_h74_source_when_typed_fields_missing_even_if_extra_payload_has_strings() -> None:
+    decision = evaluate_submit_authority_policy(
+        {
+            "side": "BUY",
+            "source": "h74_source_observation",
+            "authority": "h74_fixed_fill_quote_notional_buy",
+            "submit_expected": True,
+            "pre_submit_proof_status": "passed",
+            "portfolio_target_authoritative": True,
+            "portfolio_target_hash": "sha256:portfolio",
+            "allocation_decision_hash": "sha256:allocation",
+            "strategy_contribution_hash": "sha256:contribution",
+            "extra_payload": {
+                "submit_semantics": "quote_notional_market_buy",
+                "sizing_mode": "quote_notional",
+                "quote_notional_krw": 100_000.0,
+                "fill_qty_authority": "broker_fill",
+                "position_mode": "fixed_fill_qty_until_exit",
+            },
         },
         settings_obj=SimpleNamespace(
             MODE="live",
