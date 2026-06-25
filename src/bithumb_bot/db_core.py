@@ -5268,14 +5268,25 @@ def init_portfolio(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT id FROM portfolio WHERE id=1").fetchone()
     if row is None:
         had_tx = conn.in_transaction
-        conn.execute(
-            """
-            INSERT INTO portfolio(
-                id, probe_run_id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
-            ) VALUES (1, NULL, ?, 0.0, ?, 0.0, 0.0, 0.0)
-            """,
-            (float(settings.START_CASH_KRW), float(settings.START_CASH_KRW)),
-        )
+        columns = set(_table_columns(conn, "portfolio"))
+        if "probe_run_id" in columns:
+            conn.execute(
+                """
+                INSERT INTO portfolio(
+                    id, probe_run_id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+                ) VALUES (1, NULL, ?, 0.0, ?, 0.0, 0.0, 0.0)
+                """,
+                (float(settings.START_CASH_KRW), float(settings.START_CASH_KRW)),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO portfolio(
+                    id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+                ) VALUES (1, ?, 0.0, ?, 0.0, 0.0, 0.0)
+                """,
+                (float(settings.START_CASH_KRW), float(settings.START_CASH_KRW)),
+            )
         if not had_tx:
             conn.commit()
 
@@ -5340,29 +5351,53 @@ def set_portfolio_breakdown(
     asset_total = portfolio_asset_total(asset_available=asset_available_n, asset_locked=asset_locked_n)
     normalized_probe_run_id = str(probe_run_id or "").strip() or None
     had_tx = conn.in_transaction
-    conn.execute(
-        """
-        UPDATE portfolio
-        SET
-            probe_run_id=?,
-            cash_krw=?,
-            asset_qty=?,
-            cash_available=?,
-            cash_locked=?,
-            asset_available=?,
-            asset_locked=?
-        WHERE id=1
-        """,
-        (
-            normalized_probe_run_id,
-            cash_total,
-            asset_total,
-            cash_available_n,
-            cash_locked_n,
-            asset_available_n,
-            asset_locked_n,
-        ),
-    )
+    columns = set(_table_columns(conn, "portfolio"))
+    if "probe_run_id" in columns:
+        conn.execute(
+            """
+            UPDATE portfolio
+            SET
+                probe_run_id=?,
+                cash_krw=?,
+                asset_qty=?,
+                cash_available=?,
+                cash_locked=?,
+                asset_available=?,
+                asset_locked=?
+            WHERE id=1
+            """,
+            (
+                normalized_probe_run_id,
+                cash_total,
+                asset_total,
+                cash_available_n,
+                cash_locked_n,
+                asset_available_n,
+                asset_locked_n,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE portfolio
+            SET
+                cash_krw=?,
+                asset_qty=?,
+                cash_available=?,
+                cash_locked=?,
+                asset_available=?,
+                asset_locked=?
+            WHERE id=1
+            """,
+            (
+                cash_total,
+                asset_total,
+                cash_available_n,
+                cash_locked_n,
+                asset_available_n,
+                asset_locked_n,
+            ),
+        )
     if not had_tx:
         conn.commit()
 

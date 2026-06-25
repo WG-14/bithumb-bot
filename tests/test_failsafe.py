@@ -1545,12 +1545,12 @@ class _LoopConn:
 
         if "INSERT OR IGNORE INTO execution_plan" in q:
             assert params is not None
-            key = (int(params[0]), str(params[4]))
+            key = (int(params[1]), str(params[5]))
             if key not in self.execution_plan_rows:
                 self.execution_plan_rows[key] = {
                     "id": len(self.execution_plan_rows) + 1,
-                    "execution_submit_plan_hash": str(params[5]),
-                    "execution_submit_plan_json": params[17],
+                    "execution_submit_plan_hash": str(params[6]),
+                    "execution_submit_plan_json": params[18],
                 }
             return _Rows(None, rowcount=1)
 

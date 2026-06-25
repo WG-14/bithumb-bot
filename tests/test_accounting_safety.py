@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
@@ -17,6 +19,41 @@ from bithumb_bot.execution import LiveFillFeeValidationError, apply_fill_and_tra
 from bithumb_bot.recovery import reconcile_with_broker
 from bithumb_bot import runtime_state
 from tests.support.live_auth import configure_bithumb_test_auth
+
+
+def test_portfolio_helpers_tolerate_current_schema_without_probe_run_id() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            CREATE TABLE portfolio (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                cash_krw REAL NOT NULL,
+                asset_qty REAL NOT NULL,
+                cash_available REAL NOT NULL DEFAULT 0,
+                cash_locked REAL NOT NULL DEFAULT 0,
+                asset_available REAL NOT NULL DEFAULT 0,
+                asset_locked REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+        set_portfolio_breakdown(
+            conn,
+            cash_available=900.0,
+            cash_locked=100.0,
+            asset_available=0.4,
+            asset_locked=0.1,
+            probe_run_id="diagnostic-probe",
+        )
+
+        assert get_portfolio_breakdown(conn) == pytest.approx((900.0, 100.0, 0.4, 0.1))
+        row = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
+        assert row["cash_krw"] == pytest.approx(1000.0)
+        assert row["asset_qty"] == pytest.approx(0.5)
+    finally:
+        conn.close()
 
 
 class _AvailableOnlyBalanceBroker:
