@@ -11,7 +11,8 @@ from .risk import (
     daily_loss_reason_code_from_reason,
     evaluate_daily_loss_state,
 )
-from .risk_contract import RiskPolicy, RiskSnapshot
+from .reason_codes import DRAWDOWN_UNDEFINED_NO_CAPITAL_BASE
+from .risk_contract import DrawdownMetric, RiskPolicy, RiskSnapshot
 from .runtime_risk_engine import _classify_unresolved_state
 
 
@@ -292,42 +293,142 @@ def _minutes_since_last_loss_for_instance(
     return max(0.0, (int(ts_ms) - int(last_loss_ts)) / 60_000.0), "available"
 
 
-def _current_drawdown_pct_for_instance(
+def _risk_capital_basis_for_scope(
+    conn: sqlite3.Connection,
+    *,
+    strategy_instance_id: str,
+    risk_scope_id: str,
+    declared_capital_krw: float | None = None,
+    declared_capital_basis: str = "",
+) -> tuple[float | None, str, str]:
+    if declared_capital_krw is not None and float(declared_capital_krw) > 0.0:
+        return float(declared_capital_krw), str(declared_capital_basis or "declared_capital"), "declared_capital"
+    if not _table_exists(conn, "strategy_risk_capital_basis"):
+        return None, "", "strategy_risk_capital_basis_missing"
+    columns = _table_columns(conn, "strategy_risk_capital_basis")
+    if not {"risk_scope_id", "capital_krw", "capital_basis"}.issubset(columns):
+        return None, "", "strategy_risk_capital_basis_columns_missing"
+    row = conn.execute(
+        """
+        SELECT capital_krw, capital_basis
+        FROM strategy_risk_capital_basis
+        WHERE risk_scope_id=? OR risk_scope_id=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (str(risk_scope_id), str(strategy_instance_id)),
+    ).fetchone()
+    if row is None:
+        return None, "", DRAWDOWN_UNDEFINED_NO_CAPITAL_BASE
+    capital = float(row["capital_krw"] if hasattr(row, "keys") else row[0] or 0.0)
+    basis = str(row["capital_basis"] if hasattr(row, "keys") else row[1] or "")
+    if capital <= 0.0:
+        return None, basis, DRAWDOWN_UNDEFINED_NO_CAPITAL_BASE
+    return capital, basis, "available"
+
+
+def _current_drawdown_metric_for_scope(
     conn: sqlite3.Connection,
     ts_ms: int,
     *,
     pair: str,
     strategy_instance_id: str,
-) -> float | None:
+    risk_scope_id: str,
+    declared_capital_krw: float | None = None,
+    declared_capital_basis: str = "",
+) -> DrawdownMetric:
+    capital, basis, capital_state = _risk_capital_basis_for_scope(
+        conn,
+        strategy_instance_id=strategy_instance_id,
+        risk_scope_id=risk_scope_id,
+        declared_capital_krw=declared_capital_krw,
+        declared_capital_basis=declared_capital_basis,
+    )
     if not _table_exists(conn, "trade_lifecycles"):
-        return None
+        return DrawdownMetric(
+            value=None,
+            unit="percent_point",
+            scope="risk_scope",
+            denominator_kind="allocated_capital",
+            denominator_value=capital,
+            sample_count=0,
+            state="undefined",
+            source_table="trade_lifecycles",
+            formula_version="strategy_closed_pnl_declared_capital_v1",
+            reason_code="source_table_missing",
+        )
     columns = _table_columns(conn, "trade_lifecycles")
-    if not {"exit_ts", "pair", "strategy_instance_id", "net_pnl"}.issubset(columns):
-        return None
+    scope_column = "owner_risk_scope_id" if "owner_risk_scope_id" in columns else "risk_scope_id" if "risk_scope_id" in columns else "strategy_instance_id"
+    if not {"exit_ts", "pair", scope_column, "net_pnl"}.issubset(columns):
+        return DrawdownMetric(
+            value=None,
+            unit="percent_point",
+            scope="risk_scope",
+            denominator_kind="allocated_capital",
+            denominator_value=capital,
+            sample_count=0,
+            state="reconstruction_failed",
+            source_table="trade_lifecycles",
+            formula_version="strategy_closed_pnl_declared_capital_v1",
+            reason_code="source_columns_missing",
+        )
+    if capital is None:
+        return DrawdownMetric(
+            value=None,
+            unit="percent_point",
+            scope="risk_scope",
+            denominator_kind="allocated_capital",
+            denominator_value=None,
+            sample_count=0,
+            state="undefined",
+            source_table="trade_lifecycles",
+            formula_version="strategy_closed_pnl_declared_capital_v1",
+            reason_code=capital_state,
+        )
     rows = conn.execute(
-        """
+        f"""
         SELECT exit_ts, net_pnl
         FROM trade_lifecycles
         WHERE exit_ts <= ?
           AND pair=?
-          AND strategy_instance_id=?
+          AND {scope_column}=?
         ORDER BY exit_ts, id
         """,
-        (int(ts_ms), str(pair), str(strategy_instance_id)),
+        (int(ts_ms), str(pair), str(risk_scope_id)),
     ).fetchall()
     if not rows:
-        return 0.0
-    equity = 0.0
-    peak = 0.0
+        return DrawdownMetric(
+            value=0.0,
+            unit="percent_point",
+            scope="risk_scope",
+            denominator_kind="allocated_capital",
+            denominator_value=capital,
+            sample_count=0,
+            state="valid",
+            source_table="trade_lifecycles",
+            formula_version="strategy_closed_pnl_declared_capital_v1",
+            reason_code="",
+        )
+    equity = float(capital)
+    peak = float(capital)
     max_drawdown_abs = 0.0
     for row in rows:
         pnl = float(row["net_pnl"] if hasattr(row, "keys") else row[1] or 0.0)
         equity += pnl
         peak = max(peak, equity)
         max_drawdown_abs = max(max_drawdown_abs, peak - equity)
-    if peak <= 0.0:
-        return 100.0 if max_drawdown_abs > 0.0 else 0.0
-    return max(0.0, (max_drawdown_abs / peak) * 100.0)
+    return DrawdownMetric(
+        value=max(0.0, (max_drawdown_abs / float(capital)) * 100.0),
+        unit="percent_point",
+        scope="risk_scope",
+        denominator_kind="allocated_capital",
+        denominator_value=capital,
+        sample_count=len(rows),
+        state="valid",
+        source_table="trade_lifecycles",
+        formula_version="strategy_closed_pnl_declared_capital_v1",
+        reason_code="",
+    )
 
 
 def _missing_required_state(policy: RiskPolicy, snapshot: RiskSnapshot) -> tuple[str, ...]:
@@ -343,8 +444,8 @@ def _missing_required_state(policy: RiskPolicy, snapshot: RiskSnapshot) -> tuple
         missing.append("daily_order_count")
     if int(policy.max_trade_count_per_day) > 0 and snapshot.daily_trade_count is None:
         missing.append("daily_trade_count")
-    if float(policy.max_drawdown_pct) > 0.0 and snapshot.current_drawdown_pct is None:
-        missing.append("current_drawdown_pct")
+    if float(policy.max_drawdown_pct) > 0.0 and snapshot.current_drawdown_metric is None:
+        missing.append("current_drawdown_metric")
     cooldown_source_state = str(
         (snapshot.evidence or {})
         .get("state_derivation", {})
@@ -378,7 +479,9 @@ class StrategyRiskStateProvider:
         broker: object | None = None,
         mark_price_source: str = "market_price",
         enforced: bool = False,
+        risk_scope_id: str | None = None,
     ) -> RiskSnapshot:
+        effective_risk_scope_id = str(risk_scope_id or strategy_instance_id)
         daily = evaluate_daily_loss_state(
             self.conn,
             ts_ms=int(as_of_ts_ms),
@@ -445,14 +548,28 @@ class StrategyRiskStateProvider:
             pair=pair,
             strategy_decision_ids=strategy_decision_ids,
         )
-        current_drawdown_pct = _current_drawdown_pct_for_instance(
+        declared_capital_krw = None
+        declared_capital_basis = ""
+        if policy is not None and str(policy.source) == "h74_source_live_observation_authority":
+            from .h74_observation import (
+                H74_SOURCE_OBSERVATION_RISK_CAPITAL_BASIS,
+                H74_SOURCE_OBSERVATION_RISK_CAPITAL_KRW,
+            )
+
+            declared_capital_krw = float(H74_SOURCE_OBSERVATION_RISK_CAPITAL_KRW)
+            declared_capital_basis = H74_SOURCE_OBSERVATION_RISK_CAPITAL_BASIS
+        current_drawdown_metric = _current_drawdown_metric_for_scope(
             self.conn,
             int(as_of_ts_ms),
             pair=pair,
             strategy_instance_id=strategy_instance_id,
+            risk_scope_id=effective_risk_scope_id,
+            declared_capital_krw=declared_capital_krw,
+            declared_capital_basis=declared_capital_basis,
         )
         evidence = {
             "strategy_instance_id": str(strategy_instance_id),
+            "risk_scope_id": effective_risk_scope_id,
             "strategy_name": str(strategy_name),
             "pair": str(pair),
             "interval": str(interval),
@@ -539,15 +656,16 @@ class StrategyRiskStateProvider:
                     "value_available": position_entry_price is not None,
                 },
                 "current_drawdown_pct": {
-                    "scope": "strategy_instance",
+                    "scope": "risk_scope",
                     "table": "trade_lifecycles",
-                    "columns": ["exit_ts", "pair", "strategy_instance_id", "net_pnl"],
+                    "columns": ["exit_ts", "pair", "owner_risk_scope_id|risk_scope_id|strategy_instance_id", "net_pnl"],
                     "filters": {
-                        "strategy_instance_id": str(strategy_instance_id),
+                        "risk_scope_id": effective_risk_scope_id,
                         "pair": str(pair),
                         "exit_ts_lte_as_of": True,
                     },
-                    "value_available": current_drawdown_pct is not None,
+                    "value_available": current_drawdown_metric.state == "valid",
+                    "metric": current_drawdown_metric.as_dict(),
                 },
                 "minutes_since_last_loss": {
                     "scope": "strategy_instance",
@@ -600,7 +718,8 @@ class StrategyRiskStateProvider:
             duplicate_entry=bool(asset_qty is not None and float(asset_qty) > 1e-12),
             daily_order_count=daily_order_count,
             daily_trade_count=daily_trade_count,
-            current_drawdown_pct=current_drawdown_pct,
+            current_drawdown_pct=current_drawdown_metric.value,
+            current_drawdown_metric=current_drawdown_metric,
             minutes_since_last_loss=minutes_since_last_loss,
             unresolved_order_blocked=bool(unresolved_blocked),
             unresolved_order_reason_code=str(unresolved_reason_code),

@@ -285,3 +285,33 @@ def test_strategy_performance_gate_instance_scope_blocks_only_selected_instance(
     assert losing.allowed is False
     assert "STRATEGY_EXPECTANCY_NEGATIVE" in losing.reason_code
     assert losing.summary.sample_count == 2
+
+
+def test_operator_intervention_can_be_reported_separately_from_owner_pnl(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "operator-intervention.sqlite"))
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_lifecycles(
+                pair, entry_trade_id, exit_trade_id, entry_client_order_id, exit_client_order_id,
+                entry_ts, exit_ts, matched_qty, entry_price, exit_price, gross_pnl, fee_total,
+                net_pnl, holding_time_sec, strategy_name, strategy_instance_id,
+                owner_strategy_name, owner_strategy_instance_id, owner_risk_scope_id,
+                exit_actor, exit_authority, operator_intervention
+            ) VALUES ('KRW-BTC', 1, 2, 'entry', 'operator_flatten-1', 1, 2, 1, 100, 90, -10, 0, -10, 1,
+                'operator_flatten', 'H74', 'daily_participation_sma', 'H74', 'H74',
+                'operator', 'operator_flatten', 1)
+            """
+        )
+        conn.commit()
+
+        owner = fetch_strategy_performance_summary(conn, strategy_name="daily_participation_sma", pair="KRW-BTC")
+        operator_rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM trade_lifecycles WHERE exit_actor='operator' AND operator_intervention=1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert owner.sample_count == 1
+    assert owner.net_pnl == -10.0
+    assert operator_rows["c"] == 1

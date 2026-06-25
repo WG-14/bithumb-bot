@@ -3,10 +3,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from .reason_codes import (
+    INSUFFICIENT_STRATEGY_HISTORY,
+    MAX_DRAWDOWN_PCT,
+    RISK_METRIC_DENOMINATOR_MISSING,
+    RISK_METRIC_RECONSTRUCTION_FAILED,
+    RISK_METRIC_SCOPE_MISMATCH,
+    RISK_METRIC_UNIT_MISMATCH,
+)
+
 from .canonical_decision import canonical_payload_hash
 
 RiskEvaluationPoint = Literal["pre_decision", "pre_submit", "post_fill", "resume"]
 RiskDecisionStatus = Literal["ALLOW", "BLOCK", "REQUIRE_RECONCILE", "REDUCE_ONLY", "FORCE_EXIT"]
+RiskMetricUnit = Literal["ratio", "percent_point", "krw"]
+RiskMetricScope = Literal["account", "strategy_instance", "risk_scope"]
+RiskMetricDenominatorKind = Literal[
+    "account_equity",
+    "allocated_capital",
+    "strategy_initial_capital",
+    "peak_strategy_equity",
+]
+RiskMetricState = Literal["valid", "undefined", "insufficient_history", "reconstruction_failed"]
 
 
 @dataclass(frozen=True)
@@ -61,6 +79,95 @@ class RiskPolicy:
 
 
 @dataclass(frozen=True)
+class RiskMetric:
+    value: float | None
+    unit: RiskMetricUnit
+    scope: RiskMetricScope
+    denominator_kind: RiskMetricDenominatorKind
+    denominator_value: float | None
+    sample_count: int
+    state: RiskMetricState
+    source_table: str
+    formula_version: str
+    reason_code: str = ""
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "value": self.value,
+            "unit": self.unit,
+            "scope": self.scope,
+            "denominator_kind": self.denominator_kind,
+            "denominator_value": self.denominator_value,
+            "sample_count": int(self.sample_count),
+            "state": self.state,
+            "source_table": self.source_table,
+            "formula_version": self.formula_version,
+            "reason_code": self.reason_code,
+        }
+
+
+DrawdownMetric = RiskMetric
+
+
+@dataclass(frozen=True)
+class RiskLimit:
+    value: float
+    unit: RiskMetricUnit
+    scope: RiskMetricScope
+    reason_code: str = MAX_DRAWDOWN_PCT
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "value": float(self.value),
+            "unit": self.unit,
+            "scope": self.scope,
+            "reason_code": self.reason_code,
+        }
+
+
+@dataclass(frozen=True)
+class RiskMetricComparison:
+    exceeded: bool
+    reason_code: str
+    metric: RiskMetric
+    limit: RiskLimit
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "exceeded": bool(self.exceeded),
+            "reason_code": self.reason_code,
+            "metric": self.metric.as_dict(),
+            "limit": self.limit.as_dict(),
+        }
+
+
+def compare_risk_metric_to_limit(metric: RiskMetric, limit: RiskLimit) -> RiskMetricComparison:
+    if metric.unit != limit.unit:
+        return RiskMetricComparison(False, RISK_METRIC_UNIT_MISMATCH, metric, limit)
+    if metric.scope != limit.scope:
+        return RiskMetricComparison(False, RISK_METRIC_SCOPE_MISMATCH, metric, limit)
+    if metric.state != "valid":
+        if metric.state == "insufficient_history":
+            reason = INSUFFICIENT_STRATEGY_HISTORY
+        elif metric.state == "reconstruction_failed":
+            reason = RISK_METRIC_RECONSTRUCTION_FAILED
+        else:
+            reason = metric.reason_code or "RISK_METRIC_UNDEFINED"
+        return RiskMetricComparison(False, reason, metric, limit)
+    try:
+        denominator = float(metric.denominator_value or 0.0)
+    except (TypeError, ValueError):
+        denominator = 0.0
+    if denominator <= 0.0:
+        return RiskMetricComparison(False, RISK_METRIC_DENOMINATOR_MISSING, metric, limit)
+    try:
+        value = float(metric.value if metric.value is not None else 0.0)
+    except (TypeError, ValueError):
+        return RiskMetricComparison(False, RISK_METRIC_RECONSTRUCTION_FAILED, metric, limit)
+    return RiskMetricComparison(value >= float(limit.value), limit.reason_code if value >= float(limit.value) else "OK", metric, limit)
+
+
+@dataclass(frozen=True)
 class RiskSnapshot:
     evaluation_ts_ms: int
     mark_price: float
@@ -76,12 +183,33 @@ class RiskSnapshot:
     daily_order_count: int | None = None
     daily_trade_count: int | None = None
     current_drawdown_pct: float | None = None
+    current_drawdown_metric: RiskMetric | None = None
     minutes_since_last_loss: float | None = None
     unresolved_order_blocked: bool = False
     unresolved_order_reason_code: str = "OK"
     unresolved_order_reason: str = "ok"
     state_source: str = "unknown"
     evidence: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        metric = self.current_drawdown_metric
+        if isinstance(metric, dict):
+            object.__setattr__(
+                self,
+                "current_drawdown_metric",
+                RiskMetric(
+                    value=metric.get("value"),  # type: ignore[arg-type]
+                    unit=metric.get("unit", "percent_point"),  # type: ignore[arg-type]
+                    scope=metric.get("scope", "risk_scope"),  # type: ignore[arg-type]
+                    denominator_kind=metric.get("denominator_kind", "allocated_capital"),  # type: ignore[arg-type]
+                    denominator_value=metric.get("denominator_value"),  # type: ignore[arg-type]
+                    sample_count=int(metric.get("sample_count", 0) or 0),
+                    state=metric.get("state", "undefined"),  # type: ignore[arg-type]
+                    source_table=str(metric.get("source_table") or ""),
+                    formula_version=str(metric.get("formula_version") or ""),
+                    reason_code=str(metric.get("reason_code") or ""),
+                ),
+            )
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -99,6 +227,9 @@ class RiskSnapshot:
             "daily_order_count": self.daily_order_count,
             "daily_trade_count": self.daily_trade_count,
             "current_drawdown_pct": self.current_drawdown_pct,
+            "current_drawdown_metric": (
+                None if self.current_drawdown_metric is None else self.current_drawdown_metric.as_dict()
+            ),
             "minutes_since_last_loss": self.minutes_since_last_loss,
             "unresolved_order_blocked": bool(self.unresolved_order_blocked),
             "unresolved_order_reason_code": str(self.unresolved_order_reason_code),

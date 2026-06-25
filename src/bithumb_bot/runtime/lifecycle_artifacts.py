@@ -392,6 +392,21 @@ class ExecutionGateTrace:
         return "none", "none"
 
 
+def final_action_for_primary_block_gate(primary_block_gate: str) -> str:
+    gate = str(primary_block_gate or "").strip()
+    if gate == "strategy_risk":
+        return "BLOCK_STRATEGY_RISK"
+    if gate == "portfolio_risk":
+        return "BLOCK_PORTFOLIO_RISK"
+    if gate in {"target_authority", "entry_authority"}:
+        return "BLOCK_TARGET_AUTHORITY"
+    if gate in {"submit_authority", "pre_submit_risk"}:
+        return "BLOCK_SUBMIT_AUTHORITY"
+    if gate == "startup_gate":
+        return "BLOCK_STARTUP_GATE"
+    return "NO_BLOCK"
+
+
 @dataclass(frozen=True)
 class RuntimeCycleArtifact:
     cycle_id: str

@@ -31,6 +31,8 @@ H74_SOURCE_OBSERVATION_MAX_DAILY_TOTAL_ORDER_COUNT = 2
 H74_SOURCE_OBSERVATION_RISK_POLICY_SOURCE = H74_SOURCE_OBSERVATION_AUTHORITY_ARTIFACT_TYPE
 H74_SOURCE_OBSERVATION_MAX_DAILY_LOSS_KRW = 5_000.0
 H74_SOURCE_OBSERVATION_MAX_POSITION_LOSS_PCT = 0.03
+H74_SOURCE_OBSERVATION_RISK_CAPITAL_BASIS = "fixed_observation_notional"
+H74_SOURCE_OBSERVATION_RISK_CAPITAL_KRW = float(H74_SOURCE_MAX_ORDER_KRW)
 H74_POSITION_MODE = POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
 
 def _h74_observation_parameters() -> dict[str, object]:
@@ -92,6 +94,8 @@ def _h74_source_observation_parameters() -> dict[str, object]:
             "daily_order_count_scope": "account_global",
             "max_entry_notional_krw": H74_SOURCE_MAX_ORDER_KRW,
             "max_notional_krw": H74_SOURCE_MAX_ORDER_KRW,
+            "risk_capital_basis": H74_SOURCE_OBSERVATION_RISK_CAPITAL_BASIS,
+            "risk_capital_krw": H74_SOURCE_OBSERVATION_RISK_CAPITAL_KRW,
             "exit_closeout_not_blocked_by_entry_cap": True,
             "position_mode": H74_POSITION_MODE,
             "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
@@ -137,6 +141,75 @@ def h74_source_observation_risk_policy() -> dict[str, object]:
 
 def h74_source_observation_risk_policy_hash(policy: dict[str, object] | None = None) -> str:
     return risk_policy_from_mapping(policy or h74_source_observation_risk_policy()).policy_hash()
+
+
+def build_h74_observation_experiment_envelope(
+    *,
+    experiment_run_id: str,
+    runtime_git_commit_sha: str,
+    runtime_git_diff_hash: str = "",
+    runtime_git_clean: bool = False,
+    env_hash: str,
+    strategy_revision_id: str,
+    risk_scope_id: str,
+    risk_baseline_certificate_hash: str,
+    starting_broker_position: dict[str, object],
+    starting_local_position: dict[str, object],
+    db_snapshot_hash: str = "",
+    db_snapshot_locator: str = "",
+    included_history_policy: str,
+) -> dict[str, object]:
+    payload = {
+        "schema_version": 1,
+        "artifact_type": "h74_observation_experiment_envelope",
+        "experiment_run_id": str(experiment_run_id or ""),
+        "runtime_git_commit_sha": str(runtime_git_commit_sha or ""),
+        "runtime_git_diff_hash": str(runtime_git_diff_hash or ""),
+        "runtime_git_clean": bool(runtime_git_clean),
+        "env_hash": str(env_hash or ""),
+        "strategy_revision_id": str(strategy_revision_id or ""),
+        "risk_scope_id": str(risk_scope_id or ""),
+        "risk_capital_basis": H74_SOURCE_OBSERVATION_RISK_CAPITAL_BASIS,
+        "risk_capital_krw": H74_SOURCE_OBSERVATION_RISK_CAPITAL_KRW,
+        "risk_baseline_certificate_hash": str(risk_baseline_certificate_hash or ""),
+        "starting_broker_position": dict(starting_broker_position or {}),
+        "starting_local_position": dict(starting_local_position or {}),
+        "db_snapshot_hash": str(db_snapshot_hash or ""),
+        "db_snapshot_locator": str(db_snapshot_locator or ""),
+        "included_history_policy": str(included_history_policy or ""),
+    }
+    missing = [
+        key
+        for key in (
+            "experiment_run_id",
+            "runtime_git_commit_sha",
+            "env_hash",
+            "strategy_revision_id",
+            "risk_scope_id",
+            "risk_baseline_certificate_hash",
+            "included_history_policy",
+        )
+        if not payload[key]
+    ]
+    if not payload["runtime_git_clean"] and not payload["runtime_git_diff_hash"]:
+        missing.append("runtime_git_diff_hash")
+    if not payload["db_snapshot_hash"] and not payload["db_snapshot_locator"]:
+        missing.append("db_snapshot_hash_or_locator")
+    if missing:
+        raise H74ObservationAuthorityError("h74_observation_experiment_envelope_missing:" + ",".join(missing))
+    payload["experiment_envelope_hash"] = sha256_prefixed(
+        {key: value for key, value in payload.items() if key != "experiment_envelope_hash"}
+    )
+    return payload
+
+
+def verify_h74_observation_experiment_envelope(payload: dict[str, Any]) -> None:
+    if str(payload.get("artifact_type") or "") != "h74_observation_experiment_envelope":
+        raise H74ObservationAuthorityError("h74_observation_experiment_envelope_type_invalid")
+    expected = str(payload.get("experiment_envelope_hash") or "")
+    actual = sha256_prefixed({key: value for key, value in payload.items() if key != "experiment_envelope_hash"})
+    if expected != actual:
+        raise H74ObservationAuthorityError("h74_observation_experiment_envelope_hash_mismatch")
 
 
 def build_h74_capital_scaled_variant() -> dict[str, Any]:
@@ -257,6 +330,8 @@ def build_h74_source_observation_authority_payload(
         "production_approval": False,
         "approved_profile_evidence": False,
         "risk_policy_hash": risk_policy_hash,
+        "risk_capital_basis": H74_SOURCE_OBSERVATION_RISK_CAPITAL_BASIS,
+        "risk_capital_krw": H74_SOURCE_OBSERVATION_RISK_CAPITAL_KRW,
         "position_mode": H74_POSITION_MODE,
         "entry_submit_semantics": dict(H74_ENTRY_SUBMIT_SEMANTICS),
         "entry_submit_semantics_name": H74_ENTRY_SUBMIT_SEMANTICS_NAME,

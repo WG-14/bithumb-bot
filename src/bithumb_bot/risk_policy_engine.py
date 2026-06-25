@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .reason_codes import POSITION_LOSS_LIMIT
+from .reason_codes import MAX_DRAWDOWN_PCT, POSITION_LOSS_LIMIT
 from .risk import (
     DAILY_LOSS_LIMIT_REASON_CODE,
     POSITION_EPSILON,
@@ -15,9 +15,11 @@ from .risk_contract import (
     RiskDecision,
     RiskEvent,
     RiskPolicy,
+    RiskLimit,
     RiskSnapshot,
     SubmitPlan,
     build_risk_decision,
+    compare_risk_metric_to_limit,
 )
 
 
@@ -212,19 +214,37 @@ class RiskPolicyEngine:
                 )
 
         drawdown_limit = float(self.policy.max_drawdown_pct)
-        if drawdown_limit > 0.0 and snapshot.current_drawdown_pct is not None:
-            current_drawdown = float(snapshot.current_drawdown_pct)
-            if current_drawdown >= drawdown_limit:
+        if drawdown_limit > 0.0 and snapshot.current_drawdown_metric is not None:
+            limit = RiskLimit(
+                value=drawdown_limit,
+                unit=snapshot.current_drawdown_metric.unit,
+                scope=snapshot.current_drawdown_metric.scope,
+                reason_code=MAX_DRAWDOWN_PCT,
+            )
+            comparison = compare_risk_metric_to_limit(snapshot.current_drawdown_metric, limit)
+            if comparison.reason_code != "OK" and not comparison.exceeded:
                 return build_risk_decision(
                     evaluation_point=evaluation_point,  # type: ignore[arg-type]
                     status="BLOCK",
-                    reason_code="MAX_DRAWDOWN_PCT",
-                    reason=f"drawdown limit exceeded ({current_drawdown}/{drawdown_limit})",
+                    reason_code=comparison.reason_code,
+                    reason=f"drawdown metric incompatible or unavailable ({comparison.reason_code})",
                     allowed_actions=("HOLD",),
                     recommended_action="halt",
                     snapshot=snapshot,
                     policy=self.policy,
-                    evidence={**dict(snapshot.evidence), "current_drawdown_pct": current_drawdown},
+                    evidence={**dict(snapshot.evidence), "drawdown_metric_comparison": comparison.as_dict()},
+                )
+            if comparison.exceeded:
+                return build_risk_decision(
+                    evaluation_point=evaluation_point,  # type: ignore[arg-type]
+                    status="BLOCK",
+                    reason_code=MAX_DRAWDOWN_PCT,
+                    reason=f"drawdown limit exceeded ({snapshot.current_drawdown_metric.value}/{drawdown_limit})",
+                    allowed_actions=("HOLD",),
+                    recommended_action="halt",
+                    snapshot=snapshot,
+                    policy=self.policy,
+                    evidence={**dict(snapshot.evidence), "drawdown_metric_comparison": comparison.as_dict()},
                 )
 
         cooldown_min = int(self.policy.cooldown_after_loss_min)

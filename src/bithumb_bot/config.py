@@ -1775,6 +1775,10 @@ def runtime_code_provenance() -> dict[str, object]:
             "working_tree_dirty": env_dirty in {"1", "true", "yes", "y", "on"},
             "source": "env",
             "git_available": False,
+            "runtime_git_diff_hash": str(os.getenv("BITHUMB_RUNTIME_GIT_DIFF_HASH") or "").strip(),
+            "runtime_git_diff_artifact_path": str(os.getenv("BITHUMB_RUNTIME_GIT_DIFF_ARTIFACT_PATH") or "").strip(),
+            "source_archive_hash": str(os.getenv("BITHUMB_SOURCE_ARCHIVE_HASH") or "").strip(),
+            "operator_dirty_runtime_ack": str(os.getenv("BITHUMB_OPERATOR_DIRTY_RUNTIME_ACK") or "").strip(),
         }
 
     commit_sha = _git_output(("rev-parse", "HEAD"), cwd=PROJECT_ROOT)
@@ -1784,6 +1788,44 @@ def runtime_code_provenance() -> dict[str, object]:
         "working_tree_dirty": bool(dirty_probe) if dirty_probe is not None else None,
         "source": "git" if commit_sha else "unavailable",
         "git_available": bool(commit_sha),
+        "runtime_git_diff_hash": str(os.getenv("BITHUMB_RUNTIME_GIT_DIFF_HASH") or "").strip(),
+        "runtime_git_diff_artifact_path": str(os.getenv("BITHUMB_RUNTIME_GIT_DIFF_ARTIFACT_PATH") or "").strip(),
+        "source_archive_hash": str(os.getenv("BITHUMB_SOURCE_ARCHIVE_HASH") or "").strip(),
+        "operator_dirty_runtime_ack": str(os.getenv("BITHUMB_OPERATOR_DIRTY_RUNTIME_ACK") or "").strip(),
+    }
+
+
+def validate_runtime_code_provenance_for_live_real_order(
+    cfg: Settings,
+    *,
+    code_provenance: dict[str, object] | None = None,
+) -> dict[str, object]:
+    provenance = dict(code_provenance or runtime_code_provenance())
+    real_order = (
+        str(getattr(cfg, "MODE", "") or "").strip().lower() == "live"
+        and bool(getattr(cfg, "LIVE_REAL_ORDER_ARMED", False))
+        and not bool(getattr(cfg, "LIVE_DRY_RUN", True))
+    )
+    dirty = provenance.get("working_tree_dirty") is True
+    diff_hash = str(provenance.get("runtime_git_diff_hash") or "").strip()
+    diff_path = str(provenance.get("runtime_git_diff_artifact_path") or "").strip()
+    archive_hash = str(provenance.get("source_archive_hash") or "").strip()
+    ack = str(provenance.get("operator_dirty_runtime_ack") or "").strip()
+    ok = True
+    reason = "OK"
+    if real_order and dirty and not (diff_hash and diff_path and archive_hash and ack):
+        ok = False
+        reason = "DIRTY_RUNTIME_PROVENANCE_MISSING_DIFF_ARTIFACT"
+    return {
+        "ok": ok,
+        "reason_code": reason,
+        "live_real_order": real_order,
+        "runtime_git_commit_sha": str(provenance.get("commit_sha") or ""),
+        "runtime_git_dirty": dirty,
+        "runtime_git_diff_hash": diff_hash,
+        "runtime_git_diff_artifact_path": diff_path,
+        "source_archive_hash": archive_hash,
+        "operator_dirty_runtime_ack": ack,
     }
 
 
@@ -2096,6 +2138,13 @@ def live_execution_contract_summary(
         approved_profile_summary = profile_result.audit_fields()
     config_contract = config_contract_metadata(cfg)
     submit_authority_policy = submit_authority_policy_from_settings(cfg)
+    code_provenance = runtime_code_provenance()
+    provenance_gate = validate_runtime_code_provenance_for_live_real_order(
+        cfg,
+        code_provenance=code_provenance,
+    )
+    if not provenance_gate["ok"]:
+        raise RuntimeError(str(provenance_gate["reason_code"]))
     return {
         "mode": cfg.MODE,
         "pair": cfg.PAIR,
@@ -2114,7 +2163,8 @@ def live_execution_contract_summary(
         "api_secret_present": bool(str(cfg.BITHUMB_API_SECRET or "").strip()),
         "api_secret_length": len(str(cfg.BITHUMB_API_SECRET or "")),
         "api_secret_hash_prefix": _safe_secret_hash_prefix(cfg.BITHUMB_API_SECRET),
-        "code_provenance": runtime_code_provenance(),
+        "code_provenance": code_provenance,
+        "runtime_code_provenance_gate": provenance_gate,
         "approved_profile": approved_profile_summary,
         "runtime_profile_binding": profile_binding_summary,
         "runtime_selection_kind": profile_binding_summary.get("runtime_selection_kind"),

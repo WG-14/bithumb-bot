@@ -145,7 +145,17 @@ def fetch_strategy_performance_summary(
     if not {"gross_pnl", "fee_total", "net_pnl", "exit_ts"}.issubset(cols):
         return _empty_summary()
     has_notional_cols = {"matched_qty", "entry_price", "exit_price"}.issubset(cols)
-    has_instance_col = "strategy_instance_id" in cols
+    owner_name_expr = (
+        "COALESCE(owner_strategy_name, strategy_name, '<unknown>')"
+        if "owner_strategy_name" in cols
+        else "COALESCE(strategy_name, '<unknown>')"
+    )
+    owner_instance_expr = (
+        "COALESCE(owner_strategy_instance_id, strategy_instance_id, '')"
+        if "owner_strategy_instance_id" in cols and "strategy_instance_id" in cols
+        else "COALESCE(strategy_instance_id, '')"
+    )
+    has_instance_col = "owner_strategy_instance_id" in cols or "strategy_instance_id" in cols
     has_manifest_col = "runtime_strategy_set_manifest_hash" in cols
 
     filters: list[str] = []
@@ -153,11 +163,11 @@ def fetch_strategy_performance_summary(
     instance_filter_applied = False
     manifest_filter_applied = False
     if strategy_instance_id and has_instance_col:
-        filters.append("COALESCE(strategy_instance_id, '') = ?")
+        filters.append(f"{owner_instance_expr} = ?")
         params.append(str(strategy_instance_id))
         instance_filter_applied = True
     elif strategy_name:
-        filters.append("COALESCE(strategy_name, '<unknown>') = ?")
+        filters.append(f"{owner_name_expr} = ?")
         params.append(str(strategy_name))
     if pair:
         filters.append("COALESCE(pair, '<unknown>') = ?")
@@ -186,9 +196,9 @@ def fetch_strategy_performance_summary(
     rows = conn.execute(
         f"""
         SELECT
-            {"COALESCE(strategy_instance_id, '') AS strategy_instance_id," if has_instance_col else ""}
+            {owner_instance_expr + " AS strategy_instance_id," if has_instance_col else ""}
             {"COALESCE(runtime_strategy_set_manifest_hash, '') AS runtime_strategy_set_manifest_hash," if has_manifest_col else ""}
-            COALESCE(strategy_name, '<unknown>') AS strategy_name,
+            {owner_name_expr} AS strategy_name,
             COALESCE(exit_rule_name, '<unknown>') AS exit_rule_name,
             gross_pnl,
             fee_total,

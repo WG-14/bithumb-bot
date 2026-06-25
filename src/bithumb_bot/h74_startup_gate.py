@@ -50,6 +50,8 @@ def evaluate_h74_startup_gate(
     portfolio_qty = _float(projection.get("portfolio_qty", payload.get("portfolio_qty")))
     projected_qty = _float(projection.get("projected_total_qty", payload.get("projected_total_qty")))
     target = dict(target_state or {})
+    target_live_submit_authority = target.get("live_submit_authority")
+    target_is_authoritative = target_live_submit_authority is not False
 
     checks = {
         "broker_qty_known": broker_qty_known,
@@ -59,7 +61,12 @@ def evaluate_h74_startup_gate(
         "open_order_count": _int(payload.get("open_order_count", payload.get("unresolved_open_order_count"))),
         "submit_unknown_count": _int(payload.get("submit_unknown_count")),
         "recovery_required_count": _int(payload.get("recovery_required_count")),
-        "target_exposure_krw": _float(target.get("target_exposure_krw", payload.get("target_exposure_krw"))),
+        "target_exposure_krw": (
+            _float(target.get("target_exposure_krw", payload.get("target_exposure_krw")))
+            if target_is_authoritative
+            else 0.0
+        ),
+        "target_live_submit_authority": target_live_submit_authority,
         "residual_inventory_state": residual_state,
         "residual_inventory_mode": residual_mode,
     }

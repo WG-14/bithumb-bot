@@ -1505,6 +1505,11 @@ def apply_fill_lifecycle(
             conn,
             int(effective_entry_decision_id) if effective_entry_decision_id is not None else None,
         )
+        owner_strategy_name = str(strategy_name or _row_value(lot, "strategy_name", 11) or "")
+        owner_strategy_instance_id = str(strategy_instance_id or "")
+        owner_risk_scope_id = owner_strategy_instance_id
+        exit_actor = "operator" if str(exit_reason or "").strip().lower() == "operator_flatten" or "operator_flatten" in str(client_order_id).lower() else "strategy"
+        exit_authority = "operator_flatten" if exit_actor == "operator" else (exit_rule_name or "strategy_exit")
 
         conn.execute(
             """
@@ -1527,13 +1532,22 @@ def apply_fill_lifecycle(
                 holding_time_sec,
                 strategy_name,
                 strategy_instance_id,
+                owner_strategy_name,
+                owner_strategy_instance_id,
+                owner_risk_scope_id,
+                risk_scope_id,
+                entry_actor,
+                exit_actor,
+                exit_authority,
+                operator_intervention,
+                exit_initiator_type,
                 runtime_strategy_set_manifest_hash,
                 entry_decision_id,
                 entry_decision_linkage,
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -1552,8 +1566,17 @@ def apply_fill_lifecycle(
                 float(fee_total),
                 float(net_pnl),
                 float(holding_time_seconds),
-                strategy_name or _row_value(lot, "strategy_name", 11),
+                owner_strategy_name,
                 strategy_instance_id,
+                owner_strategy_name,
+                owner_strategy_instance_id,
+                owner_risk_scope_id,
+                owner_risk_scope_id,
+                "strategy",
+                exit_actor,
+                exit_authority,
+                1 if exit_actor == "operator" else 0,
+                exit_actor,
                 manifest_hash,
                 effective_entry_decision_id,
                 (
@@ -1590,6 +1613,11 @@ def apply_fill_lifecycle(
         remaining_qty = lot_count_to_qty(lot_count=remaining_lots, lot_size=float(lot_rules.lot_size))
         fallback_exit_fee = float(fee) * (remaining_qty / total_exit_qty) if total_exit_qty > eps else 0.0
         strategy_instance_id, manifest_hash = _strategy_scope_for_decision_id(conn, entry_decision_id)
+        owner_strategy_name = str(strategy_name or "")
+        owner_strategy_instance_id = str(strategy_instance_id or "")
+        owner_risk_scope_id = owner_strategy_instance_id
+        exit_actor = "operator" if str(exit_reason or "").strip().lower() == "operator_flatten" or "operator_flatten" in str(client_order_id).lower() else "strategy"
+        exit_authority = "operator_flatten" if exit_actor == "operator" else (exit_rule_name or "strategy_exit")
         conn.execute(
             """
             INSERT INTO trade_lifecycles(
@@ -1611,13 +1639,22 @@ def apply_fill_lifecycle(
                 holding_time_sec,
                 strategy_name,
                 strategy_instance_id,
+                owner_strategy_name,
+                owner_strategy_instance_id,
+                owner_risk_scope_id,
+                risk_scope_id,
+                entry_actor,
+                exit_actor,
+                exit_authority,
+                operator_intervention,
+                exit_initiator_type,
                 runtime_strategy_set_manifest_hash,
                 entry_decision_id,
                 entry_decision_linkage,
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -1638,6 +1675,15 @@ def apply_fill_lifecycle(
                 0.0,
                 strategy_name,
                 strategy_instance_id,
+                owner_strategy_name,
+                owner_strategy_instance_id,
+                owner_risk_scope_id,
+                owner_risk_scope_id,
+                "strategy",
+                exit_actor,
+                exit_authority,
+                1 if exit_actor == "operator" else 0,
+                exit_actor,
                 manifest_hash,
                 entry_decision_id,
                 "unattributed_unknown_entry",

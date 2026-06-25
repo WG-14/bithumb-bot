@@ -54,6 +54,56 @@ def _valid_hash(value: object) -> bool:
     return text.startswith("sha256:") and len(text.removeprefix("sha256:")) == 64
 
 
+def _table_content_hash(conn: sqlite3.Connection, table: str) -> str:
+    if not _table_exists(conn, table):
+        return sha256_prefixed({"table": table, "rows": []})
+    rows = conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+    payload_rows: list[dict[str, object]] = []
+    for row in rows:
+        if hasattr(row, "keys"):
+            payload_rows.append({str(key): row[key] for key in row.keys()})
+        else:
+            payload_rows.append({str(index): value for index, value in enumerate(row)})
+    return sha256_prefixed({"table": table, "rows": payload_rows})
+
+
+def build_risk_replay_input_artifact(
+    conn: sqlite3.Connection,
+    *,
+    db_snapshot_hash: str,
+    env_hash: str,
+    runtime_scope_id: str,
+    risk_scope_id: str,
+    candle_ts: int,
+    mark_price: float,
+    included_tables: tuple[str, ...] = ("trade_lifecycles",),
+) -> dict[str, object]:
+    if not _valid_hash(db_snapshot_hash):
+        raise ValueError("risk_replay_db_snapshot_hash_missing")
+    included_tables_hashes = {
+        str(table): _table_content_hash(conn, str(table)) for table in included_tables
+    }
+    payload = {
+        "schema_version": 1,
+        "db_snapshot_hash": str(db_snapshot_hash),
+        "env_hash": str(env_hash),
+        "runtime_scope_id": str(runtime_scope_id),
+        "risk_scope_id": str(risk_scope_id),
+        "candle_ts": int(candle_ts),
+        "mark_price": float(mark_price),
+        "included_tables_hashes": included_tables_hashes,
+    }
+    payload["risk_input_hash"] = sha256_prefixed(payload)
+    payload["risk_decision_hash"] = sha256_prefixed(
+        {
+            "schema_version": 1,
+            "risk_input_hash": payload["risk_input_hash"],
+            "risk_scope_id": str(risk_scope_id),
+        }
+    )
+    return payload
+
+
 def _generic_risk_actual(decision: Mapping[str, object]) -> tuple[str, str]:
     evidence = dict(decision.get("evidence") or {})
     evidence_hash = canonical_payload_hash(evidence)

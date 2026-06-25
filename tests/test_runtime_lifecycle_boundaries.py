@@ -17,6 +17,7 @@ from bithumb_bot.runtime.execution_coordinator import ExecutionCoordinator
 from bithumb_bot.runtime.cleanup_revalidation import CleanupRevalidationResult, CleanupRevalidationService
 from bithumb_bot.runtime.execution_coordinator import ExecutionCycleResult
 from bithumb_bot.runtime.lifecycle_artifacts import RuntimeCycleArtifact, SafetyDecision
+from bithumb_bot.db_core import ensure_db
 from bithumb_bot.runtime.notification_adapter import NotificationAdapter
 from bithumb_bot.runtime.operator_event_composer import OperatorEventComposer
 from bithumb_bot.runtime.recovery_controller import RecoveryController, ReconcileClearEvidence
@@ -1061,3 +1062,63 @@ def test_runtime_cycle_artifact_records_execution_result_hash_on_execution_halt(
         execution_result_hash=result.as_dict()["decision_hash"],
     )
     assert artifact.as_dict()["execution_result_hash"] == result.as_dict()["decision_hash"]
+
+
+def test_operator_flatten_records_owner_and_exit_actor(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "owner-actor.sqlite"))
+    decision_id = conn.execute(
+        """
+        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, candle_ts, market_price, context_json)
+        VALUES (1, 'daily_participation_sma', 'BUY', 'unit', 1, 100,
+                '{"strategy_name":"daily_participation_sma","strategy_instance_id":"H74","risk_scope_id":"H74"}')
+        """
+    ).lastrowid
+    conn.execute(
+        """
+        INSERT INTO trade_lifecycles(
+            pair, entry_trade_id, exit_trade_id, entry_client_order_id, exit_client_order_id,
+            entry_ts, exit_ts, matched_qty, entry_price, exit_price, gross_pnl, fee_total,
+            net_pnl, holding_time_sec, strategy_name, strategy_instance_id, entry_decision_id
+        ) VALUES ('KRW-BTC', 1, 2, 'entry', 'operator_flatten-1', 1, 2, 1, 100, 90, -10, 0, -10, 1,
+            'operator_flatten', 'H74', ?)
+        """,
+        (decision_id,),
+    )
+    conn.commit()
+    ensure_db(str(tmp_path / "owner-actor.sqlite")).close()
+
+    row = conn.execute(
+        "SELECT owner_strategy_name, owner_strategy_instance_id, exit_actor, exit_authority, operator_intervention FROM trade_lifecycles"
+    ).fetchone()
+
+    assert row["owner_strategy_name"] == "daily_participation_sma"
+    assert row["owner_strategy_instance_id"] == "H74"
+    assert row["exit_actor"] == "operator"
+    assert row["exit_authority"] == "operator_flatten"
+    assert row["operator_intervention"] == 1
+
+
+def test_strategy_pnl_uses_owner_not_exit_actor(tmp_path) -> None:
+    from bithumb_bot.strategy_performance import fetch_strategy_performance_summary
+
+    conn = ensure_db(str(tmp_path / "owner-pnl.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO trade_lifecycles(
+            pair, entry_trade_id, exit_trade_id, entry_client_order_id, exit_client_order_id,
+            entry_ts, exit_ts, matched_qty, entry_price, exit_price, gross_pnl, fee_total,
+            net_pnl, holding_time_sec, strategy_name, strategy_instance_id,
+            owner_strategy_name, owner_strategy_instance_id, owner_risk_scope_id,
+            exit_actor, exit_authority, operator_intervention
+        ) VALUES ('KRW-BTC', 1, 2, 'entry', 'operator_flatten-1', 1, 2, 1, 100, 90, -10, 0, -10, 1,
+            'operator_flatten', 'H74', 'daily_participation_sma', 'H74', 'H74',
+            'operator', 'operator_flatten', 1)
+        """
+    )
+
+    owner = fetch_strategy_performance_summary(conn, strategy_name="daily_participation_sma", pair="KRW-BTC")
+    actor = fetch_strategy_performance_summary(conn, strategy_name="operator_flatten", pair="KRW-BTC")
+
+    assert owner.sample_count == 1
+    assert owner.net_pnl == -10.0
+    assert actor.sample_count == 0

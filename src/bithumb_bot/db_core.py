@@ -921,6 +921,94 @@ def _backfill_trade_lifecycle_strategy_scope(conn: sqlite3.Connection) -> None:
         )
 
 
+def _owner_scope_from_decision_context(context_json: str | None) -> tuple[str | None, str | None, str | None]:
+    try:
+        context = _json_loads_object(context_json)
+    except json.JSONDecodeError:
+        return (None, None, None)
+    owner_name = str(context.get("owner_strategy_name") or context.get("strategy_name") or "").strip()
+    owner_instance = str(
+        context.get("owner_strategy_instance_id") or context.get("strategy_instance_id") or ""
+    ).strip()
+    owner_scope = str(
+        context.get("owner_risk_scope_id")
+        or context.get("risk_scope_id")
+        or context.get("position_owner_id")
+        or owner_instance
+        or ""
+    ).strip()
+    return (owner_name or None, owner_instance or None, owner_scope or None)
+
+
+def _looks_operator_flatten(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return "operator_flatten" in text or text.startswith("flatten:")
+
+
+def _backfill_trade_lifecycle_owner_actor_scope(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT
+            tl.id,
+            tl.strategy_name,
+            tl.strategy_instance_id,
+            tl.exit_client_order_id,
+            tl.exit_reason,
+            sd.context_json
+        FROM trade_lifecycles tl
+        LEFT JOIN strategy_decisions sd ON sd.id = tl.entry_decision_id
+        WHERE (tl.owner_strategy_name IS NULL OR TRIM(tl.owner_strategy_name) = '')
+           OR (tl.owner_strategy_instance_id IS NULL OR TRIM(tl.owner_strategy_instance_id) = '')
+           OR (tl.owner_risk_scope_id IS NULL OR TRIM(tl.owner_risk_scope_id) = '')
+           OR (tl.risk_scope_id IS NULL OR TRIM(tl.risk_scope_id) = '')
+           OR (tl.exit_actor IS NULL OR TRIM(tl.exit_actor) = '')
+           OR (tl.exit_authority IS NULL OR TRIM(tl.exit_authority) = '')
+           OR (tl.exit_initiator_type IS NULL OR TRIM(tl.exit_initiator_type) = '')
+        """
+    ).fetchall()
+    for row in rows:
+        context_owner_name, context_owner_instance, context_scope = _owner_scope_from_decision_context(
+            row["context_json"]
+        )
+        legacy_strategy_name = str(row["strategy_name"] or "").strip()
+        legacy_instance = str(row["strategy_instance_id"] or "").strip()
+        operator_flatten = _looks_operator_flatten(row["exit_client_order_id"]) or _looks_operator_flatten(
+            row["exit_reason"]
+        ) or _looks_operator_flatten(legacy_strategy_name)
+        owner_name = context_owner_name or ("" if operator_flatten and legacy_strategy_name == "operator_flatten" else legacy_strategy_name)
+        owner_instance = context_owner_instance or legacy_instance
+        owner_scope = context_scope or owner_instance
+        exit_actor = "operator" if operator_flatten else "strategy"
+        exit_authority = "operator_flatten" if operator_flatten else "strategy_exit"
+        conn.execute(
+            """
+            UPDATE trade_lifecycles
+            SET
+                owner_strategy_name = COALESCE(NULLIF(owner_strategy_name, ''), ?),
+                owner_strategy_instance_id = COALESCE(NULLIF(owner_strategy_instance_id, ''), ?),
+                owner_risk_scope_id = COALESCE(NULLIF(owner_risk_scope_id, ''), ?),
+                risk_scope_id = COALESCE(NULLIF(risk_scope_id, ''), ?),
+                entry_actor = COALESCE(NULLIF(entry_actor, ''), 'strategy'),
+                exit_actor = COALESCE(NULLIF(exit_actor, ''), ?),
+                exit_authority = COALESCE(NULLIF(exit_authority, ''), ?),
+                operator_intervention = CASE WHEN ? THEN 1 ELSE COALESCE(operator_intervention, 0) END,
+                exit_initiator_type = COALESCE(NULLIF(exit_initiator_type, ''), ?)
+            WHERE id=?
+            """,
+            (
+                owner_name or legacy_strategy_name,
+                owner_instance or legacy_instance,
+                owner_scope or legacy_instance,
+                owner_scope or legacy_instance,
+                exit_actor,
+                exit_authority,
+                1 if operator_flatten else 0,
+                exit_actor,
+                int(row["id"]),
+            ),
+        )
+
+
 def _strategy_decision_experiment_context(*, strategy_name: str) -> dict[str, Any]:
     payload = {
         "strategy_name": str(strategy_name).strip().lower(),
@@ -3283,6 +3371,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "trade_lifecycles", "exit_fill_id", "exit_fill_id TEXT")
     _ensure_column(conn, "trade_lifecycles", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "trade_lifecycles", "strategy_instance_id", "strategy_instance_id TEXT")
+    _ensure_column(conn, "trade_lifecycles", "owner_strategy_name", "owner_strategy_name TEXT")
+    _ensure_column(conn, "trade_lifecycles", "owner_strategy_instance_id", "owner_strategy_instance_id TEXT")
+    _ensure_column(conn, "trade_lifecycles", "owner_risk_scope_id", "owner_risk_scope_id TEXT")
+    _ensure_column(conn, "trade_lifecycles", "risk_scope_id", "risk_scope_id TEXT")
+    _ensure_column(conn, "trade_lifecycles", "entry_actor", "entry_actor TEXT")
+    _ensure_column(conn, "trade_lifecycles", "exit_actor", "exit_actor TEXT")
+    _ensure_column(conn, "trade_lifecycles", "exit_authority", "exit_authority TEXT")
+    _ensure_column(conn, "trade_lifecycles", "operator_intervention", "operator_intervention INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "trade_lifecycles", "exit_initiator_type", "exit_initiator_type TEXT")
     _ensure_column(
         conn,
         "trade_lifecycles",
@@ -3313,7 +3410,33 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ON trade_lifecycles(strategy_instance_id, pair, exit_ts, id)
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_trade_lifecycles_owner_scope_pair_exit
+        ON trade_lifecycles(owner_risk_scope_id, pair, exit_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_risk_capital_basis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            risk_scope_id TEXT NOT NULL,
+            strategy_instance_id TEXT,
+            capital_krw REAL NOT NULL,
+            capital_basis TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_risk_capital_basis_scope
+        ON strategy_risk_capital_basis(risk_scope_id)
+        """
+    )
     _backfill_trade_lifecycle_strategy_scope(conn)
+    _backfill_trade_lifecycle_owner_actor_scope(conn)
 
     _ensure_multi_strategy_artifact_schema(conn)
     _ensure_schema_meta_table(conn)

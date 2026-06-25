@@ -10,7 +10,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_strategy_decision, set_portfolio_breakdown
 from bithumb_bot.research.experiment_manifest import ManifestValidationError, parse_manifest
 from bithumb_bot.risk import DAILY_LOSS_LIMIT_REASON_CODE, RISK_STATE_MISMATCH, fetch_recent_risk_evaluations
-from bithumb_bot.risk_contract import RiskPolicy, RiskSnapshot, SubmitPlan
+from bithumb_bot.risk_contract import RiskMetric, RiskPolicy, RiskSnapshot, SubmitPlan
 from bithumb_bot.risk_policy_engine import RiskPolicyEngine
 from bithumb_bot.runtime_risk_engine import RuntimeRiskEngineAdapter
 from bithumb_bot.strategy_risk_profile import strategy_risk_profile_from_profile_payload
@@ -93,7 +93,23 @@ def _decisions(snapshot: RiskSnapshot, *, pre_submit: bool = False):
         (_snapshot(duplicate_entry=True, current_asset_qty=0.5), "DUPLICATE_ENTRY", False),
         (_snapshot(daily_order_count=2), "MAX_DAILY_ORDER_COUNT", False),
         (_snapshot(daily_trade_count=4), "MAX_TRADE_COUNT_PER_DAY", False),
-        (_snapshot(current_drawdown_pct=20.0), "MAX_DRAWDOWN_PCT", False),
+        (
+            _snapshot(
+                current_drawdown_metric=RiskMetric(
+                    value=20.0,
+                    unit="percent_point",
+                    scope="risk_scope",
+                    denominator_kind="allocated_capital",
+                    denominator_value=100_000.0,
+                    sample_count=1,
+                    state="valid",
+                    source_table="trade_lifecycles",
+                    formula_version="unit",
+                )
+            ),
+            "MAX_DRAWDOWN_PCT",
+            False,
+        ),
         (_snapshot(minutes_since_last_loss=5.0), "COOLDOWN_AFTER_LOSS", False),
     ],
 )
@@ -345,12 +361,14 @@ def test_strategy_risk_state_provider_does_not_share_same_pair_instance_state(tm
     assert beta.current_asset_qty == pytest.approx(0.0)
     assert alpha.position_entry_price == pytest.approx(100.0)
     assert beta.position_entry_price is None
-    assert alpha.current_drawdown_pct == pytest.approx(100.0)
-    assert beta.current_drawdown_pct == pytest.approx(0.0)
+    assert alpha.current_drawdown_metric is not None
+    assert alpha.current_drawdown_metric.state == "undefined"
+    assert beta.current_drawdown_metric is not None
+    assert beta.current_drawdown_metric.state == "undefined"
     assert alpha.loss_today == pytest.approx(10.0)
     assert beta.loss_today == pytest.approx(0.0)
     assert alpha.evidence["state_derivation"]["position_entry_price"]["scope"] == "strategy_instance"
-    assert alpha.evidence["state_derivation"]["current_drawdown_pct"]["scope"] == "strategy_instance"
+    assert alpha.evidence["state_derivation"]["current_drawdown_pct"]["scope"] == "risk_scope"
 
 
 def test_enforced_strategy_risk_state_allows_flat_without_position_entry_price(tmp_path) -> None:
@@ -458,8 +476,29 @@ def test_enforced_strategy_risk_state_reports_missing_required_fields() -> None:
 
     assert missing_required_risk_state(policy, snapshot) == (
         "daily_trade_count",
-        "current_drawdown_pct",
+        "current_drawdown_metric",
     )
+
+
+def test_max_drawdown_block_uses_typed_metric_contract() -> None:
+    decision = RiskPolicyEngine(_policy()).evaluate_pre_decision(
+        _snapshot(
+            current_drawdown_metric=RiskMetric(
+                value=25.0,
+                unit="percent_point",
+                scope="risk_scope",
+                denominator_kind="allocated_capital",
+                denominator_value=100_000.0,
+                sample_count=3,
+                state="valid",
+                source_table="trade_lifecycles",
+                formula_version="unit",
+            )
+        )
+    )
+
+    assert decision.reason_code == "MAX_DRAWDOWN_PCT"
+    assert decision.evidence["drawdown_metric_comparison"]["metric"]["state"] == "valid"
 
 
 def test_runtime_risk_evaluation_records_typed_decision_identity(tmp_path) -> None:

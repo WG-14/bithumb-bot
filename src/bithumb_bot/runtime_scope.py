@@ -14,6 +14,43 @@ def _clean(value: object) -> str:
     return str(value or "").strip()
 
 
+def strategy_revision_id(payload: Mapping[str, object]) -> str:
+    material = {
+        "strategy_name": _clean(payload.get("strategy_name")).lower(),
+        "strategy_instance_id": _clean(payload.get("strategy_instance_id")),
+        "runtime_contract_hash": _clean(payload.get("runtime_contract_hash")),
+        "approved_profile_hash": _clean(payload.get("approved_profile_hash")),
+        "strategy_parameters_hash": _clean(payload.get("strategy_parameters_hash")),
+    }
+    return sha256_prefixed(material)
+
+
+def derive_risk_scope_id(payload: Mapping[str, object]) -> str:
+    material = {
+        "strategy_name": _clean(payload.get("strategy_name")).lower(),
+        "pair": _clean(payload.get("pair")),
+        "interval": _clean(payload.get("interval")),
+        "risk_policy_hash": _clean(payload.get("risk_policy_hash")),
+        "risk_capital_basis": _clean(payload.get("risk_capital_basis")),
+        "risk_capital_krw": _clean(payload.get("risk_capital_krw")),
+        "position_ownership_model": _clean(payload.get("position_ownership_model") or "owner_risk_scope_v1"),
+    }
+    return sha256_prefixed(material)
+
+
+def require_risk_scope_reset_authority(
+    *,
+    previous: Mapping[str, object],
+    current: Mapping[str, object],
+    risk_scope_reset_authority: str | None = None,
+) -> str:
+    previous_scope = derive_risk_scope_id(previous)
+    current_scope = derive_risk_scope_id(current)
+    if previous_scope != current_scope and not _clean(risk_scope_reset_authority):
+        raise ValueError("risk_scope_reset_authority_required")
+    return current_scope
+
+
 @dataclass(frozen=True)
 class RuntimeScopeKey:
     pair: str

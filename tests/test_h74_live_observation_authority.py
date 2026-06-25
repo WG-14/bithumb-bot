@@ -1335,3 +1335,23 @@ def test_h74_source_observation_exit_closeout_not_blocked_by_entry_cap_after_buy
     assert payload["hash_bound_parameters"]["max_daily_entry_count"] == 1
     assert payload["hash_bound_parameters"]["max_daily_total_order_count"] == 2
     assert payload["hash_bound_parameters"]["exit_closeout_not_blocked_by_entry_cap"] is True
+
+
+def test_h74_blocked_projection_is_not_entry_state() -> None:
+    from bithumb_bot.h74_startup_gate import evaluate_h74_startup_gate
+
+    result = evaluate_h74_startup_gate(
+        readiness_payload={
+            "broker_position_evidence": {"broker_qty_known": True, "broker_qty": 0.0},
+            "open_order_count": 0,
+            "submit_unknown_count": 0,
+            "recovery_required_count": 0,
+        },
+        target_state={
+            "lifecycle_state": "blocked_projection",
+            "target_exposure_krw": 100_000.0,
+            "live_submit_authority": False,
+        },
+    )
+
+    assert result.allowed is True
