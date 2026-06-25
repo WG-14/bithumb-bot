@@ -1412,7 +1412,11 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             f"runtime_strategy_set_selection_failed: resolve_failed:{type(exc).__name__}:{exc}"
         )
     try:
-        if selection_kind == "single_strategy":
+        runtime_strategy_set_json_present = bool(
+            str(getattr(cfg, "RUNTIME_STRATEGY_SET_JSON", "") or "").strip()
+            or os.getenv("RUNTIME_STRATEGY_SET_JSON", "").strip()
+        )
+        if selection_kind == "single_strategy" and not runtime_strategy_set_json_present:
             validate_live_strategy_selection(cfg)
     except LiveModeValidationError as exc:
         issues.append(str(exc))
