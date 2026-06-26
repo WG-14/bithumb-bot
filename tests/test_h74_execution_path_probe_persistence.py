@@ -142,7 +142,7 @@ def test_probe_submit_path_persists_queryable_evidence_and_reports_pass() -> Non
     cycle_id = "probe-integrated-cycle-1"
     authority_hash = "sha256:" + "a" * 64
     strategy_instance_id = "h74-source-observation"
-    ownership_contract_hash = h74_position_ownership_contract_from_payload(
+    ownership_contract = h74_position_ownership_contract_from_payload(
         {
             "cycle_id": cycle_id,
             "h74_cycle_id": cycle_id,
@@ -155,7 +155,7 @@ def test_probe_submit_path_persists_queryable_evidence_and_reports_pass() -> Non
             "position_mode": "fixed_fill_qty_until_exit",
             "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
         }
-    ).contract_hash
+    )
     buy_decision_id = record_strategy_decision(
         conn,
         decision_ts=base_ts,
@@ -190,7 +190,9 @@ def test_probe_submit_path_persists_queryable_evidence_and_reports_pass() -> Non
         strategy_instance_id=strategy_instance_id,
         cycle_id=cycle_id,
         authority_hash=authority_hash,
-        h74_position_ownership_contract_hash=ownership_contract_hash,
+        h74_entry_plan_client_order_id=ownership_contract.entry_plan_id,
+        h74_position_ownership_contract_hash=ownership_contract.contract_hash,
+        h74_position_ownership_contract=ownership_contract.as_dict(),
         entry_decision_id=buy_decision_id,
         probe_run_id=run_id,
         ts_ms=base_ts,
@@ -228,7 +230,9 @@ def test_probe_submit_path_persists_queryable_evidence_and_reports_pass() -> Non
         strategy_instance_id=strategy_instance_id,
         cycle_id=cycle_id,
         authority_hash=authority_hash,
-        h74_position_ownership_contract_hash=ownership_contract_hash,
+        h74_entry_plan_client_order_id=ownership_contract.entry_plan_id,
+        h74_position_ownership_contract_hash=ownership_contract.contract_hash,
+        h74_position_ownership_contract=ownership_contract.as_dict(),
         exit_decision_id=sell_decision_id,
         probe_run_id=run_id,
         ts_ms=base_ts + 60_000,

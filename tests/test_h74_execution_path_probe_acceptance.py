@@ -8,6 +8,17 @@ from bithumb_bot.h74_probe_acceptance import evaluate_h74_execution_path_probe_a
 from bithumb_bot.h74_probe_report import build_h74_execution_path_probe_report
 
 
+_CONTRACT_HASH = "sha256:" + "1" * 64
+_CONTRACT_JSON = (
+    '{"authority_hash":"sha256:a","contract_hash":"'
+    + _CONTRACT_HASH
+    + '","cycle_id":"cycle-1","entry_plan_id":"probe-entry-plan",'
+    '"entry_side":"BUY","h74_cycle_id":"cycle-1","hold_policy":"hold_acquired_fill_qty_until_max_holding_exit",'
+    '"pair":"KRW-BTC","position_mode":"fixed_fill_qty_until_exit","probe_run_id":"probe-1",'
+    '"strategy_instance_id":"h74-source-observation"}'
+)
+
+
 def _pass_report() -> dict[str, object]:
     return {
         "artifact_type": "h74_execution_path_probe_report",
@@ -32,6 +43,9 @@ def _pass_report() -> dict[str, object]:
         "buy_order_id": 3,
         "buy_client_order_id": "buy-1",
         "buy_fill_id": 4,
+        "buy_order_h74_entry_plan_client_order_id": "probe-entry-plan",
+        "buy_order_h74_position_ownership_contract": {"entry_plan_id": "probe-entry-plan"},
+        "cycle_h74_entry_plan_client_order_id": "probe-entry-plan",
         "open_lot_id": 5,
         "sell_decision_id": 6,
         "sell_execution_plan_id": 7,
@@ -146,9 +160,10 @@ def test_acceptance_uses_runtime_built_probe_report() -> None:
         INSERT INTO orders(
             probe_run_id, client_order_id, status, side, pair, price, qty_req,
             qty_filled, strategy_name, strategy_instance_id, cycle_id, authority_hash,
-            h74_position_ownership_contract_hash, entry_decision_id, created_ts, updated_ts
+            h74_entry_plan_client_order_id, h74_position_ownership_contract_hash,
+            h74_position_ownership_contract, entry_decision_id, created_ts, updated_ts
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "probe-1",
@@ -163,7 +178,9 @@ def test_acceptance_uses_runtime_built_probe_report() -> None:
             "h74-source-observation",
             "cycle-1",
             "sha256:a",
-            "sha256:contract",
+            "probe-entry-plan",
+            _CONTRACT_HASH,
+            _CONTRACT_JSON,
             1,
             1,
             1,
@@ -252,9 +269,9 @@ def test_acceptance_uses_runtime_built_probe_report() -> None:
         INSERT INTO h74_cycle_state(
             cycle_id, authority_hash, strategy_instance_id, pair, state,
             entry_client_order_id, exit_client_order_id, acquired_qty, sold_qty,
-            locked_exit_qty, contract_hash
+            locked_exit_qty, contract_hash, h74_entry_plan_client_order_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "cycle-1",
@@ -267,7 +284,8 @@ def test_acceptance_uses_runtime_built_probe_report() -> None:
             0.0008,
             0.0008,
             0.0,
-            "sha256:contract",
+            _CONTRACT_HASH,
+            "probe-entry-plan",
         ),
     )
     conn.execute(

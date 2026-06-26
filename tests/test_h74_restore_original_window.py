@@ -16,6 +16,17 @@ from tests.test_h74_authority_env_alignment import _settings
 from tests.test_h74_source_variant_authority import _source, _variant
 
 
+_CONTRACT_HASH = "sha256:" + "1" * 64
+_CONTRACT_JSON = (
+    '{"authority_hash":"sha256:a","contract_hash":"'
+    + _CONTRACT_HASH
+    + '","cycle_id":"cycle-1","entry_plan_id":"probe-entry-plan",'
+    '"entry_side":"BUY","h74_cycle_id":"cycle-1","hold_policy":"hold_acquired_fill_qty_until_max_holding_exit",'
+    '"pair":"KRW-BTC","position_mode":"fixed_fill_qty_until_exit","probe_run_id":"probe-1",'
+    '"strategy_instance_id":"h74-source-observation"}'
+)
+
+
 def test_restore_check_passes_for_source_authority_and_9_11_env() -> None:
     result = verify_h74_restore_original_window(
         authority_payload=_source(),
@@ -62,29 +73,48 @@ def _pass_db(path: Path) -> None:
         """
         CREATE TABLE strategy_decisions(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, signal TEXT);
         CREATE TABLE execution_plan(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, side TEXT, submit_expected INTEGER);
-        CREATE TABLE orders(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, client_order_id TEXT, side TEXT);
+        CREATE TABLE orders(
+            id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, client_order_id TEXT, side TEXT,
+            cycle_id TEXT, h74_entry_plan_client_order_id TEXT,
+            h74_position_ownership_contract_hash TEXT, h74_position_ownership_contract TEXT
+        );
         CREATE TABLE order_events(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, client_order_id TEXT, side TEXT, event_type TEXT, exception_class TEXT);
         CREATE TABLE fills(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, client_order_id TEXT, side TEXT);
         CREATE TABLE trades(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, client_order_id TEXT, side TEXT);
-        CREATE TABLE open_position_lots(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT);
+        CREATE TABLE open_position_lots(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, cycle_id TEXT);
+        CREATE TABLE h74_cycle_state(
+            cycle_id TEXT PRIMARY KEY, probe_run_id TEXT, state TEXT,
+            acquired_qty REAL DEFAULT 0, sold_qty REAL DEFAULT 0, locked_exit_qty REAL DEFAULT 0,
+            contract_hash TEXT, h74_entry_plan_client_order_id TEXT
+        );
         CREATE TABLE trade_lifecycles(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT);
         CREATE TABLE portfolio(id INTEGER PRIMARY KEY, probe_run_id TEXT, pair TEXT, asset_qty REAL);
         INSERT INTO strategy_decisions(probe_run_id, pair, signal) VALUES('probe-1', 'KRW-BTC', 'BUY');
         INSERT INTO strategy_decisions(probe_run_id, pair, signal) VALUES('probe-1', 'KRW-BTC', 'SELL');
         INSERT INTO execution_plan(probe_run_id, pair, side, submit_expected) VALUES('probe-1', 'KRW-BTC', 'BUY', 1);
         INSERT INTO execution_plan(probe_run_id, pair, side, submit_expected) VALUES('probe-1', 'KRW-BTC', 'SELL', 1);
-        INSERT INTO orders(probe_run_id, pair, client_order_id, side) VALUES('probe-1', 'KRW-BTC', 'buy-1', 'BUY');
-        INSERT INTO orders(probe_run_id, pair, client_order_id, side) VALUES('probe-1', 'KRW-BTC', 'sell-1', 'SELL');
+        INSERT INTO orders(
+            probe_run_id, pair, client_order_id, side, cycle_id, h74_entry_plan_client_order_id,
+            h74_position_ownership_contract_hash, h74_position_ownership_contract
+        )
+        VALUES('probe-1', 'KRW-BTC', 'buy-1', 'BUY', 'cycle-1', 'probe-entry-plan', '{contract_hash}', '{contract_json}');
+        INSERT INTO orders(probe_run_id, pair, client_order_id, side, cycle_id) VALUES('probe-1', 'KRW-BTC', 'sell-1', 'SELL', 'cycle-1');
         INSERT INTO order_events(probe_run_id, pair, client_order_id, side, event_type, exception_class) VALUES('probe-1', 'KRW-BTC', 'buy-1', 'BUY', 'submit', '');
         INSERT INTO order_events(probe_run_id, pair, client_order_id, side, event_type, exception_class) VALUES('probe-1', 'KRW-BTC', 'sell-1', 'SELL', 'submit', '');
         INSERT INTO fills(probe_run_id, pair, client_order_id, side) VALUES('probe-1', 'KRW-BTC', 'buy-1', 'BUY');
         INSERT INTO fills(probe_run_id, pair, client_order_id, side) VALUES('probe-1', 'KRW-BTC', 'sell-1', 'SELL');
         INSERT INTO trades(probe_run_id, pair, client_order_id, side) VALUES('probe-1', 'KRW-BTC', 'buy-1', 'BUY');
         INSERT INTO trades(probe_run_id, pair, client_order_id, side) VALUES('probe-1', 'KRW-BTC', 'sell-1', 'SELL');
-        INSERT INTO open_position_lots(probe_run_id, pair) VALUES('probe-1', 'KRW-BTC');
+        INSERT INTO open_position_lots(probe_run_id, pair, cycle_id) VALUES('probe-1', 'KRW-BTC', 'cycle-1');
+        INSERT INTO h74_cycle_state(
+            cycle_id, probe_run_id, state, acquired_qty, sold_qty, locked_exit_qty,
+            contract_hash, h74_entry_plan_client_order_id
+        )
+        VALUES('cycle-1', 'probe-1', 'CLOSED', 0.001, 0.001, 0.0, '{contract_hash}', 'probe-entry-plan');
         INSERT INTO trade_lifecycles(probe_run_id, pair) VALUES('probe-1', 'KRW-BTC');
         INSERT INTO portfolio(probe_run_id, pair, asset_qty) VALUES('probe-1', 'KRW-BTC', 0);
         """
+        .format(contract_hash=_CONTRACT_HASH, contract_json=_CONTRACT_JSON.replace("'", "''"))
     )
     conn.commit()
     conn.close()
