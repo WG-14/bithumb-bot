@@ -19,6 +19,9 @@ REQUIRED_REPORT_FIELDS = (
     "buy_order_id",
     "buy_client_order_id",
     "buy_fill_id",
+    "buy_order_h74_entry_plan_client_order_id",
+    "buy_order_h74_position_ownership_contract",
+    "cycle_h74_entry_plan_client_order_id",
     "open_lot_id",
     "sell_decision_id",
     "sell_execution_plan_id",
@@ -80,6 +83,10 @@ def evaluate_h74_execution_path_probe_acceptance(report: Mapping[str, object]) -
         missing.append("accounting.validated")
     if not bool(report.get("final_flat_or_documented_dust")):
         missing.append("final_flat_or_documented_dust")
+    buy_entry_id = str(report.get("buy_order_h74_entry_plan_client_order_id") or "").strip()
+    cycle_entry_id = str(report.get("cycle_h74_entry_plan_client_order_id") or "").strip()
+    if buy_entry_id and cycle_entry_id and buy_entry_id != cycle_entry_id:
+        missing.append("h74_entry_plan_identity_match")
     manual_intervention = bool(
         report.get("manual_intervention")
         or report.get("manual_sell")
@@ -99,6 +106,8 @@ def evaluate_h74_execution_path_probe_acceptance(report: Mapping[str, object]) -
         "execution_path_probe_status": status,
         "source_execution_path_probe_status": report_status,
         "buy_order_filled": bool(report.get("buy_order_filled")),
+        "buy_order_h74_entry_plan_client_order_id": buy_entry_id,
+        "cycle_h74_entry_plan_client_order_id": cycle_entry_id,
         "h74_cycle_ownership_created": bool(report.get("h74_cycle_ownership_created")),
         "h74_cycle_id": str(report.get("h74_cycle_id") or ""),
         "h74_remaining_cycle_qty_before_sell": float(report.get("h74_remaining_cycle_qty_before_sell") or 0.0),

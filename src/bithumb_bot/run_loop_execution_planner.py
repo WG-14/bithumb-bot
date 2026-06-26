@@ -58,8 +58,8 @@ from .h74_cycle_state import (
 from .h74_position_ownership import (
     H74PositionOwnershipError,
     h74_position_ownership_contract_from_payload,
-    ownership_payload_fields,
 )
+from .h74_submit_identity import H74SubmitIdentity
 from .h74_observation import H74_SOURCE_OBSERVATION_AUTHORITY_ENV
 from .h74_submit_semantics import (
     H74_ENTRY_SUBMIT_SEMANTICS_AUTHORITY,
@@ -309,12 +309,7 @@ def _h74_entry_cycle_fields(*, planning_context: Mapping[str, object], updated_t
             "hold_policy": hold_policy,
         }
     )
-    return {
-        "cycle_id": cycle_id,
-        "h74_cycle_id": cycle_id,
-        "h74_entry_plan_client_order_id": entry_client_order_id,
-        **ownership_payload_fields(contract),
-    }
+    return H74SubmitIdentity.from_ownership_contract(contract).as_evidence_dict()
 
 
 def _inject_h74_cycle_inventory(

@@ -34,6 +34,7 @@ from ..h74_position_ownership import (
     H74PositionOwnershipError,
     h74_position_ownership_contract_from_payload,
 )
+from ..h74_submit_identity import H74SubmitIdentity, H74SubmitIdentityError
 from .base import Broker, BrokerOrder, BrokerRejectError, BrokerSubmissionUnknownError, BrokerTemporaryError
 from .order_rules import BuyPriceNoneSubmitContract, serialize_buy_price_none_submit_contract
 RUN_LOG = logging.getLogger("bithumb_bot.run")
@@ -95,6 +96,7 @@ class StandardSubmitPipelineRequest:
     h74_entry_plan_client_order_id: str | None = None
     h74_position_ownership_contract_hash: str | None = None
     h74_position_ownership_contract: dict[str, object] | None = None
+    h74_submit_identity: H74SubmitIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,7 @@ class StandardSubmitPlanningFailureRequest:
     h74_entry_plan_client_order_id: str | None = None
     h74_position_ownership_contract_hash: str | None = None
     h74_position_ownership_contract: dict[str, object] | None = None
+    h74_submit_identity: H74SubmitIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -175,11 +178,14 @@ def _encode_submit_evidence(*, payload: dict) -> str:
 def _h74_request_evidence_fields(
     request: StandardSubmitPlanningFailureRequest | StandardSubmitPipelineRequest,
 ) -> dict[str, object]:
+    if request.h74_submit_identity is not None:
+        return request.h74_submit_identity.as_evidence_dict()
     return {
+        "cycle_id": request.cycle_id or request.h74_cycle_id,
+        "h74_cycle_id": request.h74_cycle_id or request.cycle_id,
         "h74_position_ownership_contract": request.h74_position_ownership_contract,
         "h74_position_ownership_contract_hash": request.h74_position_ownership_contract_hash,
         "h74_entry_plan_client_order_id": request.h74_entry_plan_client_order_id,
-        "h74_cycle_id": request.h74_cycle_id or request.cycle_id,
         "authority_hash": request.authority_hash,
         "strategy_instance_id": request.strategy_instance_id,
         "probe_run_id": request.probe_run_id,
@@ -761,6 +767,43 @@ def record_standard_submit_planning_failure(
     )
 
 
+def _h74_submit_identity_guard_diagnostic(
+    *,
+    key: str,
+    request_value: object,
+    plan_payload: dict[str, object],
+    submit_observability: dict[str, object],
+) -> dict[str, object]:
+    candidate_plan_keys = [key]
+    candidate_observability_keys = [key]
+    if key == "probe_run_id":
+        candidate_plan_keys.insert(0, "h74_execution_path_probe_run_id")
+        candidate_observability_keys.insert(0, "h74_execution_path_probe_run_id")
+    plan_value = next(
+        (plan_payload.get(candidate) for candidate in candidate_plan_keys if plan_payload.get(candidate) not in (None, "")),
+        None,
+    )
+    observability_value = next(
+        (
+            submit_observability.get(candidate)
+            for candidate in candidate_observability_keys
+            if submit_observability.get(candidate) not in (None, "")
+        ),
+        None,
+    )
+    return {
+        "key": key,
+        "request_value_present": str(request_value or "").strip() != "",
+        "plan_payload_value_present": str(plan_value or "").strip() != "",
+        "submit_observability_value_present": str(observability_value or "").strip() != "",
+        "request_value": request_value,
+        "plan_payload_value": plan_value,
+        "submit_observability_value": observability_value,
+        "candidate_plan_keys": candidate_plan_keys,
+        "candidate_observability_keys": candidate_observability_keys,
+    }
+
+
 def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) -> SubmitPlan:
     submit_plan = request.submit_plan
     if not isinstance(submit_plan, SubmitPlan):
@@ -818,6 +861,22 @@ def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) ->
             if hasattr(request.submit_plan, "as_dict") and callable(request.submit_plan.as_dict)
             else {}
         )
+        if request.cycle_id and request.h74_cycle_id and request.cycle_id != request.h74_cycle_id:
+            diagnostic = _h74_submit_identity_guard_diagnostic(
+                key="cycle_id",
+                request_value=request.cycle_id,
+                plan_payload=plan_payload,
+                submit_observability=request.submit_observability_fields,
+            )
+            raise BrokerRejectError(
+                "h74_cycle_ownership_required_for_entry:mismatch:cycle_id "
+                f"diagnostic={json.dumps(diagnostic, sort_keys=True, separators=(',', ':'))}"
+            )
+        if request.h74_submit_identity is not None:
+            try:
+                request.h74_submit_identity.validate_complete()
+            except H74SubmitIdentityError as exc:
+                raise BrokerRejectError(f"h74_cycle_ownership_required_for_entry:{exc}") from exc
         required_matches = {
             "cycle_id": request.cycle_id,
             "h74_cycle_id": request.h74_cycle_id or request.cycle_id,
@@ -830,7 +889,16 @@ def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) ->
         for key, request_value in required_matches.items():
             value = str(request_value or "").strip()
             if not value:
-                raise BrokerRejectError(f"h74_cycle_ownership_required_for_entry:missing:{key}")
+                diagnostic = _h74_submit_identity_guard_diagnostic(
+                    key=key,
+                    request_value=request_value,
+                    plan_payload=plan_payload,
+                    submit_observability=request.submit_observability_fields,
+                )
+                raise BrokerRejectError(
+                    f"h74_cycle_ownership_required_for_entry:missing:{key} "
+                    f"diagnostic={json.dumps(diagnostic, sort_keys=True, separators=(',', ':'))}"
+                )
             plan_key = "h74_execution_path_probe_run_id" if key == "probe_run_id" else key
             plan_value = str(
                 plan_payload.get(plan_key)
@@ -839,9 +907,27 @@ def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) ->
                 or ""
             ).strip()
             if not plan_value:
-                raise BrokerRejectError(f"h74_cycle_ownership_required_for_entry:plan_missing:{key}")
+                diagnostic = _h74_submit_identity_guard_diagnostic(
+                    key=key,
+                    request_value=request_value,
+                    plan_payload=plan_payload,
+                    submit_observability=request.submit_observability_fields,
+                )
+                raise BrokerRejectError(
+                    f"h74_cycle_ownership_required_for_entry:plan_missing:{key} "
+                    f"diagnostic={json.dumps(diagnostic, sort_keys=True, separators=(',', ':'))}"
+                )
             if value != plan_value:
-                raise BrokerRejectError(f"h74_cycle_ownership_required_for_entry:mismatch:{key}")
+                diagnostic = _h74_submit_identity_guard_diagnostic(
+                    key=key,
+                    request_value=request_value,
+                    plan_payload=plan_payload,
+                    submit_observability=request.submit_observability_fields,
+                )
+                raise BrokerRejectError(
+                    f"h74_cycle_ownership_required_for_entry:mismatch:{key} "
+                    f"diagnostic={json.dumps(diagnostic, sort_keys=True, separators=(',', ':'))}"
+                )
         if not isinstance(request.h74_position_ownership_contract, dict):
             raise BrokerRejectError("h74_cycle_ownership_required_for_entry:missing:h74_position_ownership_contract")
         try:

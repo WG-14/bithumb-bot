@@ -23,6 +23,7 @@ from bithumb_bot.h74_observation import (
 from bithumb_bot.h74_pre_submit_evidence import build_h74_pre_submit_evidence_bundle
 from bithumb_bot.h74_position_ownership import H74PositionOwnershipError, h74_position_ownership_contract_from_payload
 from bithumb_bot.research.hashing import sha256_prefixed
+from bithumb_bot.run_loop_execution_planner import _h74_entry_cycle_fields
 from tests.test_h74_live_submit_ownership import _request as _live_submit_request
 
 
@@ -593,3 +594,26 @@ def test_h74_fixed_buy_requires_cycle_id_before_submit(tmp_path) -> None:
     assert plan["submit_expected"] is False
     assert plan["final_action"] == "BLOCK_PORTFOLIO_TARGET_AUTHORITY"
     assert plan["block_reason"].startswith("h74_cycle_ownership_required_for_entry")
+
+
+def test_h74_entry_cycle_fields_returns_canonical_submit_identity() -> None:
+    payload = _h74_entry_cycle_fields(planning_context=_payload(runtime_pair="KRW-BTC"), updated_ts=123)
+
+    assert payload["cycle_id"] == payload["h74_cycle_id"]
+    assert payload["h74_entry_plan_client_order_id"] == payload["h74_position_ownership_contract"]["entry_plan_id"]
+    assert payload["h74_position_ownership_contract_hash"] == payload["h74_position_ownership_contract"]["contract_hash"]
+
+
+def test_h74_entry_cycle_fields_includes_cycle_id_and_h74_cycle_id_aliases() -> None:
+    payload = _h74_entry_cycle_fields(planning_context=_payload(runtime_pair="KRW-BTC"), updated_ts=124)
+
+    assert payload["cycle_id"]
+    assert payload["h74_cycle_id"]
+
+
+def test_h74_entry_cycle_fields_contract_hash_matches_contract_json() -> None:
+    payload = _h74_entry_cycle_fields(planning_context=_payload(runtime_pair="KRW-BTC"), updated_ts=125)
+
+    contract = payload["h74_position_ownership_contract"]
+    assert isinstance(contract, dict)
+    assert payload["h74_position_ownership_contract_hash"] == contract["contract_hash"]

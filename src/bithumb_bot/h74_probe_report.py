@@ -61,7 +61,8 @@ def build_h74_execution_path_probe_report(
     buy_order = conn.execute(
         """
         SELECT id, client_order_id, cycle_id, entry_decision_id, authority_hash,
-               h74_position_ownership_contract_hash
+               h74_position_ownership_contract_hash, h74_entry_plan_client_order_id,
+               h74_position_ownership_contract
         FROM orders
         WHERE probe_run_id=?
           AND side='BUY'
@@ -79,7 +80,8 @@ def build_h74_execution_path_probe_report(
     if cycle_id and _table_exists(conn, "h74_cycle_state"):
         cycle = conn.execute(
             """
-            SELECT cycle_id, state, acquired_qty, sold_qty, locked_exit_qty, contract_hash
+            SELECT cycle_id, state, acquired_qty, sold_qty, locked_exit_qty, contract_hash,
+                   h74_entry_plan_client_order_id
             FROM h74_cycle_state
             WHERE cycle_id=?
             """,
@@ -176,6 +178,15 @@ def build_h74_execution_path_probe_report(
         "buy_order_id": _row_value(buy_order, "id", 0),
         "buy_client_order_id": buy_client_order_id,
         "buy_fill_id": _row_value(buy_fill, "id", 0),
+        "buy_order_h74_entry_plan_client_order_id": _row_value(
+            buy_order, "h74_entry_plan_client_order_id", 6
+        ),
+        "buy_order_h74_position_ownership_contract": _row_value(
+            buy_order, "h74_position_ownership_contract", 7
+        ),
+        "cycle_h74_entry_plan_client_order_id": _row_value(
+            cycle, "h74_entry_plan_client_order_id", 6
+        ),
         "open_lot_id": _row_value(open_lot, "id", 0),
         "sell_decision_id": _row_value(sell_order, "exit_decision_id", 2),
         "sell_execution_plan_id": cycle_id if sell_order is not None else None,
@@ -205,6 +216,10 @@ def build_h74_execution_path_probe_report(
     pass_ready = (
         bool(report["buy_order_filled"])
         and bool(report["h74_cycle_ownership_created"])
+        and bool(report["buy_order_h74_entry_plan_client_order_id"])
+        and bool(report["buy_order_h74_position_ownership_contract"])
+        and report["buy_order_h74_entry_plan_client_order_id"]
+        == report["cycle_h74_entry_plan_client_order_id"]
         and bool(report["sell_order_submitted"])
         and bool(report["sell_order_filled"])
         and bool(report["lifecycle_id"])

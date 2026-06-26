@@ -16,6 +16,7 @@ from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.execution_models import OrderIntent, SubmitPlan, SubmitPriceTickPolicy
 from bithumb_bot.h74_position_ownership import H74PositionOwnershipContract
+from bithumb_bot.h74_submit_identity import H74SubmitIdentity
 
 
 def _submit_plan() -> SubmitPlan:
@@ -74,6 +75,7 @@ def _ownership() -> H74PositionOwnershipContract:
 
 def _request(conn, *, cycle_id: str | None = "cycle-1") -> StandardSubmitPipelineRequest:
     ownership = _ownership()
+    identity = H74SubmitIdentity.from_ownership_contract(ownership)
     submit_observability = {
         "h74_fixed_position_contract_active": True,
         "h74_position_ownership_contract_hash": ownership.contract_hash,
@@ -136,6 +138,7 @@ def _request(conn, *, cycle_id: str | None = "cycle-1") -> StandardSubmitPipelin
         h74_entry_plan_client_order_id=ownership.entry_plan_id,
         h74_position_ownership_contract_hash=ownership.contract_hash,
         h74_position_ownership_contract=ownership.as_dict(),
+        h74_submit_identity=identity if cycle_id == ownership.cycle_id else None,
     )
 
 
@@ -172,6 +175,8 @@ def test_h74_order_event_submit_evidence_contains_ownership_contract_hash(tmp_pa
     assert order_row["strategy_instance_id"] == "h74-source-observation"
     assert order_row["authority_hash"] == "sha256:a"
     assert order_row["probe_run_id"] == "probe-run-1"
+    assert evidence["cycle_id"] == "cycle-1"
+    assert evidence["h74_cycle_id"] == "cycle-1"
     assert evidence["h74_position_ownership_contract_hash"].startswith("sha256:")
     assert evidence["h74_position_ownership_contract"]["entry_plan_id"] == "h74_entry_plan_123"
     assert evidence["h74_entry_plan_client_order_id"] == "h74_entry_plan_123"
@@ -325,3 +330,100 @@ def test_h74_guard_rejects_contract_hash_mismatch_before_dispatch(tmp_path) -> N
 
     with pytest.raises(BrokerRejectError, match="h74_cycle_ownership"):
         _validate_explicit_submit_plan(request=bad)
+
+
+def test_h74_order_event_submit_evidence_contains_cycle_id_and_h74_cycle_id(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "live-submit.sqlite"))
+    request = _request(conn)
+
+    context = _build_context(request=request, submit_plan=_validate_explicit_submit_plan(request=request))
+    _plan_submit_attempt(context=context)
+    event_row = conn.execute(
+        """
+        SELECT submit_evidence FROM order_events
+        WHERE client_order_id=? AND submit_phase='planning'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (request.client_order_id,),
+    ).fetchone()
+    evidence = json.loads(event_row["submit_evidence"])
+
+    assert evidence["cycle_id"] == "cycle-1"
+    assert evidence["h74_cycle_id"] == "cycle-1"
+
+
+def test_h74_guard_rejects_cycle_alias_mismatch_before_dispatch(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "live-submit.sqlite"))
+    request = _request(conn)
+    bad = request.__class__(**{**request.__dict__, "h74_cycle_id": "cycle-other"})
+
+    with pytest.raises(BrokerRejectError, match="mismatch:cycle_id"):
+        _validate_explicit_submit_plan(request=bad)
+
+
+def test_h74_guard_diagnostic_identifies_missing_submit_observability_cycle_id(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "live-submit.sqlite"))
+    request = _request(conn)
+    observability = dict(request.submit_observability_fields)
+    observability.pop("cycle_id")
+    bad = request.__class__(**{**request.__dict__, "submit_observability_fields": observability})
+
+    with pytest.raises(BrokerRejectError) as excinfo:
+        _validate_explicit_submit_plan(request=bad)
+
+    message = str(excinfo.value)
+    assert "plan_missing:cycle_id" in message
+    assert '"request_value_present":true' in message
+    assert '"submit_observability_value_present":false' in message
+
+
+def test_h74_guard_diagnostic_identifies_plan_payload_and_request_values(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "live-submit.sqlite"))
+    request = _request(conn)
+    observability = dict(request.submit_observability_fields)
+    observability["h74_entry_plan_client_order_id"] = "different-entry"
+    bad = request.__class__(**{**request.__dict__, "submit_observability_fields": observability})
+
+    with pytest.raises(BrokerRejectError) as excinfo:
+        _validate_explicit_submit_plan(request=bad)
+
+    message = str(excinfo.value)
+    assert "mismatch:h74_entry_plan_client_order_id" in message
+    assert '"request_value":"h74_entry_plan_123"' in message
+    assert '"submit_observability_value":"different-entry"' in message
+
+
+def test_h74_order_event_order_row_identity_matches_request(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "live-submit.sqlite"))
+    request = _request(conn)
+
+    context = _build_context(request=request, submit_plan=_validate_explicit_submit_plan(request=request))
+    _plan_submit_attempt(context=context)
+    row = conn.execute(
+        """
+        SELECT cycle_id, h74_entry_plan_client_order_id, h74_position_ownership_contract_hash
+        FROM orders WHERE client_order_id=?
+        """,
+        (request.client_order_id,),
+    ).fetchone()
+    event = conn.execute(
+        """
+        SELECT submit_evidence FROM order_events
+        WHERE client_order_id=? AND submit_phase='planning'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (request.client_order_id,),
+    ).fetchone()
+    evidence = json.loads(event["submit_evidence"])
+
+    assert row["cycle_id"] == evidence["cycle_id"] == request.cycle_id
+    assert (
+        row["h74_entry_plan_client_order_id"]
+        == evidence["h74_entry_plan_client_order_id"]
+        == request.h74_entry_plan_client_order_id
+    )
+    assert (
+        row["h74_position_ownership_contract_hash"]
+        == evidence["h74_position_ownership_contract_hash"]
+        == request.h74_position_ownership_contract_hash
+    )

@@ -247,6 +247,10 @@ def test_h74_buy_fill_uses_persisted_contract_when_entry_plan_id_differs_from_cl
     assert row["h74_entry_plan_client_order_id"] == "h74_entry_plan_123"
 
 
+def test_h74_normal_path_uses_orders_contract_not_legacy_fallback() -> None:
+    test_h74_buy_fill_uses_persisted_contract_when_entry_plan_id_differs_from_client_order_id()
+
+
 def test_h74_buy_fill_uses_persisted_entry_plan_id_when_different_from_client_order_id() -> None:
     test_h74_buy_fill_uses_persisted_contract_when_entry_plan_id_differs_from_client_order_id()
 
@@ -381,6 +385,10 @@ def test_h74_legacy_client_order_id_fallback_requires_hash_match() -> None:
     )
 
     assert result["h74_contract_source"] == "legacy_client_order_id_reconstruction"
+
+
+def test_h74_legacy_fallback_records_contract_source() -> None:
+    test_h74_legacy_client_order_id_fallback_requires_hash_match()
 
 
 def test_h74_cycle_persistence_failure_rolls_back_fill_trade_and_portfolio(monkeypatch) -> None:

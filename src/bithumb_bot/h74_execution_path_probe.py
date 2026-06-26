@@ -183,6 +183,29 @@ def generate_h74_execution_path_probe_report(
     sell_order = _first_row(conn, "orders", probe_run_id=normalized_probe_run_id, side="SELL", pair=pair)
     buy_client_order_id = _client_order_id(buy_order)
     sell_client_order_id = _client_order_id(sell_order)
+    buy_order_cycle_id = str(_field(buy_order, "cycle_id", "h74_cycle_id") or "")
+    cycle_state = None
+    if buy_order_cycle_id and _table_exists(conn, "h74_cycle_state"):
+        row = conn.execute(
+            """
+            SELECT cycle_id, state, acquired_qty, sold_qty, locked_exit_qty, contract_hash,
+                   h74_entry_plan_client_order_id
+            FROM h74_cycle_state
+            WHERE cycle_id=?
+            """,
+            (buy_order_cycle_id,),
+        ).fetchone()
+        if row is not None:
+            keys = row.keys() if hasattr(row, "keys") else [desc[0] for desc in conn.execute(
+                """
+                SELECT cycle_id, state, acquired_qty, sold_qty, locked_exit_qty, contract_hash,
+                       h74_entry_plan_client_order_id
+                FROM h74_cycle_state
+                WHERE cycle_id=?
+                """,
+                (buy_order_cycle_id,),
+            ).description]
+            cycle_state = dict(zip(keys, tuple(row)))
     buy_event = _first_row(
         conn,
         "order_events",
@@ -228,7 +251,28 @@ def generate_h74_execution_path_probe_report(
         pair=pair,
     )
 
-    buy_complete = all((buy_decision, buy_plan, buy_order, buy_event, buy_fill, open_lot, buy_client_order_id))
+    buy_order_entry_plan_id = str(_field(buy_order, "h74_entry_plan_client_order_id") or "")
+    buy_order_contract = _field(buy_order, "h74_position_ownership_contract")
+    cycle_entry_plan_id = str(_field(cycle_state, "h74_entry_plan_client_order_id") or "")
+    h74_identity_complete = bool(
+        buy_order_entry_plan_id
+        and buy_order_contract
+        and cycle_state
+        and cycle_entry_plan_id
+        and buy_order_entry_plan_id == cycle_entry_plan_id
+    )
+    buy_complete = all(
+        (
+            buy_decision,
+            buy_plan,
+            buy_order,
+            buy_event,
+            buy_fill,
+            open_lot,
+            buy_client_order_id,
+            h74_identity_complete,
+        )
+    )
     sell_complete = all((sell_decision, sell_plan, sell_order, sell_event, sell_fill, sell_client_order_id))
     final_flat_or_documented_dust = final_qty is not None and abs(final_qty) <= float(min_executable_qty)
     if not buy_complete:
@@ -236,6 +280,8 @@ def generate_h74_execution_path_probe_report(
     elif not sell_complete:
         status = "INCOMPLETE_SELL" if sell_plan is not None else "BLOCKED"
     elif lifecycle is None:
+        status = "FAILED_LIFECYCLE"
+    elif str(_field(cycle_state, "state") or "") != "CLOSED":
         status = "FAILED_LIFECYCLE"
     elif not accounting_ok:
         status = "FAILED_ACCOUNTING"
@@ -282,12 +328,12 @@ def generate_h74_execution_path_probe_report(
         "execution_path_probe_status": status,
         "allowed_execution_path_probe_statuses": sorted(FINAL_PROBE_STATUSES),
         "buy_order_filled": buy_fill is not None,
-        "h74_cycle_ownership_created": open_lot is not None,
+        "h74_cycle_ownership_created": cycle_state is not None,
         "h74_cycle_id": h74_cycle_id,
         "h74_remaining_cycle_qty_before_sell": float(h74_remaining_cycle_qty_before_sell or 0.0),
         "sell_order_submitted": sell_order is not None,
         "sell_order_filled": sell_fill is not None,
-        "h74_cycle_state_closed": lifecycle is not None,
+        "h74_cycle_state_closed": str(_field(cycle_state, "state") or "") == "CLOSED",
         "portfolio_flat": final_flat_or_documented_dust,
         "accounting_flat": accounting_ok,
         "manual_intervention": False,
@@ -300,6 +346,9 @@ def generate_h74_execution_path_probe_report(
         "buy_order_id": buy_leg["order_id"],
         "buy_client_order_id": buy_leg["client_order_id"],
         "buy_fill_id": buy_leg["fill_id"],
+        "buy_order_h74_entry_plan_client_order_id": buy_order_entry_plan_id,
+        "buy_order_h74_position_ownership_contract": buy_order_contract,
+        "cycle_h74_entry_plan_client_order_id": cycle_entry_plan_id,
         "open_lot_id": buy_leg["open_lot_id"],
         "sell_decision_id": sell_leg["decision_id"],
         "sell_execution_plan_id": sell_leg["execution_plan_id"],

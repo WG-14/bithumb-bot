@@ -246,7 +246,7 @@ def _record_h74_buy_intent(
         entry_client_order_id=order.client_order_id,
         authority_hash=authority_hash,
     )
-    contract_hash = h74_position_ownership_contract_from_payload(
+    contract = h74_position_ownership_contract_from_payload(
         {
             "cycle_id": cycle_id,
             "h74_cycle_id": cycle_id,
@@ -259,7 +259,7 @@ def _record_h74_buy_intent(
             "position_mode": "fixed_fill_qty_until_exit",
             "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
         }
-    ).contract_hash
+    )
     record_order_if_missing(
         conn,
         client_order_id=order.client_order_id,
@@ -272,7 +272,9 @@ def _record_h74_buy_intent(
         cycle_id=cycle_id,
         authority_hash=authority_hash,
         entry_decision_id=1,
-        h74_position_ownership_contract_hash=contract_hash,
+        h74_entry_plan_client_order_id=contract.entry_plan_id,
+        h74_position_ownership_contract_hash=contract.contract_hash,
+        h74_position_ownership_contract=contract.as_dict(),
         daily_participation_policy_hash=key.participation_policy_hash,
         daily_count_snapshot_hash=sha256_prefixed({"h74": "daily-count"}),
         participation_decision_hash=sha256_prefixed({"h74": "participation-decision"}),
@@ -620,6 +622,9 @@ def _acceptance_report(**overrides: object) -> dict[str, object]:
         "buy_order_id": 3,
         "buy_client_order_id": "buy-1",
         "buy_fill_id": 4,
+        "buy_order_h74_entry_plan_client_order_id": "h74-entry-plan-1",
+        "buy_order_h74_position_ownership_contract": {"entry_plan_id": "h74-entry-plan-1"},
+        "cycle_h74_entry_plan_client_order_id": "h74-entry-plan-1",
         "open_lot_id": 5,
         "sell_decision_id": 6,
         "sell_execution_plan_id": 7,
@@ -661,6 +666,14 @@ def test_h74_roundtrip_acceptance_requires_buy_cycle_sell_and_flat() -> None:
     assert result["h74_cycle_state_closed"] is True
     assert result["portfolio_flat"] is True
     assert result["accounting_flat"] is True
+
+
+def test_h74_live_roundtrip_acceptance_requires_buy_sell_cycle_close_flat() -> None:
+    result = evaluate_h74_execution_path_probe_acceptance(_acceptance_report())
+
+    assert result["execution_path_probe_status"] == "PASS"
+    assert result["buy_order_h74_entry_plan_client_order_id"] == "h74-entry-plan-1"
+    assert result["cycle_h74_entry_plan_client_order_id"] == "h74-entry-plan-1"
 
 
 def test_h74_buy_only_does_not_pass_roundtrip_acceptance() -> None:

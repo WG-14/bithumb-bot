@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -9,6 +10,8 @@ from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.h74_cycle_state import ensure_h74_cycle_schema, upsert_h74_cycle_fill
 from bithumb_bot.h74_position_ownership import h74_position_ownership_contract_from_payload
 from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
+from bithumb_bot.broker.live_submit_orchestrator import _build_context, _plan_submit_attempt, _validate_explicit_submit_plan
+from tests.test_h74_live_submit_ownership import _request as _live_submit_request
 
 
 def _conn() -> sqlite3.Connection:
@@ -250,6 +253,76 @@ def test_h74_sell_fill_closes_cycle_when_remaining_zero() -> None:
 
     assert row["sold_qty"] == pytest.approx(0.0008)
     assert row["state"] == "CLOSED"
+
+
+def test_h74_submit_identity_matches_execution_plan_order_event_and_order_row(tmp_path) -> None:
+    conn = _conn()
+    request = _live_submit_request(conn)
+    identity_payload = request.h74_submit_identity.as_evidence_dict() if request.h74_submit_identity else {
+        **request.submit_observability_fields
+    }
+    conn.execute(
+        """
+        INSERT INTO execution_plan(
+            probe_run_id, allocation_id, execution_plan_bundle_hash,
+            submit_expected, final_action, block_reason, status,
+            execution_plan_bundle_json, execution_submit_plan_json,
+            submit_plan_side
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "probe-run-1",
+            1,
+            "bundle-1",
+            1,
+            "SUBMIT",
+            "",
+            "PLANNED",
+            "{}",
+            json.dumps(identity_payload, sort_keys=True),
+            "BUY",
+        ),
+    )
+
+    context = _build_context(request=request, submit_plan=_validate_explicit_submit_plan(request=request))
+    _plan_submit_attempt(context=context)
+
+    plan = json.loads(
+        conn.execute("SELECT execution_submit_plan_json FROM execution_plan").fetchone()[
+            "execution_submit_plan_json"
+        ]
+    )
+    event = json.loads(
+        conn.execute(
+            """
+            SELECT submit_evidence FROM order_events
+            WHERE client_order_id=? AND submit_phase='planning'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (request.client_order_id,),
+        ).fetchone()["submit_evidence"]
+    )
+    order = conn.execute(
+        """
+        SELECT cycle_id, h74_entry_plan_client_order_id, h74_position_ownership_contract_hash
+        FROM orders WHERE client_order_id=?
+        """,
+        (request.client_order_id,),
+    ).fetchone()
+
+    assert plan["cycle_id"] == event["cycle_id"] == order["cycle_id"]
+    assert "h74_cycle_id" in event
+    assert (
+        plan["h74_entry_plan_client_order_id"]
+        == event["h74_entry_plan_client_order_id"]
+        == order["h74_entry_plan_client_order_id"]
+    )
+    assert (
+        plan["h74_position_ownership_contract_hash"]
+        == event["h74_position_ownership_contract_hash"]
+        == order["h74_position_ownership_contract_hash"]
+    )
 
 
 def test_h74_closed_cycle_requires_flat_portfolio_and_accounting() -> None:

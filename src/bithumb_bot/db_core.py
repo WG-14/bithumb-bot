@@ -926,8 +926,8 @@ def _backfill_trade_lifecycle_strategy_scope(conn: sqlite3.Connection) -> None:
            OR (tl.runtime_strategy_set_manifest_hash IS NULL OR TRIM(tl.runtime_strategy_set_manifest_hash) = '')
         """
     ).fetchall()
-    for row in rows:
-        instance_id, manifest_hash = _strategy_scope_from_decision_context(row["context_json"])
+    for row_id, context_json in rows:
+        instance_id, manifest_hash = _strategy_scope_from_decision_context(context_json)
         conn.execute(
             """
             UPDATE trade_lifecycles
@@ -936,7 +936,7 @@ def _backfill_trade_lifecycle_strategy_scope(conn: sqlite3.Connection) -> None:
                 runtime_strategy_set_manifest_hash = COALESCE(NULLIF(runtime_strategy_set_manifest_hash, ''), ?)
             WHERE id=?
             """,
-            (instance_id, manifest_hash, int(row["id"])),
+            (instance_id, manifest_hash, int(row_id)),
         )
 
 
@@ -990,14 +990,24 @@ def _backfill_trade_lifecycle_owner_actor_scope(conn: sqlite3.Connection) -> Non
         """
     ).fetchall()
     for row in rows:
+        (
+            row_id,
+            legacy_strategy_name_raw,
+            legacy_instance_raw,
+            exit_client_order_id,
+            exit_reason,
+            context_json,
+        ) = tuple(row)
         context_owner_name, context_owner_instance, context_scope, context_scope_source = _owner_scope_from_decision_context(
-            row["context_json"]
+            context_json
         )
-        legacy_strategy_name = str(row["strategy_name"] or "").strip()
-        legacy_instance = str(row["strategy_instance_id"] or "").strip()
-        operator_flatten = _looks_operator_flatten(row["exit_client_order_id"]) or _looks_operator_flatten(
-            row["exit_reason"]
-        ) or _looks_operator_flatten(legacy_strategy_name)
+        legacy_strategy_name = str(legacy_strategy_name_raw or "").strip()
+        legacy_instance = str(legacy_instance_raw or "").strip()
+        operator_flatten = (
+            _looks_operator_flatten(exit_client_order_id)
+            or _looks_operator_flatten(exit_reason)
+            or _looks_operator_flatten(legacy_strategy_name)
+        )
         owner_name = context_owner_name or ("" if operator_flatten and legacy_strategy_name == "operator_flatten" else legacy_strategy_name)
         owner_instance = context_owner_instance or legacy_instance
         owner_scope = context_scope or owner_instance
@@ -1029,7 +1039,7 @@ def _backfill_trade_lifecycle_owner_actor_scope(conn: sqlite3.Connection) -> Non
                 exit_authority,
                 1 if operator_flatten else 0,
                 exit_actor,
-                int(row["id"]),
+                int(row_id),
             ),
         )
 
@@ -1091,7 +1101,21 @@ def _trade_lifecycle_owner_actor_scope_backfill_evidence(
         ORDER BY id
         """
     ).fetchall()
-    payload_rows = [{str(key): row[key] for key in row.keys()} for row in rows]
+    payload_rows = [
+        {
+            "id": row[0],
+            "owner_strategy_name": row[1],
+            "owner_strategy_instance_id": row[2],
+            "owner_risk_scope_id": row[3],
+            "risk_scope_id": row[4],
+            "entry_actor": row[5],
+            "exit_actor": row[6],
+            "exit_authority": row[7],
+            "operator_intervention": row[8],
+            "exit_initiator_type": row[9],
+        }
+        for row in rows
+    ]
     payload = {
         "migration_id": "trade_lifecycle_owner_actor_scope_backfill_v1",
         "status": "applied",
@@ -1108,7 +1132,7 @@ def _record_trade_lifecycle_owner_actor_scope_backfill_evidence(conn: sqlite3.Co
         "SELECT backfill_hash FROM migration_evidence WHERE migration_id=?",
         (migration_id,),
     ).fetchone()
-    if existing is not None and str(existing["backfill_hash"]) == backfill_hash:
+    if existing is not None and str(existing[0]) == backfill_hash:
         return
     conn.execute(
         """
