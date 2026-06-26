@@ -264,12 +264,16 @@ class _SequencedBithumbBroker(_ScriptedBithumbBroker):
                     "price": f"{reference_price:.8f}",
                     "volume": f"{float(qty):.8f}",
                     "funds": f"{reference_price * float(qty):.8f}",
+                    "fee": f"{paid_fee:.8f}",
                     "created_at": "2024-01-01T00:00:00+00:00",
                 }
             ],
         )
         pending = deepcopy(complete)
         pending.pop("paid_fee", None)
+        for trade in pending.get("trades", ()):
+            if isinstance(trade, dict):
+                trade.pop("fee", None)
         if normalized_side == "BUY" and self.delayed_first_buy and self.submit_calls == 1:
             sequence = [deepcopy(pending) for _ in range(5)] + [deepcopy(complete) for _ in range(20)]
         else:
@@ -487,10 +491,13 @@ def _run_scripted_smoke(monkeypatch, tmp_path, *, delayed_first_buy: bool, cycle
         "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW",
         "LIVE_FILL_FEE_RATIO_MIN",
         "LIVE_FILL_FEE_RATIO_MAX",
+        "LIVE_FILL_FEE_STRICT_MODE",
+        "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW",
         "LIVE_FEE_RATE_ESTIMATE",
         "LIVE_INTERNAL_LOT_SIZE",
         "LIVE_MIN_ORDER_QTY",
         "LIVE_ORDER_QTY_STEP",
+        "LIVE_ORDER_MAX_QTY_DECIMALS",
     )
     old = {
         name: (getattr(settings, name) if hasattr(settings, name) else _MISSING_SETTING)

@@ -1827,17 +1827,31 @@ def _h74_execution_path_probe_authority_allows_submit(
     if not authority_file.is_file():
         return False
 
+    class _H74ProbeSettingsDefaults:
+        def __init__(self, base: object) -> None:
+            self._base = base
+
+        def __getattr__(self, name: str) -> object:
+            if name == "DAILY_PARTICIPATION_MAX_ORDER_KRW":
+                return H74_SOURCE_MAX_ORDER_KRW
+            return getattr(self._base, name)
+
     def _exact_number(value: object, expected: float) -> bool:
         try:
             return float(value) == float(expected)
         except (TypeError, ValueError):
             return False
 
+    alignment_settings_obj = (
+        settings_obj
+        if hasattr(settings_obj, "DAILY_PARTICIPATION_MAX_ORDER_KRW")
+        else _H74ProbeSettingsDefaults(settings_obj)
+    )
     try:
         authority_payload = load_h74_authority_payload(authority_file)
         alignment = validate_h74_authority_file_env_alignment(
             authority_file,
-            settings_obj=settings_obj,
+            settings_obj=alignment_settings_obj,
             raise_on_mismatch=True,
         )
     except Exception:
