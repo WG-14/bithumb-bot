@@ -424,6 +424,61 @@ def test_h74_buy_order_persists_cycle_metadata(roundtrip_db) -> None:
     assert row["h74_position_ownership_contract_hash"].startswith("sha256:")
 
 
+def test_h74_roundtrip_contract_inventory_boundary_is_explicit(roundtrip_db) -> None:
+    order, fills = _recorded_broker_roundtrip()
+    conn = _conn(roundtrip_db)
+    try:
+        _apply_recorded_buy_fill(conn, order, fills[0])
+        order_row = conn.execute(
+            """
+            SELECT cycle_id, strategy_instance_id, authority_hash, probe_run_id,
+                   h74_position_ownership_contract_hash
+            FROM orders
+            WHERE client_order_id=?
+            """,
+            (order.client_order_id,),
+        ).fetchone()
+        cycle_row = conn.execute(
+            """
+            SELECT cycle_id, acquired_qty, sold_qty, locked_exit_qty, contract_hash
+            FROM h74_cycle_state
+            WHERE cycle_id=?
+            """,
+            (str(order_row["cycle_id"]),),
+        ).fetchone()
+        inventory = load_h74_cycle_inventory(conn, cycle_id=str(order_row["cycle_id"]))
+    finally:
+        conn.close()
+
+    contract = h74_position_ownership_contract_from_payload(
+        {
+            "cycle_id": str(order_row["cycle_id"]),
+            "h74_cycle_id": str(order_row["cycle_id"]),
+            "authority_hash": str(order_row["authority_hash"]),
+            "strategy_instance_id": str(order_row["strategy_instance_id"]),
+            "probe_run_id": str(order_row["probe_run_id"]),
+            "pair": "KRW-BTC",
+            "entry_side": "BUY",
+            "entry_plan_id": order.client_order_id,
+            "position_mode": "fixed_fill_qty_until_exit",
+            "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
+        }
+    )
+    expected_remaining = (
+        float(cycle_row["acquired_qty"])
+        - float(cycle_row["sold_qty"])
+        - float(cycle_row["locked_exit_qty"])
+    )
+
+    assert inventory is not None
+    assert contract.cycle_id == inventory.cycle_id
+    assert contract.contract_hash == order_row["h74_position_ownership_contract_hash"]
+    assert inventory.contract_hash == contract.contract_hash
+    assert cycle_row["contract_hash"] == contract.contract_hash
+    assert inventory.remaining_cycle_qty == pytest.approx(expected_remaining)
+    assert inventory.remaining_cycle_qty == pytest.approx(float(fills[0].qty))
+
+
 def test_h74_ownership_metadata_survives_plan_to_order(roundtrip_db) -> None:
     conn = _conn(roundtrip_db)
     request = _live_submit_request(conn)

@@ -30,6 +30,7 @@ class H74CycleInventory:
     acquired_qty: float
     sold_qty: float
     locked_exit_qty: float
+    contract_hash: str = ""
 
     @property
     def remaining_cycle_qty(self) -> float:
@@ -44,6 +45,8 @@ class H74CycleInventory:
             "sold_qty": float(self.sold_qty),
             "locked_exit_qty": float(self.locked_exit_qty),
             "remaining_cycle_qty": self.remaining_cycle_qty,
+            "contract_hash": str(self.contract_hash or ""),
+            "h74_position_ownership_contract_hash": str(self.contract_hash or ""),
         }
         payload["cycle_inventory_hash"] = sha256_prefixed(payload)
         return payload
@@ -149,7 +152,7 @@ def load_h74_cycle_inventory(conn: sqlite3.Connection, *, cycle_id: str) -> H74C
     ensure_h74_cycle_schema(conn)
     row = conn.execute(
         """
-        SELECT cycle_id, authority_hash, strategy_instance_id, acquired_qty, sold_qty, locked_exit_qty
+        SELECT cycle_id, authority_hash, strategy_instance_id, acquired_qty, sold_qty, locked_exit_qty, contract_hash
         FROM h74_cycle_state
         WHERE cycle_id=?
         """,
@@ -164,6 +167,7 @@ def load_h74_cycle_inventory(conn: sqlite3.Connection, *, cycle_id: str) -> H74C
         acquired_qty=float(row["acquired_qty"] if hasattr(row, "keys") else row[3]),
         sold_qty=float(row["sold_qty"] if hasattr(row, "keys") else row[4]),
         locked_exit_qty=float(row["locked_exit_qty"] if hasattr(row, "keys") else row[5]),
+        contract_hash=str((row["contract_hash"] if hasattr(row, "keys") else row[6]) or ""),
     )
 
 
@@ -177,7 +181,7 @@ def load_open_h74_cycle_inventories(
     ensure_h74_cycle_schema(conn)
     rows = conn.execute(
         """
-        SELECT cycle_id, authority_hash, strategy_instance_id, acquired_qty, sold_qty, locked_exit_qty
+        SELECT cycle_id, authority_hash, strategy_instance_id, acquired_qty, sold_qty, locked_exit_qty, contract_hash
         FROM h74_cycle_state
         WHERE strategy_instance_id=?
           AND authority_hash=?
@@ -200,6 +204,7 @@ def load_open_h74_cycle_inventories(
             acquired_qty=float(row["acquired_qty"] if hasattr(row, "keys") else row[3]),
             sold_qty=float(row["sold_qty"] if hasattr(row, "keys") else row[4]),
             locked_exit_qty=float(row["locked_exit_qty"] if hasattr(row, "keys") else row[5]),
+            contract_hash=str((row["contract_hash"] if hasattr(row, "keys") else row[6]) or ""),
         )
         for row in rows
     )
@@ -253,6 +258,12 @@ def h74_cycle_inventory_from_payload(payload: Mapping[str, Any]) -> H74CycleInve
         acquired_qty=float(payload.get("acquired_qty") or payload.get("h74_acquired_qty") or 0.0),
         sold_qty=float(payload.get("sold_qty") or payload.get("h74_sold_qty") or 0.0),
         locked_exit_qty=float(payload.get("locked_exit_qty") or payload.get("h74_locked_exit_qty") or 0.0),
+        contract_hash=str(
+            payload.get("contract_hash")
+            or payload.get("h74_position_ownership_contract_hash")
+            or payload.get("h74_cycle_contract_hash")
+            or ""
+        ),
     )
 
 

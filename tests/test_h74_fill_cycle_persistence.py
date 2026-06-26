@@ -19,23 +19,27 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+def _ownership_contract(cycle_id: str):
+    return h74_position_ownership_contract_from_payload(
+        {
+            "cycle_id": cycle_id,
+            "h74_cycle_id": cycle_id,
+            "authority_hash": "sha256:a",
+            "strategy_instance_id": "h74-source-observation",
+            "probe_run_id": "probe-run-1",
+            "pair": "KRW-BTC",
+            "entry_side": "BUY",
+            "entry_plan_id": "h74-buy",
+            "position_mode": "fixed_fill_qty_until_exit",
+            "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
+        }
+    )
+
+
 def _order(conn: sqlite3.Connection, *, cycle_id: str | None = "cycle-1") -> None:
     contract_hash = None
     if cycle_id:
-        contract_hash = h74_position_ownership_contract_from_payload(
-            {
-                "cycle_id": cycle_id,
-                "h74_cycle_id": cycle_id,
-                "authority_hash": "sha256:a",
-                "strategy_instance_id": "h74-source-observation",
-                "probe_run_id": "probe-run-1",
-                "pair": "KRW-BTC",
-                "entry_side": "BUY",
-                "entry_plan_id": "h74-buy",
-                "position_mode": "fixed_fill_qty_until_exit",
-                "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
-            }
-        ).contract_hash
+        contract_hash = _ownership_contract(cycle_id).contract_hash
     record_order_if_missing(
         conn,
         client_order_id="h74-buy",
@@ -102,6 +106,44 @@ def test_h74_partial_buy_fills_accumulate_same_cycle() -> None:
     assert inventory.acquired_qty == pytest.approx(0.0008)
     assert inventory.remaining_cycle_qty == pytest.approx(0.0008)
     assert conn.execute("SELECT COUNT(*) AS n FROM h74_cycle_state").fetchone()["n"] == 1
+
+
+def test_h74_buy_fill_links_contract_identity_to_remaining_cycle_qty() -> None:
+    conn = _conn()
+    contract = _ownership_contract("cycle-1")
+    _order(conn)
+
+    apply_fill_and_trade(
+        conn,
+        client_order_id="h74-buy",
+        side="BUY",
+        fill_id="fill-1",
+        fill_ts=1,
+        price=100_000_000.0,
+        qty=0.0008,
+        fee=32.0,
+        strategy_name="daily_participation_sma",
+        pair="KRW-BTC",
+    )
+
+    inventory = load_h74_cycle_inventory(conn, cycle_id=contract.cycle_id)
+    row = conn.execute(
+        """
+        SELECT cycle_id, acquired_qty, sold_qty, locked_exit_qty, contract_hash
+        FROM h74_cycle_state
+        WHERE cycle_id=?
+        """,
+        (contract.cycle_id,),
+    ).fetchone()
+    assert inventory is not None
+    assert row is not None
+    expected_remaining = float(row["acquired_qty"]) - float(row["sold_qty"]) - float(row["locked_exit_qty"])
+    assert contract.cycle_id == inventory.cycle_id
+    assert row["cycle_id"] == contract.cycle_id
+    assert inventory.contract_hash == contract.contract_hash
+    assert row["contract_hash"] == contract.contract_hash
+    assert inventory.remaining_cycle_qty == pytest.approx(expected_remaining)
+    assert inventory.remaining_cycle_qty == pytest.approx(0.0008)
 
 
 def test_h74_buy_fill_without_cycle_id_fails_closed() -> None:
