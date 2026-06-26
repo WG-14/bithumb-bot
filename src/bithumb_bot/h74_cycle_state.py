@@ -266,6 +266,23 @@ def h74_cycle_health_invariant_reasons(conn: sqlite3.Connection) -> tuple[str, .
     if "h74_cycle_state" not in tables:
         return ("h74_cycle_schema_missing",)
     reasons: list[str] = []
+    def _fill_sum(client_order_id: str) -> float:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(qty),0) AS qty FROM fills WHERE client_order_id=?",
+            (client_order_id,),
+        ).fetchone()
+        return float(row["qty"] if hasattr(row, "keys") else row[0])
+
+    def _cycle_row(cycle_id: str):
+        return conn.execute(
+            """
+            SELECT acquired_qty, sold_qty, locked_exit_qty, state
+            FROM h74_cycle_state
+            WHERE cycle_id=?
+            """,
+            (cycle_id,),
+        ).fetchone()
+
     buy_rows = conn.execute(
         """
         SELECT client_order_id, cycle_id, strategy_instance_id, authority_hash
@@ -283,18 +300,11 @@ def h74_cycle_health_invariant_reasons(conn: sqlite3.Connection) -> tuple[str, .
         if not cycle_id or not strategy_instance_id or not authority_hash:
             reasons.append("h74_cycle_ownership_incomplete")
             continue
-        cycle = conn.execute(
-            "SELECT acquired_qty, sold_qty, locked_exit_qty FROM h74_cycle_state WHERE cycle_id=?",
-            (cycle_id,),
-        ).fetchone()
+        cycle = _cycle_row(cycle_id)
         if cycle is None:
             reasons.append("h74_cycle_ownership_incomplete")
             continue
-        fill_qty = conn.execute(
-            "SELECT COALESCE(SUM(qty),0) AS qty FROM fills WHERE client_order_id=?",
-            (client_order_id,),
-        ).fetchone()
-        summed = float(fill_qty["qty"] if hasattr(fill_qty, "keys") else fill_qty[0])
+        summed = _fill_sum(client_order_id)
         acquired = float(cycle["acquired_qty"] if hasattr(cycle, "keys") else cycle[0])
         sold = float(cycle["sold_qty"] if hasattr(cycle, "keys") else cycle[1])
         locked = float(cycle["locked_exit_qty"] if hasattr(cycle, "keys") else cycle[2])
@@ -302,6 +312,69 @@ def h74_cycle_health_invariant_reasons(conn: sqlite3.Connection) -> tuple[str, .
             reasons.append("h74_cycle_qty_mismatch")
         if acquired - sold - locked < -1e-12:
             reasons.append("h74_cycle_negative_remaining_qty")
+    sell_rows = conn.execute(
+        """
+        SELECT client_order_id, cycle_id, strategy_instance_id, authority_hash
+        FROM orders
+        WHERE side='SELL'
+          AND strategy_name='daily_participation_sma'
+          AND status IN ('FILLED','PARTIALLY_FILLED')
+        """
+    ).fetchall()
+    sell_fills_by_cycle: dict[str, float] = {}
+    for row in sell_rows:
+        client_order_id = str(row["client_order_id"] if hasattr(row, "keys") else row[0])
+        cycle_id = str((row["cycle_id"] if hasattr(row, "keys") else row[1]) or "").strip()
+        strategy_instance_id = str((row["strategy_instance_id"] if hasattr(row, "keys") else row[2]) or "").strip()
+        authority_hash = str((row["authority_hash"] if hasattr(row, "keys") else row[3]) or "").strip()
+        if not cycle_id or not strategy_instance_id or not authority_hash:
+            reasons.append("h74_cycle_ownership_incomplete")
+            continue
+        cycle = _cycle_row(cycle_id)
+        if cycle is None:
+            reasons.append("h74_cycle_ownership_incomplete")
+            continue
+        sell_fills_by_cycle[cycle_id] = sell_fills_by_cycle.get(cycle_id, 0.0) + _fill_sum(client_order_id)
+    for cycle_id, sell_fill_qty in sell_fills_by_cycle.items():
+        cycle = _cycle_row(cycle_id)
+        if cycle is None:
+            reasons.append("h74_cycle_ownership_incomplete")
+            continue
+        acquired = float(cycle["acquired_qty"] if hasattr(cycle, "keys") else cycle[0])
+        sold = float(cycle["sold_qty"] if hasattr(cycle, "keys") else cycle[1])
+        locked = float(cycle["locked_exit_qty"] if hasattr(cycle, "keys") else cycle[2])
+        state = str(cycle["state"] if hasattr(cycle, "keys") else cycle[3])
+        if sold + 1e-12 < sell_fill_qty:
+            reasons.append("h74_cycle_sold_qty_mismatch")
+        if acquired - sold - locked <= 1e-12 and acquired > 0.0 and state != H74_CYCLE_STATE_CLOSED:
+            reasons.append("h74_cycle_remaining_zero_not_closed")
+    closed_rows = conn.execute(
+        """
+        SELECT cycle_id, acquired_qty, sold_qty, locked_exit_qty
+        FROM h74_cycle_state
+        WHERE state=?
+        """,
+        (H74_CYCLE_STATE_CLOSED,),
+    ).fetchall()
+    if closed_rows:
+        portfolio_row = conn.execute(
+            """
+            SELECT COALESCE(asset_available,0) + COALESCE(asset_locked,0) AS asset_qty
+            FROM portfolio
+            WHERE id=1
+            """
+        ).fetchone() if "portfolio" in tables else None
+        portfolio_qty = 0.0 if portfolio_row is None else float(portfolio_row["asset_qty"] if hasattr(portfolio_row, "keys") else portfolio_row[0])
+        open_lot_row = conn.execute(
+            "SELECT COALESCE(SUM(qty_open),0) AS qty FROM open_position_lots"
+        ).fetchone() if "open_position_lots" in tables else None
+        open_lot_qty = 0.0 if open_lot_row is None else float(open_lot_row["qty"] if hasattr(open_lot_row, "keys") else open_lot_row[0])
+        trade_row = conn.execute(
+            "SELECT asset_after FROM trades ORDER BY ts DESC, id DESC LIMIT 1"
+        ).fetchone() if "trades" in tables else None
+        accounting_qty = 0.0 if trade_row is None else float(trade_row["asset_after"] if hasattr(trade_row, "keys") else trade_row[0])
+        if abs(portfolio_qty) > 1e-12 or abs(open_lot_qty) > 1e-12 or abs(accounting_qty) > 1e-12:
+            reasons.append("h74_closed_cycle_not_flat")
     return tuple(dict.fromkeys(reasons))
 
 

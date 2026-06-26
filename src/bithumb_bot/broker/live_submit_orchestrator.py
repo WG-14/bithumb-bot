@@ -91,6 +91,8 @@ class StandardSubmitPipelineRequest:
     cycle_id: str | None = None
     authority_hash: str | None = None
     probe_run_id: str | None = None
+    h74_cycle_id: str | None = None
+    h74_position_ownership_contract_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,8 @@ class StandardSubmitPlanningFailureRequest:
     cycle_id: str | None = None
     authority_hash: str | None = None
     probe_run_id: str | None = None
+    h74_cycle_id: str | None = None
+    h74_position_ownership_contract_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -781,15 +785,44 @@ def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) ->
         and bool(request.submit_observability_fields.get("h74_fixed_position_contract_active"))
     )
     if h74_fixed_buy:
+        plan_payload = (
+            request.submit_plan.as_dict()
+            if hasattr(request.submit_plan, "as_dict") and callable(request.submit_plan.as_dict)
+            else {}
+        )
+        required_matches = {
+            "cycle_id": request.cycle_id,
+            "h74_cycle_id": request.h74_cycle_id or request.cycle_id,
+            "strategy_instance_id": request.strategy_instance_id,
+            "authority_hash": request.authority_hash,
+            "probe_run_id": request.probe_run_id,
+            "h74_position_ownership_contract_hash": request.h74_position_ownership_contract_hash,
+        }
+        for key, request_value in required_matches.items():
+            value = str(request_value or "").strip()
+            if not value:
+                raise BrokerRejectError(f"h74_cycle_ownership_required_for_entry:missing:{key}")
+            plan_key = "h74_execution_path_probe_run_id" if key == "probe_run_id" else key
+            plan_value = str(
+                plan_payload.get(plan_key)
+                or request.submit_observability_fields.get(plan_key)
+                or request.submit_observability_fields.get(key)
+                or ""
+            ).strip()
+            if not plan_value:
+                raise BrokerRejectError(f"h74_cycle_ownership_required_for_entry:plan_missing:{key}")
+            if value != plan_value:
+                raise BrokerRejectError(f"h74_cycle_ownership_required_for_entry:mismatch:{key}")
         try:
             h74_position_ownership_contract_from_payload(
                 {
                     **request.submit_observability_fields,
                     "cycle_id": request.cycle_id,
-                    "h74_cycle_id": request.cycle_id,
+                    "h74_cycle_id": request.h74_cycle_id or request.cycle_id,
                     "strategy_instance_id": request.strategy_instance_id,
                     "authority_hash": request.authority_hash,
                     "probe_run_id": request.probe_run_id,
+                    "h74_position_ownership_contract_hash": request.h74_position_ownership_contract_hash,
                     "pair": settings.PAIR,
                     "entry_side": "BUY",
                     "entry_plan_id": request.client_order_id,

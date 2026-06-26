@@ -166,9 +166,36 @@ def _h74_authority_planning_fields(settings_obj: object) -> dict[str, object]:
     if not authority:
         return {}
     bound = dict(authority.get("hash_bound_parameters") or {})
+    position_mode = str(authority.get("position_mode") or bound.get("position_mode") or "").strip()
+    if (
+        position_mode == POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
+        or str(getattr(settings_obj, "POSITION_MODE", "") or "").strip()
+        == POSITION_MODE_FIXED_FILL_QTY_UNTIL_EXIT
+    ):
+        required_values = {
+            "strategy_instance_id": authority.get("strategy_instance_id") or bound.get("strategy_instance_id"),
+            "position_mode": position_mode,
+            "hold_policy": authority.get("hold_policy") or bound.get("hold_policy"),
+            "partial_fill_policy": authority.get("partial_fill_policy") or bound.get("partial_fill_policy"),
+            "authority_hash": authority.get("authority_content_hash"),
+            "max_order_krw": (
+                authority.get("max_order_krw")
+                or bound.get("max_order_krw")
+                or bound.get("DAILY_PARTICIPATION_MAX_ORDER_KRW")
+            ),
+            "probe_run_id": (
+                authority.get("probe_run_id")
+                or bound.get("probe_run_id")
+                or bound.get("H74_EXECUTION_PATH_PROBE_RUN_ID")
+                or getattr(settings_obj, "H74_EXECUTION_PATH_PROBE_RUN_ID", "")
+            ),
+        }
+        for field, value in required_values.items():
+            if value is None or str(value).strip() == "":
+                raise ValueError(f"h74_authority_contract_incomplete:{field}")
     return {
         "position_mode": str(authority.get("position_mode") or bound.get("position_mode") or ""),
-        "hold_policy": str(authority.get("hold_policy") or bound.get("hold_policy") or "max_holding_time"),
+        "hold_policy": str(authority.get("hold_policy") or bound.get("hold_policy") or ""),
         "authority_hash": str(authority.get("authority_content_hash") or ""),
         "h74_source_authority_hash": str(authority.get("authority_content_hash") or ""),
         "authority_parameter_hash": str(authority.get("authority_parameter_hash") or ""),
@@ -229,7 +256,7 @@ def _h74_authority_planning_fields(settings_obj: object) -> dict[str, object]:
         "partial_fill_policy": str(
             authority.get("partial_fill_policy")
             or bound.get("partial_fill_policy")
-            or "accumulate_cycle_fills"
+            or ""
         ),
         "h74_fixed_position_contract_active": (
             str(authority.get("position_mode") or bound.get("position_mode") or "")
@@ -2371,6 +2398,12 @@ def _with_h74_submit_plan_evidence(
         "startup_gate_hash",
         "startup_gate",
         "contract_hash",
+        "h74_position_ownership_contract_hash",
+        "h74_position_ownership_contract",
+        "h74_cycle_ownership_error",
+        "h74_entry_plan_client_order_id",
+        "entry_plan_id",
+        "h74_execution_path_probe_run_id",
         "experiment_execution_contract",
         "h74_source_authority",
     ):

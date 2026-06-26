@@ -1106,6 +1106,16 @@ def execute_live_submission_and_application(
         or None,
         probe_run_id=str(decision_observability.get("h74_execution_path_probe_run_id") or "").strip()
         or None,
+        h74_cycle_id=str(
+            decision_observability.get("h74_cycle_id")
+            or decision_observability.get("cycle_id")
+            or ""
+        )
+        or None,
+        h74_position_ownership_contract_hash=str(
+            decision_observability.get("h74_position_ownership_contract_hash") or ""
+        ).strip()
+        or None,
     )
     try:
         submit_plan = build_live_submit_plan(
@@ -1261,6 +1271,16 @@ def execute_live_submission_and_application(
             authority_hash=str(decision_observability.get("authority_hash") or "")
             or None,
             probe_run_id=str(decision_observability.get("h74_execution_path_probe_run_id") or "").strip()
+            or None,
+            h74_cycle_id=str(
+                decision_observability.get("h74_cycle_id")
+                or decision_observability.get("cycle_id")
+                or ""
+            )
+            or None,
+            h74_position_ownership_contract_hash=str(
+                decision_observability.get("h74_position_ownership_contract_hash") or ""
+            ).strip()
             or None,
         ),
         intent_key=intent_key,

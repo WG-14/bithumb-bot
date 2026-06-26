@@ -17,6 +17,11 @@ def _pass_report() -> dict[str, object]:
         "h74_cycle_state_closed": True,
         "portfolio_flat": True,
         "accounting_flat": True,
+        "manual_intervention": False,
+        "h74_exit_authority_ready": 1,
+        "h74_remaining_cycle_qty": 0.0008,
+        "h74_cycle_contract_hash": "sha256:contract",
+        "h74_exit_authority_not_ready_reason": "none",
         "buy_decision_id": 1,
         "buy_execution_plan_id": 2,
         "buy_order_id": 3,
@@ -57,6 +62,10 @@ def test_acceptance_consumes_probe_report_schema() -> None:
     result = evaluate_h74_execution_path_probe_acceptance(_pass_report())
     assert result["execution_path_probe_status"] == "PASS"
     assert result["acceptance_track"] == "execution_path_probe"
+    assert result["sell_order_filled"] is True
+    assert result["h74_cycle_state_closed"] is True
+    assert result["portfolio_flat"] is True
+    assert result["accounting_flat"] is True
 
 
 def test_acceptance_rejects_report_without_lifecycle_id() -> None:

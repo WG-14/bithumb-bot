@@ -11,9 +11,11 @@ from bithumb_bot.broker.base import BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
 from bithumb_bot.decision_equivalence import sha256_prefixed
 from bithumb_bot.db_core import ensure_db, init_portfolio, record_broker_fill_observation
+from bithumb_bot.execution_service import ExecutionSubmitPlan
 from bithumb_bot.execution import apply_fill_and_trade, apply_fill_principal_with_pending_fee, record_order_if_missing
 from bithumb_bot.h74_cycle_state import build_h74_cycle_id, load_h74_cycle_inventory
 from bithumb_bot.h74_live_rehearsal import H74LiveRehearsalConfig, run_h74_live_rehearsal
+from bithumb_bot.h74_probe_acceptance import evaluate_h74_execution_path_probe_acceptance
 from bithumb_bot.run_loop_execution_planner import _inject_h74_cycle_inventory
 from bithumb_bot.oms import set_status
 from bithumb_bot.order_settlement import OrderSettlementCoordinator, SettlementBarrierConfig
@@ -29,6 +31,8 @@ from bithumb_bot.strategy.daily_participation_policy import (
     evaluate_daily_participation_policy,
 )
 from bithumb_bot.target_position import TargetPositionSettings, build_target_position_decision
+from tests.test_h74_live_submit_ownership import _request as _live_submit_request
+from bithumb_bot.broker.live_submit_orchestrator import _build_context, _plan_submit_attempt, _validate_explicit_submit_plan
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bithumb" / "live_paid_fee_single_fill_buy_2026_04_24.json"
@@ -368,6 +372,207 @@ def test_h74_buy_order_persists_cycle_metadata(roundtrip_db) -> None:
     assert row["strategy_instance_id"] == "h74-source-observation"
     assert row["authority_hash"] == "sha256:h74-roundtrip-authority"
     assert row["probe_run_id"] == "probe-run-1"
+
+
+def test_h74_ownership_metadata_survives_plan_to_order(roundtrip_db) -> None:
+    conn = _conn(roundtrip_db)
+    request = _live_submit_request(conn)
+    plan = ExecutionSubmitPlan(
+        side="BUY",
+        source="h74_source_observation",
+        authority="typed_execution_submit_plan",
+        final_action="BUY",
+        qty=None,
+        notional_krw=100_000.0,
+        target_exposure_krw=100_000.0,
+        current_effective_exposure_krw=0.0,
+        delta_krw=100_000.0,
+        submit_expected=True,
+        pre_submit_proof_status="PASS",
+        block_reason="none",
+        idempotency_key="h74-live-buy",
+        pair="KRW-BTC",
+        extra_payload={
+            "cycle_id": request.cycle_id,
+            "h74_cycle_id": request.h74_cycle_id,
+            "strategy_instance_id": request.strategy_instance_id,
+            "authority_hash": request.authority_hash,
+            "h74_execution_path_probe_run_id": request.probe_run_id,
+            "h74_position_ownership_contract_hash": request.h74_position_ownership_contract_hash,
+        },
+    )
+    plan_payload = plan.as_dict()
+    try:
+        assert request.cycle_id == plan_payload["cycle_id"]
+        assert request.h74_cycle_id == plan_payload["h74_cycle_id"]
+        assert request.strategy_instance_id == plan_payload["strategy_instance_id"]
+        assert request.authority_hash == plan_payload["authority_hash"]
+        assert request.probe_run_id == plan_payload["h74_execution_path_probe_run_id"]
+        assert (
+            request.h74_position_ownership_contract_hash
+            == plan_payload["h74_position_ownership_contract_hash"]
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id=request.client_order_id,
+            submit_attempt_id=request.submit_attempt_id,
+            side=request.side,
+            qty_req=request.qty,
+            price=None,
+            symbol="KRW-BTC",
+            strategy_name=request.strategy_name,
+            strategy_instance_id=request.strategy_instance_id,
+            cycle_id=request.cycle_id,
+            authority_hash=request.authority_hash,
+            probe_run_id=request.probe_run_id,
+            status="PENDING_SUBMIT",
+        )
+        row = conn.execute(
+            """
+            SELECT cycle_id, strategy_instance_id, authority_hash, probe_run_id
+            FROM orders
+            WHERE client_order_id=?
+            """,
+            (request.client_order_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["cycle_id"] == plan_payload["cycle_id"]
+    assert row["strategy_instance_id"] == plan_payload["strategy_instance_id"]
+    assert row["authority_hash"] == plan_payload["authority_hash"]
+    assert row["probe_run_id"] == plan_payload["h74_execution_path_probe_run_id"]
+
+
+def test_h74_order_event_submit_evidence_contains_ownership_contract_hash(roundtrip_db) -> None:
+    conn = _conn(roundtrip_db)
+    request = _live_submit_request(conn)
+    try:
+        context = _build_context(request=request, submit_plan=_validate_explicit_submit_plan(request=request))
+        _plan_submit_attempt(context=context)
+        event_row = conn.execute(
+            """
+            SELECT submit_evidence FROM order_events
+            WHERE client_order_id=? AND submit_phase='planning'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (request.client_order_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    evidence = json.loads(event_row["submit_evidence"])
+    assert evidence["h74_position_ownership_contract_hash"] == request.h74_position_ownership_contract_hash
+
+
+def _acceptance_report(**overrides: object) -> dict[str, object]:
+    report = {
+        "artifact_type": "h74_execution_path_probe_report",
+        "probe_run_id": "probe-1",
+        "execution_path_probe_status": "PASS",
+        "buy_order_filled": True,
+        "h74_cycle_ownership_created": True,
+        "h74_cycle_id": "cycle-1",
+        "h74_remaining_cycle_qty_before_sell": 0.0008,
+        "sell_order_submitted": True,
+        "sell_order_filled": True,
+        "h74_cycle_state_closed": True,
+        "portfolio_flat": True,
+        "accounting_flat": True,
+        "manual_intervention": False,
+        "h74_exit_authority_ready": 1,
+        "h74_remaining_cycle_qty": 0.0008,
+        "h74_cycle_contract_hash": "sha256:contract",
+        "h74_exit_authority_not_ready_reason": "none",
+        "buy_decision_id": 1,
+        "buy_execution_plan_id": 2,
+        "buy_order_id": 3,
+        "buy_client_order_id": "buy-1",
+        "buy_fill_id": 4,
+        "open_lot_id": 5,
+        "sell_decision_id": 6,
+        "sell_execution_plan_id": 7,
+        "sell_order_id": 8,
+        "sell_client_order_id": "sell-1",
+        "sell_fill_id": 9,
+        "lifecycle_id": 10,
+        "buy_leg": {
+            "decision_id": 1,
+            "execution_plan_id": 2,
+            "order_id": 3,
+            "client_order_id": "buy-1",
+            "fill_id": 4,
+            "open_lot_id": 5,
+        },
+        "sell_leg": {
+            "decision_id": 6,
+            "execution_plan_id": 7,
+            "order_id": 8,
+            "client_order_id": "sell-1",
+            "fill_id": 9,
+            "lifecycle_id": 10,
+        },
+        "accounting": {"validated": True},
+        "final_flat_or_documented_dust": True,
+    }
+    report.update(overrides)
+    return report
+
+
+def test_h74_roundtrip_acceptance_requires_buy_cycle_sell_and_flat() -> None:
+    result = evaluate_h74_execution_path_probe_acceptance(_acceptance_report())
+
+    assert result["execution_path_probe_status"] == "PASS"
+    assert result["buy_order_filled"] is True
+    assert result["h74_cycle_ownership_created"] is True
+    assert result["sell_order_submitted"] is True
+    assert result["sell_order_filled"] is True
+    assert result["h74_cycle_state_closed"] is True
+    assert result["portfolio_flat"] is True
+    assert result["accounting_flat"] is True
+
+
+def test_h74_buy_only_does_not_pass_roundtrip_acceptance() -> None:
+    result = evaluate_h74_execution_path_probe_acceptance(
+        _acceptance_report(
+            sell_order_submitted=False,
+            sell_order_filled=False,
+            sell_order_id=None,
+            sell_fill_id=None,
+            lifecycle_id=None,
+            sell_leg={
+                "decision_id": None,
+                "execution_plan_id": None,
+                "order_id": None,
+                "client_order_id": None,
+                "fill_id": None,
+                "lifecycle_id": None,
+            },
+        )
+    )
+
+    assert result["execution_path_probe_status"] in {"PARTIAL_PASS", "INCOMPLETE"}
+    assert "sell_order_submitted" in result["missing_evidence"]
+    assert "sell_order_filled" in result["missing_evidence"]
+
+
+def test_h74_manual_sell_does_not_count_as_automated_sell_success() -> None:
+    result = evaluate_h74_execution_path_probe_acceptance(
+        _acceptance_report(manual_intervention=True, manual_sell=True)
+    )
+
+    assert result["execution_path_probe_status"] != "PASS"
+    assert result["manual_intervention"] is True
+    assert "automated_sell_required" in result["missing_evidence"]
+
+
+def test_h74_roundtrip_artifact_contains_exit_authority_fields() -> None:
+    result = evaluate_h74_execution_path_probe_acceptance(_acceptance_report())
+
+    assert result["h74_exit_authority_ready"] == 1
+    assert result["h74_cycle_id"] == "cycle-1"
+    assert result["h74_remaining_cycle_qty"] == pytest.approx(0.0008)
+    assert result["h74_cycle_contract_hash"] == "sha256:contract"
 
 
 def test_h74_buy_quote_notional_records_acquired_qty_from_broker_fill(roundtrip_db) -> None:

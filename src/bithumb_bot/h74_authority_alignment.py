@@ -23,6 +23,7 @@ H74_FIXED_POSITION_REQUIRED_FIELDS = (
     "position_mode",
     "hold_policy",
     "partial_fill_policy",
+    "max_order_krw",
 )
 
 
@@ -69,6 +70,22 @@ def _match(actual: object, expected: object) -> bool:
     return str(actual) == str(expected)
 
 
+def _fixed_position_field_value(payload: Mapping[str, object], bound: Mapping[str, object], field: str) -> object:
+    if field == "max_order_krw":
+        return (
+            payload.get("max_order_krw")
+            or bound.get("max_order_krw")
+            or bound.get("DAILY_PARTICIPATION_MAX_ORDER_KRW")
+        )
+    if field == "probe_run_id":
+        return (
+            payload.get("probe_run_id")
+            or bound.get("probe_run_id")
+            or bound.get("H74_EXECUTION_PATH_PROBE_RUN_ID")
+        )
+    return payload.get(field) if payload.get(field) is not None else bound.get(field)
+
+
 def validate_h74_authority_env_alignment(
     authority_payload: Mapping[str, object],
     *,
@@ -81,13 +98,23 @@ def validate_h74_authority_env_alignment(
     effective_behavior_values = h74_runtime_adapter_materialized_values_from_settings(settings_obj)
     bound = dict(payload.get("hash_bound_parameters") or {})
     position_mode = str(payload.get("position_mode") or bound.get("position_mode") or "").strip()
-    if position_mode == "fixed_fill_qty_until_exit":
+    fixed_position_required = (
+        position_mode == "fixed_fill_qty_until_exit"
+        or str(getattr(settings_obj, "POSITION_MODE", "") or "").strip() == "fixed_fill_qty_until_exit"
+    )
+    if fixed_position_required:
         for field in H74_FIXED_POSITION_REQUIRED_FIELDS:
-            value = payload.get(field)
-            if value is None or str(value).strip() == "":
-                value = bound.get(field)
+            value = _fixed_position_field_value(payload, bound, field)
             if value is None or str(value).strip() == "":
                 raise H74ObservationAuthorityError(f"h74_authority_contract_incomplete:{field}")
+        authority_max_order = _fixed_position_field_value(payload, bound, "max_order_krw")
+        runtime_max_order = getattr(
+            settings_obj,
+            "DAILY_PARTICIPATION_MAX_ORDER_KRW",
+            getattr(settings_obj, "MAX_ORDER_KRW", None),
+        )
+        if not _match(runtime_max_order, authority_max_order):
+            raise H74ObservationAuthorityError("h74_authority_contract_mismatch:max_order_krw")
     structural_runtime_values = {
         **raw_settings_values,
         **effective_behavior_values,

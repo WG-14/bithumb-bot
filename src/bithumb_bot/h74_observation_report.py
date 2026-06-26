@@ -82,6 +82,13 @@ def build_h74_observation_report(
             live_exit_avg_price=0.0,
             qty=0.0,
         ),
+        "h74_cycle_ownership_created": False,
+        "h74_exit_authority_ready": 0,
+        "h74_cycle_id": "",
+        "h74_cycle_acquired_qty": 0.0,
+        "h74_remaining_cycle_qty": 0.0,
+        "h74_cycle_contract_hash": "",
+        "h74_exit_authority_not_ready_reason": "h74_cycle_state_missing",
     }
     metrics = {field: 0 for field in H74_OBSERVATION_REPORT_FIELDS if field not in payload}
     metrics["exit_delay_seconds_p50"] = 0.0
@@ -101,6 +108,14 @@ def build_h74_observation_report(
                 interval=interval,
                 participation_policy_hash=participation_policy_hash,
                 required_kst_days=required_kst_days,
+            )
+        )
+        payload.update(
+            _sqlite_exit_authority_readiness(
+                conn,
+                authority_hash=authority_hash,
+                strategy_instance_id=strategy_instance_id,
+                pair=pair,
             )
         )
     payload.update(metrics)
@@ -145,6 +160,75 @@ def _required_kst_days(start: datetime, end: datetime) -> list[str]:
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
     return row is not None
+
+
+def _sqlite_exit_authority_readiness(
+    conn: sqlite3.Connection,
+    *,
+    authority_hash: str | None,
+    strategy_instance_id: str | None,
+    pair: str,
+) -> dict[str, Any]:
+    if not _table_exists(conn, "h74_cycle_state"):
+        return {
+            "h74_cycle_ownership_created": False,
+            "h74_exit_authority_ready": 0,
+            "h74_cycle_id": "",
+            "h74_cycle_acquired_qty": 0.0,
+            "h74_remaining_cycle_qty": 0.0,
+            "h74_cycle_contract_hash": "",
+            "h74_exit_authority_not_ready_reason": "h74_cycle_state_schema_missing",
+        }
+    clauses = ["pair=?"]
+    params: list[Any] = [pair]
+    if authority_hash:
+        clauses.append("authority_hash=?")
+        params.append(authority_hash)
+    if strategy_instance_id:
+        clauses.append("strategy_instance_id=?")
+        params.append(strategy_instance_id)
+    contract_expr = "contract_hash" if _column_exists(conn, "h74_cycle_state", "contract_hash") else "'' AS contract_hash"
+    state_expr = "state" if _column_exists(conn, "h74_cycle_state", "state") else "'UNKNOWN' AS state"
+    order_expr = (
+        "updated_ts DESC, cycle_id DESC"
+        if _column_exists(conn, "h74_cycle_state", "updated_ts")
+        else "cycle_id DESC"
+    )
+    row = conn.execute(
+        f"""
+        SELECT cycle_id, acquired_qty, sold_qty, locked_exit_qty, {contract_expr}, {state_expr}
+        FROM h74_cycle_state
+        WHERE {' AND '.join(clauses)}
+        ORDER BY {order_expr}
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if row is None:
+        return {
+            "h74_cycle_ownership_created": False,
+            "h74_exit_authority_ready": 0,
+            "h74_cycle_id": "",
+            "h74_cycle_acquired_qty": 0.0,
+            "h74_remaining_cycle_qty": 0.0,
+            "h74_cycle_contract_hash": "",
+            "h74_exit_authority_not_ready_reason": "h74_cycle_state_missing",
+        }
+    acquired = float(row["acquired_qty"] if hasattr(row, "keys") else row[1])
+    sold = float(row["sold_qty"] if hasattr(row, "keys") else row[2])
+    locked = float(row["locked_exit_qty"] if hasattr(row, "keys") else row[3])
+    remaining = max(0.0, acquired - sold - locked)
+    ready = bool(acquired > 0.0 and remaining > 1e-12 and str(row["state"] if hasattr(row, "keys") else row[5]) != "CLOSED")
+    reason = "none" if ready else ("h74_remaining_cycle_qty_non_positive" if remaining <= 1e-12 else "h74_cycle_closed")
+    return {
+        "h74_cycle_ownership_created": True,
+        "h74_exit_authority_ready": 1 if ready else 0,
+        "h74_cycle_id": str(row["cycle_id"] if hasattr(row, "keys") else row[0]),
+        "h74_cycle_acquired_qty": acquired,
+        "h74_remaining_cycle_qty": remaining,
+        "h74_cycle_contract_hash": str((row["contract_hash"] if hasattr(row, "keys") else row[4]) or ""),
+        "h74_exit_authority_not_ready_reason": reason,
+    }
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:

@@ -129,6 +129,8 @@ def _request(conn, *, cycle_id: str | None = "cycle-1") -> StandardSubmitPipelin
         cycle_id=cycle_id,
         authority_hash=ownership.authority_hash,
         probe_run_id=ownership.probe_run_id,
+        h74_cycle_id=cycle_id,
+        h74_position_ownership_contract_hash=ownership.contract_hash,
     )
 
 
