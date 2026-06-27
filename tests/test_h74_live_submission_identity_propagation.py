@@ -13,7 +13,9 @@ from bithumb_bot.broker.live_submit_orchestrator import (
     run_standard_submit_pipeline_with_evidence,
 )
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.h74_submit_identity import H74SubmitIdentityError
+from bithumb_bot.execution import record_order_if_missing
+from bithumb_bot.h74_cycle_state import upsert_h74_cycle_fill
+from bithumb_bot.h74_submit_identity import H74SubmitIdentityError, resolve_h74_sell_identity
 from tests.test_h74_live_submit_ownership import _ownership, _request
 from tests.test_h74_live_rehearsal import _source_artifact
 
@@ -232,16 +234,167 @@ def test_h74_sell_plan_rejects_contract_hash_mismatch() -> None:
 
 
 def test_h74_sell_plan_identity_matches_cycle_state_and_entry_order(tmp_path) -> None:
-    payload = run_h74_live_rehearsal(
-        H74LiveRehearsalConfig(
-            source_artifact_path=_source_artifact(tmp_path),
-            closeout_existing_qty=0.002,
-            order_rules={"min_qty": 0.001, "qty_step": 0.0, "max_qty_decimals": 8, "min_notional_krw": 5000.0},
-        )
+    conn = ensure_db(str(tmp_path / "identity.sqlite"))
+    ownership = _ownership()
+    record_order_if_missing(
+        conn,
+        client_order_id="h74-entry-order",
+        side="BUY",
+        qty_req=0.002,
+        price=100_000_000.0,
+        symbol="KRW-BTC",
+        strategy_name="daily_participation_sma",
+        strategy_instance_id=ownership.strategy_instance_id,
+        cycle_id=ownership.cycle_id,
+        authority_hash=ownership.authority_hash,
+        h74_entry_plan_client_order_id=ownership.entry_plan_id,
+        h74_position_ownership_contract_hash=ownership.contract_hash,
+        h74_position_ownership_contract=ownership.as_dict(),
+        status="FILLED",
     )
-    plan = payload["would_submit_plan"]
-    closeout = plan["h74_closeout_contract"]
+    upsert_h74_cycle_fill(
+        conn,
+        cycle_id=ownership.cycle_id,
+        authority_hash=ownership.authority_hash,
+        strategy_instance_id=ownership.strategy_instance_id,
+        pair="KRW-BTC",
+        side="BUY",
+        qty=0.002,
+        client_order_id="h74-entry-order",
+        fill_ts=1,
+        contract_hash=ownership.contract_hash,
+        h74_entry_plan_client_order_id=ownership.entry_plan_id,
+    )
 
-    assert closeout["cycle_id"] == plan["cycle_id"]
-    assert closeout["h74_cycle_id"] == plan["h74_cycle_id"]
-    assert closeout["contract_hash"] == plan["h74_position_ownership_contract_hash"]
+    identity = resolve_h74_sell_identity(
+        conn,
+        {
+            "cycle_id": ownership.cycle_id,
+            "h74_cycle_id": ownership.cycle_id,
+            "strategy_instance_id": ownership.strategy_instance_id,
+            "authority_hash": ownership.authority_hash,
+        },
+        pair="KRW-BTC",
+    )
+    order_row = conn.execute(
+        """
+        SELECT cycle_id, h74_entry_plan_client_order_id, h74_position_ownership_contract_hash
+        FROM orders
+        WHERE client_order_id='h74-entry-order'
+        """
+    ).fetchone()
+    cycle_row = conn.execute(
+        """
+        SELECT cycle_id, h74_entry_plan_client_order_id, contract_hash
+        FROM h74_cycle_state
+        WHERE cycle_id=?
+        """,
+        (ownership.cycle_id,),
+    ).fetchone()
+
+    assert identity.cycle_id == cycle_row["cycle_id"] == order_row["cycle_id"]
+    assert identity.h74_entry_plan_client_order_id == cycle_row["h74_entry_plan_client_order_id"]
+    assert identity.h74_entry_plan_client_order_id == order_row["h74_entry_plan_client_order_id"]
+    assert identity.h74_position_ownership_contract_hash == cycle_row["contract_hash"]
+    assert identity.h74_position_ownership_contract_hash == order_row["h74_position_ownership_contract_hash"]
+
+
+def test_h74_sell_plan_rejects_payload_identity_override(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "identity.sqlite"))
+    ownership = _ownership()
+    record_order_if_missing(
+        conn,
+        client_order_id="h74-entry-order",
+        side="BUY",
+        qty_req=0.002,
+        price=100_000_000.0,
+        symbol="KRW-BTC",
+        strategy_name="daily_participation_sma",
+        strategy_instance_id=ownership.strategy_instance_id,
+        cycle_id=ownership.cycle_id,
+        authority_hash=ownership.authority_hash,
+        h74_entry_plan_client_order_id=ownership.entry_plan_id,
+        h74_position_ownership_contract_hash=ownership.contract_hash,
+        h74_position_ownership_contract=ownership.as_dict(),
+        status="FILLED",
+    )
+    upsert_h74_cycle_fill(
+        conn,
+        cycle_id=ownership.cycle_id,
+        authority_hash=ownership.authority_hash,
+        strategy_instance_id=ownership.strategy_instance_id,
+        pair="KRW-BTC",
+        side="BUY",
+        qty=0.002,
+        client_order_id="h74-entry-order",
+        fill_ts=1,
+        contract_hash=ownership.contract_hash,
+        h74_entry_plan_client_order_id=ownership.entry_plan_id,
+    )
+
+    with pytest.raises(H74SubmitIdentityError, match="payload_mismatch:h74_position_ownership_contract_hash"):
+        resolve_h74_sell_identity(
+            conn,
+            {
+                "cycle_id": ownership.cycle_id,
+                "h74_cycle_id": ownership.cycle_id,
+                "strategy_instance_id": ownership.strategy_instance_id,
+                "authority_hash": ownership.authority_hash,
+                "h74_position_ownership_contract_hash": "sha256:" + "0" * 64,
+            },
+            pair="KRW-BTC",
+        )
+
+
+def test_h74_sell_plan_rejects_entry_order_contract_hash_mismatch(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "identity.sqlite"))
+    ownership = _ownership()
+    record_order_if_missing(
+        conn,
+        client_order_id="h74-entry-order",
+        side="BUY",
+        qty_req=0.002,
+        price=100_000_000.0,
+        symbol="KRW-BTC",
+        strategy_name="daily_participation_sma",
+        strategy_instance_id=ownership.strategy_instance_id,
+        cycle_id=ownership.cycle_id,
+        authority_hash=ownership.authority_hash,
+        h74_entry_plan_client_order_id=ownership.entry_plan_id,
+        h74_position_ownership_contract_hash=ownership.contract_hash,
+        h74_position_ownership_contract=ownership.as_dict(),
+        status="FILLED",
+    )
+    upsert_h74_cycle_fill(
+        conn,
+        cycle_id=ownership.cycle_id,
+        authority_hash=ownership.authority_hash,
+        strategy_instance_id=ownership.strategy_instance_id,
+        pair="KRW-BTC",
+        side="BUY",
+        qty=0.002,
+        client_order_id="h74-entry-order",
+        fill_ts=1,
+        contract_hash=ownership.contract_hash,
+        h74_entry_plan_client_order_id=ownership.entry_plan_id,
+    )
+    conn.execute(
+        """
+        UPDATE orders
+        SET h74_position_ownership_contract_hash=?
+        WHERE client_order_id='h74-entry-order'
+        """,
+        ("sha256:" + "0" * 64,),
+    )
+
+    with pytest.raises(H74SubmitIdentityError, match="entry_buy_mismatch:h74_position_ownership_contract_hash"):
+        resolve_h74_sell_identity(
+            conn,
+            {
+                "cycle_id": ownership.cycle_id,
+                "h74_cycle_id": ownership.cycle_id,
+                "strategy_instance_id": ownership.strategy_instance_id,
+                "authority_hash": ownership.authority_hash,
+            },
+            pair="KRW-BTC",
+        )

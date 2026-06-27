@@ -59,7 +59,7 @@ from .h74_position_ownership import (
     H74PositionOwnershipError,
     h74_position_ownership_contract_from_payload,
 )
-from .h74_submit_identity import H74SubmitIdentity
+from .h74_submit_identity import H74SubmitIdentity, H74SubmitIdentityError, resolve_h74_sell_identity
 from .h74_observation import H74_SOURCE_OBSERVATION_AUTHORITY_ENV
 from .h74_submit_semantics import (
     H74_ENTRY_SUBMIT_SEMANTICS_AUTHORITY,
@@ -364,6 +364,25 @@ def _inject_h74_cycle_inventory(
     if inventory is None:
         return readiness_payload
     inventory_payload = inventory.as_dict()
+    identity_payload: dict[str, object] = {}
+    try:
+        identity = resolve_h74_sell_identity(
+            conn,
+            {**planning_context, **readiness_payload, **inventory_payload},
+            pair=str(
+                readiness_payload.get("runtime_pair")
+                or planning_context.get("runtime_pair")
+                or getattr(settings, "PAIR", "")
+                or ""
+            ),
+        )
+        identity_payload = identity.as_evidence_dict()
+    except H74SubmitIdentityError as exc:
+        return {
+            **readiness_payload,
+            "h74_cycle_inventory_error": str(exc),
+            "h74_cycle_ownership_error": str(exc),
+        }
     return {
         **readiness_payload,
         "cycle_id": inventory.cycle_id,
@@ -377,6 +396,7 @@ def _inject_h74_cycle_inventory(
         "h74_position_ownership_contract_hash": inventory.contract_hash,
         "h74_entry_plan_client_order_id": inventory.h74_entry_plan_client_order_id,
         "h74_cycle_inventory": inventory_payload,
+        **identity_payload,
     }
 
 
@@ -2206,6 +2226,7 @@ class ExecutionPlanner:
                         "h74_position_ownership_contract_hash",
                         "h74_position_ownership_contract",
                         "h74_cycle_ownership_error",
+                        "h74_entry_plan_client_order_id",
                     )
                     if key in readiness_payload
                 }

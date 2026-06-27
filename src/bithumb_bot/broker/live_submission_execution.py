@@ -111,6 +111,63 @@ def _emit_notification(message: str) -> None:
     live_module.notify(message)
 
 
+def _build_live_submission_pre_submit_risk_fields(
+    *,
+    risk_decision,
+    side: str,
+    decision_observability: dict[str, object],
+) -> dict[str, object]:
+    pre_submit_risk_fields = {
+        "side": side,
+        "source": str(decision_observability.get("execution_submit_plan_source") or ""),
+        "authority": str(decision_observability.get("execution_submit_plan_authority") or ""),
+        "submit_expected": bool(decision_observability.get("submit_expected", True)),
+        "target_delta_qty": decision_observability.get("target_delta_qty"),
+        "pre_submit_risk_decision": risk_decision.as_dict(),
+        "pre_submit_risk_decision_hash": risk_decision.risk_decision_hash,
+        "pre_submit_risk_policy_hash": risk_decision.risk_policy_hash,
+        "pre_submit_risk_input_hash": risk_decision.risk_input_hash,
+        "pre_submit_risk_evidence_hash": risk_decision.risk_evidence_hash,
+        "pre_submit_risk_status": risk_decision.status,
+        "pre_submit_risk_reason_code": risk_decision.reason_code,
+        "pre_submit_risk_state_source": risk_decision.state_source,
+        "pre_submit_risk_plan_hash": str(
+            decision_observability.get("execution_submit_plan_hash") or ""
+        ),
+    }
+    for field in (
+        "side",
+        "source",
+        "authority",
+        "submit_expected",
+        "target_delta_qty",
+        "pre_submit_risk_decision",
+        "pre_submit_risk_decision_hash",
+        "pre_submit_risk_policy_hash",
+        "effective_pre_submit_risk_policy_hash",
+        "pre_submit_risk_input_hash",
+        "pre_submit_risk_evidence_hash",
+        "pre_submit_risk_status",
+        "pre_submit_risk_reason_code",
+        "pre_submit_risk_state_source",
+        "pre_submit_risk_plan_hash",
+        "risk_policy_source",
+        "pre_submit_risk_policy_source",
+        "pre_submit_risk_policy_composition_rule",
+        "strategy_instance_ids",
+        "strategy_risk_profile_hashes",
+        "strategy_risk_policy_hashes",
+        "portfolio_risk_policy_hash",
+        "operational_risk_policy_hash",
+        "residual_risk_policy_hash",
+        "effective_pre_submit_risk_policy",
+    ):
+        existing_value = decision_observability.get(field)
+        if existing_value not in (None, "", ()):
+            pre_submit_risk_fields[field] = existing_value
+    return pre_submit_risk_fields
+
+
 def submit_live_order_and_confirm(
     *,
     broker,
@@ -661,6 +718,21 @@ def execute_live_submission_and_application(
         mark_price_source="live_market_reference",
         evaluation_origin="submission_halt",
     )
+    pre_submit_risk_fields = _build_live_submission_pre_submit_risk_fields(
+        risk_decision=risk_decision,
+        side=feasibility.side,
+        decision_observability=decision_observability,
+    )
+
+    expected_plan_hash = str(decision_observability.get("execution_submit_plan_hash") or "").strip()
+    decision_plan = risk_decision.evidence.get("submit_plan")
+    decision_plan_evidence = decision_plan.get("evidence") if isinstance(decision_plan, dict) else None
+    actual_plan_hash = (
+        str(decision_plan_evidence.get("execution_submit_plan_hash") or "").strip()
+        if isinstance(decision_plan_evidence, dict)
+        else ""
+    )
+
     if risk_decision.status != "ALLOW":
         risk_fields = risk_decision.identity_fields()
         unresolved_evidence = risk_decision.evidence.get("unresolved_order_gate")
@@ -715,82 +787,44 @@ def execute_live_submission_and_application(
             conn.commit()
             return None
 
-        live_module.RUN_LOG.info(
-            format_log_kv(
-                "[ORDER_SKIP] submission halt",
-                base_signal=decision_observability["base_signal"],
-                final_signal=decision_observability["final_signal"],
-                signal=signal,
-                side=feasibility.side,
-                reason=f"category=submission_halt;reason_detail_code={risk_decision.reason_code};reason={risk_decision.reason}",
-                sell_failure_category=SELL_FAILURE_CATEGORY_SUBMISSION_HALT,
-                sell_failure_detail=SELL_FAILURE_CATEGORY_SUBMISSION_HALT,
-                reason_detail_code=risk_decision.reason_code,
-                entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
-                effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
-                normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
-                normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
-                raw_qty_open=float(decision_observability["raw_qty_open"]),
-                raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
-                open_exposure_qty=float(decision_observability["open_exposure_qty"]),
-                dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
-                submit_qty_source=decision_observability["submit_qty_source"],
-                position_state_source=decision_observability["position_state_source"],
-                entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
-                **risk_fields,
+        approval = is_pre_submit_risk_approved_for_plan(
+            pre_submit_risk_fields,
+            expected_submit_plan_hash=expected_plan_hash,
+        )
+        if approval.approved:
+            decision_observability.update(pre_submit_risk_fields)
+        else:
+            live_module.RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SKIP] submission halt",
+                    base_signal=decision_observability["base_signal"],
+                    final_signal=decision_observability["final_signal"],
+                    signal=signal,
+                    side=feasibility.side,
+                    reason=f"category=submission_halt;reason_detail_code={risk_decision.reason_code};reason={risk_decision.reason}",
+                    sell_failure_category=SELL_FAILURE_CATEGORY_SUBMISSION_HALT,
+                    sell_failure_detail=SELL_FAILURE_CATEGORY_SUBMISSION_HALT,
+                    reason_detail_code=risk_decision.reason_code,
+                    pre_submit_risk_approval_reason=approval.reason,
+                    entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                    effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                    normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                    normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                    raw_qty_open=float(decision_observability["raw_qty_open"]),
+                    raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
+                    open_exposure_qty=float(decision_observability["open_exposure_qty"]),
+                    dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
+                    submit_qty_source=decision_observability["submit_qty_source"],
+                    position_state_source=decision_observability["position_state_source"],
+                    entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    **risk_fields,
+                )
             )
-        )
-        _emit_notification(
-            f"live order placement blocked ({feasibility.side}): category=submission_halt;reason={risk_decision.reason}"
-        )
-        return None
-    pre_submit_risk_fields = {
-        "pre_submit_risk_decision": risk_decision.as_dict(),
-        "pre_submit_risk_decision_hash": risk_decision.risk_decision_hash,
-        "pre_submit_risk_policy_hash": risk_decision.risk_policy_hash,
-        "pre_submit_risk_input_hash": risk_decision.risk_input_hash,
-        "pre_submit_risk_evidence_hash": risk_decision.risk_evidence_hash,
-        "pre_submit_risk_status": risk_decision.status,
-        "pre_submit_risk_reason_code": risk_decision.reason_code,
-        "pre_submit_risk_state_source": risk_decision.state_source,
-        "pre_submit_risk_plan_hash": str(
-            decision_observability.get("execution_submit_plan_hash") or ""
-        ),
-    }
-    for field in (
-        "pre_submit_risk_decision",
-        "pre_submit_risk_decision_hash",
-        "pre_submit_risk_policy_hash",
-        "effective_pre_submit_risk_policy_hash",
-        "pre_submit_risk_input_hash",
-        "pre_submit_risk_evidence_hash",
-        "pre_submit_risk_status",
-        "pre_submit_risk_reason_code",
-        "pre_submit_risk_state_source",
-        "pre_submit_risk_plan_hash",
-        "risk_policy_source",
-        "pre_submit_risk_policy_source",
-        "pre_submit_risk_policy_composition_rule",
-        "strategy_instance_ids",
-        "strategy_risk_profile_hashes",
-        "strategy_risk_policy_hashes",
-        "portfolio_risk_policy_hash",
-        "operational_risk_policy_hash",
-        "residual_risk_policy_hash",
-        "effective_pre_submit_risk_policy",
-    ):
-        existing_value = decision_observability.get(field)
-        if existing_value not in (None, "", ()):
-            pre_submit_risk_fields[field] = existing_value
+            _emit_notification(
+                f"live order placement blocked ({feasibility.side}): category=submission_halt;reason={risk_decision.reason}"
+            )
+            return None
     if str(settings.MODE).strip().lower() == "live" and not bool(settings.LIVE_DRY_RUN):
-        expected_plan_hash = str(decision_observability.get("execution_submit_plan_hash") or "").strip()
-        decision_plan = risk_decision.evidence.get("submit_plan")
-        decision_plan_evidence = decision_plan.get("evidence") if isinstance(decision_plan, dict) else None
-        actual_plan_hash = (
-            str(decision_plan_evidence.get("execution_submit_plan_hash") or "").strip()
-            if isinstance(decision_plan_evidence, dict)
-            else ""
-        )
         if not expected_plan_hash or actual_plan_hash != expected_plan_hash:
             live_module.RUN_LOG.warning(
                 format_log_kv(

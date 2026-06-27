@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 import json
 from pathlib import Path
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,6 +37,7 @@ from bithumb_bot.strategy.daily_participation_policy import (
 from bithumb_bot.target_position import TargetPositionSettings, build_target_position_decision
 from tests.test_submit_authority_policy import _approved as _approved_submit_plan
 from tests.test_submit_authority_policy import _plan as _submit_plan
+from bithumb_bot.submit_authority_policy import evaluate_submit_authority_policy
 from tests.test_h74_live_submit_ownership import _request as _live_submit_request
 from bithumb_bot.broker.live_submit_orchestrator import _build_context, _plan_submit_attempt, _validate_explicit_submit_plan
 
@@ -1177,37 +1180,143 @@ def test_h74_buy_fill_then_scheduled_exit_closes_cycle_and_portfolio(roundtrip_d
 
 
 def test_h74_reduce_only_exit_replay_regression_from_20260626(tmp_path) -> None:
-    from bithumb_bot.h74_cycle_state import build_h74_cycle_closeout_plan_from_payload
-    from bithumb_bot.order_sizing import build_target_delta_execution_sizing
-
-    closeout = build_h74_cycle_closeout_plan_from_payload(
+    conn = ensure_db(str(tmp_path / "h74-reduce-only-replay.sqlite"))
+    init_portfolio(conn)
+    set_portfolio(conn, cash_krw=1_000_000.0, asset_qty=0.0)
+    cycle_id = "h74-replay-cycle"
+    entry_plan_id = "h74-replay-entry-plan"
+    contract = h74_position_ownership_contract_from_payload(
         {
-            "cycle_id": "h74-replay-cycle",
-            "h74_cycle_id": "h74-replay-cycle",
-            "h74_entry_plan_client_order_id": "h74-replay-entry-plan",
-            "contract_hash": "sha256:h74-replay-contract",
+            "cycle_id": cycle_id,
+            "h74_cycle_id": cycle_id,
             "authority_hash": "sha256:h74-replay-authority",
             "strategy_instance_id": "h74-source-observation",
-            "remaining_cycle_qty": 0.00109271,
-            "broker_available_qty": 0.00109271,
-        },
-        target_delta_side="SELL",
-        target_qty=0.0,
+            "probe_run_id": "probe-run-20260626",
+            "pair": "KRW-BTC",
+            "entry_side": "BUY",
+            "entry_plan_id": entry_plan_id,
+            "position_mode": "fixed_fill_qty_until_exit",
+            "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
+        }
     )
-    sizing = build_target_delta_execution_sizing(
+    record_order_if_missing(
+        conn,
+        client_order_id="h74-replay-buy",
+        side="BUY",
+        qty_req=0.00109271,
+        price=100_000_000.0,
+        symbol="KRW-BTC",
+        strategy_name="daily_participation_sma",
+        strategy_instance_id="h74-source-observation",
+        cycle_id=cycle_id,
+        authority_hash="sha256:h74-replay-authority",
+        h74_entry_plan_client_order_id=entry_plan_id,
+        h74_position_ownership_contract_hash=contract.contract_hash,
+        h74_position_ownership_contract=contract.as_dict(),
+        probe_run_id="probe-run-20260626",
+        ts_ms=1,
+        status="NEW",
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="h74-replay-buy",
+        side="BUY",
+        fill_id="h74-replay-buy-fill",
+        fill_ts=1,
+        price=100_000_000.0,
+        qty=0.00109271,
+        fee=0.0,
+        strategy_name="daily_participation_sma",
         pair="KRW-BTC",
-        side="SELL",
-        desired_qty=closeout.closeout_qty,
-        market_price=100_000_000.0,
-        min_qty=0.001,
-        qty_step=0.0,
-        min_notional_krw=5000.0,
-        max_qty_decimals=8,
-        authority_source=closeout.qty_authority,
-        h74_closeout=True,
-        qty_step_authority="local_fallback_min_qty",
+        signal_ts=1,
+        note="20260626 reduce-only replay buy",
     )
+    set_status("h74-replay-buy", "FILLED", conn=conn)
+    cycle = conn.execute("SELECT state FROM h74_cycle_state WHERE cycle_id=?", (cycle_id,)).fetchone()
+    assert cycle["state"] == "HOLDING"
 
-    assert closeout.remaining_qty == pytest.approx(0.00109271)
-    assert sizing.final_submitted_qty == pytest.approx(0.00109271)
-    assert sizing.final_submitted_qty != pytest.approx(0.001)
+    sell_plan = replace(
+        _submit_plan(side="SELL", extra={"target_delta_qty": -0.00109271}),
+        qty=0.00109271,
+        notional_krw=109_271.0,
+        target_exposure_krw=0.0,
+        current_effective_exposure_krw=109_271.0,
+        delta_krw=-109_271.0,
+    )
+    approved_plan = _approved_submit_plan(
+        sell_plan,
+        status="REDUCE_ONLY",
+        reason_code="POSITION_LOSS_LIMIT",
+        allowed_actions=["SELL", "HOLD"],
+    )
+    sell_payload = approved_plan.as_final_payload()
+    authority = evaluate_submit_authority_policy(
+        sell_payload,
+        settings_obj=SimpleNamespace(
+            MODE="live",
+            LIVE_DRY_RUN=False,
+            LIVE_REAL_ORDER_ARMED=True,
+            EXECUTION_ENGINE="target_delta",
+            RESIDUAL_LIVE_SELL_MODE="enabled",
+        ),
+        plan_kind="target",
+        require_final_payload=True,
+    )
+    assert authority.allowed is True
+    assert authority.reason != "live_real_order_pre_submit_risk_not_allow"
+
+    class _FakeBroker:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def sell(self, *, qty: float) -> None:
+            self.calls.append({"side": "SELL", "qty": float(qty)})
+
+    broker = _FakeBroker()
+    broker.sell(qty=float(sell_payload["qty"]))
+    assert len(broker.calls) == 1
+    assert broker.calls[0]["side"] == "SELL"
+    assert broker.calls[0]["qty"] == pytest.approx(0.00109271)
+    assert broker.calls[0]["qty"] != pytest.approx(0.001)
+
+    record_order_if_missing(
+        conn,
+        client_order_id="h74-replay-sell",
+        side="SELL",
+        qty_req=0.00109271,
+        price=100_000_000.0,
+        symbol="KRW-BTC",
+        strategy_name="daily_participation_sma",
+        strategy_instance_id="h74-source-observation",
+        cycle_id=cycle_id,
+        authority_hash="sha256:h74-replay-authority",
+        h74_entry_plan_client_order_id=entry_plan_id,
+        h74_position_ownership_contract_hash=contract.contract_hash,
+        h74_position_ownership_contract=contract.as_dict(),
+        exit_decision_id=2,
+        decision_reason="max_holding_time",
+        exit_rule_name="max_holding_time",
+        probe_run_id="probe-run-20260626",
+        ts_ms=2,
+        status="NEW",
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="h74-replay-sell",
+        side="SELL",
+        fill_id="h74-replay-sell-fill",
+        fill_ts=2,
+        price=100_000_000.0,
+        qty=0.00109271,
+        fee=0.0,
+        strategy_name="daily_participation_sma",
+        pair="KRW-BTC",
+        signal_ts=2,
+        note="20260626 reduce-only replay sell",
+    )
+    set_status("h74-replay-sell", "FILLED", conn=conn)
+    cycle = conn.execute("SELECT state FROM h74_cycle_state WHERE cycle_id=?", (cycle_id,)).fetchone()
+    portfolio = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+
+    assert cycle["state"] == "CLOSED"
+    assert portfolio["asset_qty"] == pytest.approx(0.0)

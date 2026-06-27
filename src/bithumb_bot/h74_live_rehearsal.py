@@ -79,6 +79,7 @@ class H74LiveRehearsalConfig:
     projection_converged: bool = True
     active_fee_accounting_blocker: bool = False
     closeout_existing_qty: float = 0.0
+    invalid_reduce_only_preview_case: str = ""
 
 
 class _H74NoSubmitBroker:
@@ -566,14 +567,31 @@ def _readiness_snapshot_payload(
         "ask_types": ["market"],
     }
     if float(closeout_existing_qty or 0.0) > 0.0:
+        from .h74_position_ownership import h74_position_ownership_contract_from_payload
+
+        contract = h74_position_ownership_contract_from_payload(
+            {
+                "cycle_id": "h74-rehearsal-closeout-cycle",
+                "h74_cycle_id": "h74-rehearsal-closeout-cycle",
+                "authority_hash": "sha256:h74-rehearsal-authority",
+                "strategy_instance_id": "h74-source-observation",
+                "probe_run_id": "h74-rehearsal-probe",
+                "pair": "KRW-BTC",
+                "entry_side": "BUY",
+                "entry_plan_id": "h74-rehearsal-entry-plan",
+                "position_mode": "fixed_fill_qty_until_exit",
+                "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
+            }
+        )
         payload["h74_cycle_id"] = "h74-rehearsal-closeout-cycle"
         payload["cycle_id"] = "h74-rehearsal-closeout-cycle"
         payload["authority_hash"] = "sha256:h74-rehearsal-authority"
         payload["strategy_instance_id"] = "h74-source-observation"
         payload["entry_client_order_id"] = "h74-rehearsal-entry"
-        payload["h74_entry_plan_client_order_id"] = "h74-rehearsal-entry-plan"
-        payload["contract_hash"] = "sha256:h74_rehearsal_contract_hash"
-        payload["h74_position_ownership_contract_hash"] = "sha256:h74_rehearsal_contract_hash"
+        payload["h74_entry_plan_client_order_id"] = contract.entry_plan_id
+        payload["contract_hash"] = contract.contract_hash
+        payload["h74_position_ownership_contract_hash"] = contract.contract_hash
+        payload["h74_position_ownership_contract"] = contract.as_dict()
         payload["acquired_qty"] = float(closeout_existing_qty)
         payload["sold_qty"] = 0.0
         payload["locked_exit_qty"] = 0.0
@@ -597,6 +615,40 @@ def _target_delta_planning_bundle(
     result_bundle = _runtime_decision_bundle(conn, ts_ms=ts_ms, settings_obj=settings_obj)
     if float(closeout_existing_qty or 0.0) > 0.0:
         from .h74_cycle_state import upsert_h74_cycle_fill
+        from .execution import record_order_if_missing
+        from .h74_position_ownership import h74_position_ownership_contract_from_payload
+
+        contract = h74_position_ownership_contract_from_payload(
+            {
+                "cycle_id": "h74-rehearsal-closeout-cycle",
+                "h74_cycle_id": "h74-rehearsal-closeout-cycle",
+                "authority_hash": "sha256:h74-rehearsal-authority",
+                "strategy_instance_id": "h74-source-observation",
+                "probe_run_id": "h74-rehearsal-probe",
+                "pair": "KRW-BTC",
+                "entry_side": "BUY",
+                "entry_plan_id": "h74-rehearsal-entry-plan",
+                "position_mode": "fixed_fill_qty_until_exit",
+                "hold_policy": "hold_acquired_fill_qty_until_max_holding_exit",
+            }
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="h74-rehearsal-entry",
+            side="BUY",
+            qty_req=float(closeout_existing_qty),
+            price=100_000_000.0,
+            symbol="KRW-BTC",
+            strategy_name="daily_participation_sma",
+            strategy_instance_id="h74-source-observation",
+            cycle_id="h74-rehearsal-closeout-cycle",
+            authority_hash="sha256:h74-rehearsal-authority",
+            h74_entry_plan_client_order_id=contract.entry_plan_id,
+            h74_position_ownership_contract_hash=contract.contract_hash,
+            h74_position_ownership_contract=contract.as_dict(),
+            ts_ms=int(ts_ms) - (74 * 60_000),
+            status="FILLED",
+        )
 
         upsert_h74_cycle_fill(
             conn,
@@ -608,8 +660,8 @@ def _target_delta_planning_bundle(
             qty=float(closeout_existing_qty),
             client_order_id="h74-rehearsal-entry",
             fill_ts=int(ts_ms) - (74 * 60_000),
-            contract_hash="sha256:h74_rehearsal_contract_hash",
-            h74_entry_plan_client_order_id="h74-rehearsal-entry-plan",
+            contract_hash=contract.contract_hash,
+            h74_entry_plan_client_order_id=contract.entry_plan_id,
         )
     readiness_payload = _readiness_snapshot_payload(
         order_rules=order_rules,
@@ -686,6 +738,38 @@ def _configured_pre_submit_block_reason(cfg: H74LiveRehearsalConfig) -> str:
     if unresolved_status == "RECOVERY_REQUIRED":
         return "RECOVERY_REQUIRED_PRESENT"
     return ""
+
+
+def _with_invalid_reduce_only_preview(
+    payload: Mapping[str, object],
+    *,
+    invalid_case: str,
+) -> dict[str, object]:
+    mutated = dict(payload)
+    case = str(invalid_case or "").strip()
+    if not case:
+        return mutated
+    if str(mutated.get("side") or "").upper() != "SELL":
+        raise H74LiveRehearsalError("invalid_reduce_only_preview_requires_sell_plan")
+    decision = dict(mutated.get("pre_submit_risk_decision") or {})
+    decision["status"] = "REDUCE_ONLY"
+    decision["reason_code"] = "POSITION_LOSS_LIMIT"
+    decision.setdefault("allowed_actions", ["SELL", "HOLD"])
+    mutated["pre_submit_risk_decision"] = decision
+    mutated["pre_submit_risk_status"] = "REDUCE_ONLY"
+    mutated["pre_submit_risk_reason_code"] = "POSITION_LOSS_LIMIT"
+    mutated["target_delta_qty"] = -abs(float(mutated.get("target_delta_qty") or mutated.get("qty") or 0.0))
+    if case == "allowed_actions_missing_sell":
+        decision["allowed_actions"] = ["HOLD"]
+    elif case == "plan_hash_mismatch":
+        mutated["pre_submit_risk_plan_hash"] = "sha256:" + "0" * 64
+    elif case == "side_buy":
+        mutated["side"] = "BUY"
+    elif case == "target_delta_qty_positive":
+        mutated["target_delta_qty"] = abs(float(mutated.get("target_delta_qty") or mutated.get("qty") or 0.0))
+    else:
+        raise H74LiveRehearsalError(f"unknown_invalid_reduce_only_preview_case:{case}")
+    return mutated
 
 
 def _connect_rehearsal_db(context: H74LiveRehearsalContext, db_path: str) -> sqlite3.Connection:
@@ -948,6 +1032,14 @@ def run_h74_live_rehearsal(
                             would_submit_plan = stored or would_submit_plan
                     finally:
                         conn.close()
+            if cfg.invalid_reduce_only_preview_case:
+                would_submit_plan = _with_invalid_reduce_only_preview(
+                    would_submit_plan,
+                    invalid_case=cfg.invalid_reduce_only_preview_case,
+                )
+                pre_submit_status = str(would_submit_plan.get("pre_submit_risk_status") or "REDUCE_ONLY")
+                pre_submit_reason = str(would_submit_plan.get("pre_submit_risk_reason_code") or "POSITION_LOSS_LIMIT")
+                captured.clear()
             submit_authority = evaluate_submit_authority_policy(
                 would_submit_plan,
                 settings_obj=settings_obj,

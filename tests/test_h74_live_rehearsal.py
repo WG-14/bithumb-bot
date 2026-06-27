@@ -431,10 +431,12 @@ def test_h74_plan_only_fails_when_reduce_only_sell_would_be_rejected(tmp_path) -
             source_artifact_path=_source_artifact(tmp_path),
             closeout_existing_qty=0.002,
             order_rules={"min_qty": 0.001, "qty_step": 0.0, "max_qty_decimals": 8, "min_notional_krw": 5000.0},
+            invalid_reduce_only_preview_case="allowed_actions_missing_sell",
         )
     )
     preview = payload["h74_closeout_preview"]
 
-    if preview["submit_authority_would_allow"] is False:
-        assert payload["primary_block_gate"] in {"pre_submit_risk", "submit_authority"}
-        assert preview["submit_authority_reason"]
+    assert preview["submit_authority_would_allow"] is False
+    assert payload["would_submit"] is False
+    assert payload["primary_block_gate"] in {"pre_submit_risk", "submit_authority"}
+    assert preview["submit_authority_reason"]

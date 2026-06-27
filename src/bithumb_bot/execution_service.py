@@ -2889,6 +2889,18 @@ def _build_execution_decision_summary_from_authority_payload(
                 "h74_fixed_position_contract_active",
                 "h74_execution_path_probe_run_id",
             ):
+                if h74_closeout_plan is not None and h74_key in {
+                    "cycle_id",
+                    "h74_cycle_id",
+                    "contract_hash",
+                    "h74_position_ownership_contract_hash",
+                    "h74_position_ownership_contract",
+                    "h74_entry_plan_client_order_id",
+                    "entry_plan_id",
+                    "remaining_cycle_qty",
+                    "h74_remaining_cycle_qty",
+                }:
+                    continue
                 if h74_key in payload:
                     target_plan_extra[h74_key] = payload[h74_key]
             if performance_gate_fields and str(target_decision.delta_side) == "BUY":
